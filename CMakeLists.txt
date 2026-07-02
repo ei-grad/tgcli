@@ -66,6 +66,12 @@ add_library(tgcli_proto STATIC
 target_link_libraries(tgcli_proto
     PUBLIC tgcli_common nlohmann_json::nlohmann_json)
 
+add_library(tgcli_core STATIC
+    src/core/td_client.cpp)
+target_link_libraries(tgcli_core
+    PUBLIC tgcli_common Td::TdStatic)
+target_precompile_headers(tgcli_core PRIVATE <td/telegram/td_api.h>)
+
 add_executable(tgcli
     src/main.cpp)
 target_link_libraries(tgcli
