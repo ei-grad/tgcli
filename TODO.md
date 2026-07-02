@@ -1,7 +1,13 @@
 # TODO
 
 Roadmap milestones from [DESIGN.md](DESIGN.md) §14. Work top-down; each item
-should land with tests and keep the build green.
+lands with the tests the testing policy (CLAUDE.md) calls for — no more, no
+fewer — and keeps the build green.
+
+Every milestone ends with a review gate: a deep review of the milestone's
+full diff against DESIGN.md under the rules of REVIEW.md, with findings
+independently verified before being accepted; accepted findings are fixed
+before the milestone is closed.
 
 ## M0 — Scaffold & process model
 
@@ -19,6 +25,7 @@ should land with tests and keep the build green.
 - [ ] clang-format + clang-tidy configs
 - [ ] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache
 - [ ] Choose license (MIT vs Apache-2.0; must be fine linking BSL-1.0 tdlib)
+- [ ] Review gate: M0 diff vs DESIGN.md
 
 ## M1 — Auth & accounts
 
@@ -30,6 +37,7 @@ should land with tests and keep the build green.
 - [ ] `tgcli logout` (destructive gate), `tgcli me`, full `tgcli doctor`
 - [ ] `tgcli account add|list|show|use|remove`; per-account state isolation
 - [ ] `tgcli daemon status|stop|restart`; `idle_exit` config
+- [ ] Review gate: M1 diff vs DESIGN.md
 
 ## M2 — Read path
 
@@ -42,6 +50,7 @@ should land with tests and keep the build green.
 - [ ] `tgcli unread`
 - [ ] `tgcli fetch <chat>` (--limit/--all/--since, resumable, progress frames)
 - [ ] `tgcli chat info`, `tgcli chat members`
+- [ ] Review gate: M2 diff vs DESIGN.md
 
 ## M3 — Safety & write path
 
@@ -57,18 +66,21 @@ should land with tests and keep the build green.
 - [ ] `tgcli send` (text, --md/--html, --reply-to, --silent, --schedule)
 - [ ] `tgcli msg edit|delete|forward|react|pin|unpin`
 - [ ] `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join|leave`
+- [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
 
 ## M4 — Files & media
 
 - [ ] `tgcli download` with progress frames (stderr bar / NDJSON), `--timeout`
 - [ ] `tgcli send --file` uploads (photos/video/voice/documents autodetect), --caption, albums
 - [ ] `TGCLI_MEDIA_DIR` handling
+- [ ] Review gate: M4 diff vs DESIGN.md
 
 ## M5 — Streaming
 
 - [ ] Update-bus subscriptions with filters, multiplexed to any number of clients
 - [ ] `tgcli listen` (--chat, --types, --count, --timeout; NDJSON)
 - [ ] `tgcli wait-for` (--chat, --from, --regex, --timeout → exit 7)
+- [ ] Review gate: M5 diff vs DESIGN.md
 
 ## M6 — Long tail
 
@@ -77,6 +89,7 @@ should land with tests and keep the build green.
 - [ ] `tgcli topic list|create|edit|close|reopen`
 - [ ] `tgcli chat set-title|set-photo|set-description|invite-link|promote|demote|ban|unban|kick|set-permissions`
 - [ ] `tgcli session list|terminate`
+- [ ] Review gate: M6 diff vs DESIGN.md
 
 ## M7 — Polish & release
 
@@ -86,6 +99,7 @@ should land with tests and keep the build green.
 - [ ] Integration test suite against Telegram test DC (`TGCLI_TEST_DC=1`)
 - [ ] Static musl Linux binary + macOS universal binary release job
 - [ ] Packaging: AUR, Homebrew; systemd user unit example for `tgcli daemon run`
+- [ ] Review gate: M7 diff vs DESIGN.md
 - [ ] v1.0
 
 ## Post-1.0 ideas

@@ -510,14 +510,21 @@ What makes tgcli specifically LLM-agent-friendly:
   the pinned hash.
 - **Libraries** (FetchContent, permissively licensed): CLI11 (nested
   subcommands), nlohmann/json, fmt, tomlplusplus, Catch2.
-- **Testing**:
-  - Unit: resolver, safety tiers, exit-code mapping, arg parsing — against a
-    mocked `TdClient` interface (handlers depend on the abstract executor, so
-    no network in unit tests).
-  - Integration: opt-in suite (`TGCLI_TEST_DC=1`) against Telegram's **test
-    DC** (`use_test_dc`), which provides synthetic phone numbers with fixed
-    login codes — real end-to-end auth/send/read without a real account.
+- **Testing** (policy detailed in CLAUDE.md; tests pin the external
+  contract, never the implementation):
+  - Contract tests as the default: a command driven through the real
+    dispatch path (`--no-daemon`) against one shared scripted fake of the
+    td_api boundary, asserting emitted td_api requests as data, output JSON
+    against docs/schemas/, exit codes, stderr discipline. Cross-command
+    semantics (write gate, NOT_AUTHED, ambiguity, timeouts) are tested once
+    centrally, not per command.
+  - Unit tests only for real logic (resolver matching, tier evaluation,
+    frame codec, cursors, idempotency replay); no mock-verification tests.
   - Golden files for human renderers.
+  - E2E: a small opt-in suite (`TGCLI_TEST_DC=1`) against Telegram's **test
+    DC** (`use_test_dc`), which provides synthetic phone numbers with fixed
+    login codes — real end-to-end auth/send/read without a real account;
+    roughly one flow per feature area.
 - **CI (GitHub Actions)**: Linux + macOS build/test matrix, clang-format and
   clang-tidy checks, tdlib build cache, release job producing a static (musl)
   Linux binary and a macOS universal binary.
