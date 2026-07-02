@@ -25,9 +25,10 @@ section — "I would have done it differently" is not a finding.
   either it already was, or the PR extends DESIGN.md in the same change (see
   §7 for which changes may do this). Undocumented behavior is silent drift
   and is rejected.
-- CLAUDE.md invariants hold: single safety chokepoint, td_api.h confined to
-  core/, stdout carries data only, no bespoke message store, secrets never
-  via argv or written to disk.
+- CLAUDE.md invariants hold: single safety chokepoint, td_api.h only in
+  daemon-side implementation TUs (core/ and command .cpp files — never in
+  public headers or client-side code), stdout carries data only, no bespoke
+  message store, secrets never via argv or written to disk.
 - If code and DESIGN.md disagree, DESIGN.md wins. Either fix the code or
   change the spec through §7 — a PR must never leave the two in
   contradiction.
@@ -84,7 +85,9 @@ Two classes of spec change, with different processes:
 
 - **Additive or clarifying** — a new command/flag following existing
   patterns, a new schema for a new command, documenting behavior the spec
-  left unspecified, wording fixes. Allowed in the same PR as the
+  left unspecified, wording fixes. Before the M7 schema freeze, changes to
+  existing docs/schemas/ fields are also additive-class; after the freeze
+  they are contract-class. Allowed in the same PR as the
   implementation. The PR description must carry a `Spec delta:` section
   listing every DESIGN.md/schema change so it is reviewed as a spec change,
   not skimmed as prose.

@@ -20,15 +20,18 @@ top-down).
 
 - stdout carries data only; progress, warnings, and diagnostics go to stderr.
 - The exit-code table (DESIGN.md §5) and the curated JSON schemas under
-  docs/schemas/ are stable contracts; changing them is a design change.
+  docs/schemas/ are stable contracts; changing them is a design change
+  (pre-M7-freeze schema edits are additive-class spec deltas, post-freeze
+  contract-class — REVIEW.md §7).
 - The write gate is fail-closed and evaluated daemon-side. Every
   Telegram-side mutation passes through the single safety chokepoint with a
   statically declared tier (Read/Write/Destructive); no handler bypasses it.
 - td_api.h appears only in daemon-side implementation translation units
   (core/ and individual command .cpp files) — never in public headers or
   client-side code (cli, output, prompts).
-- No bespoke message store: tdlib's database is the cache. tgcli's only
-  persistent state is the append-only audit log and the idempotency store.
+- No bespoke message store: tdlib's database is the cache. tgcli's own
+  persistent state is limited to the audit log, the idempotency store,
+  config.toml (which `login` updates with app credentials) and rotated logs.
 - Real secrets (2FA password, DB encryption key) are never accepted via argv
   and never written to disk by the tool.
 

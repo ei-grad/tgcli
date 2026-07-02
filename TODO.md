@@ -20,7 +20,9 @@ before the milestone is closed.
 - [ ] `TdClient` core: ClientManager thread, request/response correlation, update bus
 - [ ] Daemon skeleton: `tgcli daemon run`, unix socket ($XDG_RUNTIME_DIR/tgcli/<name>.sock;
       $TMPDIR/tgcli-<uid>/ fallback with 0700-dir ownership checks; sun_path length limits;
-      0600, SO_PEERCRED check), JSONL frame protocol (result/error/item/progress/challenge)
+      0600, peer-uid check: SO_PEERCRED on Linux / getpeereid on macOS),
+      JSONL frame protocol (result/error/item/progress/challenge; request
+      frame carries tri-state write authority + client cwd/media-dir)
 - [ ] Version handshake: binary+protocol versions at connect; graceful daemon
       restart on mismatch, terminal frames to old streams
 - [ ] Auto-spawn: fork + re-exec on missing socket, readiness handshake,
@@ -29,7 +31,8 @@ before the milestone is closed.
       wait authorizationStateClosed → exit; systemd readiness
 - [ ] `--no-daemon` in-process debug mode (same dispatch path, refuses if daemon holds lock)
 - [ ] `tgcli version` / `tgcli doctor` round-trip through the daemon (tdlib
-      version via `getOption("version")`)
+      version via `getOption("version")`); doctor degrades to local
+      diagnostics when the daemon is unreachable
 - [ ] clang-format + clang-tidy configs
 - [ ] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache;
       sanitizer jobs (ASan/UBSan full suite; TSan fake-boundary suite only)
@@ -48,7 +51,8 @@ before the milestone is closed.
 - [ ] `tgcli login` (phone/code/2FA via challenges), `--qr`, `--bot-token`;
       prompts for api_id/api_hash on first run and persists them to config
 - [ ] `tgcli logout` (destructive gate), `tgcli me`, full `tgcli doctor`
-- [ ] `tgcli account add|list|show|use|remove`; per-account state isolation
+- [ ] `tgcli account add|list|show|use|remove`; per-account state isolation;
+      remove is destructive with default server-side logout / `--keep-session`
 - [ ] `tgcli daemon status|stop|restart`; `idle_exit` config
 - [ ] Review gate: M1 diff vs DESIGN.md
 
@@ -74,14 +78,18 @@ before the milestone is closed.
 - [ ] Safety chokepoint: Read/Write/Destructive tiers in static command descriptors,
       enforced daemon-side
 - [ ] Write gate, default deny: `--allow-write` / `TGCLI_ALLOW_WRITE` /
-      per-account `allow_write` (daemon-enforced, exit 6 without a grant)
+      per-account `allow_write` (daemon-enforced, exit 6 without a grant);
+      `TGCLI_ALLOW_WRITE=0` explicit deny overrides all grants; `login`
+      tier-exempt
 - [ ] Two-phase destructive confirmation: challenge frame with resolved target →
       TTY prompt client-side; `--yes` for scripts; fails closed without a TTY
 - [ ] `--dry-run` planner
 - [ ] Audit log (JSONL per account, size-based rotation, raw-secret redaction)
 - [ ] `--idempotency-key`: record-then-send store, pending/completed replay
-      semantics, payload fingerprint check, 7-day expiry
-- [ ] `tgcli send` (text, --md/--html, --reply-to, --silent, --schedule)
+      semantics (pending → exit 1 IDEMPOTENCY_PENDING), payload fingerprint
+      check, 7-day expiry; gate checked before the store
+- [ ] `tgcli send` (text, --md/--html, --reply-to, --silent, --schedule);
+      waits for updateMessageSendSucceeded, returns the final message id
 - [ ] `tgcli msg edit|delete|forward|react|pin|unpin`
 - [ ] `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join|leave`
 - [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
@@ -99,7 +107,7 @@ before the milestone is closed.
 - [ ] Update-bus subscriptions with filters, multiplexed to any number of clients
 - [ ] `tgcli listen` (--chat, --types, --count, --timeout; NDJSON; planned expiry → exit 0)
 - [ ] `tgcli wait-for` (--chat, --from, --regex, --after for race-free
-      send-then-wait, --timeout → exit 7)
+      send-then-wait — requires --chat, --timeout → exit 7)
 - [ ] Review gate: M5 diff vs DESIGN.md
 
 ## M6 — Long tail
