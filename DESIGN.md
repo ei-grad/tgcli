@@ -20,8 +20,10 @@ Status: design phase. Nothing below is implemented yet.
   administration, sessions.
 - Fail-closed writes: anything that acts on Telegram on behalf of the account
   is gated behind an explicit grant — per call, per environment, or granted
-  once per account (§6). Reads are always free; a grantless invocation is
-  read-only by construction.
+  once per account — with an explicit deny that overrides any standing grant
+  (§6). Reads are always free; with no grant anywhere an invocation is
+  read-only, and `TGCLI_ALLOW_WRITE=0` forces read-only regardless of
+  account configuration.
 - Low-ceremony manual use: the account owner grants writes once in config
   (`allow_write = true`) and `tgcli send @user "hi"` just works — no cache
   warm-up, no confirmation tax on routine actions.
@@ -54,7 +56,7 @@ deliberately avoids:
 - **Local-only reads**: every query ran against the local cache; there was no
   server-side search at all, so results silently depended on cache freshness.
   tgcli defaults to live server-side operations (per-chat and global search
-  included) with `--local` as the explicit offline option.
+  included), with `--local` on history reads as the explicit offline option.
 - **Bespoke SQLite store with a hardcoded schema** — a migration liability on
   every upgrade. tgcli keeps *no* message store of its own: tdlib owns its
   database and migrates its schema across versions itself. tgcli's only
@@ -103,12 +105,18 @@ Global flags:
 ```
 --account <name>       account selection (default from config / TGCLI_ACCOUNT)
 --json                 machine output (plain JSON / NDJSON for streams)
---allow-write          per-call write grant (see §6 for env/config grants)
---dry-run              resolve and validate, print the plan, call nothing
+--full                 include the underlying td_api object under a raw key
+--allow-write          per-call write grant; §6 covers env/config grants and
+                       the deny override
+--dry-run              resolve and validate, print the plan, call nothing;
+                       needs no write grant (§6)
 --yes                  non-interactive approval of destructive actions
---timeout <sec>        per-command deadline (default 60; streams: unlimited)
---idempotency-key <k>  replay a recorded success instead of re-sending (§6)
+--timeout <sec>        per-command deadline (default 60; streams and file
+                       transfers: unlimited unless set)
+--cursor <token>       resume pagination from a `next` token (§5)
+--idempotency-key <k>  idempotent writes: record-then-send, replay on repeat (§6)
 --verbose / -v         diagnostics to stderr
+--no-daemon            debugging: run in-process without the daemon (§10)
 --no-color
 ```
 
@@ -127,7 +135,8 @@ tgcli send <chat> [TEXT | -] [--file PATH]... [--caption TEXT]
               [--md | --html] [--reply-to ID] [--topic ID]
               [--silent] [--schedule <ts|"online">] [--spoiler]
 tgcli search <query> [--chat <c> | --global] [--from <user>]
-              [--type text|photo|video|doc|link|voice] [-n N] [--local]
+              [--type text|photo|video|doc|link|voice] [-n N]
+              always server-side — tdlib has no local search (§8)
 tgcli unread                                      per-chat unread counters
 tgcli fetch <chat> [--limit N | --all] [--since TS]
               deliberately warm the local DB with history for one chat
@@ -137,11 +146,15 @@ tgcli download <chat> <msg-id> [-O <dir|path>]    progress on stderr
 tgcli resolve <t.me-link | @username | title>     → ids, type, metadata
 
 tgcli listen [--chat <c>]... [--types message,edit,delete,reaction,chat]
-              [--timeout S] [--count N]           NDJSON stream, one update per line
-tgcli wait-for [--chat <c>] [--from <user>] [--regex <re>] [--timeout S]
+              [--timeout S] [--count N]           NDJSON stream, one update per line;
+                                                  planned expiry (--timeout/--count) exits 0
+tgcli wait-for [--chat <c>] [--from <user>] [--regex <re>]
+              [--after <msg-id>] [--timeout S]
               blocks until one matching message arrives, prints it, exits 0;
-              exits 7 (TIMEOUT) otherwise — the primitive for
-              "send, then wait for the reply" agent loops
+              exits 7 (TIMEOUT) otherwise. --after <id> also matches messages
+              that arrived after that id but before the call (checked in the
+              local DB behind the subscription) — so `send`, then
+              `wait-for --after <sent-id>`, is race-free by construction
 
 tgcli raw '<td_api request JSON>' [--timeout S]   full-API escape hatch (§4.2)
 ```
@@ -172,11 +185,14 @@ tgcli chat set-permissions <chat> [--flags ...]
 
 tgcli contact list|search <q>|add|remove|block|unblock
 tgcli folder list|show <f>|create|edit|delete|add-chat|remove-chat
+                                                  delete destructive
 tgcli topic list <chat> | create|edit|close|reopen <chat> ...
 tgcli session list | terminate <id>               terminate destructive
 tgcli account add|list|show|use|remove <name>
 tgcli daemon status|stop|restart|run              lifecycle (§10); auto-spawned otherwise,
                                                   `run` stays in the foreground
+tgcli storage stats|optimize                      tdlib file-store usage / optimizeStorage cleanup
+tgcli schema <command> [--all]                    print the command's curated result schema
 tgcli completion <shell>
 tgcli version
 ```
@@ -184,15 +200,27 @@ tgcli version
 ### 4.1 Selectors
 
 `<chat>` accepts `@username`, a numeric tdlib chat id, a `t.me/...` link, or a
-title substring. Title resolution uses tdlib `searchChats` (plus
+title substring. A selector that parses as an integer is always a chat id,
+never a title. Title resolution uses tdlib `searchChats` (plus
 `searchPublicChat` for unseen `@usernames`). An ambiguous title fails with
 exit 2 and a `candidates` list in the error object, so a human or an agent can
 retry with a precise id. `<user>` follows the same rules against
 contacts/chat members.
 
-Message ids are **tdlib message ids** everywhere (they differ from server ids
-for channel posts). `msg link` / `resolve` convert to/from public t.me
-references, so nobody needs to know about the id-space difference.
+Title-substring resolution applies to read-tier commands only. Write- and
+destructive-tier commands require an exact selector (`@username`, id, or
+t.me link); a title substring fails with exit 2 and the `candidates` list.
+Rationale: `searchChats` matches only locally-known chats, so a fuzzy
+selector resolves differently depending on how warm the DB is — tolerable
+for a read, not for a send that could hit the wrong chat.
+
+`--since`/`--until` timestamps are ISO-8601 (date or datetime, UTC unless an
+offset is given) or relative (`30m`, `2h`, `7d`).
+
+Message ids are **tdlib message ids** everywhere (tdlib's message-id space
+differs from Telegram's server ids). `msg link` / `resolve` convert to/from
+public t.me references, so nobody needs to know about the id-space
+difference.
 
 ### 4.2 `raw` escape hatch
 
@@ -200,7 +228,10 @@ Direct passthrough to the td_api schema (`@type`-keyed JSON, the same
 convention as td_json_client): guarantees full API coverage before a dedicated
 subcommand exists. `raw` passes through the same write gate (§6): request
 types outside a known-read-only allowlist count as writes and require a
-write grant.
+write grant. Auth-flow request types (`setAuthenticationPhoneNumber`,
+`checkAuthenticationPassword`, …) are refused outright — they would put
+secrets on argv and into the audit log; authentication goes through `login`
+challenges only. Audited `raw` records redact known secret-bearing fields.
 
 ## 5. Output contract
 
@@ -211,8 +242,11 @@ object itself to stdout:
 {"id": 123456, "chat_id": -1001234, "date": "2026-07-02T12:00:00Z", "text": "hi", ...}
 ```
 
-List-returning commands print `{"items": [...], "next": <cursor|null>}` —
-pass `next` back via `--before`/`--offset` for deterministic pagination.
+List-returning commands print `{"items": [...], "next": <cursor|null>}`.
+`next` is an opaque, self-contained, account-scoped token: pass it back via
+`--cursor` (accepted by every paginated command) to fetch the next page
+deterministically; the daemon holds no per-cursor state. `read` additionally
+accepts a plain `--before <msg-id>` as the human-friendly equivalent.
 Streams print one JSON object per line (NDJSON).
 
 Failures print a single error object to **stderr** and set the exit code:
@@ -240,7 +274,7 @@ Failures print a single error object to **stderr** and set the exit code:
 | 4 | NOT_FOUND | chat/message/user/file not found |
 | 5 | RATE_LIMITED | Telegram flood wait surfaced; `retry_after` in error details |
 | 6 | DENIED | write attempted without a grant, or destructive action without confirmation |
-| 7 | TIMEOUT | `--timeout` elapsed (`wait-for`, downloads, raw) |
+| 7 | TIMEOUT | `--timeout` elapsed without the awaited outcome (`wait-for`, transfers, raw); `listen` reaching `--timeout`/`--count` is a planned expiry and exits 0 |
 
 ## 6. Safety model
 
@@ -257,27 +291,44 @@ cannot be forgotten:
     agent harness that is trusted to write);
   - `allow_write = true` in the account's config — granted once by the
     account owner for ceremony-free everyday use of their own account.
+
+  **An explicit deny overrides every grant.** `TGCLI_ALLOW_WRITE=0` denies
+  writes even when the config grants them and even when the invocation
+  passes `--allow-write`. Precedence: explicit deny > any grant > default
+  deny. This is the one-variable sandbox switch for a harness running an
+  agent against an account whose owner keeps a standing config grant.
 - **Destructive** (msg delete, chat leave/ban/kick, session terminate, folder
   delete, logout) — requires a write grant *and* confirmation: on a TTY an
   interactive prompt showing the resolved target
   (`leave chat "Dev Team" (-1001234)? [y/N]`); without a TTY an explicit
   `--yes`.
 
-The default is therefore fail-closed: an agent invoked with no grant in its
-environment has a read-only surface by construction and receives a
-structured exit-6 error the moment it strays. The gate guards against
-accidental and unauthorized-by-omission writes, not against a hostile
-process running as the same uid (§10).
+The gate fails closed: an agent invoked with no grant — or under
+`TGCLI_ALLOW_WRITE=0` when the account carries a standing grant — has a
+read-only surface and receives a structured exit-6 error the moment it
+strays. The gate guards against accidental and unauthorized-by-omission
+writes, not against a hostile process running as the same uid (§10).
 
 Supporting mechanisms:
 
 - **`--dry-run`** — performs resolution and validation, prints the exact plan
-  (resolved ids, message preview, td_api request type), calls nothing.
+  (resolved ids, message preview, td_api request type), calls nothing. It
+  needs no write grant and no `--yes` — it exists precisely so plans can be
+  made without authority.
 - **Audit log** — every state-changing invocation appends a JSONL record
-  (argv, resolved targets, outcome) to the account's `audit.log`.
-- **`--idempotency-key <k>`** — records successful writes keyed by `k`; a
-  replay returns the recorded result without calling Telegram. Makes
-  retry-on-transport-error loops safe from double-sends.
+  (argv, resolved targets, outcome) to the account's `audit.log`. The record
+  includes message bodies — it is the account owner's own log; secret-bearing
+  fields in `raw` payloads are redacted. Files rotate by size (§9).
+- **`--idempotency-key <k>`** — record-then-send: the key is written to the
+  store as *pending* (with a payload fingerprint) before the request is
+  dispatched, and updated with the result on completion. Replay semantics: a
+  *completed* key returns the recorded result without calling Telegram; a
+  *pending* key (the prior attempt's outcome is unknown — daemon crash or
+  client-side timeout mid-send) fails with a structured error instead of
+  re-sending, so the caller can inspect the chat or pick a new key; the same
+  key with a different payload fingerprint is a usage error. Entries expire
+  after 7 days. Recording only successes would not prevent double-sends in
+  the very scenario retries exist for; record-then-send does.
 
 ## 7. Architecture
 
@@ -323,7 +374,9 @@ Layer responsibilities:
   dedicated thread. Exposes `send(td_api::object_ptr<Fn>) → future<Result>`
   with request-id correlation, an update bus (typed subscriptions used by
   `listen`/`wait-for`/file progress), and the authorization state machine.
-  Nothing above this layer touches tdlib type lifecycle rules.
+  tdlib object lifecycle and receive-loop rules live entirely here; command
+  handlers construct typed request objects but never touch the
+  ClientManager or the update loop directly.
 - **resolver** — selector strings → ids, cached per request; produces the
   `candidates` payload on ambiguity.
 - **safety** — the single chokepoint (§6), evaluated daemon-side. Handlers
@@ -338,33 +391,56 @@ Layer responsibilities:
 tgcli uses tdlib's **native typed C++ interface** (`td::td_api`) for all
 implemented commands — compile-time schema safety — and tdlib's JSON
 conversion layer (`td_api_json`) for the `raw` command and `--full` dumps.
-tdlib is built from a pinned source revision as part of the build (§13), so
-the availability of the JSON conversion headers is under our control.
+That conversion layer is generated tdlib-internal code, not part of the
+installed public interface, so tgcli supports exactly one tdlib provenance:
+the pinned source revision — built via FetchContent, or preinstalled into a
+prefix by `scripts/build-tdlib.sh`, which exports the extra headers
+`raw`/`--full` need (§13). Arbitrary distro tdlib packages are not
+supported.
 
-The huge `td_api.h` header is confined to `core/` translation units and a
-precompiled header to keep incremental builds tolerable.
+The huge `td_api.h` header is confined to daemon-side implementation
+translation units — `core/` plus individual command `.cpp` files, which do
+construct typed requests — behind a precompiled header. It never appears in
+public headers or client-side code (cli, output, prompts). This keeps
+incremental builds tolerable without pretending commands could be written
+against a hand-mirrored facade of td_api.
 
 ## 8. tdlib integration details
 
-- **Auth FSM**: driven by `updateAuthorizationState`:
-  `waitTdlibParameters → waitPhoneNumber → waitCode → [waitPassword] → ready`.
-  Interactive `login` prompts reach the invoking client as challenge frames
-  (§10) and are answered from its TTY (password without echo);
-  `--qr` uses `requestQrCodeAuthentication` and renders the QR in the
-  terminal; `--bot-token` uses `checkAuthenticationBotToken` (fully
-  non-interactive — the recommended path for disposable agent accounts). The
-  2FA password can come from `password_cmd` in config (e.g. `pass show …`)
-  for scripted re-auth; secrets are never accepted via argv.
+- **Auth FSM**: driven by `updateAuthorizationState`. The common path is
+  `waitTdlibParameters → waitPhoneNumber → waitCode → [waitPassword] → ready`,
+  but the FSM handles every authorization state tdlib can enter:
+  `waitRegistration` (fresh numbers — the test-DC suite hits this
+  constantly), `waitOtherDeviceConfirmation` (the state the `--qr` flow
+  actually runs in), and the email states (`waitEmailAddress`,
+  `waitEmailCode`) some accounts are forced through. Interactive `login`
+  prompts reach the invoking client as challenge frames (§10) and are
+  answered from its TTY (password without echo); `--qr` uses
+  `requestQrCodeAuthentication` and renders the QR in the terminal;
+  `--bot-token` uses `checkAuthenticationBotToken` (fully non-interactive).
+  The 2FA password can come from `password_cmd` in config (e.g.
+  `pass show …`) for scripted re-auth; secrets are never accepted via argv.
+- **Bot-account caveat**: a bot session has no dialog list, cannot read
+  arbitrary chat history, has no server-side search and no contacts — most
+  of the read surface (`chats`, `read`, `search`, `unread`, `fetch`) is
+  user-account-only. Bots suit narrow send/receive automation in chats they
+  are already in; an agent that needs to read should run on a user account.
 - **Every other command** requires `authorizationStateReady`; anything else →
   exit 3 with the current state named in the error details.
+- **Remote session death**: a session revoked from another device surfaces
+  as `authorizationStateLoggingOut`/`Closed` unprompted. Streaming
+  subscribers get a terminal error frame, subsequent commands exit 3 with
+  the reason, `doctor` reports the state, and the daemon stays up so
+  `login` can re-authenticate without a respawn.
 - **Request correlation**: `ClientManager::send(client_id, query_id, fn)`;
   `TdClient` hands out monotonic query ids and resolves the matching promise
   on receive. Updates (query_id 0) go to the update bus.
 - **Files**: `downloadFile` + `updateFile` progress events → progress bar on
   stderr (TTY) or NDJSON progress frames. Uploads via `inputFileLocal` inside
   send requests, same plumbing.
-- **Flood waits**: tdlib retries most floods internally; a surfaced 429 maps
-  to exit 5 with `retry_after`.
+- **Flood waits**: tdlib absorbs some flood waits during its internal
+  syncing, but user-initiated request bursts routinely surface error 429 —
+  agents should expect exit 5 with `retry_after` and back off.
 - **Local DB and persistence**: tdlib persists every chat, message and update
   it observes into its own database and migrates that schema across tdlib
   versions itself — tgcli never defines a message schema and has no
@@ -374,13 +450,19 @@ precompiled header to keep incremental builds tolerable.
   per-account daemon (§10) keeps running by default, so the local DB absorbs
   updates continuously; `listen` is a live view over that stream, not the
   persistence mechanism.
-- **Local-only reads**: `--local` on `read`/`search` sets the `only_local`
-  flag on `getChatHistory` / searches only the DB — offline mode for agents
-  that must not hit the network. `tgcli fetch` is the deliberate warming
-  path: it pages `getChatHistory` for one chat to a requested depth/date,
-  resumable, with progress on stderr.
-- **Options at startup**: `ignore_background_updates=false` (keep the DB
-  warm), `notification_group_count_max=0` (no notification machinery).
+- **Local-only reads**: `--local` on `read` sets the `only_local` flag on
+  `getChatHistory` — offline mode for agents that must not hit the network.
+  There is deliberately no `--local` on `search`: tdlib exposes no
+  local-only search for regular chats (`searchChatMessages`/`searchMessages`
+  are server-side), and tgcli does not pretend otherwise; offline filtering
+  over prefetched history is a post-1.0 idea. `tgcli fetch` is the
+  deliberate warming path: it pages `getChatHistory` for one chat to a
+  requested depth/date, with progress on stderr. Resume keeps no persisted
+  state: the next run pages `only_local` history to find the oldest cached
+  message and continues from there.
+- **Options at startup**: tdlib defaults are kept; tgcli uses no
+  notification machinery and relies on background updates being processed —
+  both already the default behavior.
 - **tdlib logging**: to a file in the account state dir at verbosity 1 by
   default; `-v` raises verbosity and mirrors to stderr.
 
@@ -395,6 +477,13 @@ XDG layout, one subtree per account:
 $XDG_RUNTIME_DIR/tgcli/<name>.sock             daemon socket
 ```
 
+When `XDG_RUNTIME_DIR` is unset (macOS, most containers and CI sandboxes),
+the socket falls back to `$TMPDIR/tgcli-<uid>/<name>.sock` (then
+`/tmp/tgcli-<uid>/`), a `0700` directory whose ownership is verified before
+use. Socket paths must fit `sun_path` (~104 bytes); account names are
+length-validated accordingly. `audit.log` and `tdlib.log` rotate by size
+(default 32 MiB, keep 4).
+
 `config.toml`:
 
 ```toml
@@ -403,14 +492,24 @@ default_account = "main"
 [accounts.main]
 api_id       = 12345                             # plain values are the normal path;
 api_hash     = "0123456789abcdef"                # `tgcli login` saves them on first run
+# api_id_cmd   = "pass show tg-api-id"           # alternative: source app creds from a command
+# api_hash_cmd = "pass show tg-api-hash"
 db_key_cmd   = ""                                # optional tdlib database_encryption_key source
 password_cmd = ""                                # optional 2FA password source
 allow_write  = false                             # standing write grant for this account (§6);
                                                  # default deny — grant per call/env otherwise
+# idle_exit  = 300                               # daemon exits after N idle seconds (default: stays up)
 ```
 
-Environment (env beats config): `TGCLI_ACCOUNT`, `TGCLI_API_ID`,
-`TGCLI_API_HASH`, `TGCLI_ALLOW_WRITE`, `TGCLI_MEDIA_DIR`.
+Environment (env beats config; for the write gate, §6's
+deny-overrides-grants rule applies): `TGCLI_ACCOUNT`, `TGCLI_API_ID`,
+`TGCLI_API_HASH`, `TGCLI_ALLOW_WRITE` (`1` grant / `0` hard deny),
+`TGCLI_MEDIA_DIR` (default output directory for `download` when `-O` is
+omitted; falls back to the current directory).
+
+The daemon re-reads `config.toml` when its mtime changes, so gate and
+`idle_exit` edits apply to new requests without a restart; tdlib parameters
+(api_id/api_hash, db key) take effect on daemon restart.
 
 Credentials policy — two classes, treated differently:
 
@@ -460,12 +559,32 @@ DB open per command), safe concurrent invocations, any number of simultaneous
   with no TTY a challenge fails closed (exit 3 for auth, 6 for confirmation).
   Multiple requests are served concurrently; a slow download never blocks a
   `send` from another shell.
-- **Security.** Socket at `$XDG_RUNTIME_DIR/tgcli/<name>.sock`, mode 0600,
-  `SO_PEERCRED` uid check. The write gate (§6) is evaluated in the daemon:
-  a write-tier request runs only if the account config grants `allow_write`
-  or the request itself carries a grant. Per-invocation grants are client
-  declarations within the same uid trust domain — the gate is a guard
-  against accidents, not against a hostile local process.
+- **Version handshake.** The connect handshake carries binary and protocol
+  versions from both sides. On any mismatch the client — freshly exec'd, so
+  authoritative — asks the daemon to shut down gracefully and respawns it
+  from the new binary; streams on the old daemon receive a terminal error
+  frame. Frames and curated schemas are never mixed across versions.
+- **Challenge ownership.** A challenge belongs to the request (and client
+  connection) that triggered it. `login` additionally takes a per-account
+  auth lease: one login flow at a time — a concurrent `login` gets a
+  structured "auth flow in progress" error, and other commands exit 3
+  naming the pending flow. If the owning client disconnects mid-challenge,
+  the flow aborts and the lease is released; tdlib's auth FSM stays in its
+  current wait state and the next `login` resumes from it. A
+  destructive-confirmation challenge dies with its request: a disconnect
+  before the answer means nothing is sent.
+- **Shutdown.** On SIGTERM/SIGINT or `daemon stop`: stop accepting requests,
+  send terminal error frames to streaming subscribers, call tdlib `close()`
+  and wait for `authorizationStateClosed` so the database is flushed
+  cleanly, then exit. The systemd user unit uses readiness notification.
+  Active `listen`/`wait-for` subscribers count as activity for `idle_exit`.
+- **Security.** Socket at `$XDG_RUNTIME_DIR/tgcli/<name>.sock` (fallback per
+  §9), mode 0600, `SO_PEERCRED` uid check. The write gate (§6) is evaluated
+  in the daemon: a write-tier request runs only if the account config grants
+  `allow_write` or the request itself carries a grant, and never under an
+  explicit deny. Per-invocation grants are client declarations within the
+  same uid trust domain — the gate is a guard against accidents, not against
+  a hostile local process.
 - **`--no-daemon`.** Debugging escape hatch: runs dispatch and handlers
   in-process over the same code path minus the socket; refuses to start if a
   daemon already holds the account lock.
@@ -482,32 +601,39 @@ stores and audit logs.
 What makes tgcli specifically LLM-agent-friendly:
 
 - Exit codes are the control flow — agents branch without parsing prose.
-- Writes fail closed: with no grant in the environment every mutating command
-  exits 6 with a structured error — a harness that grants nothing gets a
-  read-only agent by construction; a harness that sets `TGCLI_ALLOW_WRITE=1`
-  (or lets the agent pass `--allow-write` per call) opts into writes
-  deliberately.
+- Writes fail closed: with no grant every mutating command exits 6 with a
+  structured error, and `TGCLI_ALLOW_WRITE=0` force-sandboxes an agent even
+  against an account with a standing config grant. A harness that sets
+  `TGCLI_ALLOW_WRITE=1` (or lets the agent pass `--allow-write` per call)
+  opts into writes deliberately.
 - The per-account daemon gives ~zero per-call startup latency and makes
   parallel tool calls safe (no DB-lock failures), with the local DB
   continuously warm for `--local` reads.
 - `--dry-run` lets an agent present a plan for human approval before writing.
 - Destructive actions are non-interactive-safe: without a TTY they fail
   closed (exit 6) unless `--yes` is explicit in the call.
-- `wait-for --regex --timeout` turns "message someone and await the reply"
-  into one blocking call with a deterministic timeout exit code.
-- `listen --json --count N --timeout S` gives bounded streaming reads.
-- `--idempotency-key` makes retries safe.
+- `send` returns the sent message id; `wait-for --after <that-id> --regex
+  --timeout` turns "message someone and await the reply" into one race-free
+  blocking call with a deterministic timeout exit code.
+- `listen --json --count N --timeout S` gives bounded streaming reads that
+  exit 0 on planned expiry.
+- `--idempotency-key` makes retries safe (record-then-send, §6).
 - `raw` guarantees no capability cliff: anything td_api can do is reachable.
-- Stable curated schemas under `docs/schemas/` that an agent skill can pin to.
+- Stable curated schemas under `docs/schemas/`, also dumpable at runtime via
+  `tgcli schema <command>` — no repo checkout needed inside a sandbox.
 - `tgcli doctor --json` is a one-call health/auth probe.
 
 ## 13. Build, dependencies, testing
 
 - **Language/std**: C++20. **Build**: CMake ≥ 3.24 with presets.
 - **tdlib**: pinned source revision (tdlib tags rarely; pin a commit hash),
-  built via FetchContent by default; `-DTGCLI_SYSTEM_TDLIB=ON` to use an
-  installed one. ccache strongly advised; CI caches the tdlib build keyed by
-  the pinned hash.
+  built via FetchContent by default; `-DTGCLI_SYSTEM_TDLIB=ON` accepts a
+  prefix produced by `scripts/build-tdlib.sh` from the same pin — it exports
+  the JSON-conversion headers `raw`/`--full` need; arbitrary distro tdlib
+  packages are not supported. ccache strongly advised; CI caches the tdlib
+  build keyed by the pinned hash. Bumping the pin is a
+  contract-change-class PR (REVIEW.md §7): td_api churn can move the typed
+  surface and the curated schemas.
 - **Libraries** (FetchContent, permissively licensed): CLI11 (nested
   subcommands), nlohmann/json, fmt, tomlplusplus, Catch2.
 - **Testing** (policy detailed in CLAUDE.md; tests pin the external
@@ -524,14 +650,23 @@ What makes tgcli specifically LLM-agent-friendly:
   - E2E: a small opt-in suite (`TGCLI_TEST_DC=1`) against Telegram's **test
     DC** (`use_test_dc`), which provides synthetic phone numbers with fixed
     login codes — real end-to-end auth/send/read without a real account;
-    roughly one flow per feature area.
+    roughly one flow per feature area. The test DC is an external,
+    rate-limited, periodically-wiped service, so this suite runs nightly and
+    at milestone gates — not as a per-PR merge blocker (REVIEW.md §4).
+- **Sanitizers**: ASan/UBSan jobs run the full test suite (an uninstrumented
+  tdlib is acceptable for those); TSan runs the unit/contract suite against
+  the fake td boundary only — meaningful TSan across tdlib's own threads
+  would require a second, TSan-instrumented tdlib build (optional nightly).
 - **CI (GitHub Actions)**: Linux + macOS build/test matrix, clang-format and
-  clang-tidy checks, tdlib build cache, release job producing a static (musl)
-  Linux binary and a macOS universal binary.
+  clang-tidy checks, sanitizer jobs as above, tdlib build cache, release job
+  producing a static (musl) Linux binary — OpenSSL/zlib linked statically
+  from pinned sources in the musl toolchain image — and a macOS universal
+  binary assembled from per-arch builds with `lipo`.
 
 ## 14. Roadmap
 
-Milestones (tracked in TODO.md):
+Milestones. TODO.md is normative for per-milestone contents; this list is a
+summary:
 
 - **M0** — scaffold + process model: CMake + presets, deps, CI, tdlib builds;
   auto-spawned daemon, socket protocol skeleton; `tgcli version` / `tgcli

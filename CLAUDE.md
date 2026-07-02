@@ -13,8 +13,8 @@ top-down).
   spec-first).
 - Changes are accepted against REVIEW.md — a PR satisfying every rule there
   is mergeable; one violating any rule is returned.
-- Every task lands with the tests the testing policy below calls for — no
-  more, no fewer — and keeps the build green.
+- Every task lands with the tests the testing policy below calls for and
+  none it forbids, and keeps the build green.
 
 ## Invariants
 
@@ -24,8 +24,9 @@ top-down).
 - The write gate is fail-closed and evaluated daemon-side. Every
   Telegram-side mutation passes through the single safety chokepoint with a
   statically declared tier (Read/Write/Destructive); no handler bypasses it.
-- td_api.h stays confined to core/ translation units; layers above core
-  never touch tdlib types.
+- td_api.h appears only in daemon-side implementation translation units
+  (core/ and individual command .cpp files) — never in public headers or
+  client-side code (cli, output, prompts).
 - No bespoke message store: tdlib's database is the cache. tgcli's only
   persistent state is the append-only audit log and the idempotency store.
 - Real secrets (2FA password, DB encryption key) are never accepted via argv
@@ -35,8 +36,12 @@ top-down).
 
 - CMake ≥ 3.24 with presets; C++20; clang-format and clang-tidy clean.
 - Dev loop uses a prebuilt tdlib (`-DTGCLI_SYSTEM_TDLIB=ON`) plus ccache —
-  never rebuild tdlib from scratch per checkout.
-- Sanitizers (ASan/UBSan, TSan for daemon code) must pass in CI.
+  never rebuild tdlib from scratch per checkout. The prefix must be produced
+  by `scripts/build-tdlib.sh` at the pinned revision (distro tdlib packages
+  lack the JSON-conversion headers `raw`/`--full` need).
+- Sanitizers must pass in CI: ASan/UBSan over the full suite; TSan over the
+  fake-boundary unit/contract suite only (tdlib is uninstrumented —
+  full-program TSan would need a TSan-built tdlib).
 
 ## Testing policy
 
@@ -63,4 +68,6 @@ Tests pin the external contract; they never mirror the implementation.
   reviewed act, not a reflex on failure.
 - **E2E against the Telegram test DC** (`TGCLI_TEST_DC=1`) is a small
   curated suite — roughly one flow per feature area. It proves the stack is
-  real end-to-end; branch coverage belongs to contract tests.
+  real end-to-end; branch coverage belongs to contract tests. It runs
+  nightly and at milestone gates, not as a per-PR merge blocker: the test DC
+  is an external, rate-limited, periodically-wiped service (REVIEW.md §4).

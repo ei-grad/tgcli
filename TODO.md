@@ -1,8 +1,9 @@
 # TODO
 
-Roadmap milestones from [DESIGN.md](DESIGN.md) §14. Work top-down; each item
-lands with the tests the testing policy (CLAUDE.md) calls for — no more, no
-fewer — and keeps the build green.
+Roadmap milestones from [DESIGN.md](DESIGN.md) §14 (this file is normative
+for per-milestone contents). Work top-down; each item lands with the tests
+the testing policy (CLAUDE.md) calls for and none it forbids, and keeps the
+build green.
 
 Every milestone ends with a review gate: a deep review of the milestone's
 full diff against DESIGN.md under the rules of REVIEW.md, with findings
@@ -13,25 +14,37 @@ before the milestone is closed.
 
 - [ ] CMake project (≥3.24) with presets: debug, release, release-static
 - [ ] Pin tdlib source revision; FetchContent build + `-DTGCLI_SYSTEM_TDLIB=ON` option
+- [ ] `scripts/build-tdlib.sh`: prebuilt pinned-tdlib prefix exporting the
+      JSON-conversion headers (dev loop + `raw`/`--full` dependency)
 - [ ] Vendor deps via FetchContent: CLI11, nlohmann/json, fmt, tomlplusplus, Catch2
 - [ ] `TdClient` core: ClientManager thread, request/response correlation, update bus
-- [ ] Daemon skeleton: `tgcli daemon run`, unix socket ($XDG_RUNTIME_DIR/tgcli/<name>.sock,
+- [ ] Daemon skeleton: `tgcli daemon run`, unix socket ($XDG_RUNTIME_DIR/tgcli/<name>.sock;
+      $TMPDIR/tgcli-<uid>/ fallback with 0700-dir ownership checks; sun_path length limits;
       0600, SO_PEERCRED check), JSONL frame protocol (result/error/item/progress/challenge)
+- [ ] Version handshake: binary+protocol versions at connect; graceful daemon
+      restart on mismatch, terminal frames to old streams
 - [ ] Auto-spawn: fork + re-exec on missing socket, readiness handshake,
       flock-settled spawn races
+- [ ] Graceful shutdown: SIGTERM/SIGINT → terminal frames → tdlib close() →
+      wait authorizationStateClosed → exit; systemd readiness
 - [ ] `--no-daemon` in-process debug mode (same dispatch path, refuses if daemon holds lock)
 - [ ] `tgcli version` / `tgcli doctor` round-trip through the daemon (tdlib
       version via `getOption("version")`)
 - [ ] clang-format + clang-tidy configs
-- [ ] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache
+- [ ] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache;
+      sanitizer jobs (ASan/UBSan full suite; TSan fake-boundary suite only)
 - [ ] Choose license (MIT vs Apache-2.0; must be fine linking BSL-1.0 tdlib)
 - [ ] Review gate: M0 diff vs DESIGN.md
 
 ## M1 — Auth & accounts
 
-- [ ] Authorization FSM (`updateAuthorizationState` handling, daemon-side)
-- [ ] Challenge/response frames for interactive prompts (phone, code, 2FA password)
-- [ ] Config loading (config.toml, XDG paths), `*_cmd` secret hooks
+- [ ] Authorization FSM (`updateAuthorizationState` handling, daemon-side) —
+      all states incl. waitRegistration, waitOtherDeviceConfirmation (QR),
+      waitEmailAddress/waitEmailCode; remote-revocation handling
+- [ ] Challenge/response frames for interactive prompts (phone, code, 2FA password);
+      challenge ownership: per-account auth lease, abort on client disconnect
+- [ ] Config loading (config.toml, XDG paths), `*_cmd` secret hooks,
+      mtime-based reload in the daemon
 - [ ] `tgcli login` (phone/code/2FA via challenges), `--qr`, `--bot-token`;
       prompts for api_id/api_hash on first run and persists them to config
 - [ ] `tgcli logout` (destructive gate), `tgcli me`, full `tgcli doctor`
@@ -41,12 +54,16 @@ before the milestone is closed.
 
 ## M2 — Read path
 
-- [ ] Resolver: @username / id / t.me link / title substring; `candidates` on ambiguity
-- [ ] Output layer: human renderers, `--json`, exit-code mapping, stderr discipline
+- [ ] Resolver: @username / id / t.me link / title substring; `candidates` on
+      ambiguity; integer selectors are always ids; title matching read-tier-only
+- [ ] Output layer: human renderers, `--json`, exit-code mapping, stderr
+      discipline; opaque `--cursor` pagination tokens
+- [ ] docs/schemas/ established (mutable until the M7 freeze) for every
+      implemented command; contract tests assert against them from here on
 - [ ] `tgcli chats` (folders, archived, unread filters, pagination)
 - [ ] `tgcli read` (limits, --before, --since/--until, --topic, --local)
 - [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`
-- [ ] `tgcli search` (per-chat, --global, filters, --local)
+- [ ] `tgcli search` (per-chat, --global, filters; server-side only)
 - [ ] `tgcli unread`
 - [ ] `tgcli fetch <chat>` (--limit/--all/--since, resumable, progress frames)
 - [ ] `tgcli chat info`, `tgcli chat members`
@@ -61,8 +78,9 @@ before the milestone is closed.
 - [ ] Two-phase destructive confirmation: challenge frame with resolved target →
       TTY prompt client-side; `--yes` for scripts; fails closed without a TTY
 - [ ] `--dry-run` planner
-- [ ] Audit log (JSONL per account)
-- [ ] `--idempotency-key` store + replay
+- [ ] Audit log (JSONL per account, size-based rotation, raw-secret redaction)
+- [ ] `--idempotency-key`: record-then-send store, pending/completed replay
+      semantics, payload fingerprint check, 7-day expiry
 - [ ] `tgcli send` (text, --md/--html, --reply-to, --silent, --schedule)
 - [ ] `tgcli msg edit|delete|forward|react|pin|unpin`
 - [ ] `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join|leave`
@@ -70,7 +88,8 @@ before the milestone is closed.
 
 ## M4 — Files & media
 
-- [ ] `tgcli download` with progress frames (stderr bar / NDJSON), `--timeout`
+- [ ] `tgcli download` with progress frames (stderr bar / NDJSON); transfers
+      unlimited by default, `--timeout` opt-in
 - [ ] `tgcli send --file` uploads (photos/video/voice/documents autodetect), --caption, albums
 - [ ] `TGCLI_MEDIA_DIR` handling
 - [ ] Review gate: M4 diff vs DESIGN.md
@@ -78,8 +97,9 @@ before the milestone is closed.
 ## M5 — Streaming
 
 - [ ] Update-bus subscriptions with filters, multiplexed to any number of clients
-- [ ] `tgcli listen` (--chat, --types, --count, --timeout; NDJSON)
-- [ ] `tgcli wait-for` (--chat, --from, --regex, --timeout → exit 7)
+- [ ] `tgcli listen` (--chat, --types, --count, --timeout; NDJSON; planned expiry → exit 0)
+- [ ] `tgcli wait-for` (--chat, --from, --regex, --after for race-free
+      send-then-wait, --timeout → exit 7)
 - [ ] Review gate: M5 diff vs DESIGN.md
 
 ## M6 — Long tail
@@ -89,14 +109,18 @@ before the milestone is closed.
 - [ ] `tgcli topic list|create|edit|close|reopen`
 - [ ] `tgcli chat set-title|set-photo|set-description|invite-link|promote|demote|ban|unban|kick|set-permissions`
 - [ ] `tgcli session list|terminate`
+- [ ] `tgcli storage stats|optimize` (tdlib file-store usage, optimizeStorage)
 - [ ] Review gate: M6 diff vs DESIGN.md
 
 ## M7 — Polish & release
 
-- [ ] `tgcli raw` passthrough (td_api_json), read-only allowlist
+- [ ] `tgcli raw` passthrough (td_api_json), read-only allowlist, auth-type
+      refusal + audit redaction
+- [ ] `tgcli schema <command> [--all]` — runtime dump of curated schemas
 - [ ] Shell completions (bash/zsh/fish), man pages
 - [ ] docs/schemas/ — freeze curated JSON schemas per command
-- [ ] Integration test suite against Telegram test DC (`TGCLI_TEST_DC=1`)
+- [ ] E2E suite against Telegram test DC (`TGCLI_TEST_DC=1`) wired as a
+      nightly job + milestone-gate check (not a per-PR blocker)
 - [ ] Static musl Linux binary + macOS universal binary release job
 - [ ] Packaging: AUR, Homebrew; systemd user unit example for `tgcli daemon run`
 - [ ] Review gate: M7 diff vs DESIGN.md
@@ -105,6 +129,7 @@ before the milestone is closed.
 ## Post-1.0 ideas
 
 - [ ] MCP server mode (`tgcli mcp` over stdio)
+- [ ] Offline search: client-side filtering over prefetched local history
 - [ ] Secret chats
 - [ ] Scheduled-message management
 - [ ] Message translation

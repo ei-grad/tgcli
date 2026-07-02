@@ -47,10 +47,16 @@ section — "I would have done it differently" is not a finding.
 
 ## 4. Mechanical gate
 
-All of CI green, including: build matrix, unit + contract + golden tests,
-clang-format, clang-tidy, sanitizers (ASan/UBSan; TSan for daemon code), and
-the e2e test-DC suite when the touched area has a flow. A reviewer does not
-re-litigate what CI proves; a reviewer also never waives a red CI.
+All required CI green: build matrix, unit + contract + golden tests,
+clang-format, clang-tidy, sanitizers (ASan/UBSan; TSan over the
+fake-boundary suite). A reviewer does not re-litigate what CI proves; a
+reviewer also never waives a red required check.
+
+The e2e test-DC suite is deliberately **not** a per-PR required check — it
+depends on an external, rate-limited, periodically-wiped service. It runs
+nightly and gates milestones: at a milestone review gate a red e2e is
+triaged — a reproducible regression blocks the milestone; a documented
+infrastructure flake gets a rerun.
 
 ## 5. Code
 
@@ -84,7 +90,9 @@ Two classes of spec change, with different processes:
   not skimmed as prose.
 - **Contract changes** — altering the exit-code table, changing or removing
   existing schema fields, changing frame-protocol or selector semantics, the
-  safety model, or the meaning of existing config/env keys. Spec-first: a
+  safety model, or the meaning of existing config/env keys; bumping the
+  pinned tdlib revision belongs here too (td_api churn can move the typed
+  surface and curated schemas). Spec-first: a
   separate PR that changes only DESIGN.md (+ docs/schemas/) with the
   rationale and migration notes, reviewed and merged before any
   implementation PR. An implementation PR that silently alters a contract is

@@ -21,8 +21,10 @@ tgcli wait-for --chat @buildbot --regex 'deploy (succeeded|failed)' --timeout 60
 - **Fail-closed writes** — reads are free, but acting on behalf of the
   account requires an explicit grant: `--allow-write` per call,
   `TGCLI_ALLOW_WRITE=1` per environment, or `allow_write = true` granted once
-  in the account config for ceremony-free everyday use. Destructive actions
-  additionally require confirmation (`--yes` when scripted).
+  in the account config for ceremony-free everyday use. `TGCLI_ALLOW_WRITE=0`
+  is a hard deny overriding any standing grant — the one-variable sandbox for
+  agent harnesses. Destructive actions additionally require confirmation
+  (`--yes` when scripted).
 - **Agent-friendly** — plain JSON output (no envelopes), stable schemas,
   meaningful exit codes, `--dry-run`, idempotency keys.
 - **Streaming primitives** — `listen` (NDJSON updates) and `wait-for`
