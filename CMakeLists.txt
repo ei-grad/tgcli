@@ -1,0 +1,83 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(tgcli VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(TGCLI_SYSTEM_TDLIB
+    "Use a prebuilt tdlib prefix (scripts/build-tdlib.sh) instead of building via FetchContent"
+    OFF)
+option(TGCLI_BUILD_TESTS "Build tests" ON)
+option(TGCLI_WERROR "Treat compiler warnings as errors" OFF)
+
+# The revision here and in scripts/build-tdlib.sh must stay in sync; bumping
+# it is a contract-change-class PR (REVIEW.md §7).
+set(TGCLI_TDLIB_REV a17f87c4cff7b90b278d12b91ba0614383aaee82) # v1.8.65
+
+include(FetchContent)
+
+FetchContent_Declare(cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11
+    GIT_TAG v2.5.0
+    GIT_SHALLOW TRUE)
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json
+    GIT_TAG v3.12.0
+    GIT_SHALLOW TRUE)
+FetchContent_Declare(fmt
+    GIT_REPOSITORY https://github.com/fmtlib/fmt
+    GIT_TAG 11.2.0
+    GIT_SHALLOW TRUE)
+FetchContent_Declare(tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus
+    GIT_TAG v3.4.0
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(cli11 nlohmann_json fmt tomlplusplus)
+
+if(TGCLI_SYSTEM_TDLIB)
+    find_package(Td REQUIRED)
+    if(NOT TARGET Td::TdStatic)
+        message(FATAL_ERROR "Td package found but Td::TdStatic is missing; "
+            "build the prefix with scripts/build-tdlib.sh")
+    endif()
+else()
+    set(BUILD_TESTING OFF)
+    FetchContent_Declare(td
+        GIT_REPOSITORY https://github.com/tdlib/td
+        GIT_TAG ${TGCLI_TDLIB_REV})
+    FetchContent_MakeAvailable(td)
+endif()
+
+configure_file(cmake/version.hpp.in include/tgcli/version.hpp @ONLY)
+
+add_library(tgcli_common INTERFACE)
+target_include_directories(tgcli_common INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}/include)
+target_compile_options(tgcli_common INTERFACE
+    -Wall -Wextra -Wpedantic
+    $<$<BOOL:${TGCLI_WERROR}>:-Werror>)
+
+add_library(tgcli_proto STATIC
+    src/proto/frame.cpp)
+target_link_libraries(tgcli_proto
+    PUBLIC tgcli_common nlohmann_json::nlohmann_json)
+
+add_executable(tgcli
+    src/main.cpp)
+target_link_libraries(tgcli
+    PRIVATE tgcli_proto CLI11::CLI11 fmt::fmt)
+
+if(TGCLI_BUILD_TESTS)
+    FetchContent_Declare(catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2
+        GIT_TAG v3.8.1
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(catch2)
+    list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

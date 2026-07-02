@@ -1,0 +1,11 @@
+---
+# Catch2's assertion macros expand to do-while loops, file-static dummy
+# functions, and REQUIRE-guarded optional access the analyzer cannot see
+# through; those checks are meaningless inside test files.
+InheritParentConfig: true
+Checks: >
+  -bugprone-unchecked-optional-access,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -cppcoreguidelines-avoid-do-while,
+  -misc-use-anonymous-namespace,
+  -readability-function-cognitive-complexity
