@@ -14,7 +14,7 @@ before the milestone is closed.
 
 - [ ] CMake project (≥3.24) with presets: debug, release, release-static
 - [ ] Pin tdlib source revision; FetchContent build + `-DTGCLI_SYSTEM_TDLIB=ON` option
-- [ ] `scripts/build-tdlib.sh`: prebuilt pinned-tdlib prefix exporting the
+- [x] `scripts/build-tdlib.sh`: prebuilt pinned-tdlib prefix exporting the
       JSON-conversion headers (dev loop + `raw`/`--full` dependency)
 - [ ] Vendor deps via FetchContent: CLI11, nlohmann/json, fmt, tomlplusplus, Catch2
 - [ ] `TdClient` core: ClientManager thread, request/response correlation, update bus
