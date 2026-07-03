@@ -2,6 +2,7 @@
 // speaking the frame protocol. td-free (fake context), so TSan covers it.
 
 #include "common/exit_codes.hpp"
+#include "common/net_compat.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
 #include "daemon/dispatch.hpp"
@@ -29,7 +30,7 @@ std::string test_socket_path() {
 }
 
 int connect_to(const std::string& path) {
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const int fd = net::socket_cloexec(AF_UNIX, SOCK_STREAM, 0);
     REQUIRE(fd >= 0);
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
