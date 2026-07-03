@@ -4,8 +4,11 @@
 #include "common/net_compat.hpp"
 #include "proto/frame_io.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -64,9 +67,19 @@ Server::~Server() {
 }
 
 bool Server::start(std::string& error) {
+    if (!net::pipe_cloexec(wake_read_fd_, wake_write_fd_)) {
+        error = std::string("pipe: ") + std::strerror(errno);
+        return false;
+    }
     listen_fd_ = net::socket_cloexec(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
         error = std::string("socket: ") + std::strerror(errno);
+        return false;
+    }
+    // Non-blocking so a connection aborted between poll() and accept()
+    // cannot re-block the loop.
+    if (::fcntl(listen_fd_, F_SETFL, O_NONBLOCK) != 0) {
+        error = std::string("fcntl: ") + std::strerror(errno);
         return false;
     }
     sockaddr_un addr{};
@@ -118,10 +131,13 @@ void Server::stop() {
     if (stopping_.exchange(true)) {
         return;
     }
-    // shutdown() unblocks accept(); joining the accept thread first
-    // guarantees no new connection appears after the sweep below.
-    if (listen_fd_ >= 0) {
-        ::shutdown(listen_fd_, SHUT_RDWR);
+    // The self-pipe wakes the accept loop's poll() — shutdown() on a
+    // listening socket does not unblock accept() on macOS/BSD. Joining the
+    // accept thread first guarantees no new connection appears after the
+    // sweep below.
+    if (wake_write_fd_ >= 0) {
+        const char byte = 0;
+        [[maybe_unused]] const ssize_t n = ::write(wake_write_fd_, &byte, 1);
     }
     if (accept_thread_.joinable()) {
         accept_thread_.join();
@@ -134,6 +150,12 @@ void Server::stop() {
     if (listen_fd_ >= 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
+    }
+    for (int* fd : {&wake_read_fd_, &wake_write_fd_}) {
+        if (*fd >= 0) {
+            ::close(*fd);
+            *fd = -1;
+        }
     }
     ::unlink(options_.socket_path.c_str());
 }
@@ -158,13 +180,33 @@ bool Server::peer_uid_ok(int fd) {
 
 void Server::accept_loop() {
     while (!stopping_.load(std::memory_order_acquire)) {
-        const int fd = net::accept_cloexec(listen_fd_);
-        if (fd < 0) {
+        std::array<pollfd, 2> fds{{{listen_fd_, POLLIN, 0}, {wake_read_fd_, POLLIN, 0}}};
+        if (::poll(fds.data(), fds.size(), -1) < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            // accept fails permanently once stop() shuts the listener down.
             break;
+        }
+        if ((fds[1].revents & (POLLIN | POLLERR | POLLHUP)) != 0) {
+            break; // stop() wrote to the self-pipe
+        }
+        if ((fds[0].revents & POLLIN) == 0) {
+            continue;
+        }
+        const int fd = net::accept_cloexec(listen_fd_);
+        if (fd < 0) {
+            // The listener is non-blocking: a connection gone between poll()
+            // and accept() surfaces here instead of blocking the loop.
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK ||
+                errno == ECONNABORTED) {
+                continue;
+            }
+            break;
+        }
+        // BSD sockets inherit the listener's O_NONBLOCK; connection reads
+        // must block (Linux never sets it on accepted fds — harmless there).
+        if (const int flags = ::fcntl(fd, F_GETFL); flags >= 0) {
+            ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
         }
         if (!peer_uid_ok(fd)) {
             ::close(fd);

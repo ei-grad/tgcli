@@ -38,4 +38,30 @@ inline int accept_cloexec(int listen_fd) {
 #endif
 }
 
+// pipe(2) with close-on-exec on both ends. Returns false on failure.
+inline bool pipe_cloexec(int& read_fd, int& write_fd) {
+    int fds[2] = {-1, -1}; // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+#if defined(__linux__)
+    if (::pipe2(fds, O_CLOEXEC) != 0) {
+        return false;
+    }
+#else
+    if (::pipe(fds) != 0) {
+        return false;
+    }
+    // set_cloexec closes the fd it failed on; close the sibling ourselves.
+    if (set_cloexec(fds[0]) < 0) {
+        ::close(fds[1]);
+        return false;
+    }
+    if (set_cloexec(fds[1]) < 0) {
+        ::close(fds[0]);
+        return false;
+    }
+#endif
+    read_fd = fds[0];
+    write_fd = fds[1];
+    return true;
+}
+
 } // namespace tgcli::net

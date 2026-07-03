@@ -59,6 +59,10 @@ class Server {
     ServerOptions options_;
     const Dispatcher& dispatcher_;
     int listen_fd_ = -1;
+    // Self-pipe waking the accept loop: shutdown() on a listening socket
+    // does not unblock accept() on macOS/BSD, so the loop polls on both fds.
+    int wake_read_fd_ = -1;
+    int wake_write_fd_ = -1;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> stopping_{false};
     std::thread accept_thread_;
