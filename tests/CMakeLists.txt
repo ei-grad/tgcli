@@ -2,11 +2,14 @@ include(Catch)
 
 add_executable(tgcli_unit_tests
     frame_test.cpp
+    paths_test.cpp
     query_registry_test.cpp
     update_bus_test.cpp
+    dispatch_test.cpp
+    server_test.cpp
     td_client_test.cpp)
 target_link_libraries(tgcli_unit_tests
-    PRIVATE tgcli_proto tgcli_core Catch2::Catch2WithMain)
+    PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_core Catch2::Catch2WithMain)
 
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).

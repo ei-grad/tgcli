@@ -16,14 +16,17 @@ constexpr auto kCloseTimeout = std::chrono::seconds(30);
 
 constexpr double kReceiveTimeoutSeconds = 0.5;
 
+// Quiets tdlib's default stderr chatter (level 1 keeps errors only) and
+// only then allocates the client id — tdlib logs client creation at its
+// default verbosity. Log-file routing arrives with config (M1).
+std::int32_t create_client_quietly(td::ClientManager& manager) {
+    td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
+    return manager.create_client_id();
+}
+
 } // namespace
 
-TdClient::TdClient() : client_id_(manager_.create_client_id()) {
-    // Quiet tdlib's default stderr chatter; level 1 keeps errors only.
-    // Nothing logs before the first request, so setting it here — after the
-    // client id is allocated — loses nothing. Log-file routing arrives with
-    // config (M1).
-    td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
+TdClient::TdClient() : client_id_(create_client_quietly(manager_)) {
     receive_thread_ = std::thread([this] { receive_loop(); });
 }
 

@@ -62,9 +62,15 @@ target_compile_options(tgcli_common INTERFACE
     $<$<BOOL:${TGCLI_WERROR}>:-Werror>)
 
 add_library(tgcli_proto STATIC
-    src/proto/frame.cpp)
+    src/proto/frame.cpp
+    src/proto/frame_io.cpp)
 target_link_libraries(tgcli_proto
     PUBLIC tgcli_common nlohmann_json::nlohmann_json)
+
+add_library(tgcli_util STATIC
+    src/common/paths.cpp)
+target_link_libraries(tgcli_util
+    PUBLIC tgcli_common)
 
 add_library(tgcli_core STATIC
     src/core/td_client.cpp)
@@ -72,10 +78,26 @@ target_link_libraries(tgcli_core
     PUBLIC tgcli_common Td::TdStatic)
 target_precompile_headers(tgcli_core PRIVATE <td/telegram/td_api.h>)
 
+add_library(tgcli_daemon STATIC
+    src/daemon/dispatch.cpp
+    src/daemon/commands.cpp
+    src/daemon/server.cpp
+    src/daemon/daemon_run.cpp)
+target_link_libraries(tgcli_daemon
+    PUBLIC tgcli_proto tgcli_util
+    PRIVATE tgcli_core)
+
+add_library(tgcli_cli STATIC
+    src/cli/client.cpp
+    src/cli/render.cpp)
+target_link_libraries(tgcli_cli
+    PUBLIC tgcli_proto tgcli_util tgcli_daemon
+    PRIVATE fmt::fmt)
+
 add_executable(tgcli
     src/main.cpp)
 target_link_libraries(tgcli
-    PRIVATE tgcli_proto CLI11::CLI11 fmt::fmt)
+    PRIVATE tgcli_cli tgcli_daemon CLI11::CLI11)
 
 if(TGCLI_BUILD_TESTS)
     FetchContent_Declare(catch2
