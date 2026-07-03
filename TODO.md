@@ -12,31 +12,33 @@ before the milestone is closed.
 
 ## M0 — Scaffold & process model
 
-- [ ] CMake project (≥3.24) with presets: debug, release, release-static
-- [ ] Pin tdlib source revision; FetchContent build + `-DTGCLI_SYSTEM_TDLIB=ON` option
+- [x] CMake project (≥3.24) with presets: debug, release, release-static
+- [x] Pin tdlib source revision; FetchContent build + `-DTGCLI_SYSTEM_TDLIB=ON` option
 - [x] `scripts/build-tdlib.sh`: prebuilt pinned-tdlib prefix exporting the
       JSON-conversion headers (dev loop + `raw`/`--full` dependency)
-- [ ] Vendor deps via FetchContent: CLI11, nlohmann/json, fmt, tomlplusplus, Catch2
-- [ ] `TdClient` core: ClientManager thread, request/response correlation, update bus
-- [ ] Daemon skeleton: `tgcli daemon run`, unix socket ($XDG_RUNTIME_DIR/tgcli/<name>.sock;
+- [x] Vendor deps via FetchContent: CLI11, nlohmann/json, fmt, tomlplusplus, Catch2
+- [x] `TdClient` core: ClientManager thread, request/response correlation, update bus
+- [x] Daemon skeleton: `tgcli daemon run`, unix socket ($XDG_RUNTIME_DIR/tgcli/<name>.sock;
       $TMPDIR/tgcli-<uid>/ fallback with 0700-dir ownership checks; sun_path length limits;
       0600, peer-uid check: SO_PEERCRED on Linux / getpeereid on macOS),
       JSONL frame protocol (result/error/item/progress/challenge; request
       frame carries tri-state write authority + client cwd/media-dir)
-- [ ] Version handshake: binary+protocol versions at connect; graceful daemon
+- [x] Version handshake: binary+protocol versions at connect; graceful daemon
       restart on mismatch, terminal frames to old streams
-- [ ] Auto-spawn: fork + re-exec on missing socket, readiness handshake,
+- [x] Auto-spawn: fork + re-exec on missing socket, readiness handshake,
       flock-settled spawn races
-- [ ] Graceful shutdown: SIGTERM/SIGINT → terminal frames → tdlib close() →
+- [x] Graceful shutdown: SIGTERM/SIGINT → terminal frames → tdlib close() →
       wait authorizationStateClosed → exit; systemd readiness
-- [ ] `--no-daemon` in-process debug mode (same dispatch path, refuses if daemon holds lock)
-- [ ] `tgcli version` / `tgcli doctor` round-trip through the daemon (tdlib
+- [x] `--no-daemon` in-process debug mode (same dispatch path, refuses if daemon holds lock)
+- [x] `tgcli version` / `tgcli doctor` round-trip through the daemon (tdlib
       version via `getOption("version")`); doctor degrades to local
       diagnostics when the daemon is unreachable
-- [ ] clang-format + clang-tidy configs
+- [x] clang-format + clang-tidy configs
+- [ ] macOS portability: peer-uid via getpeereid, accept4/SOCK_CLOEXEC and
+      sigtimedwait replacements (Linux-only today; validated by the CI matrix)
 - [ ] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache;
       sanitizer jobs (ASan/UBSan full suite; TSan fake-boundary suite only)
-- [ ] Choose license (MIT vs Apache-2.0; must be fine linking BSL-1.0 tdlib)
+- [x] Choose license (MIT vs Apache-2.0; must be fine linking BSL-1.0 tdlib)
 - [ ] Review gate: M0 diff vs DESIGN.md
 
 ## M1 — Auth & accounts

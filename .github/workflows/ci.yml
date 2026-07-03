@@ -1,0 +1,100 @@
+# macOS joins the matrix with the M0 macOS-portability item (TODO.md):
+# the daemon currently uses Linux-only accept4/SO_PEERCRED/sigtimedwait.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, asan, tsan]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache
+
+      - name: Resolve tdlib prefix path
+        id: tdlib
+        run: echo "prefix=$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tdlib prefix
+        id: tdlib-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.tdlib.outputs.prefix }}
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ matrix.preset }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-${{ matrix.preset }}-
+
+      - name: Build tdlib prefix
+        if: steps.tdlib-cache.outputs.cache-hit != 'true'
+        run: ./scripts/build-tdlib.sh "${{ steps.tdlib.outputs.prefix }}"
+
+      - name: Configure
+        run: TGCLI_TDLIB_PREFIX="${{ steps.tdlib.outputs.prefix }}" cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        # setarch -R: gcc's TSan runtime rejects vm.mmap_rnd_bits > 28, and
+        # Catch2 test discovery executes the binary at build time.
+        run: |
+          if [ "${{ matrix.preset }}" = "tsan" ]; then
+            setarch "$(uname -m)" -R cmake --build --preset ${{ matrix.preset }}
+          else
+            cmake --build --preset ${{ matrix.preset }}
+          fi
+
+      - name: Test
+        run: |
+          if [ "${{ matrix.preset }}" = "tsan" ]; then
+            setarch "$(uname -m)" -R ctest --preset ${{ matrix.preset }}
+          else
+            ctest --preset ${{ matrix.preset }}
+          fi
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache \
+            clang-format-18 clang-tidy-18
+
+      - name: clang-format
+        run: |
+          shopt -s globstar
+          clang-format-18 --dry-run -Werror src/**/*.hpp src/**/*.cpp tests/*.cpp
+
+      - name: Cache tdlib prefix
+        id: tdlib-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+
+      - name: Build tdlib prefix
+        if: steps.tdlib-cache.outputs.cache-hit != 'true'
+        run: ./scripts/build-tdlib.sh "$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7"
+
+      - name: clang-tidy
+        run: |
+          TGCLI_TDLIB_PREFIX="$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7" cmake --preset tidy
+          shopt -s globstar
+          clang-tidy-18 -p build/tidy --warnings-as-errors='*' \
+            src/**/*.cpp tests/*.cpp

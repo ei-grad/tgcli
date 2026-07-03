@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.24)
 
 project(tgcli VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# C++20 is applied per-target through tgcli_common below — a global
+# CMAKE_CXX_STANDARD would leak into the FetchContent tdlib build and break
+# its C++17 sources (u8"" literals become char8_t under C++20).
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -49,11 +50,24 @@ else()
         GIT_REPOSITORY https://github.com/tdlib/td
         GIT_TAG ${TGCLI_TDLIB_REV})
     FetchContent_MakeAvailable(td)
+    # The installed-prefix path imports tdlib headers as SYSTEM; give the
+    # in-tree build the same treatment so tdlib's headers are exempt from
+    # our -Werror warning set.
+    foreach(td_target tdclient tdapi tdactor tdcore tdutils tdnet tddb tdmtproto tdjson_private)
+        if(TARGET ${td_target})
+            get_target_property(td_includes ${td_target} INTERFACE_INCLUDE_DIRECTORIES)
+            if(td_includes)
+                set_target_properties(${td_target} PROPERTIES
+                    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${td_includes}")
+            endif()
+        endif()
+    endforeach()
 endif()
 
 configure_file(cmake/version.hpp.in include/tgcli/version.hpp @ONLY)
 
 add_library(tgcli_common INTERFACE)
+target_compile_features(tgcli_common INTERFACE cxx_std_20)
 target_include_directories(tgcli_common INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}/include)
