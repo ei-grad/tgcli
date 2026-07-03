@@ -38,4 +38,4 @@ tgcli wait-for --chat @buildbot --regex 'deploy (succeeded|failed)' --timeout 60
 
 ## License
 
-TBD.
+[MIT](LICENSE).
