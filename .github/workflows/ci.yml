@@ -6,7 +6,51 @@ on:
   pull_request:
 
 jobs:
+  # Builds the tdlib prefix once per OS and saves it to the actions cache so
+  # a cold cache doesn't make every test/lint job build tdlib from source.
+  # Downstream jobs keep their own conditional build step as a fallback
+  # against cache eviction.
+  tdlib:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tdlib prefix path
+        id: tdlib
+        run: echo "prefix=$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tdlib prefix
+        id: tdlib-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.tdlib.outputs.prefix }}
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux' && steps.tdlib-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS' && steps.tdlib-cache.outputs.cache-hit != 'true'
+        run: brew install gperf ninja ccache coreutils
+
+      - name: Build tdlib prefix
+        if: steps.tdlib-cache.outputs.cache-hit != 'true'
+        # macOS: build-tdlib.sh installs headers with GNU install/cp flags;
+        # coreutils' gnubin provides them (and nproc) ahead of the BSD tools.
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export PATH="$(brew --prefix)/opt/coreutils/libexec/gnubin:$PATH"
+          fi
+          ./scripts/build-tdlib.sh "${{ steps.tdlib.outputs.prefix }}"
+
   test:
+    needs: tdlib
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +108,7 @@ jobs:
           fi
 
   test-macos:
+    needs: tdlib
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -107,6 +152,7 @@ jobs:
         run: ctest --preset debug
 
   lint:
+    needs: tdlib
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
