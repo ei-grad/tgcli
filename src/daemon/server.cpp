@@ -1,6 +1,7 @@
 #include "daemon/server.hpp"
 
 #include "common/exit_codes.hpp"
+#include "common/net_compat.hpp"
 #include "proto/frame_io.hpp"
 
 #include <cerrno>
@@ -63,7 +64,7 @@ Server::~Server() {
 }
 
 bool Server::start(std::string& error) {
-    listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    listen_fd_ = net::socket_cloexec(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
         error = std::string("socket: ") + std::strerror(errno);
         return false;
@@ -94,12 +95,22 @@ bool Server::start(std::string& error) {
 }
 
 void Server::request_stop() {
-    stop_requested_.store(true, std::memory_order_release);
+    {
+        // Mutate the flag under the lock so a concurrent wait_for_stop() can
+        // never miss the transition between its predicate check and its wait.
+        const std::lock_guard<std::mutex> lock(mutex_);
+        stop_requested_.store(true, std::memory_order_release);
+    }
     idle_cv_.notify_all();
 }
 
 bool Server::stop_requested() const {
     return stop_requested_.load(std::memory_order_acquire);
+}
+
+void Server::wait_for_stop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    idle_cv_.wait(lock, [this] { return stop_requested_.load(std::memory_order_acquire); });
 }
 
 void Server::stop() {
@@ -128,17 +139,26 @@ void Server::stop() {
 }
 
 bool Server::peer_uid_ok(int fd) {
+#if defined(__APPLE__)
+    uid_t uid = 0;
+    gid_t gid = 0;
+    if (::getpeereid(fd, &uid, &gid) != 0) {
+        return false;
+    }
+    return uid == ::getuid();
+#else
     ucred cred{};
     socklen_t len = sizeof(cred);
     if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
         return false;
     }
     return cred.uid == ::getuid();
+#endif
 }
 
 void Server::accept_loop() {
     while (!stopping_.load(std::memory_order_acquire)) {
-        const int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+        const int fd = net::accept_cloexec(listen_fd_);
         if (fd < 0) {
             if (errno == EINTR) {
                 continue;

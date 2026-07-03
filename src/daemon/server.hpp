@@ -42,6 +42,10 @@ class Server {
     void request_stop();
     bool stop_requested() const;
 
+    // Blocks the calling thread until request_stop() has been observed. The
+    // daemon's owning thread parks here instead of polling.
+    void wait_for_stop();
+
     // Graceful teardown (DESIGN.md §10): stop accepting, shut down live
     // connections, wait for their threads, unlink the socket. Idempotent.
     // Must not be called from a connection thread.

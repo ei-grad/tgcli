@@ -2,17 +2,20 @@
 
 #include "cli/render.hpp"
 #include "common/exit_codes.hpp"
+#include "common/net_compat.hpp"
 #include "common/paths.hpp"
 #include "daemon/daemon_run.hpp"
 #include "proto/frame_io.hpp"
 
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -20,6 +23,10 @@
 #include <thread>
 #include <unistd.h>
 #include <variant>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace tgcli::cli {
 
@@ -94,7 +101,7 @@ class FrameRenderer {
 };
 
 int connect_socket(const std::string& socket_path) {
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const int fd = net::socket_cloexec(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         return -1;
     }
@@ -108,9 +115,32 @@ int connect_socket(const std::string& socket_path) {
     return fd;
 }
 
+// Absolute path to the running executable, re-exec'd as the daemon. Linux
+// uses the /proc self-symlink directly; macOS has no /proc, so ask dyld.
+// Resolved before fork so no allocation happens in the forked child.
+std::string current_exe_path() {
+#if defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size); // sets size to the required length
+    std::string path(size, '\0');
+    if (_NSGetExecutablePath(path.data(), &size) != 0) {
+        return {};
+    }
+    path.resize(std::strlen(path.c_str()));
+    return path;
+#else
+    return "/proc/self/exe";
+#endif
+}
+
 // Double-fork so the daemon is reparented to init and the client never
 // leaves a zombie; the grandchild re-execs this binary as `daemon run`.
 bool spawn_daemon(const std::string& account, std::string& error) {
+    const std::string exe = current_exe_path();
+    if (exe.empty()) {
+        error = "cannot determine executable path for daemon re-exec";
+        return false;
+    }
     const pid_t child = ::fork();
     if (child < 0) {
         error = std::string("fork: ") + std::strerror(errno);
@@ -131,7 +161,7 @@ bool spawn_daemon(const std::string& account, std::string& error) {
                 ::close(devnull);
             }
         }
-        ::execl("/proc/self/exe", "tgcli", "daemon", "run", "--account", account.c_str(),
+        ::execl(exe.c_str(), "tgcli", "daemon", "run", "--account", account.c_str(),
                 static_cast<char*>(nullptr));
         ::_exit(127);
     }

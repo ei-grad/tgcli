@@ -21,7 +21,11 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tgcli-dev"
 SRC_DIR="${TDLIB_SRC:-$CACHE_DIR/td}"
 PREFIX="${1:-$CACHE_DIR/tdlib-${TDLIB_REV:0:12}}"
 BUILD_DIR="$CACHE_DIR/tdlib-build-${TDLIB_REV:0:12}"
-JOBS="${JOBS:-$(nproc)}"
+if [ "$(uname -s)" = "Darwin" ]; then
+    JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
+else
+    JOBS="${JOBS:-$(nproc)}"
+fi
 
 if [ ! -d "$SRC_DIR/.git" ]; then
     git clone https://github.com/tdlib/td "$SRC_DIR"
@@ -44,6 +48,10 @@ if command -v ccache >/dev/null; then
         -DCMAKE_C_COMPILER_LAUNCHER=ccache
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
     )
+fi
+# macOS ships LibreSSL; tdlib needs OpenSSL, which brew installs keg-only.
+if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null; then
+    CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)")
 fi
 
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" "${CMAKE_ARGS[@]}"

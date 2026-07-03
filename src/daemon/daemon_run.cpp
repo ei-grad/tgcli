@@ -1,5 +1,6 @@
 #include "daemon/daemon_run.hpp"
 
+#include "common/net_compat.hpp"
 #include "common/paths.hpp"
 #include "core/td_client.hpp"
 #include "daemon/commands.hpp"
@@ -10,14 +11,15 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <fcntl.h>
+#include <pthread.h>
 #include <string>
 #include <string_view>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <tgcli/version.hpp>
+#include <thread>
 #include <unistd.h>
 
 namespace tgcli::daemon {
@@ -52,7 +54,7 @@ void notify_systemd_ready() {
     if (socket_path == nullptr || *socket_path == '\0') {
         return;
     }
-    const int fd = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    const int fd = net::socket_cloexec(AF_UNIX, SOCK_DGRAM, 0);
     if (fd < 0) {
         return;
     }
@@ -119,7 +121,7 @@ int run_daemon(const std::string& account) {
         return 1;
     }
 
-    // Handled synchronously via sigtimedwait below; blocked before any
+    // Consumed by a dedicated sigwait watcher below; blocked before any
     // thread (tdlib's included) is created so none of them steals the
     // signal. SIGPIPE would otherwise kill the daemon on a vanished client.
     sigset_t signals;
@@ -151,13 +153,25 @@ int run_daemon(const std::string& account) {
     }
     notify_systemd_ready();
 
-    const timespec poll_interval{0, 100'000'000}; // 100ms
-    while (!server.stop_requested()) {
-        const int sig = ::sigtimedwait(&signals, nullptr, &poll_interval);
-        if (sig == SIGTERM || sig == SIGINT) {
-            break;
+    // sigwait (portable, unlike Linux-only sigtimedwait) parks a dedicated
+    // thread on the blocked signals with no polling. SIGTERM/SIGINT request a
+    // graceful stop; the `daemon stop` command sets the same flag directly.
+    // The watcher exits once stop is requested; after the owning thread
+    // observes stop it wakes a still-parked watcher with SIGPIPE — blocked, so
+    // delivered to sigwait rather than a handler, and ignored by the watcher —
+    // so it can be joined before the Server and TdClient are torn down.
+    std::thread signal_watcher([&server, &signals] {
+        while (!server.stop_requested()) {
+            int sig = 0;
+            if (sigwait(&signals, &sig) == 0 && (sig == SIGTERM || sig == SIGINT)) {
+                server.request_stop();
+            }
         }
-    }
+    });
+
+    server.wait_for_stop();
+    ::pthread_kill(signal_watcher.native_handle(), SIGPIPE);
+    signal_watcher.join();
 
     server.stop();
     td.close();
