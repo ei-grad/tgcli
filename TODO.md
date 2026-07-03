@@ -34,9 +34,9 @@ before the milestone is closed.
       version via `getOption("version")`); doctor degrades to local
       diagnostics when the daemon is unreachable
 - [x] clang-format + clang-tidy configs
-- [ ] macOS portability: peer-uid via getpeereid, accept4/SOCK_CLOEXEC and
+- [x] macOS portability: peer-uid via getpeereid, accept4/SOCK_CLOEXEC and
       sigtimedwait replacements (Linux-only today; validated by the CI matrix)
-- [ ] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache;
+- [x] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache;
       sanitizer jobs (ASan/UBSan full suite; TSan fake-boundary suite only)
 - [x] Choose license (MIT vs Apache-2.0; must be fine linking BSL-1.0 tdlib)
 - [ ] Review gate: M0 diff vs DESIGN.md
