@@ -735,7 +735,8 @@ summary:
 
 ## 15. Open questions
 
-- License (MIT vs Apache-2.0) — must be compatible with linking tdlib (BSL-1.0).
+- ~~License (MIT vs Apache-2.0)~~ — resolved: MIT (see LICENSE). BSL-1.0 is
+  permissive and copyleft-free, so linking tdlib is compatible.
 - Whether `chat create` (new groups/channels) belongs in v1 scope.
 - Windows support: tdlib supports it, but the process model assumes unix
   sockets and fork/exec; a Windows port needs named pipes and
