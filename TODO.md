@@ -80,6 +80,12 @@ before the milestone is closed.
 - [ ] `tgcli read` (limits, --before, --since/--until, --topic, --local)
 - [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`
 - [ ] `tgcli search` (per-chat, --global, filters; server-side only)
+- [ ] `tgcli saved tags|search`: user-account-only reaction-tag discovery plus
+      tag-only/tag+text search; canonical emoji/custom selector round-trip,
+      label/count/order output, account/scope/filter-bound cursor pagination,
+      and contract coverage for NOT_AUTHED/BOT_UNSUPPORTED preflight, malformed
+      selectors/cursors, cursor/filter mismatches, paid/unknown variants, empty
+      matches, and reaction tags vs emoji text
 - [ ] `tgcli unread`
 - [ ] `tgcli fetch <chat>` (--limit/--all/--since, resumable, progress frames)
 - [ ] `tgcli chat info`, `tgcli chat members`
@@ -113,6 +119,12 @@ before the milestone is closed.
 - [ ] `tgcli download` with progress frames (stderr bar / NDJSON); transfers
       unlimited by default, `--timeout` opt-in
 - [ ] `tgcli send --file` uploads (photos/video/voice/documents autodetect), --caption, albums
+- [ ] `tgcli saved attach <message-id> <PATH> [--caption TEXT]`: user-only
+      single-file reply in Saved Messages, preserving the original and
+      delegating to normal send; add its result-only manifest entry and strict
+      Draft 2020-12 schema, with contract tests validating actual result data
+      and coverage for final-id output, NOT_AUTHED/BOT_UNSUPPORTED preflight,
+      NOT_FOUND/USAGE, write gate, dry-run, audit, timeout, and idempotency
 - [ ] `TGCLI_MEDIA_DIR` handling
 - [ ] Add a supported M4 media flow to the test-DC E2E milestone gate
 - [ ] Review gate: M4 diff vs DESIGN.md

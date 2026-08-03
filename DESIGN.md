@@ -194,6 +194,10 @@ tgcli folder list|show <f>|create|edit|delete|add-chat|remove-chat
 tgcli topic list <chat> | create|edit|close|reopen <chat> ...
 tgcli session list | terminate <id>               terminate destructive
 tgcli account add|list|show|use|remove <name>     remove destructive (§11)
+tgcli saved tags                                  list reaction tags (§4.3)
+tgcli saved search [<query>] --tag <selector> [-n N]
+tgcli saved search [<query>] [--tag <selector>] --cursor <token>
+tgcli saved attach <message-id> <PATH> [--caption TEXT]
 tgcli daemon status|stop|restart|run              lifecycle (§10); auto-spawned otherwise,
                                                   `run` stays in the foreground
 tgcli storage stats|optimize                      tdlib file-store usage / optimizeStorage cleanup
@@ -237,6 +241,99 @@ write grant. Auth-flow request types (`setAuthenticationPhoneNumber`,
 `checkAuthenticationPassword`, …) are refused outright — they would put
 secrets on argv and into the audit log; authentication goes through `login`
 challenges only. Audited `raw` records redact known secret-bearing fields.
+
+### 4.3 Saved Messages namespace
+
+`saved` is an additive, user-account-only command namespace, not a `<chat>`
+selector. Its commands always operate on the selected account's own Saved
+Messages; account isolation follows §11. The normal authorization check runs
+first (`NOT_AUTHED` if the selected account is not ready). An authenticated bot
+account is then rejected by namespace preflight, before the selected subcommand
+can dispatch any Telegram read or write, with exit 2 and a structured error
+such as:
+
+```json
+{"error":{"code":"BOT_UNSUPPORTED","message":"saved commands require a user account"}}
+```
+
+Telegram has no generic mutation that appends an attachment to an already-sent
+text message. `tgcli saved attach <message-id> <PATH> [--caption TEXT]`
+therefore sends exactly one new media message as a reply to that message in the
+selected user's Saved Messages and preserves the original unchanged. For
+example, after an idea note has tdlib message id `N`:
+
+```
+tgcli saved attach N result.csv --caption "experiment result"
+```
+
+`saved attach` delegates to the normal single-file `send` path: it is
+write-tier and inherits the write gate, dry-run plan, audit record,
+idempotency-key semantics, timeout/send-confirmation behavior, and successful
+curated message result with its final tdlib id in `id`. A missing Saved
+Messages message or input file fails with `NOT_FOUND`; malformed arguments or
+more than one path fail with `USAGE`. Multiple files and albums are outside
+this command. In-place media or caption replacement is also outside this
+workflow and may be exposed later by a dedicated command or through `raw` when
+the underlying td_api operation supports it.
+
+Saved Messages tags are reaction tags, not emoji characters found in message
+text. `tgcli saved tags` returns all tags across Saved Messages topics for the
+selected account as the standard unpaginated list result (`next` is null); a
+`--cursor` supplied to this command is `USAGE`. Each item has the canonical
+reaction selector in `tag`, plus `label` and `count`:
+
+```json
+{"items":[{"tag":"🧪","label":"experiments","count":7},{"tag":"custom:123456789","label":"","count":2}],"next":null}
+```
+
+The same `tag` string can be passed to `saved search --tag` without
+conversion. A regular-emoji selector is the exact, non-empty valid UTF-8
+string from tdlib's `reactionTypeEmoji.emoji`; it can contain variation
+selectors, skin-tone modifiers, or zero-width-joiner sequences and is one
+reaction value rather than necessarily one Unicode scalar. tgcli performs no
+Unicode normalization, variation-selector stripping, case folding, or grapheme
+rewrite, so callers must preserve the returned string exactly. Empty or invalid
+UTF-8 selectors fail with `USAGE`.
+
+A custom-emoji selector has the canonical form `custom:<id>`, where `<id>` is
+an unprefixed base-10 integer matching `[1-9][0-9]*` and no greater than
+9223372036854775807. The JSON representation remains that string; the id is
+never emitted as a JSON number. Zero, negative, signed, leading-zero,
+overflowing, non-decimal, or otherwise malformed custom ids fail with `USAGE`.
+At the pinned tdlib revision, `reactionTypePaid` denotes paid reactions in
+channel chats and has no Saved Messages selector. No CLI spelling maps to it.
+If `saved tags` receives a paid or unknown reaction variant, or a non-positive
+custom id, it fails with `GENERIC` and tdlib details instead of silently
+dropping the item or inventing a selector.
+
+Items from `saved tags` preserve tdlib's returned order: at the pinned
+revision this is non-increasing `count`; order among equal counts is opaque and
+must not be treated as stable. `tgcli saved search --tag 🧪` searches by one
+exact reaction tag; adding the optional positional query, for example
+`tgcli saved search experiment --tag 🧪`, intersects the tag filter with
+tdlib's Saved Messages text query. An emoji appearing only in message text does
+not satisfy `--tag`. An unused but valid tag is a successful empty list, not
+`NOT_FOUND`.
+
+The first search page uses
+`tgcli saved search [<query>] --tag <selector> [-n N]` without `--cursor`.
+A continuation uses `tgcli saved search --cursor <token>` and may redundantly
+repeat the same query and canonical `--tag` selector; `-n` is omitted because
+the original page size is cursor-bound. The opaque cursor binds the
+`saved.search` operation, selected account identity, all-topics Saved Messages
+search scope (`saved_messages_topic_id = 0`), exact canonical tag selector,
+exact UTF-8 query argument (empty when omitted), page size, and all tdlib
+continuation state.
+`next_from_message_id` is part of that state, not the complete cursor contract.
+A cursor for another operation, account, or Saved Messages scope, a malformed
+cursor, or a supplied query/tag that differs from the cursor fails with
+`USAGE`. Results use the standard paginated message list in reverse message-id
+order, with the next opaque cursor in `next` or null when exhausted.
+
+`saved tags` and `saved search` are read-tier. The pinned
+`searchSavedMessages` API is Premium-only; an unavailable Premium capability
+surfaces through the existing `GENERIC` exit 1 with tdlib error details rather
+than defining a new exit code.
 
 ## 5. Output contract
 
@@ -800,13 +897,15 @@ summary:
 - **M1** — auth: challenge/response login over the protocol (phone/QR/bot),
   logout, me, accounts; auth FSM; daemon lifecycle commands
   (status/stop/restart/run, idle_exit).
-- **M2** — read path: chats, read, msg get, search, unread, resolve, fetch;
-  resolver, JSON/human output, exit codes; every new result-producing command
-  lands with its manifest entry, strict schema, and contract validation.
+- **M2** — read path: chats, read, msg get, search, Saved Messages reaction-tag
+  discovery/search, unread, resolve, fetch; resolver, JSON/human output, exit
+  codes; every new result-producing command lands with its manifest entry,
+  strict schema, and contract validation.
 - **M3** — safety layer + write path: send/edit/delete/forward/react/
   mark-read/pin, two-phase destructive confirmation over the protocol,
   audit log, idempotency, dry-run.
-- **M4** — files: download/upload with progress frames, media types.
+- **M4** — files: download/upload with progress frames, media types, single-file
+  Saved Messages attachment replies that preserve the replied-to message.
 - **M5** — streaming: multiplexed update subscriptions, listen, wait-for.
 - **M6** — folders, topics, contacts, chat admin, sessions.
 - **M7** — raw passthrough, shell completions, man pages, packaging (static
