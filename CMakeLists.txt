@@ -101,6 +101,7 @@ target_link_libraries(tgcli_core
 
 add_library(tgcli_daemon STATIC
     src/daemon/dispatch.cpp
+    src/daemon/request_session.cpp
     src/daemon/commands.cpp
     src/daemon/server.cpp
     src/daemon/daemon_run.cpp)
@@ -110,6 +111,7 @@ target_link_libraries(tgcli_daemon
 
 add_library(tgcli_cli STATIC
     src/cli/client.cpp
+    src/cli/prompt.cpp
     src/cli/render.cpp)
 target_link_libraries(tgcli_cli
     PUBLIC tgcli_proto tgcli_util tgcli_daemon

@@ -3,6 +3,7 @@
 // discipline — the observables DESIGN.md §5 pins.
 
 #include "cli/client.hpp"
+#include "cli/prompt.hpp"
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
@@ -10,6 +11,7 @@
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
 #include "proto/frame.hpp"
 #include "proto/frame_io.hpp"
@@ -38,6 +40,7 @@
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -156,6 +159,96 @@ RunOutcome run_captured(const std::vector<std::string>& command, const cli::RunO
         outcome.err = err.contents();
     }
     return outcome;
+}
+
+RunOutcome run_request_captured(const proto::Request& request, const cli::RunOptions& options,
+                                const IsolatedEnv& env) {
+    RunOutcome outcome;
+    {
+        const CaptureStream out(stdout, STDOUT_FILENO, env.root() + "/stdout.txt");
+        const CaptureStream err(stderr, STDERR_FILENO, env.root() + "/stderr.txt");
+        outcome.exit_code = cli::run_command(request, options);
+        outcome.out = out.contents();
+        outcome.err = err.contents();
+    }
+    return outcome;
+}
+
+class InjectedPrompt final : public cli::ChallengePrompt {
+  public:
+    explicit InjectedPrompt(cli::PromptResultKind result) : result_(result) {}
+
+    cli::PromptResult prompt(const json& challenge) override {
+        if (result_ == cli::PromptResultKind::Unavailable ||
+            result_ == cli::PromptResultKind::Error) {
+            return {result_};
+        }
+        json answer{{"nonce", challenge["nonce"]},
+                    {"sequence", challenge["sequence"]},
+                    {"client_generation", challenge["client_generation"]},
+                    {"auth_sequence", challenge["auth_sequence"]}};
+        if (result_ == cli::PromptResultKind::Cancelled) {
+            answer["cancelled"] = true;
+        } else {
+            answer["value"] = "12345";
+        }
+        return {result_, std::move(answer)};
+    }
+
+  private:
+    cli::PromptResultKind result_;
+};
+
+void install_client_challenge(daemon::Dispatcher& dispatcher) {
+    dispatcher.register_command(
+        "client challenge",
+        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {
+             const daemon::ChallengeSpec spec{
+                 proto::ChallengeKind::AuthenticationCode,
+                 4,
+                 9,
+                 "Code: ",
+                 {{"delivery_type", "sms"}, {"expected_length", 5}, {"resend_timeout", 30}}};
+             const auto outcome = session.challenge(spec);
+             switch (outcome.status) {
+             case daemon::ChallengeStatus::Answered:
+                 if (session.reserve_in_flight()) {
+                     session.settle_in_flight();
+                     session.result({{"value", std::get<std::string>(outcome.value)}});
+                 }
+                 return;
+             case daemon::ChallengeStatus::Cancelled:
+                 session.error("AUTH_CANCELLED", "authentication cancelled",
+                               {{"account", "main"},
+                                {"state", "wait_code"},
+                                {"challenge", "authentication_code"}},
+                               kNotAuthed);
+                 return;
+             case daemon::ChallengeStatus::TimedOut:
+                 session.error("TIMEOUT", "authentication timed out",
+                               {{"operation", "login"}, {"state", "wait_code"}}, kTimeout);
+                 return;
+             case daemon::ChallengeStatus::NoTty:
+             case daemon::ChallengeStatus::Superseded:
+                 session.error("INTERNAL", "unexpected challenge state", json::object(), kGeneric);
+                 return;
+             case daemon::ChallengeStatus::Disconnected:
+             case daemon::ChallengeStatus::Shutdown:
+             case daemon::ChallengeStatus::ProtocolError:
+                 return;
+             }
+         }});
+}
+
+proto::Request client_challenge_request() {
+    proto::Request request;
+    request.id = 1;
+    request.command = {"client", "challenge"};
+    request.context.tty = true;
+    request.context.json = true;
+    request.context.timeout_seconds = 2.0;
+    request.context.cwd = "/";
+    return request;
 }
 
 void prepare_account_layout() {
@@ -1051,6 +1144,76 @@ TEST_CASE("no-daemon unknown command: USAGE error on stderr, exit 2", "[cli][tdl
     CHECK(result.out.empty());
     const auto error = json::parse(result.err);
     CHECK(error["error"]["code"] == "USAGE");
+}
+
+TEST_CASE("socket and no-daemon clients map every prompt result immediately and identically",
+          "[cli][challenge][process]") {
+    for (const auto prompt_kind :
+         {cli::PromptResultKind::Answer, cli::PromptResultKind::Cancelled,
+          cli::PromptResultKind::Unavailable, cli::PromptResultKind::Error}) {
+        DYNAMIC_SECTION(static_cast<int>(prompt_kind)) {
+            const IsolatedEnv env;
+            daemon::Dispatcher dispatcher;
+            install_client_challenge(dispatcher);
+
+            InjectedPrompt in_process_prompt(prompt_kind);
+            cli::RunOptions in_process_options;
+            in_process_options.json = true;
+            in_process_options.no_daemon = true;
+            in_process_options.prompt = &in_process_prompt;
+            in_process_options.in_process_dispatcher = &dispatcher;
+            const auto in_process_start = std::chrono::steady_clock::now();
+            const auto in_process =
+                run_request_captured(client_challenge_request(), in_process_options, env);
+            const auto in_process_elapsed = std::chrono::steady_clock::now() - in_process_start;
+
+            const auto real_env = paths::real_environment();
+            std::string error;
+            REQUIRE(paths::ensure_private_dir(paths::runtime_dir(real_env), real_env.uid, error));
+            const auto socket_path = paths::socket_path("main", real_env, error);
+            REQUIRE(socket_path.has_value());
+            daemon::Server server({*socket_path, kVersion, proto::kProtocolVersion, {}, {}},
+                                  dispatcher);
+            REQUIRE(server.start(error));
+
+            InjectedPrompt socket_prompt(prompt_kind);
+            cli::RunOptions socket_options;
+            socket_options.json = true;
+            socket_options.auto_spawn = false;
+            socket_options.prompt = &socket_prompt;
+            const auto socket_start = std::chrono::steady_clock::now();
+            const auto socket =
+                run_request_captured(client_challenge_request(), socket_options, env);
+            const auto socket_elapsed = std::chrono::steady_clock::now() - socket_start;
+            server.stop();
+
+            CHECK(in_process_elapsed < std::chrono::seconds(1));
+            CHECK(socket_elapsed < std::chrono::seconds(1));
+            CHECK(socket.exit_code == in_process.exit_code);
+            CHECK(socket.out == in_process.out);
+            CHECK(socket.err == in_process.err);
+
+            if (prompt_kind == cli::PromptResultKind::Answer) {
+                CHECK(socket.exit_code == kOk);
+                CHECK(json::parse(socket.out) == json{{"value", "12345"}});
+                CHECK(socket.err.empty());
+            } else {
+                CHECK(socket.out.empty());
+                const auto rendered = json::parse(socket.err);
+                CHECK(rendered["error"]["details"].is_object());
+                if (prompt_kind == cli::PromptResultKind::Cancelled) {
+                    CHECK(socket.exit_code == kNotAuthed);
+                    CHECK(rendered["error"]["code"] == "AUTH_CANCELLED");
+                    CHECK(rendered["error"]["message"] == "authentication cancelled");
+                } else {
+                    CHECK(socket.exit_code == kGeneric);
+                    CHECK(rendered["error"]["code"] == "INTERNAL");
+                    CHECK(rendered["error"]["message"] == "cannot read challenge response");
+                    CHECK(rendered["error"]["details"] == json::object());
+                }
+            }
+        }
+    }
 }
 
 TEST_CASE("doctor degrades to local diagnostics when the daemon is unreachable", "[cli][schema]") {

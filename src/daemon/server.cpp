@@ -2,6 +2,7 @@
 
 #include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
+#include "daemon/request_session.hpp"
 #include "proto/frame_io.hpp"
 
 #include <algorithm>
@@ -21,7 +22,7 @@ namespace tgcli::daemon {
 
 class ConnectionState {
   public:
-    explicit ConnectionState(int fd) : fd_(fd) {}
+    ConnectionState(int fd, std::uint64_t id) : fd_(fd), id_(id) {}
     ConnectionState(const ConnectionState&) = delete;
     ConnectionState& operator=(const ConnectionState&) = delete;
     ConnectionState(ConnectionState&&) = delete;
@@ -33,6 +34,10 @@ class ConnectionState {
 
     [[nodiscard]] int fd() const {
         return fd_;
+    }
+
+    [[nodiscard]] std::uint64_t id() const {
+        return id_;
     }
 
     bool send(const proto::Frame& frame) {
@@ -50,18 +55,22 @@ class ConnectionState {
     static constexpr auto kWriteTimeout = std::chrono::seconds(5);
 
     int fd_;
+    std::uint64_t id_;
     std::mutex write_mutex_;
 };
 
 namespace {
 
-constexpr const char* kShutdownCode = "DAEMON_SHUTDOWN";
-constexpr const char* kShutdownMessage = "daemon is shutting down";
-
 class ConnectionSink final : public ResponseSink {
   public:
+    using TerminalHook = std::function<void(bool)>;
+
     ConnectionSink(std::shared_ptr<ConnectionState> connection, std::uint64_t request_id)
         : connection_(std::move(connection)), request_id_(request_id) {}
+
+    void set_terminal_hook(TerminalHook hook) {
+        terminal_hook_ = std::move(hook);
+    }
 
   private:
     void emit_item(nlohmann::json data) override {
@@ -71,21 +80,24 @@ class ConnectionSink final : public ResponseSink {
         connection_->send(proto::Progress{request_id_, std::move(data)});
     }
     void emit_result(nlohmann::json data) override {
-        connection_->send(proto::Result{request_id_, std::move(data)});
+        const bool visible = connection_->send(proto::Result{request_id_, std::move(data)});
+        terminal_hook_(visible);
     }
     void emit_error(std::string code, std::string message, nlohmann::json details,
                     int exit_code) override {
-        connection_->send(proto::Error{request_id_, std::move(code), std::move(message),
-                                       std::move(details), exit_code});
+        const bool visible = connection_->send(proto::Error{
+            request_id_, std::move(code), std::move(message), std::move(details), exit_code});
+        terminal_hook_(visible);
+    }
+    ChallengeReply emit_challenge(nlohmann::json data) override {
+        connection_->send(proto::Challenge{request_id_, std::move(data)});
+        return {};
     }
 
     std::shared_ptr<ConnectionState> connection_;
     std::uint64_t request_id_;
+    TerminalHook terminal_hook_ = [](bool) {};
 };
-
-void emit_shutdown_error(const std::shared_ptr<ResponseSink>& sink) {
-    sink->error(kShutdownCode, kShutdownMessage, {{"reason", "daemon_shutdown"}}, kGeneric);
-}
 
 } // namespace
 
@@ -182,7 +194,7 @@ bool Server::start(std::string& error) {
 }
 
 void Server::request_stop() {
-    std::vector<std::shared_ptr<ResponseSink>> active_requests;
+    std::vector<std::shared_ptr<RequestSession>> active_requests;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (stop_requested_.exchange(true, std::memory_order_acq_rel)) {
@@ -191,7 +203,7 @@ void Server::request_stop() {
         }
         for (const auto& active : active_requests_) {
             if (!active.shutdown_request) {
-                active_requests.push_back(active.sink);
+                active_requests.push_back(active.session);
             }
         }
     }
@@ -199,8 +211,8 @@ void Server::request_stop() {
         const char byte = 0;
         [[maybe_unused]] const ssize_t count = ::write(wake_write_fd_, &byte, 1);
     }
-    for (const auto& sink : active_requests) {
-        emit_shutdown_error(sink);
+    for (const auto& session : active_requests) {
+        session->shutdown();
     }
     {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -334,7 +346,7 @@ void Server::accept_loop() {
             ::close(fd);
             break;
         }
-        auto connection = std::make_shared<ConnectionState>(fd);
+        auto connection = std::make_shared<ConnectionState>(fd, next_connection_id_++);
         connections_.push_back(connection);
         ++active_connections_;
         // Detached: serve_connection's final act is signalling idle_cv_
@@ -356,69 +368,166 @@ bool Server::consume_control_request() {
            std::equal(options_.control_token.begin(), options_.control_token.end(), data.begin());
 }
 
+// This reader loop is the connection-ordering boundary: Hello, Answer, EOF,
+// admission and worker replacement must be classified in wire order.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection) {
     connection->send(proto::Hello{options_.binary_version, options_.protocol_version});
 
     proto::FrameReader reader(connection->fd());
     bool hello_seen = false;
-    while (!stop_requested_.load(std::memory_order_acquire)) {
-        std::string io_error;
-        const auto line = reader.read_line(io_error);
-        if (!line) {
-            break; // EOF or broken connection; nothing sensible to send back
+    std::shared_ptr<RequestSession> active_session;
+    std::shared_ptr<std::atomic<bool>> active_terminal_visible;
+    struct Worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::optional<Worker> active_worker;
+    std::vector<Worker> retired_workers;
+    const auto reap_workers = [&retired_workers] {
+        std::erase_if(retired_workers, [](Worker& retired) {
+            if (!retired.done->load(std::memory_order_acquire)) {
+                return false;
+            }
+            retired.thread.join();
+            return true;
+        });
+    };
+    const auto release_terminal_admission = [&] {
+        if (active_session && active_terminal_visible &&
+            active_terminal_visible->load(std::memory_order_acquire)) {
+            retired_workers.push_back(std::move(*active_worker));
+            active_worker.reset();
+            active_session.reset();
+            active_terminal_visible.reset();
         }
-        std::string parse_error;
-        auto frame = proto::parse(*line, parse_error);
-        if (!frame) {
-            connection->send(proto::Error{0, "USAGE", "malformed frame: " + parse_error,
-                                          nlohmann::json::object(), kUsage});
-            break;
-        }
-        if (const auto* hello = std::get_if<proto::Hello>(&*frame)) {
-            hello_seen = true;
-            if (hello->protocol_version != options_.protocol_version) {
-                connection->send(proto::Error{
-                    0, "PROTOCOL_MISMATCH",
-                    "daemon speaks protocol " + std::to_string(options_.protocol_version) +
-                        ", client sent " + std::to_string(hello->protocol_version),
-                    nlohmann::json::object(), kGeneric});
+        reap_workers();
+    };
+    try {
+        while (!stop_requested_.load(std::memory_order_acquire)) {
+            std::string io_error;
+            const auto line = reader.read_line(io_error);
+            if (!line) {
+                break; // EOF or broken connection; nothing sensible to send back
+            }
+            release_terminal_admission();
+            std::string parse_error;
+            auto frame = proto::parse(*line, parse_error);
+            if (!frame) {
+                if (hello_seen) {
+                    if (auto malformed_answer = proto::parse_answer_candidate(*line)) {
+                        if (active_session) {
+                            active_session->receive_answer(*malformed_answer);
+                        } else {
+                            connection->send(proto::Error{malformed_answer->id,
+                                                          "PROTOCOL_ANSWER_INVALID",
+                                                          "invalid challenge answer",
+                                                          {{"request_id", malformed_answer->id},
+                                                           {"reason", "unknown_request"}},
+                                                          kUsage});
+                        }
+                        continue;
+                    }
+                }
+                connection->send(proto::Error{0, "USAGE", "malformed frame: " + parse_error,
+                                              nlohmann::json::object(), kUsage});
                 break;
             }
-            continue;
-        }
-        const auto* request = std::get_if<proto::Request>(&*frame);
-        if (request == nullptr || !hello_seen) {
-            connection->send(proto::Error{0, "USAGE",
-                                          hello_seen ? "expected a request frame"
-                                                     : "expected a hello frame first",
-                                          nlohmann::json::object(), kUsage});
-            break;
-        }
-        auto sink = std::make_shared<ConnectionSink>(connection, request->id);
-        const bool shutdown_request =
-            request->command == std::vector<std::string>{"daemon", "stop"};
-        bool shutting_down = false;
-        {
-            const std::lock_guard<std::mutex> lock(mutex_);
-            // Admission and stop-request designation share the same lock as
-            // the shutdown sweep: either shutdown wins, or an admitted stop
-            // remains exempt from shutdown errors until its own terminal.
-            shutting_down = stop_requested_.load(std::memory_order_acquire);
-            if (!shutting_down) {
-                active_requests_.push_back({sink, shutdown_request});
+            if (const auto* hello = std::get_if<proto::Hello>(&*frame)) {
+                hello_seen = true;
+                if (hello->protocol_version != options_.protocol_version) {
+                    connection->send(proto::Error{
+                        0, "PROTOCOL_MISMATCH",
+                        "daemon speaks protocol " + std::to_string(options_.protocol_version) +
+                            ", client sent " + std::to_string(hello->protocol_version),
+                        nlohmann::json::object(), kGeneric});
+                    break;
+                }
+                continue;
             }
+            if (const auto* answer = std::get_if<proto::Answer>(&*frame)) {
+                if (!hello_seen) {
+                    connection->send(proto::Error{0, "USAGE", "expected a hello frame first",
+                                                  nlohmann::json::object(), kUsage});
+                    break;
+                }
+                if (active_session) {
+                    active_session->receive_answer(*answer);
+                } else {
+                    connection->send(
+                        proto::Error{answer->id,
+                                     "PROTOCOL_ANSWER_INVALID",
+                                     "invalid challenge answer",
+                                     {{"request_id", answer->id}, {"reason", "unknown_request"}},
+                                     kUsage});
+                }
+                continue;
+            }
+            const auto* request = std::get_if<proto::Request>(&*frame);
+            if (request == nullptr || !hello_seen) {
+                connection->send(proto::Error{0, "USAGE",
+                                              hello_seen ? "expected a request frame"
+                                                         : "expected a hello frame first",
+                                              nlohmann::json::object(), kUsage});
+                break;
+            }
+            if (active_session) {
+                connection->send(proto::Error{request->id, "USAGE",
+                                              "connection already has an active request",
+                                              nlohmann::json::object(), kUsage});
+                continue;
+            }
+            auto sink = std::make_shared<ConnectionSink>(connection, request->id);
+            active_session = std::make_shared<RequestSession>(*request, sink, connection->id());
+            active_terminal_visible = std::make_shared<std::atomic<bool>>(false);
+            sink->set_terminal_hook([this, weak_session = std::weak_ptr(active_session),
+                                     terminal_visible = active_terminal_visible](bool visible) {
+                terminal_visible->store(visible, std::memory_order_release);
+                if (const auto session = weak_session.lock()) {
+                    const std::lock_guard<std::mutex> lock(mutex_);
+                    std::erase_if(active_requests_, [&session](const ActiveRequest& active) {
+                        return active.session == session;
+                    });
+                    idle_cv_.notify_all();
+                }
+            });
+            const bool shutdown_request =
+                request->command == std::vector<std::string>{"daemon", "stop"};
+            bool shutting_down = false;
+            {
+                const std::lock_guard<std::mutex> lock(mutex_);
+                // Admission and stop-request designation share the same lock as
+                // the shutdown sweep: either shutdown wins, or an admitted stop
+                // remains exempt from shutdown errors until its own terminal.
+                shutting_down = stop_requested_.load(std::memory_order_acquire);
+                if (!shutting_down) {
+                    active_requests_.push_back({active_session, shutdown_request});
+                }
+            }
+            if (shutting_down) {
+                active_session->shutdown();
+                break;
+            }
+            auto worker_done = std::make_shared<std::atomic<bool>>(false);
+            std::thread worker([this, session = active_session, worker_done] {
+                dispatcher_.dispatch(*session);
+                worker_done->store(true, std::memory_order_release);
+            });
+            active_worker = Worker{std::move(worker), std::move(worker_done)};
         }
-        if (shutting_down) {
-            emit_shutdown_error(sink);
-            break;
-        }
-        dispatcher_.dispatch(*request, *sink);
-        {
-            const std::lock_guard<std::mutex> lock(mutex_);
-            std::erase_if(active_requests_,
-                          [&sink](const ActiveRequest& active) { return active.sink == sink; });
-            idle_cv_.notify_all();
-        }
+    } catch (...) {
+        // No exception may cross a detached reader boundary: doing so invokes
+        // std::terminate. Close only this connection and run common cleanup.
+        connection->shutdown();
+    }
+    if (active_session) {
+        active_session->disconnect();
+    }
+    if (active_worker) {
+        active_worker->thread.join();
+    }
+    for (auto& retired : retired_workers) {
+        retired.thread.join();
     }
     {
         const std::lock_guard<std::mutex> lock(mutex_);

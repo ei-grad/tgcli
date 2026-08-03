@@ -1,8 +1,10 @@
 #include "proto/frame.hpp"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
@@ -34,6 +36,53 @@ Request make_request() {
     req.context.media_dir = "/data/media";
     req.context.write_authority = WriteAuthority::Deny;
     return req;
+}
+
+json request_document_with_timeout(json timeout) {
+    auto document = json::parse(serialize(make_request()));
+    document["context"]["timeout"] = std::move(timeout);
+    return document;
+}
+
+json destructive_challenge(std::string action, json target) {
+    return {{"kind", "destructive_confirmation"},
+            {"nonce", "00112233445566778899aabbccddeeff"},
+            {"sequence", 1},
+            {"client_generation", nullptr},
+            {"auth_sequence", nullptr},
+            {"secret", false},
+            {"prompt", "Confirm? [y/N] "},
+            {"details", {{"action", std::move(action)}, {"target", std::move(target)}}}};
+}
+
+json logout_target() {
+    return {{"operation", "logout"},
+            {"account", "main"},
+            {"remote_logout", true},
+            {"tdlib_request", "logOut"}};
+}
+
+json account_remove_target() {
+    return {{"operation", "account_remove"},
+            {"account", "work"},
+            {"remote_logout", true},
+            {"keep_session", false},
+            {"delete_paths", json::array({"/data/work", "/state/work"})},
+            {"config_path", "/config/tgcli/config.toml"},
+            {"config_snapshot",
+             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;dev:1;"
+             "ino:2;size:3;ctime_ns:4"},
+            {"data_root",
+             {{"path", "/data/work"},
+              {"device", std::uint64_t{1}},
+              {"inode", std::uint64_t{2}},
+              {"owner", std::uint64_t{1000}}}},
+            {"state_root",
+             {{"path", "/state/work"},
+              {"device", std::uint64_t{1}},
+              {"inode", std::uint64_t{3}},
+              {"owner", std::uint64_t{1000}}}},
+            {"reassign_default", "main"}};
 }
 
 } // namespace
@@ -124,10 +173,160 @@ TEST_CASE("response frames round-trip", "[proto]") {
         CHECK(f.exit_code == 5);
     }
     SECTION("challenge and answer") {
-        auto c = std::get<Challenge>(round_trip(Challenge{9, json{{"kind", "confirm"}}}));
-        CHECK(c.challenge["kind"] == "confirm");
-        auto a = std::get<Answer>(round_trip(Answer{9, json{{"confirmed", true}}}));
-        CHECK(a.answer["confirmed"] == true);
+        const json challenge{{"kind", "password"},
+                             {"nonce", "00112233445566778899aabbccddeeff"},
+                             {"sequence", 1},
+                             {"client_generation", 3},
+                             {"auth_sequence", 8},
+                             {"secret", true},
+                             {"prompt", "Password: "},
+                             {"details",
+                              {{"hint", "pet"},
+                               {"has_recovery_email", true},
+                               {"has_passport_data", false},
+                               {"recovery_email_pattern", "a***@example.com"}}}};
+        auto c = std::get<Challenge>(round_trip(Challenge{9, challenge}));
+        CHECK(c.challenge == challenge);
+        const json answer{{"nonce", challenge["nonce"]},
+                          {"sequence", 1},
+                          {"client_generation", 3},
+                          {"auth_sequence", 8},
+                          {"value", "sentinel"}};
+        auto a = std::get<Answer>(round_trip(Answer{9, answer}));
+        CHECK(a.answer == answer);
+    }
+}
+
+TEST_CASE("challenge payloads enforce closed kinds, details, and secrecy", "[proto][challenge]") {
+    const json base{{"kind", "phone_number"}, {"nonce", "00112233445566778899aabbccddeeff"},
+                    {"sequence", 1},          {"client_generation", 4},
+                    {"auth_sequence", 9},     {"secret", false},
+                    {"prompt", "Phone: "},    {"details", json::object()}};
+
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value["kind"] = "future_kind"; },
+             [](json& value) { value["nonce"] = "ABCDEF"; },
+             [](json& value) { value["sequence"] = 0; },
+             [](json& value) { value["client_generation"] = nullptr; },
+             [](json& value) { value["secret"] = true; },
+             [](json& value) { value["details"]["extra"] = true; },
+             [](json& value) { value["extra"] = true; }}) {
+        auto invalid = base;
+        mutate(invalid);
+        std::string error;
+        INFO(invalid.dump());
+        CHECK_FALSE(parse(serialize(Challenge{7, invalid}), error).has_value());
+        CHECK_FALSE(error.empty());
+    }
+}
+
+TEST_CASE("destructive confirmation target is the exact closed plan", "[proto][challenge]") {
+    for (const auto& [action, target] :
+         {std::pair{std::string("logout"), logout_target()},
+          std::pair{std::string("account_remove"), account_remove_target()}}) {
+        std::string error;
+        CHECK(validate_challenge_payload(destructive_challenge(action, target), error));
+    }
+
+    SECTION("logout rejects shape, identity, operation, and secret-bearing fields") {
+        const auto base = logout_target();
+        for (const auto& mutate : std::vector<std::function<void(json&)>>{
+                 [](json& value) { value.erase("account"); },
+                 [](json& value) { value["extra"] = true; },
+                 [](json& value) { value["operation"] = "account_remove"; },
+                 [](json& value) { value["account"] = "../main"; },
+                 [](json& value) { value["remote_logout"] = false; },
+                 [](json& value) { value["tdlib_request"] = "log_out"; },
+                 [](json& value) { value["password"] = "secret"; }}) {
+            auto invalid = base;
+            mutate(invalid);
+            std::string error;
+            INFO(invalid.dump());
+            CHECK_FALSE(
+                validate_challenge_payload(destructive_challenge("logout", invalid), error));
+        }
+        std::string error;
+        CHECK_FALSE(validate_challenge_payload(
+            destructive_challenge("account_remove", logout_target()), error));
+    }
+
+    SECTION("account removal rejects every target and nested identity deviation") {
+        const auto base = account_remove_target();
+        for (const auto& mutate : std::vector<std::function<void(json&)>>{
+                 [](json& value) { value.erase("config_path"); },
+                 [](json& value) { value["extra"] = true; },
+                 [](json& value) { value["operation"] = "logout"; },
+                 [](json& value) { value["account"] = ""; },
+                 [](json& value) { value["remote_logout"] = false; },
+                 [](json& value) { value["keep_session"] = true; },
+                 [](json& value) { value["delete_paths"] = json::array({"/data/work"}); },
+                 [](json& value) { value["delete_paths"][0] = "relative"; },
+                 [](json& value) { value["config_path"] = false; },
+                 [](json& value) { value["config_snapshot"] = "sha256:bad"; },
+                 [](json& value) {
+                     value["config_snapshot"] =
+                         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;"
+                         "dev:18446744073709551616;ino:2;size:3;ctime_ns:4";
+                 },
+                 [](json& value) { value["data_root"]["extra"] = true; },
+                 [](json& value) { value["data_root"]["path"] = "/other"; },
+                 [](json& value) { value["data_root"]["device"] = -1; },
+                 [](json& value) { value["state_root"] = json::array(); },
+                 [](json& value) { value["reassign_default"] = "../main"; },
+                 [](json& value) { value["bot_token"] = "secret"; }}) {
+            auto invalid = base;
+            mutate(invalid);
+            std::string error;
+            INFO(invalid.dump());
+            CHECK_FALSE(validate_challenge_payload(destructive_challenge("account_remove", invalid),
+                                                   error));
+        }
+        std::string error;
+        CHECK_FALSE(validate_challenge_payload(
+            destructive_challenge("logout", account_remove_target()), error));
+    }
+
+    SECTION("absent roots and null reassignment retain the exact removal shape") {
+        auto target = account_remove_target();
+        target["data_root"] = nullptr;
+        target["state_root"] = nullptr;
+        target["reassign_default"] = nullptr;
+        std::string error;
+        CHECK(validate_challenge_payload(destructive_challenge("account_remove", target), error));
+    }
+
+    SECTION("keep-session removal is the valid opposite boolean policy") {
+        auto target = account_remove_target();
+        target["remote_logout"] = false;
+        target["keep_session"] = true;
+        std::string error;
+        CHECK(validate_challenge_payload(destructive_challenge("account_remove", target), error));
+    }
+}
+
+TEST_CASE("answer payloads have one exact value or cancellation shape", "[proto][challenge]") {
+    const json base{{"nonce", "00112233445566778899aabbccddeeff"},
+                    {"sequence", 1},
+                    {"client_generation", 4},
+                    {"auth_sequence", 9},
+                    {"value", "12345"}};
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value["nonce"] = "short"; },
+             [](json& value) { value["sequence"] = -1; },
+             [](json& value) { value["cancelled"] = true; },
+             [](json& value) { value.erase("value"); },
+             [](json& value) {
+                 value.erase("value");
+                 value["cancelled"] = false;
+             },
+             [](json& value) { value["value"] = json::object(); },
+             [](json& value) { value["extra"] = true; }}) {
+        auto invalid = base;
+        mutate(invalid);
+        std::string error;
+        INFO(invalid.dump());
+        CHECK_FALSE(parse(serialize(Answer{7, invalid}), error).has_value());
+        CHECK_FALSE(error.empty());
     }
 }
 
@@ -149,6 +348,60 @@ TEST_CASE("malformed input is rejected with a reason", "[proto]") {
         INFO("input: " << line);
         CHECK_FALSE(parse(line, error).has_value());
         CHECK_FALSE(error.empty());
+    }
+}
+
+TEST_CASE("strict and answer-recovery parsers never throw on malformed field types",
+          "[proto][challenge]") {
+    const auto cases = std::to_array<std::string_view>({
+        R"({"type":null,"id":1,"answer":{}})",
+        R"({"type":{},"id":1,"answer":{}})",
+        R"({"type":[],"id":1,"answer":{}})",
+        R"({"type":true,"id":1,"answer":{}})",
+        R"({"type":"answer","id":{},"answer":{}})",
+        R"({"type":"answer","id":1,"answer":null})",
+        R"({"type":"answer","id":1,"answer":[]})",
+        R"({"type":"hello","binary_version":"v","protocol_version":18446744073709551615})",
+        R"({"type":"error","id":1,"error":{"code":"X","message":"m","details":{}},"exit_code":18446744073709551615})",
+    });
+    for (const auto line : cases) {
+        INFO(line);
+        std::string error;
+        CHECK_NOTHROW(parse(line, error));
+        CHECK_FALSE(parse(line, error).has_value());
+        CHECK_NOTHROW(parse_answer_candidate(line));
+    }
+}
+
+TEST_CASE("request timeout distinguishes default from invalid present values", "[proto][timeout]") {
+    SECTION("null uses the admission default") {
+        std::string error;
+        const auto parsed = parse(request_document_with_timeout(nullptr).dump(), error);
+        REQUIRE(parsed.has_value());
+        CHECK_FALSE(std::get<Request>(*parsed).context.timeout_seconds.has_value());
+    }
+
+    SECTION("positive fractions remain valid") {
+        std::string error;
+        const auto parsed = parse(request_document_with_timeout(0.000001).dump(), error);
+        REQUIRE(parsed.has_value());
+        CHECK(std::get<Request>(*parsed).context.timeout_seconds == 0.000001);
+    }
+
+    SECTION("zero, negative, non-finite, and representation-extreme values fail") {
+        for (
+            const auto& line : std::to_array<std::string>({
+                request_document_with_timeout(0).dump(),
+                request_document_with_timeout(-1).dump(),
+                request_document_with_timeout(18446744073709551615ULL).dump(),
+                std::string(
+                    R"({"type":"request","id":42,"command":["version"],"args":{},"context":{"tty":true,"json":false,"yes":false,"dry_run":false,"timeout":1.7976931348623157e308,"cwd":"/","media_dir":null,"write_authority":"unset"}})"),
+            })) {
+            std::string error;
+            INFO(line);
+            CHECK_FALSE(parse(line, error).has_value());
+            CHECK(error.find("timeout") != std::string::npos);
+        }
     }
 }
 

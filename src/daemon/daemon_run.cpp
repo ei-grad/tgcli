@@ -168,7 +168,7 @@ int run_daemon(const std::string& account) {
 }
 
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
-                   std::string& error) {
+                   std::string& error, const Dispatcher* dispatcher_override) {
     AccountPaths account_paths;
     if (!resolve_account_paths(account, account_paths, error)) {
         return false;
@@ -190,7 +190,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
 
     Dispatcher dispatcher;
     register_commands(dispatcher, context);
-    dispatcher.dispatch(request, sink);
+    (dispatcher_override != nullptr ? *dispatcher_override : dispatcher).dispatch(request, sink);
 
     ::close(lock_fd);
     return true;

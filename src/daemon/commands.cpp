@@ -1,6 +1,7 @@
 #include "daemon/commands.hpp"
 
 #include "common/exit_codes.hpp"
+#include "daemon/request_session.hpp"
 
 #include <cstdint>
 #include <unistd.h>
@@ -35,16 +36,16 @@ json doctor_payload(const DaemonContext& context) {
 } // namespace
 
 void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
-    dispatcher.register_command("version",
-                                {Tier::Read, [&context](const proto::Request&, ResponseSink& sink) {
-                                     sink.result(version_payload(context));
-                                 }});
-    dispatcher.register_command("doctor",
-                                {Tier::Read, [&context](const proto::Request&, ResponseSink& sink) {
-                                     sink.result(doctor_payload(context));
-                                 }});
     dispatcher.register_command(
-        "daemon stop", {Tier::Read, [&context](const proto::Request&, ResponseSink& sink) {
+        "version", {Tier::Read, [&context](const proto::Request&, RequestSession& sink) {
+                        sink.result(version_payload(context));
+                    }});
+    dispatcher.register_command(
+        "doctor", {Tier::Read, [&context](const proto::Request&, RequestSession& sink) {
+                       sink.result(doctor_payload(context));
+                   }});
+    dispatcher.register_command(
+        "daemon stop", {Tier::Read, [&context](const proto::Request&, RequestSession& sink) {
                             if (context.in_process) {
                                 sink.error("USAGE", "no daemon to stop in --no-daemon mode",
                                            nlohmann::json::object(), kUsage);
