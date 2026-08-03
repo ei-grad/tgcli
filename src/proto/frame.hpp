@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -21,6 +22,38 @@ inline constexpr int kProtocolVersion = 1;
 // The client folds --allow-write and TGCLI_ALLOW_WRITE into this field; the
 // daemon cannot see the invoking shell's environment (DESIGN.md §6/§10).
 enum class WriteAuthority { Unset, Grant, Deny };
+
+enum class ChallengeKind {
+    ApiId,
+    ApiHash,
+    DatabaseKey,
+    PhoneNumber,
+    AuthenticationCode,
+    EmailAddress,
+    EmailCode,
+    Password,
+    BotToken,
+    RegistrationTerms,
+    RegistrationFirstName,
+    RegistrationLastName,
+    DestructiveConfirmation,
+};
+
+std::string_view challenge_kind_name(ChallengeKind kind);
+std::optional<ChallengeKind> parse_challenge_kind(std::string_view name);
+bool challenge_kind_is_secret(ChallengeKind kind);
+bool challenge_kind_expects_boolean(ChallengeKind kind);
+
+// Computes the one request deadline without overflowing the clock duration or
+// time point. A missing timeout selects the protocol's 60-second default;
+// present invalid values return nullopt.
+std::optional<std::chrono::steady_clock::time_point>
+request_deadline(std::optional<double> timeout_seconds,
+                 std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+
+// Validates the exact closed payload shapes from DESIGN.md §10.
+bool validate_challenge_payload(const nlohmann::json& payload, std::string& error);
+bool validate_answer_payload(const nlohmann::json& payload, std::string& error);
 
 // First frame in each direction after connect.
 struct Hello {
@@ -93,5 +126,11 @@ std::string serialize(const Frame& frame);
 // Parses one line. Returns std::nullopt and sets `error` on malformed input:
 // invalid JSON, unknown/missing type, missing or mistyped required fields.
 std::optional<Frame> parse(std::string_view line, std::string& error);
+
+// Recovers only an answer frame's request id and raw payload after strict
+// parsing failed. The server uses this to return the specified
+// PROTOCOL_ANSWER_INVALID terminal instead of treating a malformed answer as
+// an unrelated connection error.
+std::optional<Answer> parse_answer_candidate(std::string_view line);
 
 } // namespace tgcli::proto

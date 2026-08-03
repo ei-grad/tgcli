@@ -5,6 +5,7 @@
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/request_session.hpp"
 #include "schema_matcher.hpp"
 
 #include <atomic>
@@ -118,16 +119,16 @@ TEST_CASE("non-Read tiers fail closed pending the M3 gate", "[dispatch]") {
     bool handler_ran = false;
     dispatcher.register_command(
         "poke",
-        {daemon::Tier::Write, [&handler_ran](const proto::Request&, daemon::ResponseSink& sink) {
+        {daemon::Tier::Write, [&handler_ran](const proto::Request&, daemon::RequestSession& sink) {
              handler_ran = true;
              sink.result(json::object());
          }});
-    dispatcher.register_command("nuke",
-                                {daemon::Tier::Destructive,
-                                 [&handler_ran](const proto::Request&, daemon::ResponseSink& sink) {
-                                     handler_ran = true;
-                                     sink.result(json::object());
-                                 }});
+    dispatcher.register_command(
+        "nuke", {daemon::Tier::Destructive,
+                 [&handler_ran](const proto::Request&, daemon::RequestSession& sink) {
+                     handler_ran = true;
+                     sink.result(json::object());
+                 }});
 
     for (const auto* name : {"poke", "nuke"}) {
         const auto outcome = dispatch(dispatcher, {name});
@@ -166,7 +167,7 @@ TEST_CASE("only the first terminal response is emitted", "[dispatch]") {
     daemon::Dispatcher dispatcher;
     dispatcher.register_command(
         "duplicate terminal",
-        {daemon::Tier::Read, [](const proto::Request&, daemon::ResponseSink& sink) {
+        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& sink) {
              sink.item({{"sequence", 1}});
              sink.result({{"winner", "result"}});
              sink.error("GENERIC", "late error", json::object(), kGeneric);
@@ -199,11 +200,12 @@ TEST_CASE("handler return and exception both receive a terminal error", "[dispat
     daemon::Dispatcher dispatcher;
     dispatcher.register_command(
         "missing terminal",
-        {daemon::Tier::Read, [](const proto::Request&, daemon::ResponseSink&) {}});
+        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession&) {}});
     dispatcher.register_command(
-        "throwing handler", {daemon::Tier::Read, [](const proto::Request&, daemon::ResponseSink&) {
-                                 throw std::runtime_error("handler failed");
-                             }});
+        "throwing handler",
+        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession&) {
+             throw std::runtime_error("handler failed");
+         }});
 
     for (const auto& command : {std::vector<std::string>{"missing", "terminal"},
                                 std::vector<std::string>{"throwing", "handler"}}) {

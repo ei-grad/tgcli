@@ -7,6 +7,16 @@
 
 namespace tgcli::cli {
 
+class ChallengePrompt;
+
+} // namespace tgcli::cli
+
+namespace tgcli::daemon {
+class Dispatcher;
+}
+
+namespace tgcli::cli {
+
 struct RunOptions {
     std::string account = "main";
     bool json = false;
@@ -16,6 +26,12 @@ struct RunOptions {
     // Empty uses the running executable. Tests may supply the built tgcli
     // binary because their process image is the unit-test runner.
     std::string daemon_executable;
+    // Optional injectable prompt for tests/frontends. Null uses the process
+    // terminal (stdin for input, stderr for prompts).
+    ChallengePrompt* prompt = nullptr;
+    // Optional in-process dispatcher injection for frontends and end-to-end
+    // transport tests. The normal --no-daemon path builds the production table.
+    const daemon::Dispatcher* in_process_dispatcher = nullptr;
 };
 
 // Runs one command end to end: connect to (or spawn) the account daemon —

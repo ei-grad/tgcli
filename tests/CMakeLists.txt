@@ -8,7 +8,9 @@ add_executable(tgcli_unit_tests
     query_registry_test.cpp
     update_bus_test.cpp
     dispatch_test.cpp
+    request_session_test.cpp
     server_test.cpp
+    prompt_test.cpp
     schema_matcher.cpp
     schema_test.cpp
     secret_hook_test.cpp

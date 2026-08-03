@@ -1,5 +1,6 @@
 #include "cli/client.hpp"
 
+#include "cli/prompt.hpp"
 #include "cli/render.hpp"
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
@@ -104,6 +105,51 @@ class FrameRenderer {
     bool json_;
     bool done_ = false;
     int exit_code_ = kGeneric;
+};
+
+class InProcessSink final : public daemon::ResponseSink {
+  public:
+    InProcessSink(FrameRenderer& renderer, ChallengePrompt& prompt, bool tty)
+        : renderer_(renderer), prompt_(prompt), tty_(tty) {}
+
+  private:
+    void emit_item(json data) override {
+        FrameRenderer::on_item(data);
+    }
+    void emit_progress(json data) override {
+        renderer_.on_progress(data);
+    }
+    void emit_result(json data) override {
+        renderer_.on_result(data);
+    }
+    void emit_error(std::string code, std::string message, json details, int exit_code) override {
+        renderer_.on_error(code, message, details, exit_code);
+    }
+    daemon::ChallengeReply emit_challenge(json challenge) override {
+        if (!tty_) {
+            return {{},
+                    daemon::ChallengeFailure{"INTERNAL", "daemon challenged a non-TTY client",
+                                             json::object(), kGeneric}};
+        }
+        auto response = prompt_.prompt(challenge);
+        switch (response.kind) {
+        case PromptResultKind::Answer:
+        case PromptResultKind::Cancelled:
+            return {std::move(response.answer), std::nullopt};
+        case PromptResultKind::Unavailable:
+        case PromptResultKind::Error:
+            return {{},
+                    daemon::ChallengeFailure{"INTERNAL", "cannot read challenge response",
+                                             json::object(), kGeneric}};
+        }
+        return {{},
+                daemon::ChallengeFailure{"INTERNAL", "cannot read challenge response",
+                                         json::object(), kGeneric}};
+    }
+
+    FrameRenderer& renderer_;
+    ChallengePrompt& prompt_;
+    bool tty_;
 };
 
 using Deadline = proto::IoDeadline;
@@ -666,9 +712,31 @@ int run_local_doctor(const std::string& account, const std::string& socket_path,
     return renderer.exit_code();
 }
 
+void handle_challenge(int fd, const proto::Request& request, ChallengePrompt& prompt,
+                      FrameRenderer& renderer, const proto::Challenge& challenge) {
+    if (!request.context.tty) {
+        renderer.on_error("INTERNAL", "daemon challenged a non-TTY client",
+                          nlohmann::json::object(), kGeneric);
+        return;
+    }
+    auto response = prompt.prompt(challenge.challenge);
+    if (response.kind == PromptResultKind::Unavailable ||
+        response.kind == PromptResultKind::Error) {
+        renderer.on_error("INTERNAL", "cannot read challenge response", nlohmann::json::object(),
+                          kGeneric);
+        return;
+    }
+    std::string io_error;
+    if (!proto::write_frame(fd, proto::Answer{challenge.id, std::move(response.answer)},
+                            io_error)) {
+        renderer.on_error("INTERNAL", "cannot send challenge response", nlohmann::json::object(),
+                          kGeneric);
+    }
+}
+
 // Sends the request and renders response frames until the terminal one.
 int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
-             const RunOptions& options) {
+             const RunOptions& options, ChallengePrompt& prompt) {
     if (std::string io_error; !proto::write_frame(fd, request, io_error)) {
         print_error("GENERIC", "cannot send request: " + io_error, json::object());
         return kGeneric;
@@ -689,7 +757,7 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
             return kGeneric;
         }
         std::visit(
-            [&renderer](const auto& f) {
+            [&renderer, &prompt, fd, &request](const auto& f) {
                 using T = std::decay_t<decltype(f)>;
                 if constexpr (std::is_same_v<T, proto::Item>) {
                     FrameRenderer::on_item(f.data);
@@ -699,25 +767,22 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
                     renderer.on_result(f.data);
                 } else if constexpr (std::is_same_v<T, proto::Error>) {
                     renderer.on_error(f.code, f.message, f.details, f.exit_code);
+                } else if constexpr (std::is_same_v<T, proto::Challenge>) {
+                    handle_challenge(fd, request, prompt, renderer, f);
                 }
-                // Hello/Request/Challenge/Answer: nothing to render in M0;
-                // challenges arrive with M1.
             },
             *frame);
     }
     return renderer.exit_code();
 }
 
-int run_in_process(const proto::Request& request, const RunOptions& options) {
+int run_in_process(const proto::Request& request, const RunOptions& options,
+                   ChallengePrompt& prompt) {
     FrameRenderer renderer(command_key(request.command), options.json);
-    daemon::CallbackSink sink(
-        [](const json& data) { FrameRenderer::on_item(data); },
-        [&renderer](const json& data) { renderer.on_progress(data); },
-        [&renderer](const json& data) { renderer.on_result(data); },
-        [&renderer](const std::string& code, const std::string& message, const json& details,
-                    int exit_code) { renderer.on_error(code, message, details, exit_code); });
+    InProcessSink sink(renderer, prompt, request.context.tty);
     std::string error;
-    if (!daemon::run_no_daemon(request, sink, options.account, error)) {
+    if (!daemon::run_no_daemon(request, sink, options.account, error,
+                               options.in_process_dispatcher)) {
         print_error("GENERIC", error, json::object());
         return kGeneric;
     }
@@ -727,8 +792,10 @@ int run_in_process(const proto::Request& request, const RunOptions& options) {
 } // namespace
 
 int run_command(const proto::Request& request, const RunOptions& options) {
+    TerminalPrompt terminal_prompt;
+    ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
     if (options.no_daemon) {
-        return run_in_process(request, options);
+        return run_in_process(request, options, prompt);
     }
 
     const auto env = paths::real_environment();
@@ -782,7 +849,7 @@ int run_command(const proto::Request& request, const RunOptions& options) {
             return kGeneric;
         }
         case HandshakeOutcome::Ok:
-            return exchange(session.fd, reader, request, options);
+            return exchange(session.fd, reader, request, options, prompt);
         case HandshakeOutcome::BinaryMismatch:
         case HandshakeOutcome::ProtocolMismatch:
         case HandshakeOutcome::IncompatibleHello:

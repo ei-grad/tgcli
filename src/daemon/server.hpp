@@ -14,6 +14,7 @@
 namespace tgcli::daemon {
 
 class ConnectionState;
+class RequestSession;
 
 struct ServerOptions {
     std::string socket_path;
@@ -25,9 +26,9 @@ struct ServerOptions {
 
 // Accepts connections on the account's unix socket and serves the JSONL
 // frame protocol (DESIGN.md §10): peer-uid check, hello handshake, then
-// requests dispatched through the Dispatcher. One detached thread per
-// connection; requests on a connection are served sequentially, concurrency
-// comes from concurrent connections.
+// requests dispatched through the Dispatcher. One detached reader thread
+// per connection admits one request at a time; a terminal response releases
+// admission even if the completed handler still has cleanup to finish.
 class Server {
   public:
     Server(ServerOptions options, const Dispatcher& dispatcher);
@@ -58,7 +59,7 @@ class Server {
 
   private:
     struct ActiveRequest {
-        std::shared_ptr<ResponseSink> sink;
+        std::shared_ptr<RequestSession> session;
         bool shutdown_request = false;
     };
 
@@ -86,6 +87,7 @@ class Server {
     std::vector<std::shared_ptr<ConnectionState>> connections_;
     std::vector<ActiveRequest> active_requests_;
     int active_connections_ = 0;
+    std::uint64_t next_connection_id_ = 1;
 };
 
 } // namespace tgcli::daemon
