@@ -11,10 +11,14 @@ add_executable(tgcli_unit_tests
     schema_matcher.cpp
     schema_test.cpp
     cli_test.cpp
-    td_client_test.cpp)
+    td_client_test.cpp
+    td_runtime_conversion_test.cpp
+    td_runtime_test.cpp
+    support/scripted_td_runtime.cpp)
 target_link_libraries(tgcli_unit_tests
     PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_cli tgcli_core Td::TdStatic
         Catch2::Catch2WithMain jsoncons)
+target_include_directories(tgcli_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(tgcli_unit_tests tgcli)
 target_compile_definitions(tgcli_unit_tests
     PRIVATE

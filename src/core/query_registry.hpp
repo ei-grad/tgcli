@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <exception>
 #include <future>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -34,6 +36,21 @@ template <typename Response> class QueryRegistry {
             pending_.erase(it);
         }
         promise.set_value(std::move(response));
+        return true;
+    }
+
+    bool fail(std::uint64_t id, std::exception_ptr error) {
+        std::promise<Response> promise;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            auto it = pending_.find(id);
+            if (it == pending_.end()) {
+                return false;
+            }
+            promise = std::move(it->second);
+            pending_.erase(it);
+        }
+        promise.set_exception(std::move(error));
         return true;
     }
 

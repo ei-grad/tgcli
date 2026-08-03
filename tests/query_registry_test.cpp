@@ -59,6 +59,17 @@ TEST_CASE("fail_all breaks every pending future", "[core]") {
     (void)id2;
 }
 
+TEST_CASE("fail resolves one pending future exactly once", "[core][lifecycle]") {
+    QueryRegistry<Payload> registry;
+    auto [id, future] = registry.reserve();
+
+    CHECK(registry.fail(id, std::make_exception_ptr(std::runtime_error("send failed"))));
+    CHECK_THROWS_AS(future.get(), std::runtime_error);
+    CHECK_FALSE(registry.fail(id, std::make_exception_ptr(std::runtime_error("again"))));
+    CHECK_FALSE(registry.fulfill(id, std::make_unique<int>(1)));
+    CHECK(registry.pending_count() == 0);
+}
+
 TEST_CASE("concurrent reserve and fulfill stay consistent", "[core]") {
     QueryRegistry<Payload> registry;
     constexpr int kPerThread = 200;

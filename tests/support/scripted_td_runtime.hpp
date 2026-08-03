@@ -1,0 +1,69 @@
+#pragma once
+
+#include "core/td_runtime.hpp"
+
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <optional>
+#include <vector>
+
+namespace tgcli::test {
+
+struct ScriptedClient {
+    std::int32_t client_id;
+    std::uint64_t client_generation;
+
+    bool operator==(const ScriptedClient&) const = default;
+};
+
+struct SentTdFunction {
+    std::int32_t client_id;
+    std::uint64_t client_generation;
+    std::uint64_t query_id;
+    core::TdFunctionData function;
+
+    bool operator==(const SentTdFunction&) const = default;
+};
+
+class ScriptedTdRuntime final : public core::TdRuntime {
+  public:
+    explicit ScriptedTdRuntime(bool close_automatically = true);
+
+    void initialize_process() override;
+    std::int32_t create_client(std::uint64_t client_generation) override;
+    core::TdValue make_function(core::TdBuiltinFunction function) override;
+    void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
+              core::TdValue function) override;
+    std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;
+
+    void push_response(ScriptedClient client, std::uint64_t query_id, core::TdValue object = {},
+                       std::optional<core::AuthStateData> authorization_state = std::nullopt);
+    void push_update(ScriptedClient client, core::TdValue object = {},
+                     std::optional<core::AuthStateData> authorization_state = std::nullopt);
+
+    bool wait_for_sent(std::size_t count,
+                       std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
+    bool wait_for_clients(std::size_t count,
+                          std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
+    [[nodiscard]] std::vector<SentTdFunction> sent_functions() const;
+    [[nodiscard]] std::vector<ScriptedClient> clients() const;
+    [[nodiscard]] bool initialized_before_first_client() const;
+
+  private:
+    void push_event(core::TdRuntimeEvent event);
+
+    bool close_automatically_;
+    mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
+    bool initialized_ = false;
+    bool initialized_before_first_client_ = false;
+    std::vector<ScriptedClient> clients_;
+    std::vector<SentTdFunction> sent_;
+    std::deque<core::TdRuntimeEvent> events_;
+};
+
+} // namespace tgcli::test

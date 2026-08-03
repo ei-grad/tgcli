@@ -87,12 +87,17 @@ add_library(tgcli_util STATIC
 target_link_libraries(tgcli_util
     PUBLIC tgcli_common)
 
+add_library(tgcli_td_runtime STATIC
+    src/core/td_runtime.cpp)
+target_link_libraries(tgcli_td_runtime
+    PUBLIC tgcli_common
+    PRIVATE Td::TdStatic)
+
 add_library(tgcli_core STATIC
     src/core/td_client.cpp)
 target_link_libraries(tgcli_core
     PUBLIC tgcli_common
-    PRIVATE Td::TdStatic)
-target_precompile_headers(tgcli_core PRIVATE <td/telegram/td_api.h>)
+    PRIVATE tgcli_td_runtime)
 
 add_library(tgcli_daemon STATIC
     src/daemon/dispatch.cpp

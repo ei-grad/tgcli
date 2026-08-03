@@ -31,7 +31,8 @@ TEST_CASE("request/response correlation and clean close against real tdlib", "[c
     TdClient client;
 
     NativeFunctionPtr request = td_api::make_object<td_api::getOption>("version");
-    auto future = client.send(TdValue::from(std::move(request)));
+    auto future = client.send(
+        TdValue::function(std::move(request), tgcli::core::TdFunctionData{"getOption"}));
     auto response = future.get();
     const auto* native_response = response.get_if<NativeObjectPtr>();
     REQUIRE(native_response != nullptr);
@@ -42,7 +43,7 @@ TEST_CASE("request/response correlation and clean close against real tdlib", "[c
 
     bool saw_closed = false;
     client.subscribe_updates([&saw_closed](const TdValue& update) {
-        const auto* native_update = update.get_if<const td_api::Object*>();
+        const auto* native_update = update.get_if<NativeObjectPtr>();
         if (native_update == nullptr || *native_update == nullptr) {
             return;
         }
@@ -67,7 +68,8 @@ TEST_CASE("send after close returns a ready exceptional future", "[core][tdlib][
     client.close();
 
     NativeFunctionPtr request = td_api::make_object<td_api::getOption>("version");
-    auto response = client.send(TdValue::from(std::move(request)));
+    auto response = client.send(
+        TdValue::function(std::move(request), tgcli::core::TdFunctionData{"getOption"}));
 
     REQUIRE(response.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
     CHECK_THROWS_AS(response.get(), std::runtime_error);
