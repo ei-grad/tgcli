@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -55,6 +56,7 @@ TEST_CASE("account name validation", "[paths]") {
     CHECK_FALSE(valid_account_name("has space"));
     CHECK_FALSE(valid_account_name("dot.dot"));
     CHECK_FALSE(valid_account_name("slash/evil"));
+    CHECK_FALSE(valid_account_name("m\xC3\xA4in"));
     CHECK_FALSE(valid_account_name(std::string(kMaxAccountNameLength + 1, 'a')));
     CHECK(valid_account_name(std::string(kMaxAccountNameLength, 'a')));
 }
@@ -108,6 +110,71 @@ TEST_CASE("XDG layout matches DESIGN.md §9", "[paths]") {
     CHECK(config_file(overridden) == "/cfg/tgcli/config.toml");
     CHECK(account_data_dir("main", overridden) == "/data/tgcli/accounts/main");
     CHECK(account_state_dir("main", overridden) == "/state/tgcli/accounts/main");
+}
+
+TEST_CASE("test DC uses isolated names in every XDG root", "[paths][config]") {
+    auto env = fake_env();
+    env.test_dc = true;
+
+    std::string error;
+    CHECK(config_file(env) == "/home/user/.config/tgcli-test/config.toml");
+    CHECK(account_data_dir("main", env) == "/home/user/.local/share/tgcli-test/accounts/main");
+    CHECK(account_state_dir("main", env) == "/home/user/.local/state/tgcli-test/accounts/main");
+    CHECK(runtime_dir(env) == "/run/user/1000/tgcli-test");
+    REQUIRE(socket_path("main", env, error));
+    CHECK(*socket_path("main", env, error) == "/run/user/1000/tgcli-test/main.sock");
+}
+
+TEST_CASE("test DC environment accepts only the exact trusted value", "[paths][config]") {
+    bool enabled = false;
+    std::string error;
+    CHECK(parse_test_dc(nullptr, enabled, error));
+    CHECK_FALSE(enabled);
+    CHECK(parse_test_dc("", enabled, error));
+    CHECK_FALSE(enabled);
+    CHECK(parse_test_dc("1", enabled, error));
+    CHECK(enabled);
+    CHECK_FALSE(parse_test_dc("true", enabled, error));
+    CHECK(error.find("TGCLI_TEST_DC") != std::string::npos);
+}
+
+TEST_CASE("account selection has exact precedence and validates before path derivation",
+          "[paths][config]") {
+    std::string error;
+    AccountSelectionInput input;
+    input.explicit_account = "explicit";
+    input.environment_account = "environment";
+    input.default_account = "configured";
+    auto selected = select_account(input, error);
+    REQUIRE(selected);
+    CHECK(selected->name == "explicit");
+    CHECK(selected->source == AccountSelectionSource::Explicit);
+
+    input.explicit_account.reset();
+    selected = select_account(input, error);
+    REQUIRE(selected);
+    CHECK(selected->name == "environment");
+    CHECK(selected->source == AccountSelectionSource::Environment);
+
+    input.environment_account.reset();
+    selected = select_account(input, error);
+    REQUIRE(selected);
+    CHECK(selected->name == "configured");
+    CHECK(selected->source == AccountSelectionSource::Default);
+
+    input.default_account.reset();
+    selected = select_account(input, error);
+    REQUIRE(selected);
+    CHECK(selected->name == "main");
+    CHECK(selected->source == AccountSelectionSource::ImplicitMain);
+
+    input.explicit_account = "../escape";
+    input.environment_account = "valid";
+    CHECK_FALSE(select_account(input, error));
+    CHECK(error.find("invalid account name") != std::string::npos);
+
+    CHECK_THROWS_AS(account_data_dir("../escape", fake_env()), std::invalid_argument);
+    CHECK_THROWS_AS(account_state_dir("slash/escape", fake_env()), std::invalid_argument);
 }
 
 TEST_CASE("ensure_private_dir creates 0700 and rejects tampering", "[paths]") {

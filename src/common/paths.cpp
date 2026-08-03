@@ -1,10 +1,10 @@
 #include "common/paths.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -12,6 +12,9 @@
 #include <unistd.h>
 
 namespace tgcli::paths {
+
+InvalidTestDcEnvironment::InvalidTestDcEnvironment()
+    : std::runtime_error("TGCLI_TEST_DC must be exactly 1 when set") {}
 
 namespace {
 
@@ -46,6 +49,16 @@ std::optional<std::string> endpoint_path(const std::string& account, const Envir
         return std::nullopt;
     }
     return path;
+}
+
+std::string namespace_name(const Environment& env) {
+    return env.test_dc ? "tgcli-test" : "tgcli";
+}
+
+void require_valid_account_name(const std::string& account) {
+    if (!valid_account_name(account)) {
+        throw std::invalid_argument("invalid account name for path derivation");
+    }
 }
 
 std::optional<SocketIdentity> inspect_socket(const std::string& socket_path, uid_t uid,
@@ -91,8 +104,15 @@ bool valid_account_name(const std::string& name) {
     if (name.empty() || name.size() > kMaxAccountNameLength) {
         return false;
     }
-    return std::ranges::all_of(name, [](char c) {
-        return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '-';
+    return std::ranges::all_of(name, [](unsigned char character) {
+        return (character >= static_cast<unsigned char>('A') &&
+                character <= static_cast<unsigned char>('Z')) ||
+               (character >= static_cast<unsigned char>('a') &&
+                character <= static_cast<unsigned char>('z')) ||
+               (character >= static_cast<unsigned char>('0') &&
+                character <= static_cast<unsigned char>('9')) ||
+               character == static_cast<unsigned char>('_') ||
+               character == static_cast<unsigned char>('-');
     });
 }
 
@@ -105,15 +125,55 @@ Environment real_environment() {
     env.tmpdir = env_value("TMPDIR");
     env.home = env_value("HOME").value_or("/");
     env.uid = getuid();
+    std::string error;
+    if (!parse_test_dc(std::getenv("TGCLI_TEST_DC"), env.test_dc, error)) {
+        throw InvalidTestDcEnvironment();
+    }
     return env;
+}
+
+bool parse_test_dc(const char* value, bool& enabled, std::string& error) {
+    enabled = false;
+    if (value == nullptr || *value == '\0') {
+        error.clear();
+        return true;
+    }
+    if (std::string_view(value) == "1") {
+        enabled = true;
+        error.clear();
+        return true;
+    }
+    error = "TGCLI_TEST_DC must be exactly 1 when set";
+    return false;
+}
+
+std::optional<AccountSelection> select_account(const AccountSelectionInput& input,
+                                               std::string& error) {
+    AccountSelection selection;
+    if (input.explicit_account) {
+        selection = {*input.explicit_account, AccountSelectionSource::Explicit};
+    } else if (input.environment_account) {
+        selection = {*input.environment_account, AccountSelectionSource::Environment};
+    } else if (input.default_account) {
+        selection = {*input.default_account, AccountSelectionSource::Default};
+    } else {
+        selection = {"main", AccountSelectionSource::ImplicitMain};
+    }
+    if (!valid_account_name(selection.name)) {
+        error = "invalid account name '" + selection.name + "': use 1-" +
+                std::to_string(kMaxAccountNameLength) + " characters from [A-Za-z0-9_-]";
+        return std::nullopt;
+    }
+    error.clear();
+    return selection;
 }
 
 std::string runtime_dir(const Environment& env) {
     if (env.xdg_runtime_dir) {
-        return *env.xdg_runtime_dir + "/tgcli";
+        return *env.xdg_runtime_dir + "/" + namespace_name(env);
     }
     const std::string base = env.tmpdir.value_or("/tmp");
-    return base + "/tgcli-" + std::to_string(env.uid);
+    return base + "/" + namespace_name(env) + "-" + std::to_string(env.uid);
 }
 
 std::optional<std::string> socket_path(const std::string& account, const Environment& env,
@@ -128,17 +188,24 @@ std::optional<std::string> control_socket_path(const std::string& account, const
 
 std::string config_file(const Environment& env) {
     const std::string base = env.xdg_config_home.value_or(env.home + "/.config");
-    return base + "/tgcli/config.toml";
+    return base + "/" + namespace_name(env) + "/config.toml";
+}
+
+std::string config_lock_file(const Environment& env) {
+    const std::string base = env.xdg_config_home.value_or(env.home + "/.config");
+    return base + "/" + namespace_name(env) + "/config.lock";
 }
 
 std::string account_data_dir(const std::string& account, const Environment& env) {
+    require_valid_account_name(account);
     const std::string base = env.xdg_data_home.value_or(env.home + "/.local/share");
-    return base + "/tgcli/accounts/" + account;
+    return base + "/" + namespace_name(env) + "/accounts/" + account;
 }
 
 std::string account_state_dir(const std::string& account, const Environment& env) {
+    require_valid_account_name(account);
     const std::string base = env.xdg_state_home.value_or(env.home + "/.local/state");
-    return base + "/tgcli/accounts/" + account;
+    return base + "/" + namespace_name(env) + "/accounts/" + account;
 }
 
 bool ensure_private_dir(const std::string& dir, uid_t uid, std::string& error) {

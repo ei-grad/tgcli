@@ -82,10 +82,13 @@ target_link_libraries(tgcli_proto
     PUBLIC tgcli_common nlohmann_json::nlohmann_json)
 
 add_library(tgcli_util STATIC
+    src/common/config.cpp
     src/common/daemon_lock.cpp
-    src/common/paths.cpp)
+    src/common/paths.cpp
+    src/common/secret_hook.cpp)
 target_link_libraries(tgcli_util
-    PUBLIC tgcli_common)
+    PUBLIC tgcli_common
+    PRIVATE tomlplusplus::tomlplusplus)
 
 add_library(tgcli_td_runtime STATIC
     src/core/td_runtime.cpp)

@@ -1,6 +1,7 @@
 include(Catch)
 
 add_executable(tgcli_unit_tests
+    config_test.cpp
     daemon_lock_test.cpp
     frame_test.cpp
     paths_test.cpp
@@ -10,6 +11,7 @@ add_executable(tgcli_unit_tests
     server_test.cpp
     schema_matcher.cpp
     schema_test.cpp
+    secret_hook_test.cpp
     cli_test.cpp
     td_client_test.cpp
     td_runtime_conversion_test.cpp

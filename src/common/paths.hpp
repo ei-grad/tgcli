@@ -2,10 +2,16 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <sys/types.h>
 
 namespace tgcli::paths {
+
+class InvalidTestDcEnvironment final : public std::runtime_error {
+  public:
+    InvalidTestDcEnvironment();
+};
 
 // Account names end up in socket paths and directory names; the charset is
 // restricted accordingly and the length keeps the socket path within
@@ -22,6 +28,20 @@ struct Environment {
     std::optional<std::string> tmpdir;
     std::string home;
     uid_t uid = 0;
+    bool test_dc = false;
+};
+
+enum class AccountSelectionSource { Explicit, Environment, Default, ImplicitMain };
+
+struct AccountSelectionInput {
+    std::optional<std::string> explicit_account;
+    std::optional<std::string> environment_account;
+    std::optional<std::string> default_account;
+};
+
+struct AccountSelection {
+    std::string name;
+    AccountSelectionSource source = AccountSelectionSource::ImplicitMain;
 };
 
 struct SocketIdentity {
@@ -35,6 +55,15 @@ struct SocketIdentity {
 
 // Snapshot of the real process environment.
 Environment real_environment();
+
+// TGCLI_TEST_DC is a trusted harness switch, not a general boolean. Only the
+// exact value "1" enables it; any other non-empty value is invalid.
+bool parse_test_dc(const char* value, bool& enabled, std::string& error);
+
+// Exact normal routing precedence: explicit flag, client environment,
+// configured default, then the virtual first-run name `main`.
+std::optional<AccountSelection> select_account(const AccountSelectionInput& input,
+                                               std::string& error);
 
 // Directory that holds the account's daemon socket:
 // $XDG_RUNTIME_DIR/tgcli, falling back to $TMPDIR/tgcli-<uid> then
@@ -53,6 +82,7 @@ std::optional<std::string> control_socket_path(const std::string& account, const
 
 // XDG layout from DESIGN.md §9. Pure.
 std::string config_file(const Environment& env);
+std::string config_lock_file(const Environment& env);
 std::string account_data_dir(const std::string& account, const Environment& env);
 std::string account_state_dir(const std::string& account, const Environment& env);
 

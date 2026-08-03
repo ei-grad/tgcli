@@ -1,5 +1,6 @@
 #include "cli/client.hpp"
 #include "common/exit_codes.hpp"
+#include "common/paths.hpp"
 #include "daemon/daemon_run.hpp"
 #include "proto/frame.hpp"
 
@@ -20,6 +21,13 @@ namespace {
 void report_fatal(const char* message) noexcept {
     std::fprintf(stderr, "{\"error\":{\"code\":\"INTERNAL\",\"message\":\"%s\",\"details\":{}}}\n",
                  message);
+}
+
+void report_invalid_test_dc() noexcept {
+    std::fputs(
+        "{\"error\":{\"code\":\"USAGE\",\"message\":\"TGCLI_TEST_DC must be exactly 1 when "
+        "set\",\"details\":{\"argument\":\"TGCLI_TEST_DC\",\"reason\":\"invalid_environment\"}}}\n",
+        stderr);
 }
 
 tgcli::proto::RequestContext make_request_context(bool json_output) {
@@ -104,6 +112,9 @@ int run(int argc, char** argv) {
 int main(int argc, char** argv) {
     try {
         return run(argc, argv);
+    } catch (const tgcli::paths::InvalidTestDcEnvironment&) {
+        report_invalid_test_dc();
+        return tgcli::kUsage;
     } catch (const std::exception& e) {
         report_fatal(e.what());
         return tgcli::kGeneric;

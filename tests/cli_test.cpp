@@ -1010,6 +1010,47 @@ void stop_current_daemon(const IsolatedEnv& env) {
 
 } // namespace
 
+TEST_CASE("invalid TGCLI_TEST_DC is a narrow process-level usage error", "[cli][process]") {
+    const IsolatedEnv env;
+    const std::string output_path = env.root() + "/invalid-test-dc.out";
+    const std::string error_path = env.root() + "/invalid-test-dc.err";
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        const int output = ::open(output_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        const int errors = ::open(error_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        if (output < 0 || errors < 0 || ::setenv("TGCLI_TEST_DC", "true", 1) != 0) {
+            ::_exit(126);
+        }
+        ::dup2(output, STDOUT_FILENO);
+        ::dup2(errors, STDERR_FILENO);
+        ::close(output);
+        ::close(errors);
+        ::execl(TGCLI_TEST_BINARY, "tgcli", "--json", "--no-daemon", "version",
+                static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == kUsage);
+
+    const auto read_file = [](const std::string& file_path) {
+        const std::ifstream input(file_path);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        return contents.str();
+    };
+    CHECK(read_file(output_path).empty());
+    const auto error = json::parse(read_file(error_path));
+    CHECK(error == json{{"error",
+                         {{"code", "USAGE"},
+                          {"message", "TGCLI_TEST_DC must be exactly 1 when set"},
+                          {"details",
+                           {{"argument", "TGCLI_TEST_DC"}, {"reason", "invalid_environment"}}}}}});
+}
+
 TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli][tdlib]") {
     const IsolatedEnv env;
     cli::RunOptions options;
