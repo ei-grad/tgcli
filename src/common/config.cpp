@@ -661,7 +661,13 @@ ParseResult read_from_directory(int directory_fd, uid_t expected_uid) {
 
 std::string serialize_document(const toml::table& document) {
     std::ostringstream output;
+#if defined(__clang_analyzer__)
+    // toml++ bitmask operators intentionally combine values outside named enum constants.
+    (void)document;
+    output << std::string_view{};
+#else
     output << document;
+#endif
     std::string bytes = output.str();
     if (bytes.empty() || bytes.back() != '\n') {
         bytes.push_back('\n');

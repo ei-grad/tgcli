@@ -306,7 +306,7 @@ void install_challenge_command(daemon::Dispatcher& dispatcher) {
 } // namespace
 
 TEST_CASE("challenge answer round-trip keeps the socket reader live", "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -327,7 +327,7 @@ TEST_CASE("challenge answer round-trip keeps the socket reader live", "[server][
 
 TEST_CASE("socket and in-process dispatch have equivalent challenge results",
           "[server][challenge][dispatch]") {
-    proto::Request in_process_request = make_request({"challenge", "socket"}, 81);
+    const proto::Request in_process_request = make_request({"challenge", "socket"}, 81);
     std::optional<json> in_process_result;
     daemon::CallbackSink in_process_sink(
         [](const json&) {}, [](const json&) {},
@@ -342,7 +342,7 @@ TEST_CASE("socket and in-process dispatch have equivalent challenge results",
     in_process_dispatcher.dispatch(in_process_session);
     REQUIRE(in_process_result.has_value());
 
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -356,7 +356,7 @@ TEST_CASE("socket and in-process dispatch have equivalent challenge results",
 }
 
 TEST_CASE("answer on another connection cannot affect the challenge owner", "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int owner_fd = connect_to(daemon.socket);
     proto::FrameReader owner_reader(owner_fd);
     read_frame(owner_reader);
@@ -385,7 +385,7 @@ TEST_CASE("answer on another connection cannot affect the challenge owner", "[se
 
 TEST_CASE("changed request id is unknown after its consumed challenge terminates",
           "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -412,7 +412,7 @@ TEST_CASE("changed request id is unknown after its consumed challenge terminates
 }
 
 TEST_CASE("one active request per connection does not replace a challenge", "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -435,7 +435,7 @@ TEST_CASE("one active request per connection does not replace a challenge", "[se
 
 TEST_CASE("malformed answer cancels only its owning request with the protocol error",
           "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -459,7 +459,7 @@ TEST_CASE("malformed answer cancels only its owning request with the protocol er
 
 TEST_CASE("malformed frame variants cannot terminate the detached daemon reader",
           "[server][process][proto]") {
-    TestDaemon daemon;
+    const TestDaemon daemon;
     for (
         const auto malformed : std::to_array<std::string_view>({
             R"({"type":null,"id":1,"answer":{}})",
@@ -493,7 +493,8 @@ TEST_CASE("malformed frame variants cannot terminate the detached daemon reader"
 TEST_CASE("terminal response releases same-connection admission before worker cleanup",
           "[server][lifecycle][race]") {
     TerminalThenBlockCommand blocked;
-    TestDaemon daemon([&blocked](daemon::Dispatcher& dispatcher) { blocked.install(dispatcher); });
+    const TestDaemon daemon(
+        [&blocked](daemon::Dispatcher& dispatcher) { blocked.install(dispatcher); });
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -514,7 +515,7 @@ TEST_CASE("terminal response releases same-connection admission before worker cl
 
 TEST_CASE("non-TTY challenge path emits structured input-required without a prompt",
           "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -531,7 +532,7 @@ TEST_CASE("non-TTY challenge path emits structured input-required without a prom
 }
 
 TEST_CASE("request deadline terminates a socket challenge once", "[server][challenge]") {
-    TestDaemon daemon(install_challenge_command);
+    const TestDaemon daemon(install_challenge_command);
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader);
@@ -582,7 +583,7 @@ TEST_CASE("daemon stop sends shutdown terminal to a challenge before EOF",
 }
 
 TEST_CASE("repeated QR progress updates remain display-only", "[server][challenge]") {
-    TestDaemon daemon([](daemon::Dispatcher& dispatcher) {
+    const TestDaemon daemon([](daemon::Dispatcher& dispatcher) {
         dispatcher.register_command(
             "qr progress",
             {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {

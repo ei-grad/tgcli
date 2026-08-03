@@ -95,34 +95,43 @@ json wait_challenge(Captured& captured) {
 } // namespace
 
 TEST_CASE("request session accepts one exact answer", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
 
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto emitted = wait_challenge(captured);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::Accepted);
     const auto outcome = future.get();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(outcome.status == daemon::ChallengeStatus::Answered);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     REQUIRE(std::holds_alternative<std::string>(outcome.value));
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(std::get<std::string>(outcome.value) == "12345");
-    CHECK(session.reserve_in_flight());
+    CHECK(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
     session.settle_in_flight();
 }
 
 TEST_CASE("explicit cancellation consumes the challenge without a value", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto emitted = wait_challenge(captured);
     auto cancelled = answer(emitted);
     cancelled.answer.erase("value");
     cancelled.answer["cancelled"] = true;
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(cancelled) == daemon::AnswerDisposition::Cancelled);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(future.get().status == daemon::ChallengeStatus::Cancelled);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(cancelled) == daemon::AnswerDisposition::DuplicateIgnored);
 }
 
@@ -144,18 +153,24 @@ TEST_CASE("request session rejects identity violations without waking with a val
 
     for (const auto& mutation : mutations) {
         DYNAMIC_SECTION(mutation.reason) {
-            Captured captured;
+            Captured captured; // NOLINT(misc-const-correctness): callback output.
             auto sink = make_sink(captured);
-            daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+            daemon::RequestSession session( // NOLINT(misc-const-correctness): mutable state.
+                request(), sink, 17, [] { return std::string(kNonce); });
             auto future = std::async(std::launch::async,
                                      [&session] { return session.challenge(challenge()); });
             const auto emitted = wait_challenge(captured);
             auto invalid = answer(emitted);
             mutation.apply(invalid);
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             CHECK(session.receive_answer(invalid) == daemon::AnswerDisposition::Rejected);
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             CHECK(future.get().status == daemon::ChallengeStatus::ProtocolError);
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             REQUIRE(captured.error.has_value());
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             CHECK(captured.error->details ==
                   json{{"request_id", invalid.id}, {"reason", mutation.reason}});
         }
@@ -164,18 +179,22 @@ TEST_CASE("request session rejects identity violations without waking with a val
 
 TEST_CASE("old generation, stale sequence, and exact duplicates are ignored",
           "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
 
     auto first =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto first_frame = wait_challenge(captured);
     const auto exact = answer(first_frame);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(exact) == daemon::AnswerDisposition::Accepted);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(first.get().status == daemon::ChallengeStatus::Answered);
-    REQUIRE(session.reserve_in_flight());
+    REQUIRE(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
     session.settle_in_flight();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(exact) == daemon::AnswerDisposition::DuplicateIgnored);
 
     {
@@ -187,107 +206,138 @@ TEST_CASE("old generation, stale sequence, and exact duplicates are ignored",
     const auto second_frame = wait_challenge(captured);
     auto stale_sequence = answer(second_frame);
     stale_sequence.answer["sequence"] = 1;
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(stale_sequence) == daemon::AnswerDisposition::StaleIgnored);
     auto stale_generation = answer(second_frame);
     stale_generation.answer["auth_sequence"] = 9;
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(stale_generation) == daemon::AnswerDisposition::StaleIgnored);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(second_frame)) == daemon::AnswerDisposition::Accepted);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(second.get().status == daemon::ChallengeStatus::Answered);
-    REQUIRE(session.reserve_in_flight());
+    REQUIRE(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
     session.settle_in_flight();
 }
 
 TEST_CASE("consumed answer identity includes the request id", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto emitted = wait_challenge(captured);
     const auto exact = answer(emitted);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(exact) == daemon::AnswerDisposition::Accepted);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(future.get().status == daemon::ChallengeStatus::Answered);
-    REQUIRE(session.reserve_in_flight());
+    REQUIRE(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
     session.settle_in_flight();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(exact) == daemon::AnswerDisposition::DuplicateIgnored);
 
     auto changed_request = exact;
     changed_request.id = 2;
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(changed_request) == daemon::AnswerDisposition::Rejected);
-    REQUIRE(captured.error.has_value());
+    REQUIRE(captured.error.has_value()); // NOLINT(misc-const-correctness): Catch2 expansion.
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(captured.error->details == json{{"request_id", 2}, {"reason", "unknown_request"}});
 }
 
 TEST_CASE("same-state auth update supersedes the waiter", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto emitted = wait_challenge(captured);
-    CHECK(session.supersede(4, 10));
+    CHECK(session.supersede(4, 10)); // NOLINT(misc-const-correctness): Catch2 expansion.
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(future.get().status == daemon::ChallengeStatus::Superseded);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::StaleIgnored);
 }
 
 TEST_CASE("disconnect releases a prompt waiter and exposes orphan state", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
-    std::atomic<daemon::InFlightState> observed{daemon::InFlightState::None};
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
+    std::atomic<daemon::InFlightState> observed{// NOLINT(misc-const-correctness): callback output.
+                                                daemon::InFlightState::None};
     session.set_in_flight_hook([&observed](daemon::InFlightState state) { observed.store(state); });
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     wait_challenge(captured);
     session.disconnect();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(future.get().status == daemon::ChallengeStatus::Disconnected);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.in_flight_state() == daemon::InFlightState::None);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(observed.load() == daemon::InFlightState::None);
 }
 
 TEST_CASE("disconnect after answer preserves an orphaned in-flight query", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto emitted = wait_challenge(captured);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::Accepted);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(future.get().status == daemon::ChallengeStatus::Answered);
-    REQUIRE(session.reserve_in_flight());
+    REQUIRE(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
     session.disconnect();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.in_flight_state() == daemon::InFlightState::Orphaned);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::RequestTerminated);
     session.settle_in_flight();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.in_flight_state() == daemon::InFlightState::None);
 }
 
 TEST_CASE("disconnect after acceptance but before query claim prevents the send",
           "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
     auto future =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto emitted = wait_challenge(captured);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::Accepted);
     session.disconnect();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(future.get().status == daemon::ChallengeStatus::Answered);
-    CHECK_FALSE(session.reserve_in_flight());
+    CHECK_FALSE(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.in_flight_state() == daemon::InFlightState::None);
 }
 
 TEST_CASE("disconnect between challenges releases only the current waiter",
           "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(), sink, 17, [] { return std::string(kNonce); });
     auto first =
         std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
     const auto first_frame = wait_challenge(captured);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.receive_answer(answer(first_frame)) == daemon::AnswerDisposition::Accepted);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(first.get().status == daemon::ChallengeStatus::Answered);
-    REQUIRE(session.reserve_in_flight());
+    REQUIRE(session.reserve_in_flight()); // NOLINT(misc-const-correctness): Catch2 expansion.
     session.settle_in_flight();
 
     {
@@ -298,21 +348,24 @@ TEST_CASE("disconnect between challenges releases only the current waiter",
         std::async(std::launch::async, [&session] { return session.challenge(challenge(4, 10)); });
     wait_challenge(captured);
     session.disconnect();
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(second.get().status == daemon::ChallengeStatus::Disconnected);
 }
 
 TEST_CASE("deadline and answer acceptance have one serialized winner", "[challenge][session]") {
-    for (int iteration = 0; iteration < 64; ++iteration) {
-        Captured captured;
+    for (int iteration = 0; // NOLINT(misc-const-correctness): loop counter.
+         iteration < 64; ++iteration) {
+        Captured captured; // NOLINT(misc-const-correctness): callback output.
         auto sink = make_sink(captured);
-        daemon::RequestSession session(request(true, 0.003), sink, 17,
-                                       [] { return std::string(kNonce); });
+        daemon::RequestSession session( // NOLINT(misc-const-correctness): mutable state.
+            request(true, 0.003), sink, 17, [] { return std::string(kNonce); });
         auto future =
             std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
         const auto emitted = wait_challenge(captured);
         std::this_thread::sleep_for(std::chrono::milliseconds(iteration % 5));
         const auto disposition = session.receive_answer(answer(emitted));
         const auto status = future.get().status;
+        // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
         CHECK(((disposition == daemon::AnswerDisposition::Accepted &&
                 status == daemon::ChallengeStatus::Answered) ||
                (disposition == daemon::AnswerDisposition::RequestTerminated &&
@@ -321,10 +374,13 @@ TEST_CASE("deadline and answer acceptance have one serialized winner", "[challen
 }
 
 TEST_CASE("non-TTY sessions never emit a challenge", "[challenge][session]") {
-    Captured captured;
+    Captured captured; // NOLINT(misc-const-correctness): mutated through sink callbacks.
     auto sink = make_sink(captured);
-    daemon::RequestSession session(request(false), sink, 17, [] { return std::string(kNonce); });
+    daemon::RequestSession session( // NOLINT(misc-const-correctness): owns mutable state.
+        request(false), sink, 17, [] { return std::string(kNonce); });
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK(session.challenge(challenge()).status == daemon::ChallengeStatus::NoTty);
+    // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
     CHECK_FALSE(captured.challenge.has_value());
 }
 
