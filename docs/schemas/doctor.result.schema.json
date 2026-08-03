@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli doctor result",
+  "oneOf": [
+    {
+      "title": "reachable daemon",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "daemon", "tdlib", "auth"],
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "daemon": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["running", "in_process", "pid", "version", "socket"],
+          "properties": {
+            "running": {
+              "const": true
+            },
+            "in_process": {
+              "const": false
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "version": {
+              "type": "string"
+            },
+            "socket": {
+              "type": "string"
+            }
+          }
+        },
+        "tdlib": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version"],
+          "properties": {
+            "version": {
+              "type": "string"
+            }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "const": "unknown"
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "in-process daemon bypass",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "daemon", "tdlib", "auth"],
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "daemon": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["running", "in_process", "pid", "version"],
+          "properties": {
+            "running": {
+              "const": false
+            },
+            "in_process": {
+              "const": true
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "version": {
+              "type": "string"
+            }
+          }
+        },
+        "tdlib": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version"],
+          "properties": {
+            "version": {
+              "type": "string"
+            }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "const": "unknown"
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "local fallback",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "daemon", "config"],
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "daemon": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["running", "socket"],
+          "properties": {
+            "running": {
+              "const": false
+            },
+            "socket": {
+              "type": "string"
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "exists"],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "exists": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

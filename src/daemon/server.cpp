@@ -4,8 +4,10 @@
 #include "common/net_compat.hpp"
 #include "proto/frame_io.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
@@ -17,45 +19,73 @@
 
 namespace tgcli::daemon {
 
-namespace {
+class ConnectionState {
+  public:
+    explicit ConnectionState(int fd) : fd_(fd) {}
+    ConnectionState(const ConnectionState&) = delete;
+    ConnectionState& operator=(const ConnectionState&) = delete;
+    ConnectionState(ConnectionState&&) = delete;
+    ConnectionState& operator=(ConnectionState&&) = delete;
 
-// Serializes concurrent frame writes on one connection (a handler thread and
-// a future stream multiplexer may share it).
-struct Connection {
-    int fd;
-    std::mutex write_mutex;
+    ~ConnectionState() {
+        ::close(fd_);
+    }
+
+    [[nodiscard]] int fd() const {
+        return fd_;
+    }
 
     bool send(const proto::Frame& frame) {
         std::string error;
-        const std::lock_guard<std::mutex> lock(write_mutex);
-        return proto::write_frame(fd, frame, error);
+        const std::lock_guard<std::mutex> lock(write_mutex_);
+        return proto::write_frame_until(fd_, frame,
+                                        std::chrono::steady_clock::now() + kWriteTimeout, error);
     }
-};
 
-class ConnectionSink final : public ResponseSink {
-  public:
-    ConnectionSink(Connection& connection, std::uint64_t request_id)
-        : connection_(connection), request_id_(request_id) {}
-
-    void item(nlohmann::json data) override {
-        connection_.send(proto::Item{request_id_, std::move(data)});
-    }
-    void progress(nlohmann::json data) override {
-        connection_.send(proto::Progress{request_id_, std::move(data)});
-    }
-    void result(nlohmann::json data) override {
-        connection_.send(proto::Result{request_id_, std::move(data)});
-    }
-    void error(std::string code, std::string message, nlohmann::json details,
-               int exit_code) override {
-        connection_.send(proto::Error{request_id_, std::move(code), std::move(message),
-                                      std::move(details), exit_code});
+    void shutdown() const {
+        ::shutdown(fd_, SHUT_RDWR);
     }
 
   private:
-    Connection& connection_;
+    static constexpr auto kWriteTimeout = std::chrono::seconds(5);
+
+    int fd_;
+    std::mutex write_mutex_;
+};
+
+namespace {
+
+constexpr const char* kShutdownCode = "DAEMON_SHUTDOWN";
+constexpr const char* kShutdownMessage = "daemon is shutting down";
+
+class ConnectionSink final : public ResponseSink {
+  public:
+    ConnectionSink(std::shared_ptr<ConnectionState> connection, std::uint64_t request_id)
+        : connection_(std::move(connection)), request_id_(request_id) {}
+
+  private:
+    void emit_item(nlohmann::json data) override {
+        connection_->send(proto::Item{request_id_, std::move(data)});
+    }
+    void emit_progress(nlohmann::json data) override {
+        connection_->send(proto::Progress{request_id_, std::move(data)});
+    }
+    void emit_result(nlohmann::json data) override {
+        connection_->send(proto::Result{request_id_, std::move(data)});
+    }
+    void emit_error(std::string code, std::string message, nlohmann::json details,
+                    int exit_code) override {
+        connection_->send(proto::Error{request_id_, std::move(code), std::move(message),
+                                       std::move(details), exit_code});
+    }
+
+    std::shared_ptr<ConnectionState> connection_;
     std::uint64_t request_id_;
 };
+
+void emit_shutdown_error(const std::shared_ptr<ResponseSink>& sink) {
+    sink->error(kShutdownCode, kShutdownMessage, {{"reason", "daemon_shutdown"}}, kGeneric);
+}
 
 } // namespace
 
@@ -67,6 +97,17 @@ Server::~Server() {
 }
 
 bool Server::start(std::string& error) {
+    if (options_.control_socket_path.empty() != options_.control_token.empty()) {
+        error = "control socket path and token must be configured together";
+        return false;
+    }
+    if (!paths::prepare_socket_endpoint(options_.socket_path, getuid(), error)) {
+        return false;
+    }
+    if (!options_.control_socket_path.empty() &&
+        !paths::prepare_socket_endpoint(options_.control_socket_path, getuid(), error)) {
+        return false;
+    }
     if (!net::pipe_cloexec(wake_read_fd_, wake_write_fd_)) {
         error = std::string("pipe: ") + std::strerror(errno);
         return false;
@@ -89,9 +130,6 @@ bool Server::start(std::string& error) {
         return false;
     }
     std::strncpy(addr.sun_path, options_.socket_path.c_str(), sizeof(addr.sun_path) - 1);
-    // The caller holds the account flock, so an existing file is a stale
-    // leftover, never a live daemon's socket.
-    ::unlink(options_.socket_path.c_str());
     const mode_t old_umask = ::umask(0177); // socket mode 0600 (§10)
     const int bind_rc = ::bind(listen_fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
     ::umask(old_umask);
@@ -99,20 +137,74 @@ bool Server::start(std::string& error) {
         error = "bind " + options_.socket_path + ": " + std::strerror(errno);
         return false;
     }
+    socket_identity_ = paths::inspect_socket_endpoint(options_.socket_path, getuid(), error);
+    if (!socket_identity_) {
+        return false;
+    }
     if (::listen(listen_fd_, SOMAXCONN) != 0) {
         error = "listen: " + std::string(std::strerror(errno));
         return false;
+    }
+    if (!options_.control_socket_path.empty()) {
+        control_fd_ = net::socket_cloexec(AF_UNIX, SOCK_DGRAM, 0);
+        if (control_fd_ < 0) {
+            error = std::string("control socket: ") + std::strerror(errno);
+            return false;
+        }
+        if (::fcntl(control_fd_, F_SETFL, O_NONBLOCK) != 0) {
+            error = std::string("control socket fcntl: ") + std::strerror(errno);
+            return false;
+        }
+        sockaddr_un control_addr{};
+        control_addr.sun_family = AF_UNIX;
+        if (options_.control_socket_path.size() >= sizeof(control_addr.sun_path)) {
+            error = "control socket path too long: " + options_.control_socket_path;
+            return false;
+        }
+        std::strncpy(control_addr.sun_path, options_.control_socket_path.c_str(),
+                     sizeof(control_addr.sun_path) - 1);
+        const mode_t control_umask = ::umask(0177);
+        const int control_bind_rc = ::bind(
+            control_fd_, reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr));
+        ::umask(control_umask);
+        if (control_bind_rc != 0) {
+            error = "bind " + options_.control_socket_path + ": " + std::strerror(errno);
+            return false;
+        }
+        control_socket_identity_ =
+            paths::inspect_socket_endpoint(options_.control_socket_path, getuid(), error);
+        if (!control_socket_identity_) {
+            return false;
+        }
     }
     accept_thread_ = std::thread([this] { accept_loop(); });
     return true;
 }
 
 void Server::request_stop() {
+    std::vector<std::shared_ptr<ResponseSink>> active_requests;
     {
-        // Mutate the flag under the lock so a concurrent wait_for_stop() can
-        // never miss the transition between its predicate check and its wait.
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (stop_requested_.exchange(true, std::memory_order_acq_rel)) {
+            idle_cv_.wait(lock, [this] { return shutdown_terminals_sent_; });
+            return;
+        }
+        for (const auto& active : active_requests_) {
+            if (!active.shutdown_request) {
+                active_requests.push_back(active.sink);
+            }
+        }
+    }
+    if (wake_write_fd_ >= 0) {
+        const char byte = 0;
+        [[maybe_unused]] const ssize_t count = ::write(wake_write_fd_, &byte, 1);
+    }
+    for (const auto& sink : active_requests) {
+        emit_shutdown_error(sink);
+    }
+    {
         const std::lock_guard<std::mutex> lock(mutex_);
-        stop_requested_.store(true, std::memory_order_release);
+        shutdown_terminals_sent_ = true;
     }
     idle_cv_.notify_all();
 }
@@ -123,7 +215,11 @@ bool Server::stop_requested() const {
 
 void Server::wait_for_stop() {
     std::unique_lock<std::mutex> lock(mutex_);
-    idle_cv_.wait(lock, [this] { return stop_requested_.load(std::memory_order_acquire); });
+    idle_cv_.wait(lock, [this] {
+        return shutdown_terminals_sent_ &&
+               std::none_of(active_requests_.begin(), active_requests_.end(),
+                            [](const ActiveRequest& active) { return active.shutdown_request; });
+    });
 }
 
 void Server::stop() {
@@ -131,25 +227,33 @@ void Server::stop() {
     if (stopping_.exchange(true)) {
         return;
     }
-    // The self-pipe wakes the accept loop's poll() — shutdown() on a
-    // listening socket does not unblock accept() on macOS/BSD. Joining the
-    // accept thread first guarantees no new connection appears after the
-    // sweep below.
-    if (wake_write_fd_ >= 0) {
-        const char byte = 0;
-        [[maybe_unused]] const ssize_t n = ::write(wake_write_fd_, &byte, 1);
-    }
+    // request_stop() wakes the accept loop before active sessions are closed,
+    // so no new connection can appear after the sweep below.
     if (accept_thread_.joinable()) {
         accept_thread_.join();
     }
-    std::unique_lock<std::mutex> lock(mutex_);
-    for (const int fd : connection_fds_) {
-        ::shutdown(fd, SHUT_RDWR);
+    std::vector<std::shared_ptr<ConnectionState>> connections;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        idle_cv_.wait(lock, [this] {
+            return std::none_of(
+                active_requests_.begin(), active_requests_.end(),
+                [](const ActiveRequest& active) { return active.shutdown_request; });
+        });
+        connections = connections_;
     }
+    for (const auto& connection : connections) {
+        connection->shutdown();
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
     idle_cv_.wait(lock, [this] { return active_connections_ == 0; });
     if (listen_fd_ >= 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
+    }
+    if (control_fd_ >= 0) {
+        ::close(control_fd_);
+        control_fd_ = -1;
     }
     for (int* fd : {&wake_read_fd_, &wake_write_fd_}) {
         if (*fd >= 0) {
@@ -157,7 +261,15 @@ void Server::stop() {
             *fd = -1;
         }
     }
-    ::unlink(options_.socket_path.c_str());
+    if (socket_identity_) {
+        paths::unlink_socket_endpoint_if_same(options_.socket_path, *socket_identity_);
+        socket_identity_.reset();
+    }
+    if (control_socket_identity_) {
+        paths::unlink_socket_endpoint_if_same(options_.control_socket_path,
+                                              *control_socket_identity_);
+        control_socket_identity_.reset();
+    }
 }
 
 bool Server::peer_uid_ok(int fd) {
@@ -180,7 +292,8 @@ bool Server::peer_uid_ok(int fd) {
 
 void Server::accept_loop() {
     while (!stopping_.load(std::memory_order_acquire)) {
-        std::array<pollfd, 2> fds{{{listen_fd_, POLLIN, 0}, {wake_read_fd_, POLLIN, 0}}};
+        std::array<pollfd, 3> fds{
+            {{listen_fd_, POLLIN, 0}, {wake_read_fd_, POLLIN, 0}, {control_fd_, POLLIN, 0}}};
         if (::poll(fds.data(), fds.size(), -1) < 0) {
             if (errno == EINTR) {
                 continue;
@@ -189,6 +302,10 @@ void Server::accept_loop() {
         }
         if ((fds[1].revents & (POLLIN | POLLERR | POLLHUP)) != 0) {
             break; // stop() wrote to the self-pipe
+        }
+        if ((fds[2].revents & POLLIN) != 0 && consume_control_request()) {
+            request_stop();
+            break;
         }
         if ((fds[0].revents & POLLIN) == 0) {
             continue;
@@ -217,22 +334,34 @@ void Server::accept_loop() {
             ::close(fd);
             break;
         }
-        connection_fds_.push_back(fd);
+        auto connection = std::make_shared<ConnectionState>(fd);
+        connections_.push_back(connection);
         ++active_connections_;
         // Detached: serve_connection's final act is signalling idle_cv_
         // under mutex_, which stop() holds until the count reaches zero, so
         // the thread never outlives the Server.
-        std::thread([this, fd] { serve_connection(fd); }).detach();
+        std::thread([this, connection = std::move(connection)] {
+            serve_connection(connection);
+        }).detach();
     }
 }
 
-void Server::serve_connection(int fd) {
-    Connection connection{fd, {}};
-    connection.send(proto::Hello{options_.binary_version, options_.protocol_version});
+bool Server::consume_control_request() {
+    std::array<char, 256> data{};
+    const ssize_t count = ::recv(control_fd_, data.data(), data.size(), 0);
+    if (count < 0) {
+        return false;
+    }
+    return static_cast<std::size_t>(count) == options_.control_token.size() &&
+           std::equal(options_.control_token.begin(), options_.control_token.end(), data.begin());
+}
 
-    proto::FrameReader reader(fd);
+void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection) {
+    connection->send(proto::Hello{options_.binary_version, options_.protocol_version});
+
+    proto::FrameReader reader(connection->fd());
     bool hello_seen = false;
-    while (!stopping_.load(std::memory_order_acquire)) {
+    while (!stop_requested_.load(std::memory_order_acquire)) {
         std::string io_error;
         const auto line = reader.read_line(io_error);
         if (!line) {
@@ -241,14 +370,14 @@ void Server::serve_connection(int fd) {
         std::string parse_error;
         auto frame = proto::parse(*line, parse_error);
         if (!frame) {
-            connection.send(proto::Error{0, "USAGE", "malformed frame: " + parse_error,
-                                         nlohmann::json::object(), kUsage});
+            connection->send(proto::Error{0, "USAGE", "malformed frame: " + parse_error,
+                                          nlohmann::json::object(), kUsage});
             break;
         }
         if (const auto* hello = std::get_if<proto::Hello>(&*frame)) {
             hello_seen = true;
             if (hello->protocol_version != options_.protocol_version) {
-                connection.send(proto::Error{
+                connection->send(proto::Error{
                     0, "PROTOCOL_MISMATCH",
                     "daemon speaks protocol " + std::to_string(options_.protocol_version) +
                         ", client sent " + std::to_string(hello->protocol_version),
@@ -259,19 +388,41 @@ void Server::serve_connection(int fd) {
         }
         const auto* request = std::get_if<proto::Request>(&*frame);
         if (request == nullptr || !hello_seen) {
-            connection.send(proto::Error{0, "USAGE",
-                                         hello_seen ? "expected a request frame"
-                                                    : "expected a hello frame first",
-                                         nlohmann::json::object(), kUsage});
+            connection->send(proto::Error{0, "USAGE",
+                                          hello_seen ? "expected a request frame"
+                                                     : "expected a hello frame first",
+                                          nlohmann::json::object(), kUsage});
             break;
         }
-        ConnectionSink sink(connection, request->id);
-        dispatcher_.dispatch(*request, sink);
+        auto sink = std::make_shared<ConnectionSink>(connection, request->id);
+        const bool shutdown_request =
+            request->command == std::vector<std::string>{"daemon", "stop"};
+        bool shutting_down = false;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            // Admission and stop-request designation share the same lock as
+            // the shutdown sweep: either shutdown wins, or an admitted stop
+            // remains exempt from shutdown errors until its own terminal.
+            shutting_down = stop_requested_.load(std::memory_order_acquire);
+            if (!shutting_down) {
+                active_requests_.push_back({sink, shutdown_request});
+            }
+        }
+        if (shutting_down) {
+            emit_shutdown_error(sink);
+            break;
+        }
+        dispatcher_.dispatch(*request, *sink);
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            std::erase_if(active_requests_,
+                          [&sink](const ActiveRequest& active) { return active.sink == sink; });
+            idle_cv_.notify_all();
+        }
     }
-    ::close(fd);
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        std::erase(connection_fds_, fd);
+        std::erase(connections_, connection);
         --active_connections_;
         idle_cv_.notify_all();
     }

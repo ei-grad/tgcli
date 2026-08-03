@@ -1,0 +1,14 @@
+{
+  "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "commands": {
+    "daemon stop": {
+      "result": "daemon-stop.result.schema.json"
+    },
+    "doctor": {
+      "result": "doctor.result.schema.json"
+    },
+    "version": {
+      "result": "version.result.schema.json"
+    }
+  }
+}

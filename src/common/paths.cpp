@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -20,6 +21,68 @@ std::optional<std::string> env_value(const char* name) {
         return std::nullopt;
     }
     return std::string(value);
+}
+
+SocketIdentity socket_identity(const struct stat& st) {
+#if defined(__APPLE__)
+    return SocketIdentity{st.st_dev, st.st_ino, st.st_ctimespec.tv_sec, st.st_ctimespec.tv_nsec};
+#else
+    return SocketIdentity{st.st_dev, st.st_ino, st.st_ctim.tv_sec, st.st_ctim.tv_nsec};
+#endif
+}
+
+std::optional<std::string> endpoint_path(const std::string& account, const Environment& env,
+                                         std::string_view suffix, std::string& error) {
+    if (!valid_account_name(account)) {
+        error = "invalid account name '" + account + "': use 1-" +
+                std::to_string(kMaxAccountNameLength) + " characters from [A-Za-z0-9_-]";
+        return std::nullopt;
+    }
+    std::string path = runtime_dir(env) + "/" + account + std::string(suffix);
+    // sun_path must hold the path plus its NUL terminator.
+    if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
+        error = "socket path too long for sun_path (" + std::to_string(path.size()) +
+                " bytes): " + path;
+        return std::nullopt;
+    }
+    return path;
+}
+
+std::optional<SocketIdentity> inspect_socket(const std::string& socket_path, uid_t uid,
+                                             bool allow_missing, bool& missing,
+                                             std::string& error) {
+    struct stat st {};
+    if (::lstat(socket_path.c_str(), &st) != 0) {
+        if (errno == ENOENT && allow_missing) {
+            missing = true;
+            return std::nullopt;
+        }
+        error = "cannot stat " + socket_path + ": " + std::strerror(errno);
+        return std::nullopt;
+    }
+    missing = false;
+    if (allow_missing && st.st_nlink == 0) {
+        missing = true;
+        return std::nullopt;
+    }
+    if (!S_ISSOCK(st.st_mode)) {
+        error = socket_path + " exists and is not a unix socket";
+        return std::nullopt;
+    }
+    if (st.st_uid != uid) {
+        error = socket_path + " is owned by uid " + std::to_string(st.st_uid) + ", not " +
+                std::to_string(uid);
+        return std::nullopt;
+    }
+    if ((st.st_mode & 07777) != 0600) {
+        error = socket_path + " has unsafe permissions; expected mode 0600";
+        return std::nullopt;
+    }
+    if (st.st_nlink != 1) {
+        error = socket_path + " has an unexpected hard-link count";
+        return std::nullopt;
+    }
+    return socket_identity(st);
 }
 
 } // namespace
@@ -55,19 +118,12 @@ std::string runtime_dir(const Environment& env) {
 
 std::optional<std::string> socket_path(const std::string& account, const Environment& env,
                                        std::string& error) {
-    if (!valid_account_name(account)) {
-        error = "invalid account name '" + account + "': use 1-" +
-                std::to_string(kMaxAccountNameLength) + " characters from [A-Za-z0-9_-]";
-        return std::nullopt;
-    }
-    std::string path = runtime_dir(env) + "/" + account + ".sock";
-    // sun_path must hold the path plus its NUL terminator.
-    if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
-        error = "socket path too long for sun_path (" + std::to_string(path.size()) +
-                " bytes): " + path;
-        return std::nullopt;
-    }
-    return path;
+    return endpoint_path(account, env, ".sock", error);
+}
+
+std::optional<std::string> control_socket_path(const std::string& account, const Environment& env,
+                                               std::string& error) {
+    return endpoint_path(account, env, ".ctl", error);
 }
 
 std::string config_file(const Environment& env) {
@@ -90,6 +146,10 @@ bool ensure_private_dir(const std::string& dir, uid_t uid, std::string& error) {
         error = "cannot create " + dir + ": " + std::string(std::strerror(errno));
         return false;
     }
+    return validate_private_dir(dir, uid, error);
+}
+
+bool validate_private_dir(const std::string& dir, uid_t uid, std::string& error) {
     struct stat st {};
     if (lstat(dir.c_str(), &st) != 0) {
         error = "cannot stat " + dir + ": " + std::string(std::strerror(errno));
@@ -109,6 +169,68 @@ bool ensure_private_dir(const std::string& dir, uid_t uid, std::string& error) {
         return false;
     }
     return true;
+}
+
+std::optional<SocketIdentity> inspect_socket_endpoint(const std::string& socket_path, uid_t uid,
+                                                      std::string& error) {
+    bool missing = false;
+    return inspect_socket(socket_path, uid, false, missing, error);
+}
+
+bool find_socket_endpoint(const std::string& socket_path, uid_t uid,
+                          std::optional<SocketIdentity>& identity, std::string& error) {
+    bool missing = false;
+    identity = inspect_socket(socket_path, uid, true, missing, error);
+    return missing || identity.has_value();
+}
+
+bool prepare_socket_endpoint(const std::string& socket_path, uid_t uid, std::string& error) {
+    const auto separator = socket_path.rfind('/');
+    if (separator == std::string::npos || separator == 0) {
+        error = "socket path has no private parent directory: " + socket_path;
+        return false;
+    }
+    if (!ensure_private_dir(socket_path.substr(0, separator), uid, error)) {
+        return false;
+    }
+
+    bool missing = false;
+    const auto existing = inspect_socket(socket_path, uid, true, missing, error);
+    if (missing) {
+        return true;
+    }
+    if (!existing) {
+        return false;
+    }
+    if (::unlink(socket_path.c_str()) != 0) {
+        error = "cannot remove stale socket " + socket_path + ": " + std::strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+bool socket_endpoint_changed(const std::string& socket_path, uid_t uid,
+                             const SocketIdentity& identity, bool& changed, std::string& error) {
+    bool missing = false;
+    const auto current = inspect_socket(socket_path, uid, true, missing, error);
+    if (missing) {
+        changed = true;
+        return true;
+    }
+    if (!current) {
+        return false;
+    }
+    changed = *current != identity;
+    return true;
+}
+
+void unlink_socket_endpoint_if_same(const std::string& socket_path,
+                                    const SocketIdentity& identity) {
+    struct stat st {};
+    if (::lstat(socket_path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode) &&
+        socket_identity(st) == identity) {
+        ::unlink(socket_path.c_str());
+    }
 }
 
 } // namespace tgcli::paths

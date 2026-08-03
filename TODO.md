@@ -33,13 +33,19 @@ before the milestone is closed.
 - [x] `tgcli version` / `tgcli doctor` round-trip through the daemon (tdlib
       version via `getOption("version")`); doctor degrades to local
       diagnostics when the daemon is unreachable
+- [x] Establish the Draft 2020-12 result-only `docs/schemas/manifest.json` and
+      strict result schemas for every M0 result-producing command
 - [x] clang-format + clang-tidy configs
 - [x] macOS portability: peer-uid via getpeereid, accept4/SOCK_CLOEXEC and
       sigtimedwait replacements (Linux-only today; validated by the CI matrix)
 - [x] GitHub Actions: Linux + macOS build/test matrix, ccache + tdlib build cache;
       sanitizer jobs (ASan/UBSan full suite; TSan fake-boundary suite only)
 - [x] Choose license (MIT vs Apache-2.0; must be fine linking BSL-1.0 tdlib)
-- [ ] Review gate: M0 diff vs DESIGN.md
+- [x] Protocol-mismatch restart: verify the daemon lifetime lock, authenticate a
+      version-independent control socket, wait boundedly for old ownership to
+      disappear, then spawn and complete a matching handshake
+- [x] E2E gate exemption: M0 has no authentication; test-DC coverage starts in M1
+- [x] Review gate: M0 diff vs DESIGN.md
 
 ## M1 — Auth & accounts
 
@@ -56,6 +62,9 @@ before the milestone is closed.
 - [ ] `tgcli account add|list|show|use|remove`; per-account state isolation;
       remove is destructive with default server-side logout / `--keep-session`
 - [ ] `tgcli daemon status|stop|restart`; `idle_exit` config
+- [ ] Bootstrap the `TGCLI_TEST_DC=1` E2E harness and nightly job with an auth
+      smoke flow; document unavailable test-DC/Premium states with
+      fake-boundary coverage and explicit skip reasons
 - [ ] Review gate: M1 diff vs DESIGN.md
 
 ## M2 — Read path
@@ -64,8 +73,9 @@ before the milestone is closed.
       ambiguity; integer selectors are always ids; title matching read-tier-only
 - [ ] Output layer: human renderers, `--json`, exit-code mapping, stderr
       discipline; opaque `--cursor` pagination tokens
-- [ ] docs/schemas/ established (mutable until the M7 freeze) for every
-      implemented command; contract tests assert against them from here on
+- [ ] Every new M2 result-producing command adds its result-only manifest entry
+      and strict Draft 2020-12 schema (mutable until the M7 freeze), with
+      contract tests validating actual result data
 - [ ] `tgcli chats` (folders, archived, unread filters, pagination)
 - [ ] `tgcli read` (limits, --before, --since/--until, --topic, --local)
 - [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`
@@ -73,6 +83,7 @@ before the milestone is closed.
 - [ ] `tgcli unread`
 - [ ] `tgcli fetch <chat>` (--limit/--all/--since, resumable, progress frames)
 - [ ] `tgcli chat info`, `tgcli chat members`
+- [ ] Add a supported M2 read-path flow to the test-DC E2E milestone gate
 - [ ] Review gate: M2 diff vs DESIGN.md
 
 ## M3 — Safety & write path
@@ -94,6 +105,7 @@ before the milestone is closed.
       waits for updateMessageSendSucceeded, returns the final message id
 - [ ] `tgcli msg edit|delete|forward|react|pin|unpin`
 - [ ] `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join|leave`
+- [ ] Add a supported M3 write-path flow to the test-DC E2E milestone gate
 - [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
 
 ## M4 — Files & media
@@ -102,6 +114,7 @@ before the milestone is closed.
       unlimited by default, `--timeout` opt-in
 - [ ] `tgcli send --file` uploads (photos/video/voice/documents autodetect), --caption, albums
 - [ ] `TGCLI_MEDIA_DIR` handling
+- [ ] Add a supported M4 media flow to the test-DC E2E milestone gate
 - [ ] Review gate: M4 diff vs DESIGN.md
 
 ## M5 — Streaming
@@ -110,6 +123,7 @@ before the milestone is closed.
 - [ ] `tgcli listen` (--chat, --types, --count, --timeout; NDJSON; planned expiry → exit 0)
 - [ ] `tgcli wait-for` (--chat, --from, --regex, --after for race-free
       send-then-wait — requires --chat, --timeout → exit 7)
+- [ ] Add a supported M5 streaming flow to the test-DC E2E milestone gate
 - [ ] Review gate: M5 diff vs DESIGN.md
 
 ## M6 — Long tail
@@ -120,6 +134,7 @@ before the milestone is closed.
 - [ ] `tgcli chat set-title|set-photo|set-description|invite-link|promote|demote|ban|unban|kick|set-permissions`
 - [ ] `tgcli session list|terminate`
 - [ ] `tgcli storage stats|optimize` (tdlib file-store usage, optimizeStorage)
+- [ ] Add a supported M6 long-tail flow to the test-DC E2E milestone gate
 - [ ] Review gate: M6 diff vs DESIGN.md
 
 ## M7 — Polish & release
@@ -129,8 +144,9 @@ before the milestone is closed.
 - [ ] `tgcli schema <command> [--all]` — runtime dump of curated schemas
 - [ ] Shell completions (bash/zsh/fish), man pages
 - [ ] docs/schemas/ — freeze curated JSON schemas per command
-- [ ] E2E suite against Telegram test DC (`TGCLI_TEST_DC=1`) wired as a
-      nightly job + milestone-gate check (not a per-PR blocker)
+- [ ] Validate the complete M1–M6 test-DC E2E suite at the M7 gate, including
+      fake-boundary coverage and explicit skip reasons for states the test DC
+      or available account capabilities cannot exercise
 - [ ] Static musl Linux binary + macOS universal binary release job
 - [ ] Packaging: AUR, Homebrew; systemd user unit example for `tgcli daemon run`
 - [ ] Review gate: M7 diff vs DESIGN.md

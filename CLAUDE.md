@@ -1,8 +1,8 @@
 # tgcli
 
-Daemon-first Telegram CLI in C++20 on tdlib/td. Currently in design phase:
-DESIGN.md is the authoritative spec, TODO.md is the roadmap (work milestones
-top-down).
+Daemon-first Telegram CLI in C++20 on tdlib/td, under pre-release
+development. DESIGN.md is the authoritative target spec; TODO.md is the
+authoritative implementation status and roadmap (work milestones top-down).
 
 ## Ground rules
 
@@ -22,7 +22,10 @@ top-down).
 - The exit-code table (DESIGN.md §5) and the curated JSON schemas under
   docs/schemas/ are stable contracts; changing them is a design change
   (pre-M7-freeze schema edits are additive-class spec deltas, post-freeze
-  contract-class — REVIEW.md §7).
+  contract-class — REVIEW.md §7). Result schemas use Draft 2020-12, reject
+  undeclared object properties, and have an exact command/file bijection in
+  the result-only `docs/schemas/manifest.json`; commands without results are
+  absent from that manifest.
 - The write gate is fail-closed and evaluated daemon-side. Every
   Telegram-side mutation passes through the single safety chokepoint with a
   statically declared tier (Read/Write/Destructive); no handler bypasses it.
@@ -70,7 +73,11 @@ Tests pin the external contract; they never mirror the implementation.
 - **Golden files** cover human renderers; regenerating them is a deliberate,
   reviewed act, not a reflex on failure.
 - **E2E against the Telegram test DC** (`TGCLI_TEST_DC=1`) is a small
-  curated suite — roughly one flow per feature area. It proves the stack is
-  real end-to-end; branch coverage belongs to contract tests. It runs
-  nightly and at milestone gates, not as a per-PR merge blocker: the test DC
-  is an external, rate-limited, periodically-wiped service (REVIEW.md §4).
+  curated suite proving the stack end-to-end; branch coverage belongs to
+  contract tests. M0 is exempt because it has no auth. M1 establishes the
+  harness, nightly job, and auth smoke; each M2–M6 gate adds a supported
+  feature flow; M7 validates the complete accumulated suite. A required
+  test-DC or Premium-only state that cannot be induced gets fake-boundary
+  coverage and an explicit E2E skip reason. E2E is not a per-PR blocker
+  because the service is external, rate-limited, and periodically wiped
+  (REVIEW.md §4).

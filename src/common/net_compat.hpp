@@ -1,7 +1,12 @@
 #pragma once
 
+#include <cerrno>
+#include <cstring>
 #include <fcntl.h>
+#include <string>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace tgcli::net {
@@ -20,12 +25,28 @@ inline int set_cloexec(int fd) {
     return fd;
 }
 
+// On macOS there is no MSG_NOSIGNAL; SO_NOSIGPIPE on the socket is the
+// equivalent, making writes to a closed peer fail with EPIPE instead of
+// raising SIGPIPE. No-op elsewhere (Linux sends with MSG_NOSIGNAL).
+inline int set_nosigpipe(int fd) {
+#if defined(SO_NOSIGPIPE)
+    if (fd >= 0) {
+        const int one = 1;
+        if (::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) != 0) {
+            ::close(fd);
+            return -1;
+        }
+    }
+#endif
+    return fd;
+}
+
 // socket(2) with the close-on-exec flag set atomically where supported.
 inline int socket_cloexec(int domain, int type, int protocol) {
 #ifdef SOCK_CLOEXEC
-    return ::socket(domain, type | SOCK_CLOEXEC, protocol);
+    return set_nosigpipe(::socket(domain, type | SOCK_CLOEXEC, protocol));
 #else
-    return set_cloexec(::socket(domain, type, protocol));
+    return set_nosigpipe(set_cloexec(::socket(domain, type, protocol)));
 #endif
 }
 
@@ -34,8 +55,39 @@ inline int accept_cloexec(int listen_fd) {
 #if defined(__linux__)
     return ::accept4(listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
 #else
-    return set_cloexec(::accept(listen_fd, nullptr, nullptr));
+    return set_nosigpipe(set_cloexec(::accept(listen_fd, nullptr, nullptr)));
 #endif
+}
+
+// Returns the process at the connected unix-stream peer. This binds an
+// incompatible main-protocol connection to the owner of the bootstrap lock.
+inline bool peer_pid(int fd, pid_t& pid, std::string& error) {
+#if defined(__APPLE__) && defined(LOCAL_PEERPID)
+    socklen_t length = sizeof(pid);
+    if (::getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) != 0 || length != sizeof(pid)) {
+        error = std::string("cannot inspect unix peer pid: ") + std::strerror(errno);
+        return false;
+    }
+#elif defined(__linux__)
+    ucred credentials{};
+    socklen_t length = sizeof(credentials);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) != 0 ||
+        length != sizeof(credentials)) {
+        error = std::string("cannot inspect unix peer pid: ") + std::strerror(errno);
+        return false;
+    }
+    pid = credentials.pid;
+#else
+    (void)fd;
+    (void)pid;
+    error = "unix peer pid inspection is unsupported on this platform";
+    return false;
+#endif
+    if (pid < 1) {
+        error = "unix peer reported an invalid pid";
+        return false;
+    }
+    return true;
 }
 
 // pipe(2) with close-on-exec on both ends. Returns false on failure.

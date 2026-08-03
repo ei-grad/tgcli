@@ -1,15 +1,25 @@
 include(Catch)
 
 add_executable(tgcli_unit_tests
+    daemon_lock_test.cpp
     frame_test.cpp
     paths_test.cpp
     query_registry_test.cpp
     update_bus_test.cpp
     dispatch_test.cpp
     server_test.cpp
+    schema_matcher.cpp
+    schema_test.cpp
+    cli_test.cpp
     td_client_test.cpp)
 target_link_libraries(tgcli_unit_tests
-    PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_core Catch2::Catch2WithMain)
+    PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_cli tgcli_core Td::TdStatic
+        Catch2::Catch2WithMain jsoncons)
+add_dependencies(tgcli_unit_tests tgcli)
+target_compile_definitions(tgcli_unit_tests
+    PRIVATE
+        TGCLI_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/docs/schemas"
+        TGCLI_TEST_BINARY="$<TARGET_FILE:tgcli>")
 
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).

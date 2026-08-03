@@ -1,8 +1,12 @@
 #include "common/paths.hpp"
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
@@ -21,6 +25,24 @@ Environment fake_env() {
     env.home = "/home/user";
     env.uid = 1000;
     return env;
+}
+
+int bind_test_socket(const std::string& socket_path) {
+    const int fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    const mode_t old_umask = ::umask(0177);
+    const int result = ::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+    ::umask(old_umask);
+    if (result != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 } // namespace
@@ -118,5 +140,52 @@ TEST_CASE("ensure_private_dir creates 0700 and rejects tampering", "[paths]") {
         CHECK_FALSE(ensure_private_dir(good, getuid() + 1, error));
         CHECK(error.find("owned by uid") != std::string::npos);
     }
+    std::filesystem::remove_all(base);
+}
+
+TEST_CASE("stale endpoint preparation refuses unexpected files", "[paths][socket-safety]") {
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("tgcli-endpoint-test-" + std::to_string(getpid()));
+    std::filesystem::remove_all(base);
+    std::filesystem::create_directories(base);
+    std::filesystem::permissions(base, std::filesystem::perms::owner_all);
+    const auto endpoint = (base / "main.ctl").string();
+    { std::ofstream(endpoint) << "do not remove"; }
+    std::filesystem::permissions(endpoint, std::filesystem::perms::owner_read |
+                                               std::filesystem::perms::owner_write);
+
+    std::string error;
+    CHECK_FALSE(prepare_socket_endpoint(endpoint, getuid(), error));
+    CHECK(error.find("not a unix socket") != std::string::npos);
+    CHECK(std::filesystem::is_regular_file(endpoint));
+    std::filesystem::remove_all(base);
+}
+
+TEST_CASE("socket replacement is detected and identity cleanup preserves it",
+          "[paths][socket-safety]") {
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("tgcli-replacement-test-" + std::to_string(getpid()));
+    std::filesystem::remove_all(base);
+    std::filesystem::create_directories(base);
+    std::filesystem::permissions(base, std::filesystem::perms::owner_all);
+    const auto endpoint = (base / "main.ctl").string();
+
+    const int old_fd = bind_test_socket(endpoint);
+    REQUIRE(old_fd >= 0);
+    std::string error;
+    const auto old_identity = inspect_socket_endpoint(endpoint, getuid(), error);
+    REQUIRE(old_identity.has_value());
+    REQUIRE(::unlink(endpoint.c_str()) == 0);
+    const int replacement_fd = bind_test_socket(endpoint);
+    REQUIRE(replacement_fd >= 0);
+
+    bool changed = false;
+    REQUIRE(socket_endpoint_changed(endpoint, getuid(), *old_identity, changed, error));
+    CHECK(changed);
+    unlink_socket_endpoint_if_same(endpoint, *old_identity);
+    CHECK(std::filesystem::is_socket(endpoint));
+
+    ::close(old_fd);
+    ::close(replacement_fd);
     std::filesystem::remove_all(base);
 }

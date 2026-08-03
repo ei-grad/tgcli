@@ -1,0 +1,586 @@
+#include "common/daemon_lock.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <charconv>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <string_view>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#if defined(__linux__)
+#include <sys/random.h>
+#elif defined(__APPLE__)
+#include <libproc.h>
+#include <stdlib.h>
+#endif
+
+namespace tgcli::daemon_lock {
+
+namespace {
+
+constexpr std::size_t kMaxRecordBytes = 256;
+constexpr std::size_t kControlTokenBytes = 16;
+
+int open_flags(int base) {
+#ifdef O_NOFOLLOW
+    return base | O_CLOEXEC | O_NOFOLLOW;
+#else
+    return base | O_CLOEXEC;
+#endif
+}
+
+bool validate_lock_file(int fd, uid_t expected_uid, std::string& error) {
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        error = std::string("cannot stat daemon lock: ") + std::strerror(errno);
+        return false;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        error = "daemon lock is not a regular file";
+        return false;
+    }
+    if (st.st_uid != expected_uid) {
+        error = "daemon lock is owned by uid " + std::to_string(st.st_uid) + ", not " +
+                std::to_string(expected_uid);
+        return false;
+    }
+    if ((st.st_mode & 07777) != 0600) {
+        error = "daemon lock has unsafe permissions; expected mode 0600";
+        return false;
+    }
+    if (st.st_nlink != 1) {
+        error = "daemon lock has an unexpected hard-link count";
+        return false;
+    }
+    return true;
+}
+
+bool process_start_token(pid_t pid, std::string& token, std::string& error) {
+#if defined(__linux__)
+    const std::string stat_path = "/proc/" + std::to_string(pid) + "/stat";
+    std::ifstream input(stat_path);
+    std::string data;
+    if (!input || !std::getline(input, data)) {
+        error = "cannot read process identity for pid " + std::to_string(pid);
+        return false;
+    }
+    const auto command_end = data.rfind(')');
+    if (command_end == std::string::npos || command_end + 2 >= data.size()) {
+        error = "malformed process identity for pid " + std::to_string(pid);
+        return false;
+    }
+    std::istringstream fields(data.substr(command_end + 2));
+    std::string value;
+    for (int field = 3; field <= 22; ++field) {
+        if (!(fields >> value)) {
+            error = "incomplete process identity for pid " + std::to_string(pid);
+            return false;
+        }
+        if (field == 22) {
+            if (value.empty() || !std::ranges::all_of(value, [](unsigned char ch) {
+                    return ch >= static_cast<unsigned char>('0') &&
+                           ch <= static_cast<unsigned char>('9');
+                })) {
+                error = "invalid process start time for pid " + std::to_string(pid);
+                return false;
+            }
+            token = "linux:" + value;
+            return true;
+        }
+    }
+#elif defined(__APPLE__)
+    proc_bsdinfo info{};
+    if (::proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) !=
+        static_cast<int>(sizeof(info))) {
+        error = "cannot read process identity for pid " + std::to_string(pid);
+        return false;
+    }
+    token = "macos:" + std::to_string(info.pbi_start_tvsec) + ":" +
+            std::to_string(info.pbi_start_tvusec);
+    return true;
+#else
+    (void)pid;
+    error = "safe daemon process identity is unsupported on this platform";
+    return false;
+#endif
+    error = "cannot determine process identity for pid " + std::to_string(pid);
+    return false;
+}
+
+bool random_control_token(std::string& token, std::string& error) {
+    std::array<unsigned char, kControlTokenBytes> bytes{};
+#if defined(__linux__)
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const ssize_t count = ::getrandom(bytes.data() + offset, bytes.size() - offset, 0);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            error = std::string("cannot generate daemon control token: ") +
+                    (count < 0 ? std::strerror(errno) : "short read");
+            return false;
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+#elif defined(__APPLE__)
+    ::arc4random_buf(bytes.data(), bytes.size());
+#else
+    error = "secure daemon control tokens are unsupported on this platform";
+    return false;
+#endif
+
+    constexpr std::string_view hex = "0123456789abcdef";
+    token.clear();
+    token.reserve(bytes.size() * 2);
+    for (const unsigned char byte : bytes) {
+        token.push_back(hex.at(byte >> 4));
+        token.push_back(hex.at(byte & 0x0f));
+    }
+    return true;
+}
+
+bool parse_canonical_unsigned(std::string_view value, std::uint64_t minimum, std::uint64_t maximum,
+                              std::uint64_t& parsed) {
+    if (value.empty() || (value.size() > 1 && value.front() == '0') ||
+        !std::ranges::all_of(value, [](unsigned char ch) {
+            return ch >= static_cast<unsigned char>('0') && ch <= static_cast<unsigned char>('9');
+        })) {
+        return false;
+    }
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    return result.ec == std::errc{} && result.ptr == value.data() + value.size() &&
+           parsed >= minimum && parsed <= maximum;
+}
+
+bool parse_process_start(std::string_view value) {
+#if defined(__linux__)
+    constexpr std::string_view prefix = "linux:";
+    if (!value.starts_with(prefix)) {
+        return false;
+    }
+    std::uint64_t ticks = 0;
+    return parse_canonical_unsigned(value.substr(prefix.size()), 1,
+                                    std::numeric_limits<std::uint64_t>::max(), ticks);
+#elif defined(__APPLE__)
+    constexpr std::string_view prefix = "macos:";
+    if (!value.starts_with(prefix)) {
+        return false;
+    }
+    value.remove_prefix(prefix.size());
+    const auto separator = value.find(':');
+    if (separator == std::string_view::npos ||
+        value.find(':', separator + 1) != std::string_view::npos) {
+        return false;
+    }
+    std::uint64_t seconds = 0;
+    std::uint64_t microseconds = 0;
+    return parse_canonical_unsigned(value.substr(0, separator), 1,
+                                    std::numeric_limits<std::uint64_t>::max(), seconds) &&
+           parse_canonical_unsigned(value.substr(separator + 1), 0, 999999, microseconds);
+#else
+    (void)value;
+    return false;
+#endif
+}
+
+bool parse_record(std::string_view record, Identity& identity, std::string& error) {
+    const std::string prefix = std::string(kIdentityRecordTag) + " ";
+    if (!record.starts_with(prefix)) {
+        error = "daemon lock identity is malformed";
+        return false;
+    }
+    const std::size_t pid_start = prefix.size();
+    const std::size_t pid_end = record.find(' ', pid_start);
+    const std::size_t process_start = pid_end == std::string_view::npos ? pid_end : pid_end + 1;
+    const std::size_t process_end = record.find(' ', process_start);
+    if (pid_end == std::string_view::npos || process_end == std::string_view::npos) {
+        error = "daemon lock identity is malformed";
+        return false;
+    }
+    const std::size_t token_start = process_end + 1;
+    const std::size_t expected_size = token_start + kControlTokenHexLength + 1;
+    const std::string_view pid_text = record.substr(pid_start, pid_end - pid_start);
+    const std::string_view process_text = record.substr(process_start, process_end - process_start);
+    const std::string_view control_token = record.substr(token_start, kControlTokenHexLength);
+    std::uint64_t parsed_pid = 0;
+    if (record.size() != expected_size || record.back() != '\n' ||
+        !parse_canonical_unsigned(pid_text, 1,
+                                  static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max()),
+                                  parsed_pid) ||
+        !parse_process_start(process_text) ||
+        !std::ranges::all_of(control_token, [](unsigned char ch) {
+            return (ch >= static_cast<unsigned char>('0') &&
+                    ch <= static_cast<unsigned char>('9')) ||
+                   (ch >= static_cast<unsigned char>('a') && ch <= static_cast<unsigned char>('f'));
+        })) {
+        error = "daemon lock identity is malformed";
+        return false;
+    }
+    identity = Identity{static_cast<pid_t>(parsed_pid), std::string(process_text),
+                        std::string(control_token)};
+    return true;
+}
+
+bool read_record(int fd, std::string& record, std::string& error) {
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        error = std::string("cannot stat daemon lock identity: ") + std::strerror(errno);
+        return false;
+    }
+    if (st.st_size <= 0 || static_cast<std::size_t>(st.st_size) > kMaxRecordBytes) {
+        error = "daemon lock identity has an invalid size";
+        return false;
+    }
+    record.assign(static_cast<std::size_t>(st.st_size), '\0');
+    std::size_t offset = 0;
+    while (offset < record.size()) {
+        const ssize_t count =
+            ::pread(fd, record.data() + offset, record.size() - offset, static_cast<off_t>(offset));
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            error = std::string("cannot read daemon lock identity: ") +
+                    (count < 0 ? std::strerror(errno) : "unexpected end of file");
+            return false;
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+    return true;
+}
+
+bool query_kernel_owner(int fd, bool& held, pid_t& owner_pid, std::string& error) {
+    struct flock query {};
+    query.l_type = F_WRLCK;
+    query.l_whence = SEEK_SET;
+    query.l_start = 0;
+    query.l_len = 0;
+    if (::fcntl(fd, F_GETLK, &query) != 0) {
+        error = std::string("cannot inspect daemon lock owner: ") + std::strerror(errno);
+        return false;
+    }
+    if (query.l_type == F_UNLCK) {
+        held = false;
+        owner_pid = -1;
+        return true;
+    }
+    if (query.l_type != F_WRLCK || query.l_pid < 1) {
+        error = "daemon lock has an invalid kernel owner";
+        return false;
+    }
+    held = true;
+    owner_pid = query.l_pid;
+    return true;
+}
+
+OwnerStatus query_owner(int fd, Identity& identity, pid_t& observed_pid, std::string& error) {
+    bool initial_held = false;
+    pid_t initial_owner = -1;
+    if (!query_kernel_owner(fd, initial_held, initial_owner, error)) {
+        return OwnerStatus::Invalid;
+    }
+    if (!initial_held) {
+        observed_pid = -1;
+        error.clear();
+        return OwnerStatus::Released;
+    }
+    observed_pid = initial_owner;
+
+    std::optional<std::string> initial_record;
+    std::string initial_record_error;
+    std::string record_bytes;
+    if (read_record(fd, record_bytes, initial_record_error)) {
+        initial_record = std::move(record_bytes);
+    }
+
+    Identity parsed_identity;
+    const Identity* parsed = nullptr;
+    std::string parse_error;
+    if (initial_record && parse_record(*initial_record, parsed_identity, parse_error)) {
+        parsed = &parsed_identity;
+    }
+
+    std::optional<std::string> live_start;
+    std::string live_start_error;
+    std::string live_start_value;
+    if (parsed != nullptr && parsed->pid == initial_owner &&
+        process_start_token(parsed->pid, live_start_value, live_start_error)) {
+        live_start = std::move(live_start_value);
+    }
+
+    bool final_held = false;
+    pid_t final_owner = -1;
+    if (!query_kernel_owner(fd, final_held, final_owner, error)) {
+        return OwnerStatus::Invalid;
+    }
+
+    std::optional<std::string> final_record;
+    std::string final_record_error;
+    record_bytes.clear();
+    if (read_record(fd, record_bytes, final_record_error)) {
+        final_record = std::move(record_bytes);
+    }
+
+    const auto as_view =
+        [](const std::optional<std::string>& value) -> std::optional<std::string_view> {
+        if (!value) {
+            return std::nullopt;
+        }
+        return *value;
+    };
+    std::string classification_error;
+    const auto status = detail::classify_owner_observation(
+        initial_owner, final_held, final_owner, as_view(initial_record), as_view(final_record),
+        parsed, live_start ? std::optional<std::string_view>(*live_start) : std::nullopt,
+        classification_error);
+    if (status == detail::ObservationStatus::Transition) {
+        if (parsed != nullptr) {
+            identity = std::move(parsed_identity);
+        }
+        error.clear();
+        return OwnerStatus::Transition;
+    }
+    if (status == detail::ObservationStatus::Invalid) {
+        if (!initial_record) {
+            error = initial_record_error;
+        } else if (parsed == nullptr) {
+            error = parse_error;
+        } else if (!live_start && parsed->pid == initial_owner) {
+            error = live_start_error;
+        } else if (!final_record) {
+            error = final_record_error;
+        } else {
+            error = classification_error;
+        }
+        return OwnerStatus::Invalid;
+    }
+    identity = std::move(parsed_identity);
+    error.clear();
+    return OwnerStatus::Held;
+}
+
+bool write_all_at_start(int fd, std::string_view data, std::string& error) {
+    if (::ftruncate(fd, 0) != 0) {
+        error = std::string("cannot truncate daemon lock identity: ") + std::strerror(errno);
+        return false;
+    }
+    std::size_t offset = 0;
+    while (offset < data.size()) {
+        const ssize_t count =
+            ::pwrite(fd, data.data() + offset, data.size() - offset, static_cast<off_t>(offset));
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            error = std::string("cannot write daemon lock identity: ") +
+                    (count < 0 ? std::strerror(errno) : "short write");
+            return false;
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+    return true;
+}
+
+} // namespace
+
+namespace detail {
+
+ObservationStatus classify_owner_observation(pid_t initial_owner, bool final_held,
+                                             pid_t final_owner,
+                                             std::optional<std::string_view> initial_record,
+                                             std::optional<std::string_view> final_record,
+                                             const Identity* parsed_identity,
+                                             std::optional<std::string_view> live_process_start,
+                                             std::string& error) {
+    if (!final_held || final_owner != initial_owner ||
+        initial_record.has_value() != final_record.has_value() ||
+        (initial_record && *initial_record != *final_record)) {
+        error.clear();
+        return ObservationStatus::Transition;
+    }
+    if (initial_owner < 1 || !initial_record || parsed_identity == nullptr || !live_process_start) {
+        error = "daemon lock identity could not be validated against a stable owner";
+        return ObservationStatus::Invalid;
+    }
+    if (parsed_identity->pid != initial_owner) {
+        error = "daemon lock identity does not match its stable kernel owner";
+        return ObservationStatus::Invalid;
+    }
+    if (parsed_identity->process_start != *live_process_start) {
+        error = "daemon lock identity refers to a different stable process instance";
+        return ObservationStatus::Invalid;
+    }
+    error.clear();
+    return ObservationStatus::Stable;
+}
+
+} // namespace detail
+
+OwnerWatch::OwnerWatch(OwnerWatch&& other) noexcept
+    : fd_(other.fd_), identity_(std::move(other.identity_)), observed_pid_(other.observed_pid_) {
+    other.fd_ = -1;
+    other.observed_pid_ = -1;
+}
+
+OwnerWatch& OwnerWatch::operator=(OwnerWatch&& other) noexcept {
+    if (this != &other) {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+        fd_ = other.fd_;
+        identity_ = std::move(other.identity_);
+        observed_pid_ = other.observed_pid_;
+        other.fd_ = -1;
+        other.observed_pid_ = -1;
+    }
+    return *this;
+}
+
+OwnerWatch::~OwnerWatch() {
+    if (fd_ >= 0) {
+        ::close(fd_);
+    }
+}
+
+bool OwnerWatch::owner_released(bool& released, std::string& error) const {
+    if (observed_pid_ < 1) {
+        released = true;
+        return true;
+    }
+    bool held = false;
+    pid_t owner_pid = -1;
+    if (!query_kernel_owner(fd_, held, owner_pid, error)) {
+        return false;
+    }
+    if (!held || owner_pid != observed_pid_) {
+        released = true;
+        return true;
+    }
+    if (identity_.process_start.empty()) {
+        released = false;
+        return true;
+    }
+    std::string live_start;
+    if (!process_start_token(owner_pid, live_start, error)) {
+        bool rechecked_held = false;
+        pid_t rechecked_pid = -1;
+        std::string recheck_error;
+        if (query_kernel_owner(fd_, rechecked_held, rechecked_pid, recheck_error) &&
+            (!rechecked_held || rechecked_pid != observed_pid_)) {
+            error.clear();
+            released = true;
+            return true;
+        }
+        return false;
+    }
+    released = live_start != identity_.process_start;
+    return true;
+}
+
+int acquire(const std::string& lock_path, Identity& identity, std::string& error) {
+    const int fd = ::open(lock_path.c_str(), open_flags(O_RDWR | O_CREAT), 0600);
+    if (fd < 0) {
+        error = "cannot open " + lock_path + ": " + std::strerror(errno);
+        return -1;
+    }
+    if (!validate_lock_file(fd, getuid(), error)) {
+        ::close(fd);
+        return -1;
+    }
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        error = "another tgcli process holds the account lock (" + lock_path + ")";
+        ::close(fd);
+        return -1;
+    }
+
+    struct flock owner_lock {};
+    owner_lock.l_type = F_WRLCK;
+    owner_lock.l_whence = SEEK_SET;
+    owner_lock.l_start = 0;
+    owner_lock.l_len = 0;
+    if (::fcntl(fd, F_SETLK, &owner_lock) != 0) {
+        error = std::string("cannot establish daemon identity lock: ") + std::strerror(errno);
+        ::close(fd);
+        return -1;
+    }
+
+    identity.pid = getpid();
+    if (!process_start_token(identity.pid, identity.process_start, error) ||
+        !random_control_token(identity.control_token, error)) {
+        ::close(fd);
+        return -1;
+    }
+    const std::string record = std::string(kIdentityRecordTag) + " " +
+                               std::to_string(identity.pid) + " " + identity.process_start + " " +
+                               identity.control_token + "\n";
+    if (!write_all_at_start(fd, record, error)) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+bool parse_identity_record(std::string_view record, Identity& identity, std::string& error) {
+    return parse_record(record, identity, error);
+}
+
+bool owner_pid_matches(pid_t record_pid, pid_t kernel_pid, std::string& error) {
+    if (record_pid < 1 || kernel_pid < 1 || record_pid != kernel_pid) {
+        error = "daemon lock identity does not match its kernel owner";
+        return false;
+    }
+    return true;
+}
+
+std::optional<OwnerWatch> verify_owner(const std::string& lock_path, uid_t expected_uid,
+                                       std::string& error) {
+    std::optional<OwnerWatch> owner;
+    const auto status = inspect_owner(lock_path, expected_uid, owner, error);
+    if (status == OwnerStatus::Released) {
+        error = "daemon lock is not held; refusing its recorded identity";
+        owner.reset();
+    } else if (status == OwnerStatus::Transition) {
+        error = "daemon lock ownership changed during verification";
+        owner.reset();
+    }
+    return owner;
+}
+
+OwnerStatus inspect_owner(const std::string& lock_path, uid_t expected_uid,
+                          std::optional<OwnerWatch>& owner, std::string& error) {
+    owner.reset();
+    const int fd = ::open(lock_path.c_str(), open_flags(O_RDWR));
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            error.clear();
+            return OwnerStatus::Released;
+        }
+        error = "cannot open " + lock_path + ": " + std::strerror(errno);
+        return OwnerStatus::Invalid;
+    }
+    if (!validate_lock_file(fd, expected_uid, error)) {
+        ::close(fd);
+        return OwnerStatus::Invalid;
+    }
+
+    Identity identity;
+    pid_t observed_pid = -1;
+    const auto status = query_owner(fd, identity, observed_pid, error);
+    if (status == OwnerStatus::Invalid) {
+        ::close(fd);
+        return OwnerStatus::Invalid;
+    }
+    owner = OwnerWatch(fd, std::move(identity), observed_pid);
+    return status;
+}
+
+} // namespace tgcli::daemon_lock

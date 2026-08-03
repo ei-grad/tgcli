@@ -9,7 +9,8 @@ designed for two audiences at once:
    codes, a sandboxing switch, streaming primitives (`listen`, `wait-for`),
    and non-interactive auth paths.
 
-Status: design phase. Nothing below is implemented yet.
+Status: pre-release development. This document defines the target contract;
+TODO.md is authoritative for current implementation status.
 
 ## 1. Goals and non-goals
 
@@ -261,11 +262,15 @@ Failures print a single error object to **stderr** and set the exit code:
 
 - Result schemas are **curated and stable** per command (documented in
   `docs/schemas/`), not raw td_api dumps; `--full` adds the underlying td_api
-  object under a `raw` key.
+  object under a `raw` key. They use JSON Schema Draft 2020-12 and are listed
+  by command in the result-only `docs/schemas/manifest.json`. The pre-freeze
+  baseline is self-contained (no `$id`, external references, or `format`) and
+  rejects undeclared properties at every object boundary. Commands without a
+  result, such as `daemon run`, do not appear in the manifest.
 - Human output renders the same data — no information exists in one mode that
   the other lacks.
 - Warnings go to stderr (prefixed `warning:` in human mode, NDJSON
-  `{"warning": …}` objects in `--json` mode).
+  `{"warning":"<message>"}` objects in `--json` mode).
 
 ### Exit codes
 
@@ -360,7 +365,7 @@ graph TD
         CMD["commands: one handler per subcommand"]
         SAFE["safety: tier gates, confirm challenges,<br/>dry-run planner, audit, idempotency"]
         RES["resolver: chat/user/link resolution,<br/>ambiguity → candidates"]
-        CORE["core: TdClient<br/>typed td_api requests → futures,<br/>auth FSM, update bus, file transfers"]
+        CORE["core: TdClient<br/>type-erased TdValue requests → futures,<br/>auth FSM, update bus, file transfers"]
         TD["tdlib ClientManager<br/>(own thread)"]
     end
     CLI -- "request frame<br/>(unix socket, JSONL)" --> DISP
@@ -382,12 +387,13 @@ Layer responsibilities:
   requests, subscription multiplexing (many `listen`/`wait-for` clients over
   one update bus).
 - **core (`TdClient`)** — owns the tdlib `ClientManager` receive loop on a
-  dedicated thread. Exposes `send(td_api::object_ptr<Fn>) → future<Result>`
-  with request-id correlation, an update bus (typed subscriptions used by
-  `listen`/`wait-for`/file progress), and the authorization state machine.
-  tdlib object lifecycle and receive-loop rules live entirely here; command
-  handlers construct typed request objects but never touch the
-  ClientManager or the update loop directly.
+  dedicated thread. Its public boundary is
+  `send(TdValue) → future<TdValue>`: `TdValue` is move-only type erasure, so
+  generated td_api types do not enter project headers. Daemon implementation
+  translation units construct typed requests, box them for `send`, and unbox
+  typed replies. The core also owns request-id correlation, the update bus
+  used by `listen`/`wait-for`/file progress, and the authorization state
+  machine. Command handlers never touch the ClientManager or receive loop.
 - **resolver** — selector strings → ids, cached per request; produces the
   `candidates` payload on ambiguity.
 - **safety** — the single chokepoint (§6), evaluated daemon-side. Handlers
@@ -411,10 +417,10 @@ supported.
 
 The huge `td_api.h` header is confined to daemon-side implementation
 translation units — `core/` plus individual command `.cpp` files, which do
-construct typed requests — behind a precompiled header. It never appears in
-public headers or client-side code (cli, output, prompts). This keeps
-incremental builds tolerable without pretending commands could be written
-against a hand-mirrored facade of td_api.
+construct and box typed requests — behind a precompiled header. It never
+appears in public headers or client-side code (cli, output, prompts). This
+keeps incremental builds tolerable without hand-mirroring td_api while the
+type-erased public boundary keeps generated types from leaking across layers.
 
 ## 8. tdlib integration details
 
@@ -447,7 +453,11 @@ against a hand-mirrored facade of td_api.
   `login` can re-authenticate without a respawn.
 - **Request correlation**: `ClientManager::send(client_id, query_id, fn)`;
   `TdClient` hands out monotonic query ids and resolves the matching promise
-  on receive. Updates (query_id 0) go to the update bus.
+  on receive. Updates (query_id 0) go to the update bus. Request reservation
+  and the close transition are ordered under one lifecycle gate: a send
+  admitted first is resolved normally or failed during close, while a send
+  after close begins returns an immediately exceptional future. No request
+  can be reserved after the final pending-query sweep.
 - **Send lifecycle**: tdlib's `sendMessage` returns immediately with a
   message in `messageSendingStatePending` carrying a *temporary local id*;
   the permanent id arrives via `updateMessageSendSucceeded`/`Failed`.
@@ -500,6 +510,7 @@ XDG layout, one subtree per account:
 ~/.config/tgcli/config.toml                    global + per-account config
 ~/.local/share/tgcli/accounts/<name>/tdlib/    tdlib database + files
 ~/.local/state/tgcli/accounts/<name>/          audit.log, idempotency.db, tdlib.log
+$XDG_RUNTIME_DIR/tgcli/<name>.ctl              bootstrap stop socket
 $XDG_RUNTIME_DIR/tgcli/<name>.sock             daemon socket
 ```
 
@@ -509,6 +520,10 @@ the socket falls back to `$TMPDIR/tgcli-<uid>/<name>.sock` (then
 use. Socket paths must fit `sun_path` (~104 bytes); account names are
 length-validated accordingly. `audit.log` and `tdlib.log` rotate by size
 (default 32 MiB, keep 4).
+
+The `.ctl` endpoint and `<account-state-dir>/daemon.lock` form the bootstrap
+compatibility surface described in §10. They are account-scoped even though
+they are not part of the main JSONL protocol.
 
 `config.toml`:
 
@@ -602,6 +617,58 @@ DB open per command), safe concurrent invocations, any number of simultaneous
   authoritative — asks the daemon to shut down gracefully and respawns it
   from the new binary; streams on the old daemon receive a terminal error
   frame. Frames and curated schemas are never mixed across versions.
+- **Frozen bootstrap/control contract.** Main-protocol evolution must not be
+  required to stop an older daemon. This contract starts at the v1
+  pre-release baseline and remains readable and operational across all later
+  main-protocol versions that can be encountered during an in-place upgrade:
+  - the account lifetime file is exactly
+    `<account-state-dir>/daemon.lock`, a non-symlink regular file owned by the
+    current uid, mode `0600`, link count 1. Its one-line ASCII record is
+    `tgcli-lock-v1 <pid> <process-start> <control-token>\n`, with no extra
+    bytes. Every shown space is exactly one ASCII space, and the final byte is
+    exactly one LF. `<pid>` is a canonical positive ASCII decimal PID including
+    1: no sign or leading zero, and its value must fit `pid_t`.
+    `<process-start>` is platform-specific. On Linux it is
+    `linux:<proc-stat-field-22>`, where field 22 is a canonical positive ASCII
+    decimal integer fitting `uint64_t`. On macOS it is
+    `macos:<start-seconds>:<start-microseconds>`; seconds are a canonical
+    positive ASCII decimal integer fitting `uint64_t`, and microseconds are a
+    canonical non-negative ASCII decimal integer from 0 through 999999. A zero
+    value is written only as `0`; every other numeric field has no leading zero.
+    A platform rejects the other platform's process-start form.
+    `<control-token>` is exactly 32 lowercase hexadecimal characters encoding
+    128 random bits;
+  - the daemon holds both a whole-file exclusive `flock` and a whole-file
+    POSIX write lock for its lifetime. A client accepts the record only when
+    the POSIX lock's kernel owner PID, the live process-start value and the
+    record agree. The client keeps that exact lock-file inode open while
+    observing shutdown. Numeric PIDs from this record are never signalled;
+  - the control endpoint is exactly
+    `$XDG_RUNTIME_DIR/tgcli/<account>.ctl` (with §9's runtime fallback), an
+    `AF_UNIX`/`SOCK_DGRAM` filesystem socket in the verified `0700` runtime
+    directory, owned by the current uid, mode `0600`, link count 1. The stop
+    datagram is exactly the record's 32 ASCII token bytes, with no prefix,
+    suffix or newline. A matching datagram requests graceful stop; malformed
+    or non-matching datagrams are ignored and the endpoint sends no reply;
+  - before using this control path, the client also verifies that its
+    connected main-socket peer PID is the verified lock owner and that the
+    main and control path identities have not changed. A missing, malformed,
+    foreign, unlocked or ambiguous bootstrap surface fails closed. Once a
+    target was verified, disappearance or replacement is treated as another
+    client already performing the same restart;
+  - shutdown observation, reconnect/spawn and the replacement Hello share one
+    monotonic deadline. A replacement is usable only after the old lock and
+    both old socket identities disappear and the new daemon completes the
+    current main-protocol handshake.
+
+  Future implementations may add a new bootstrap record/control version but
+  must retain the `tgcli-lock-v1` parser and token-stop behavior until no
+  supported direct upgrade can encounter a daemon that only implements this
+  baseline. Renaming a main Hello or changing its encoding therefore does not
+  remove the shutdown path. Unit coverage accepts and validates PID 1 in the
+  frozen record and owner-matching helpers. An executable daemon-as-PID-1
+  namespace test additionally requires the test host to permit user and PID
+  namespace creation; restricted hosts cannot exercise that kernel path.
 - **Challenge ownership.** A challenge belongs to the request (and client
   connection) that triggered it. `login` additionally takes a per-account
   auth lease: one login flow at a time — a concurrent `login` gets a
@@ -611,11 +678,17 @@ DB open per command), safe concurrent invocations, any number of simultaneous
   current wait state and the next `login` resumes from it. A
   destructive-confirmation challenge dies with its request: a disconnect
   before the answer means nothing is sent.
-- **Shutdown.** On SIGTERM/SIGINT or `daemon stop`: stop accepting requests,
-  send terminal error frames to streaming subscribers, call tdlib `close()`
-  and wait for `authorizationStateClosed` so the database is flushed
-  cleanly, then exit. The systemd user unit uses readiness notification.
-  Active `listen`/`wait-for` subscribers count as activity for `idle_exit`.
+- **Shutdown.** On SIGTERM/SIGINT or `daemon stop`: stop accepting requests;
+  finish every active request with one terminal `DAEMON_SHUTDOWN` error (exit
+  1, details `{"reason":"daemon_shutdown"}`) unless it already emitted its
+  terminal frame; call tdlib `close()` and wait for
+  `authorizationStateClosed` so the database is flushed cleanly; then exit.
+  Admission and shutdown designation are atomic: once a `daemon stop`
+  request is admitted, a racing signal or external stop cannot replace its
+  sole successful `{"stopping":true}` result with the shutdown error, and
+  teardown waits for that terminal before EOF. The systemd user unit uses
+  readiness notification. Active `listen`/`wait-for` subscribers count as
+  activity for `idle_exit`.
 - **Security.** Socket at `$XDG_RUNTIME_DIR/tgcli/<name>.sock` (fallback per
   §9), mode 0600, peer-uid check (`SO_PEERCRED` on Linux,
   `getpeereid()`/`LOCAL_PEERCRED` on macOS). The write gate (§6) is evaluated
@@ -681,7 +754,8 @@ What makes tgcli specifically LLM-agent-friendly:
   contract-change-class PR (REVIEW.md §7): td_api churn can move the typed
   surface and the curated schemas.
 - **Libraries** (FetchContent, permissively licensed): CLI11 (nested
-  subcommands), nlohmann/json, fmt, tomlplusplus, Catch2.
+  subcommands), nlohmann/json, fmt, tomlplusplus, Catch2; tests additionally
+  use jsoncons 1.7.0 at the pinned release commit for Draft 2020-12 validation.
 - **Testing** (policy detailed in CLAUDE.md; tests pin the external
   contract, never the implementation):
   - Contract tests as the default: a command driven through the real
@@ -695,19 +769,24 @@ What makes tgcli specifically LLM-agent-friendly:
   - Golden files for human renderers.
   - E2E: a small opt-in suite (`TGCLI_TEST_DC=1`) against Telegram's **test
     DC** (`use_test_dc`), which provides synthetic phone numbers with fixed
-    login codes — real end-to-end auth/send/read without a real account;
-    roughly one flow per feature area. The test DC is an external,
-    rate-limited, periodically-wiped service, so this suite runs nightly and
-    at milestone gates — not as a per-PR merge blocker (REVIEW.md §4).
+    login codes. M0 is expressly exempt because it has no authentication.
+    M1 bootstraps the harness and nightly job with an auth smoke flow; every
+    M2–M6 milestone gate adds a flow for a feature that milestone supports.
+    M7 validates the already-complete suite for release rather than
+    introducing it. Required states unavailable in the test DC, including
+    Premium-only states, receive fake-boundary contract coverage and an
+    explicit E2E skip reason. The external service is rate-limited and
+    periodically wiped, so E2E is not a per-PR merge blocker (REVIEW.md §4).
 - **Sanitizers**: ASan/UBSan jobs run the full test suite (an uninstrumented
   tdlib is acceptable for those); TSan runs the unit/contract suite against
   the fake td boundary only — meaningful TSan across tdlib's own threads
   would require a second, TSan-instrumented tdlib build (optional nightly).
 - **CI (GitHub Actions)**: Linux + macOS build/test matrix, clang-format and
-  clang-tidy checks, sanitizer jobs as above, tdlib build cache, release job
-  producing a static (musl) Linux binary — OpenSSL/zlib linked statically
-  from pinned sources in the musl toolchain image — and a macOS universal
-  binary assembled from per-arch builds with `lipo`.
+  clang-tidy checks, sanitizer jobs as above, and a tdlib build cache. M7 is
+  planned to add the release job producing a static (musl) Linux binary —
+  OpenSSL/zlib linked statically from pinned sources in the musl toolchain
+  image — and a macOS universal binary assembled from per-arch builds with
+  `lipo`.
 
 ## 14. Roadmap
 
@@ -716,12 +795,14 @@ summary:
 
 - **M0** — scaffold + process model: CMake + presets, deps, CI, tdlib builds;
   auto-spawned daemon, socket protocol skeleton; `tgcli version` / `tgcli
-  doctor` round-trip through the daemon reporting the tdlib version.
+  doctor` round-trip through the daemon reporting the tdlib version; initial
+  result-schema manifest and strict schemas for the M0 result commands.
 - **M1** — auth: challenge/response login over the protocol (phone/QR/bot),
   logout, me, accounts; auth FSM; daemon lifecycle commands
   (status/stop/restart/run, idle_exit).
 - **M2** — read path: chats, read, msg get, search, unread, resolve, fetch;
-  resolver, JSON/human output, exit codes.
+  resolver, JSON/human output, exit codes; every new result-producing command
+  lands with its manifest entry, strict schema, and contract validation.
 - **M3** — safety layer + write path: send/edit/delete/forward/react/
   mark-read/pin, two-phase destructive confirmation over the protocol,
   audit log, idempotency, dry-run.
@@ -730,6 +811,9 @@ summary:
 - **M6** — folders, topics, contacts, chat admin, sessions.
 - **M7** — raw passthrough, shell completions, man pages, packaging (static
   binaries, AUR, Homebrew), docs/schemas freeze → v1.0.
+- **E2E chronology** — M0 is exempt; M1 establishes auth smoke and nightly
+  wiring; each M2–M6 gate adds a supported feature flow; M7 validates the
+  complete accumulated suite.
 - **Post-1.0 ideas**: MCP server mode (`tgcli mcp` over stdio), secret chats,
   scheduled-message management, message translation.
 

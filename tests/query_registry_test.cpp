@@ -1,14 +1,20 @@
 #include "core/query_registry.hpp"
+#include "core/request_lifecycle.hpp"
 
 #include <atomic>
+#include <barrier>
+#include <chrono>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 using tgcli::core::QueryRegistry;
+using tgcli::core::detail::RequestLifecycle;
 
 // Move-only payload mirrors td_api::object_ptr.
 using Payload = std::unique_ptr<int>;
@@ -79,4 +85,34 @@ TEST_CASE("concurrent reserve and fulfill stay consistent", "[core]") {
     }
     CHECK(ok == kThreads * kPerThread);
     CHECK(registry.pending_count() == 0);
+}
+
+TEST_CASE("send and close race leaves no unresolved request", "[core][lifecycle]") {
+    for (int iteration = 0; iteration < 128; ++iteration) {
+        QueryRegistry<Payload> registry;
+        RequestLifecycle<Payload> lifecycle("closed");
+        std::future<Payload> response;
+        std::barrier start(3);
+
+        std::thread sender([&] {
+            start.arrive_and_wait();
+            response = lifecycle.send([&registry] {
+                auto [id, future] = registry.reserve();
+                static_cast<void>(id);
+                return std::move(future);
+            });
+        });
+        std::thread closer([&] {
+            start.arrive_and_wait();
+            lifecycle.begin_close([&registry] { registry.fail_all("closed"); });
+        });
+        start.arrive_and_wait();
+        sender.join();
+        closer.join();
+
+        REQUIRE(response.valid());
+        REQUIRE(response.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
+        CHECK_THROWS_AS(response.get(), std::runtime_error);
+        CHECK(registry.pending_count() == 0);
+    }
 }

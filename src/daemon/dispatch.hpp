@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -16,8 +17,8 @@ namespace tgcli::daemon {
 // dispatcher fails every non-Read command closed.
 enum class Tier { Read, Write, Destructive };
 
-// Where a handler emits its response frames. A terminal call (result or
-// error) ends the request; item/progress may precede it.
+// Where a handler emits its response frames. The first terminal call (result
+// or error) ends the request; concurrent or later frames are suppressed.
 class ResponseSink {
   public:
     ResponseSink() = default;
@@ -27,11 +28,23 @@ class ResponseSink {
     ResponseSink& operator=(ResponseSink&&) = delete;
     virtual ~ResponseSink() = default;
 
-    virtual void item(nlohmann::json data) = 0;
-    virtual void progress(nlohmann::json data) = 0;
-    virtual void result(nlohmann::json data) = 0;
-    virtual void error(std::string code, std::string message, nlohmann::json details,
-                       int exit_code) = 0;
+    void item(nlohmann::json data);
+    void progress(nlohmann::json data);
+    void result(nlohmann::json data);
+    void error(std::string code, std::string message, nlohmann::json details, int exit_code);
+
+    [[nodiscard]] bool has_terminal() const;
+
+  protected:
+    virtual void emit_item(nlohmann::json data) = 0;
+    virtual void emit_progress(nlohmann::json data) = 0;
+    virtual void emit_result(nlohmann::json data) = 0;
+    virtual void emit_error(std::string code, std::string message, nlohmann::json details,
+                            int exit_code) = 0;
+
+  private:
+    mutable std::mutex mutex_;
+    bool terminal_ = false;
 };
 
 // ResponseSink over plain callbacks; used by the in-process --no-daemon mode
@@ -45,21 +58,21 @@ class CallbackSink final : public ResponseSink {
         : on_item_(std::move(on_item)), on_progress_(std::move(on_progress)),
           on_result_(std::move(on_result)), on_error_(std::move(on_error)) {}
 
-    void item(nlohmann::json data) override {
+  private:
+    void emit_item(nlohmann::json data) override {
         on_item_(std::move(data));
     }
-    void progress(nlohmann::json data) override {
+    void emit_progress(nlohmann::json data) override {
         on_progress_(std::move(data));
     }
-    void result(nlohmann::json data) override {
+    void emit_result(nlohmann::json data) override {
         on_result_(std::move(data));
     }
-    void error(std::string code, std::string message, nlohmann::json details,
-               int exit_code) override {
+    void emit_error(std::string code, std::string message, nlohmann::json details,
+                    int exit_code) override {
         on_error_(std::move(code), std::move(message), std::move(details), exit_code);
     }
 
-  private:
     DataFn on_item_;
     DataFn on_progress_;
     DataFn on_result_;

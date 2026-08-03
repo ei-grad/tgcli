@@ -82,6 +82,7 @@ target_link_libraries(tgcli_proto
     PUBLIC tgcli_common nlohmann_json::nlohmann_json)
 
 add_library(tgcli_util STATIC
+    src/common/daemon_lock.cpp
     src/common/paths.cpp)
 target_link_libraries(tgcli_util
     PUBLIC tgcli_common)
@@ -89,7 +90,8 @@ target_link_libraries(tgcli_util
 add_library(tgcli_core STATIC
     src/core/td_client.cpp)
 target_link_libraries(tgcli_core
-    PUBLIC tgcli_common Td::TdStatic)
+    PUBLIC tgcli_common
+    PRIVATE Td::TdStatic)
 target_precompile_headers(tgcli_core PRIVATE <td/telegram/td_api.h>)
 
 add_library(tgcli_daemon STATIC
@@ -114,11 +116,15 @@ target_link_libraries(tgcli
     PRIVATE tgcli_cli tgcli_daemon CLI11::CLI11)
 
 if(TGCLI_BUILD_TESTS)
+    set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "Disable jsoncons upstream tests" FORCE)
+    FetchContent_Declare(jsoncons
+        GIT_REPOSITORY https://github.com/danielaparker/jsoncons
+        GIT_TAG cb54cdc3134a62634466bf7bcd24f1a906f4ef25)
     FetchContent_Declare(catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2
         GIT_TAG v3.8.1
         GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(catch2)
+    FetchContent_MakeAvailable(catch2 jsoncons)
     list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
     enable_testing()
     add_subdirectory(tests)

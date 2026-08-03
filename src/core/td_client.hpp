@@ -1,25 +1,63 @@
 #pragma once
 
-// Daemon-side only: this header carries td_api.h (via Client.h) and must
-// never be included from client-side code (cli, output, prompts) — see the
-// td_api.h invariant in CLAUDE.md.
-
-#include "core/query_registry.hpp"
-#include "core/update_bus.hpp"
-
-#include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <future>
-#include <mutex>
+#include <memory>
 #include <string>
-#include <thread>
-
-#include <td/telegram/Client.h>
-#include <td/telegram/td_api.h>
+#include <utility>
 
 namespace tgcli::core {
+
+// Move-only type erasure keeps generated TDLib types out of project headers.
+// Daemon implementation translation units that use typed TDLib requests box
+// the native pointer and unbox the response; client-side code never sees it.
+class TdValue {
+  public:
+    TdValue() = default;
+    TdValue(const TdValue&) = delete;
+    TdValue& operator=(const TdValue&) = delete;
+    TdValue(TdValue&&) noexcept = default;
+    TdValue& operator=(TdValue&&) noexcept = default;
+    ~TdValue() = default;
+
+    template <typename T> static TdValue from(T value) {
+        TdValue result;
+        result.value_ = std::make_unique<Holder<T>>(std::move(value));
+        return result;
+    }
+
+    template <typename T> [[nodiscard]] T* get_if() {
+        auto* holder = dynamic_cast<Holder<T>*>(value_.get());
+        return holder == nullptr ? nullptr : &holder->value;
+    }
+
+    template <typename T> [[nodiscard]] const T* get_if() const {
+        const auto* holder = dynamic_cast<const Holder<T>*>(value_.get());
+        return holder == nullptr ? nullptr : &holder->value;
+    }
+
+    [[nodiscard]] bool has_value() const {
+        return value_ != nullptr;
+    }
+
+  private:
+    struct ValueBase {
+        ValueBase() = default;
+        ValueBase(const ValueBase&) = delete;
+        ValueBase& operator=(const ValueBase&) = delete;
+        ValueBase(ValueBase&&) = delete;
+        ValueBase& operator=(ValueBase&&) = delete;
+        virtual ~ValueBase() = default;
+    };
+
+    template <typename T> struct Holder final : ValueBase {
+        explicit Holder(T stored) : value(std::move(stored)) {}
+        T value;
+    };
+
+    std::unique_ptr<ValueBase> value_;
+};
 
 // Owns tdlib's ClientManager and its receive loop on a dedicated thread
 // (DESIGN.md §7). tdlib object lifecycle and receive-loop rules live
@@ -27,8 +65,7 @@ namespace tgcli::core {
 // the ClientManager or the update loop directly.
 class TdClient {
   public:
-    using ObjectPtr = td::td_api::object_ptr<td::td_api::Object>;
-    using UpdateHandler = std::function<void(const td::td_api::Object&)>;
+    using UpdateHandler = std::function<void(const TdValue&)>;
 
     TdClient();
     ~TdClient();
@@ -37,9 +74,11 @@ class TdClient {
     TdClient(TdClient&&) = delete;
     TdClient& operator=(TdClient&&) = delete;
 
-    // Thread-safe. The future resolves with the raw response object, which
-    // may be a td_api::error.
-    std::future<ObjectPtr> send(td::td_api::object_ptr<td::td_api::Function> request);
+    // Thread-safe. Native request/response objects stay inside TdValue so
+    // generated TDLib types remain daemon-implementation details. Once
+    // close begins, a valid request returns a ready future that throws
+    // std::runtime_error instead of entering the request registry.
+    std::future<TdValue> send(TdValue request);
 
     // Handlers run on the receive thread under the bus lock: fast, no tdlib
     // calls, no (un)subscribe from within a handler (see UpdateBus).
@@ -55,19 +94,8 @@ class TdClient {
     static std::string tdlib_version();
 
   private:
-    void receive_loop();
-    void handle_update(ObjectPtr update);
-
-    td::ClientManager manager_;
-    std::int32_t client_id_ = 0;
-    QueryRegistry<ObjectPtr> queries_;
-    UpdateBus<td::td_api::Object> updates_;
-    std::atomic<bool> stop_{false};
-    std::mutex closed_mutex_;
-    std::condition_variable closed_cv_;
-    bool closed_ = false;
-    std::once_flag close_once_;
-    std::thread receive_thread_;
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace tgcli::core

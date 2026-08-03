@@ -53,10 +53,15 @@ clang-format, clang-tidy, sanitizers (ASan/UBSan; TSan over the
 fake-boundary suite). A reviewer does not re-litigate what CI proves; a
 reviewer also never waives a red required check.
 
-The e2e test-DC suite is deliberately **not** a per-PR required check — it
-depends on an external, rate-limited, periodically-wiped service. It runs
-nightly and gates milestones: at a milestone review gate a red e2e is
-triaged — a reproducible regression blocks the milestone; a documented
+The E2E test-DC suite is deliberately **not** a per-PR required check — it
+depends on an external, rate-limited, periodically-wiped service. M0 is
+expressly exempt because it has no authentication. M1 must establish the
+harness and nightly job with an auth smoke flow; each M2–M6 milestone gate
+must add a flow for a supported feature. M7 validates the already-complete
+accumulated suite rather than introducing E2E. A required state unavailable
+in the test DC, including a Premium-only state, must have fake-boundary
+contract coverage and an explicit E2E skip reason. At an applicable milestone
+gate, a reproducible E2E regression blocks the milestone; a documented
 infrastructure flake gets a rerun.
 
 ## 5. Code

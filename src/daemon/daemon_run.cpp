@@ -1,5 +1,6 @@
 #include "daemon/daemon_run.hpp"
 
+#include "common/daemon_lock.hpp"
 #include "common/net_compat.hpp"
 #include "common/paths.hpp"
 #include "core/td_client.hpp"
@@ -11,11 +12,9 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
-#include <fcntl.h>
 #include <pthread.h>
 #include <string>
 #include <string_view>
-#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <tgcli/version.hpp>
@@ -25,28 +24,6 @@
 namespace tgcli::daemon {
 
 namespace {
-
-// Exclusive per-account lock: one process owns the tdlib database, whether
-// a daemon or a --no-daemon invocation (DESIGN.md §10). The fd stays open
-// (and the lock held) for the owner's lifetime.
-int acquire_account_lock(const std::string& state_dir, std::string& error) {
-    const std::string lock_path = state_dir + "/daemon.lock";
-    const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (fd < 0) {
-        error = "cannot open " + lock_path + ": " + std::strerror(errno);
-        return -1;
-    }
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        error = "another tgcli process holds the account lock (" + lock_path + ")";
-        ::close(fd);
-        return -1;
-    }
-    const std::string pid = std::to_string(getpid()) + "\n";
-    if (::ftruncate(fd, 0) != 0 || ::write(fd, pid.data(), pid.size()) < 0) {
-        // The pid note is informational; the flock itself is the guarantee.
-    }
-    return fd;
-}
 
 // Minimal sd_notify(READY=1) without libsystemd; a no-op outside systemd.
 void notify_systemd_ready() {
@@ -72,13 +49,19 @@ void notify_systemd_ready() {
 
 struct AccountPaths {
     std::string socket;
+    std::string control_socket;
     std::string state_dir;
+    std::string lock_file;
 };
 
 bool resolve_account_paths(const std::string& account, AccountPaths& out, std::string& error) {
     const auto env = paths::real_environment();
     const auto socket = paths::socket_path(account, env, error);
     if (!socket) {
+        return false;
+    }
+    const auto control_socket = paths::control_socket_path(account, env, error);
+    if (!control_socket) {
         return false;
     }
     if (!paths::ensure_private_dir(paths::runtime_dir(env), env.uid, error)) {
@@ -102,7 +85,9 @@ bool resolve_account_paths(const std::string& account, AccountPaths& out, std::s
         }
     }
     out.socket = *socket;
+    out.control_socket = *control_socket;
     out.state_dir = state_dir;
+    out.lock_file = state_dir + "/daemon.lock";
     return true;
 }
 
@@ -115,7 +100,8 @@ int run_daemon(const std::string& account) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
-    const int lock_fd = acquire_account_lock(account_paths.state_dir, error);
+    daemon_lock::Identity lock_identity;
+    const int lock_fd = daemon_lock::acquire(account_paths.lock_file, lock_identity, error);
     if (lock_fd < 0) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
@@ -143,7 +129,9 @@ int run_daemon(const std::string& account) {
     Dispatcher dispatcher;
     register_commands(dispatcher, context);
 
-    Server server({account_paths.socket, kVersion, proto::kProtocolVersion}, dispatcher);
+    Server server({account_paths.socket, kVersion, proto::kProtocolVersion,
+                   account_paths.control_socket, lock_identity.control_token},
+                  dispatcher);
     context.request_shutdown = [&server] { server.request_stop(); };
 
     if (!server.start(error)) {
@@ -185,13 +173,14 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     if (!resolve_account_paths(account, account_paths, error)) {
         return false;
     }
-    const int lock_fd = acquire_account_lock(account_paths.state_dir, error);
+    daemon_lock::Identity lock_identity;
+    const int lock_fd = daemon_lock::acquire(account_paths.lock_file, lock_identity, error);
     if (lock_fd < 0) {
         return false;
     }
 
-    core::TdClient td;
-
+    // No TdClient instance yet: M0's commands only need the static tdlib
+    // version. The instance appears here once a handler needs live tdlib.
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -203,7 +192,6 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     register_commands(dispatcher, context);
     dispatcher.dispatch(request, sink);
 
-    td.close();
     ::close(lock_fd);
     return true;
 }

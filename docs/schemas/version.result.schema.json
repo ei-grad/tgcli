@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli version result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "protocol", "tdlib"],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "protocol": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tdlib": {
+      "type": "string"
+    }
+  }
+}

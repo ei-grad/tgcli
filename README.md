@@ -11,10 +11,11 @@ tgcli search "release notes" --global --json
 tgcli wait-for --chat @buildbot --regex 'deploy (succeeded|failed)' --timeout 600
 ```
 
-**Status: design phase.** See [DESIGN.md](DESIGN.md) for the full design and
-[TODO.md](TODO.md) for the roadmap. Nothing is implemented yet.
+**Status: pre-release development.** [DESIGN.md](DESIGN.md) defines the target
+contract; [TODO.md](TODO.md) is the authoritative record of what is currently
+implemented and what remains.
 
-## Highlights (planned)
+## Target v1 highlights
 
 - **No cache ceremony** — tdlib's local database serves reads instantly and
   fetches from the server on miss; server-side full-text search included.
