@@ -49,22 +49,80 @@ before the milestone is closed.
 
 ## M1 — Auth & accounts
 
-- [ ] Authorization FSM (`updateAuthorizationState` handling, daemon-side) —
-      all states incl. waitRegistration, waitOtherDeviceConfirmation (QR),
-      waitEmailAddress/waitEmailCode; remote-revocation handling
-- [ ] Challenge/response frames for interactive prompts (phone, code, 2FA password);
-      challenge ownership: per-account auth lease, abort on client disconnect
-- [ ] Config loading (config.toml, XDG paths), `*_cmd` secret hooks,
-      mtime-based reload in the daemon
-- [ ] `tgcli login` (phone/code/2FA via challenges), `--qr`, `--bot-token`;
-      prompts for api_id/api_hash on first run and persists them to config
-- [ ] `tgcli logout` (destructive gate), `tgcli me`, full `tgcli doctor`
-- [ ] `tgcli account add|list|show|use|remove`; per-account state isolation;
-      remove is destructive with default server-side logout / `--keep-session`
-- [ ] `tgcli daemon status|stop|restart`; `idle_exit` config
-- [ ] Bootstrap the `TGCLI_TEST_DC=1` E2E harness and nightly job with an auth
-      smoke flow; document unavailable test-DC/Premium states with
-      fake-boundary coverage and explicit skip reasons
+- [ ] **M1.1 config/bootstrap:** strict loader, 1 MiB bound, one-second idle
+      watcher/two-second publish-or-reject deadline and immutable last-good
+      snapshots; invalid-reload standing-grant deny and config-global current-
+      file reads; cross-process `config.lock`, snapshot-identity CAS and
+      symlink-safe atomic 0600 mutation. Pin query-1 `getAuthorizationState`
+      response-first/update-first sequence behavior, every one of the 14
+      `setTdlibParameters` fields,
+      exact phone/QR/registration settings, deterministic implicit-main
+      materialization, bounded/redacted per-field `*_cmd` fallback, and fully
+      isolated/propagated `TGCLI_TEST_DC=1` roots and parameter identity.
+- [ ] **M1.2 auth core:** source-aware `(client_id, query_id)` correlation,
+      immutable auth snapshots, exhaustive 13-state pinned FSM including
+      `waitPremiumPurchase`, repeated QR updates, ready-loss termination with
+      generic reason, and non-shutdown `Closed` replacement. Lifecycle-owned
+      login/logout/removal/close waiters accept every response/update ordering,
+      resolve their waiter before the unrelated-generation sweep, and preserve
+      exactly one terminal; credential and unknown 400/401/429/5xx mapping is
+      closed and tested.
+- [ ] **M1.3 challenge/login:** challenge identity binds connection/request,
+      client generation, auth sequence, nonce and sequence; same-state updates
+      supersede old input; answer/deadline acceptance is atomic. Cover pre-send
+      disconnect, serialized/orphaned in-flight auth queries, cancellation and
+      one-deadline/one-terminal behavior; phone/code/email/2FA/database-key and
+      registration retry/resume; QR progress and bot hook/no-echo login; reject
+      and redact legacy `--bot-token` plus every env/plain-config token path.
+- [ ] **M1.4 identity/safety:** curated `login`/`me`/`doctor` results; every
+      TDLib send crosses the descriptor chokepoint, with AuthBootstrap's closed
+      function/state allowlist and all other writes still denied. Implement the
+      M1 destructive kernel for `logout`/`account remove` only: authority-source
+      precedence, confirmation/`--yes`, dry-run, exact durable intent/outcome
+      records, correlated logout completion and fail-closed remote uncertainty.
+      Set process-global TDLib logging to ERROR before client creation, keep it
+      below INFO for life, and make `-v` affect tgcli diagnostics only.
+- [ ] **M1.5 accounts/removal:** `account add|list|show|use|remove`, empty-config
+      results, exact duplicate/missing/default-reassignment behavior, target-
+      daemon routing and config/tdlib/state/socket isolation. Default removal
+      versus `--keep-session` uses a global non-deletable audit/tombstone,
+      ordered crash-safe remote/config/data/state/outcome checkpoints, fresh-
+      approval recovery, root identity/CAS validation, and mount/device-
+      boundary refusal; no local deletion precedes remote proof.
+- [ ] **M1.6 daemon/results:** exact auto-spawn/no-spawn matrix and
+      `daemon status|stop|restart|run` absent/running behavior; preserve M0
+      `USAGE {}` for lifecycle `--no-daemon`; one-second config observation and
+      request/challenge/subscription `idle_exit` accounting. Add result-only
+      manifest entries and strict Draft 2020-12 schemas for every exact M1
+      success/error/detail/audit shape, uint64 request IDs, audit checkpoint
+      arrays and `none|possible|confirmed` mutation state while preserving M0
+      objects; keep `raw`/`--full` rejected until M7.
+- [ ] **M1.7 fake-boundary acceptance:** drive all 13 auth states and the closed
+      exact `(function, code, raw message)` credential table; first-query/all-
+      parameter bootstrap in response-first and update-first orders, repeated
+      QR replacement, stale/wrong/duplicate answers, same-state supersession,
+      disconnect/orphan/deadline races, legal lifecycle response/update orders,
+      ready loss and old-generation late responses. Cover hook/config watcher/
+      CAS races, invalid `account show`, destructive authority/audit order,
+      every logout/removal before-send and after-confirm crash checkpoint,
+      audit inspection/clear behavior, mount refusal, account
+      isolation/routing/empty config and daemon spawn/idle boundaries through
+      real dispatch.
+- [ ] **M1.8 test-DC and real-TD sentinel:** `TGCLI_TEST_DC=1` creates and
+      propagates isolated roots/parameters, refuses production state, and runs
+      nightly. Smoke covers add/phone/fixed-code registration, `me`, explicitly
+      granted/confirmed logout and correlated closed/re-login readiness. QR/bot
+      require their named fixtures. Concurrent `-v` auth with sentinel token,
+      codes, password and database key scans stderr, active `tdlib.log` and all
+      rotated logs byte-for-byte and proves TDLib INFO request serialization is
+      absent.
+- [ ] **M1.9 explicit E2E gaps:** every pinned state not deterministically
+      forceable in the test DC has M1.7 coverage and a closed skip reason. Every
+      run publishes `<build-dir>/test-results/tgcli-test-dc-skips.json`, even
+      when empty, with exact sorted entries and only
+      `fixture_missing:qr_approver`, `fixture_missing:bot_token_cmd`, or
+      `test_dc_state_not_forceable:<state>`; a missing artifact or silent/pass-
+      equivalent skip fails the milestone gate.
 - [ ] Review gate: M1 diff vs DESIGN.md
 
 ## M2 — Read path
@@ -94,16 +152,12 @@ before the milestone is closed.
 
 ## M3 — Safety & write path
 
-- [ ] Safety chokepoint: Read/Write/Destructive tiers in static command descriptors,
-      enforced daemon-side
-- [ ] Write gate, default deny: `--allow-write` / `TGCLI_ALLOW_WRITE` /
-      per-account `allow_write` (daemon-enforced, exit 6 without a grant);
-      `TGCLI_ALLOW_WRITE=0` explicit deny overrides all grants; `login`
-      tier-exempt
-- [ ] Two-phase destructive confirmation: challenge frame with resolved target →
-      TTY prompt client-side; `--yes` for scripts; fails closed without a TTY
-- [ ] `--dry-run` planner
-- [ ] Audit log (JSONL per account, size-based rotation, raw-secret redaction)
+- [ ] Extend M1's safety chokepoint from `logout`/`account remove` to every
+      Write/Destructive static descriptor; preserve default deny,
+      `--allow-write` / `TGCLI_ALLOW_WRITE` / standing `allow_write`, and the
+      explicit-deny override while keeping `login` tier-exempt
+- [ ] Extend M1 confirmation, dry-run planning and intent/outcome audit to all
+      M3 writes/destructive commands; preserve secret-field exclusion
 - [ ] `--idempotency-key`: record-then-send store, pending/completed replay
       semantics (pending → exit 1 IDEMPOTENCY_PENDING), payload fingerprint
       check, 7-day expiry; gate checked before the store

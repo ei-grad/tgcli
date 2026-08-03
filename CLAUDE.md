@@ -28,15 +28,35 @@ authoritative implementation status and roadmap (work milestones top-down).
   absent from that manifest.
 - The write gate is fail-closed and evaluated daemon-side. Every
   Telegram-side mutation passes through the single safety chokepoint with a
-  statically declared tier (Read/Write/Destructive); no handler bypasses it.
+  statically declared descriptor (Read/AuthBootstrap/Write/Destructive); no
+  handler bypasses it.
+  M1 activates the minimal authority/confirmation/dry-run/audit kernel only
+  for destructive `logout` and `account remove`; M3 extends it to general
+  writes.
+- AuthBootstrap is a separate grant-exempt descriptor, not a write bypass. It
+  admits only DESIGN.md §6's closed auth-function allowlist for the current
+  client generation, auth state/sequence and owner; every TDLib send crosses
+  that same chokepoint.
+- TDLib process-global logging is set to ERROR before client creation and is
+  never raised to INFO; `-v` changes only tgcli-owned diagnostics. Authentication
+  sentinels must be absent from stderr, active `tdlib.log` and rotated logs.
+- All config mutations hold the cross-process config lock and compare the
+  planned snapshot identity before mutation. Account removal journals intent,
+  ordered checkpoints and outcome in global removals state outside the account
+  roots it can delete, and never crosses a mount/device boundary.
 - td_api.h appears only in daemon-side implementation translation units
   (core/ and individual command .cpp files) — never in public headers or
   client-side code (cli, output, prompts).
 - No bespoke message store: tdlib's database is the cache. tgcli's own
   persistent state is limited to the audit log, the idempotency store,
-  config.toml (which `login` updates with app credentials) and rotated logs.
-- Real secrets (2FA password, DB encryption key) are never accepted via argv
-  and never written to disk by the tool.
+  removal tombstones, config.toml (which `login` updates with app credentials)
+  and rotated logs.
+- Real secrets (2FA password, DB encryption key, bot token) are never accepted
+  via argv or environment and never written to disk by the tool. Bot login is
+  `login --bot` and obtains its token only from `bot_token_cmd` or a no-echo
+  challenge; legacy `--bot-token` is consumed only for redacted rejection.
+- `raw` and `--full` remain rejected reserved syntax through M6; M7 activates
+  them with its explicit schema delta.
 
 ## Build & dev
 
@@ -78,6 +98,10 @@ Tests pin the external contract; they never mirror the implementation.
   harness, nightly job, and auth smoke; each M2–M6 gate adds a supported
   feature flow; M7 validates the complete accumulated suite. A required
   test-DC or Premium-only state that cannot be induced gets fake-boundary
-  coverage and an explicit E2E skip reason. E2E is not a per-PR blocker
+  coverage and an explicit E2E skip reason. Every test-DC run publishes the
+  exact sorted `test-results/tgcli-test-dc-skips.json` artifact, even when it
+  is empty. The real-TD M1 sentinel runs concurrent `-v` authentication and
+  scans stderr, the active TDLib log and every rotated log for each credential
+  byte string. E2E is not a per-PR blocker
   because the service is external, rate-limited, and periodically wiped
   (REVIEW.md §4).
