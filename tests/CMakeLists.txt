@@ -10,6 +10,8 @@ add_executable(tgcli_unit_tests
     config_runtime_test.cpp
     daemon_lock_test.cpp
     dependency_lock_schema_test.cpp
+    destructive_contract_test.cpp
+    destructive_plan_test.cpp
     frame_test.cpp
     paths_test.cpp
     query_registry_test.cpp

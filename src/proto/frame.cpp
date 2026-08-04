@@ -1,9 +1,9 @@
 #include "proto/frame.hpp"
 
+#include "proto/destructive_plan.hpp"
+
 #include <algorithm>
 #include <array>
-#include <cctype>
-#include <charconv>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -69,132 +69,22 @@ bool valid_nonce(const json& value) {
            });
 }
 
-bool valid_account_identity(const json& value) {
-    if (!value.is_string()) {
-        return false;
-    }
-    const auto& account = value.get_ref<const std::string&>();
-    return !account.empty() && account.size() <= 32 &&
-           std::all_of(account.begin(), account.end(), [](char character) {
-               return (character >= 'A' && character <= 'Z') ||
-                      (character >= 'a' && character <= 'z') ||
-                      (character >= '0' && character <= '9') || character == '_' ||
-                      character == '-';
-           });
-}
-
-bool valid_absolute_path(const json& value) {
-    return value.is_string() && !value.get_ref<const std::string&>().empty() &&
-           value.get_ref<const std::string&>().front() == '/';
-}
-
-bool valid_unsigned_decimal(std::string_view value) {
-    if (value.empty() || (value.size() != 1 && value.front() == '0') ||
-        !std::all_of(value.begin(), value.end(),
-                     [](unsigned char character) { return std::isdigit(character) != 0; })) {
-        return false;
-    }
-    std::uint64_t parsed = 0;
-    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
-    return result.ec == std::errc{} && result.ptr == value.data() + value.size();
-}
-
-bool consume_config_identity_field(std::string_view& identity, std::string_view prefix,
-                                   bool final = false) {
-    if (!identity.starts_with(prefix)) {
-        return false;
-    }
-    identity.remove_prefix(prefix.size());
-    const auto separator = identity.find(';');
-    const auto value = final ? identity : identity.substr(0, separator);
-    if ((!final && separator == std::string_view::npos) || !valid_unsigned_decimal(value)) {
-        return false;
-    }
-    identity.remove_prefix(final ? identity.size() : separator + 1);
-    return true;
-}
-
-bool valid_config_identity(const json& value) {
-    if (!value.is_string()) {
-        return false;
-    }
-    std::string_view identity = value.get_ref<const std::string&>();
-    constexpr std::string_view prefix = "sha256:";
-    if (!identity.starts_with(prefix)) {
-        return false;
-    }
-    identity.remove_prefix(prefix.size());
-    const auto hash_end = identity.find(';');
-    if (hash_end != 64 ||
-        !std::all_of(identity.begin(), identity.begin() + static_cast<std::ptrdiff_t>(hash_end),
-                     [](char character) {
-                         return (character >= '0' && character <= '9') ||
-                                (character >= 'a' && character <= 'f');
-                     })) {
-        return false;
-    }
-    identity.remove_prefix(hash_end + 1);
-    return consume_config_identity_field(identity, "dev:") &&
-           consume_config_identity_field(identity, "ino:") &&
-           consume_config_identity_field(identity, "size:") &&
-           consume_config_identity_field(identity, "ctime_ns:", true) && identity.empty();
-}
-
-bool valid_root_identity(const json& value, const json& expected_path) {
-    if (value.is_null()) {
-        return true;
-    }
-    return exact_fields(value, {"path", "device", "inode", "owner"}) &&
-           valid_absolute_path(value["path"]) && value["path"] == expected_path &&
-           value["device"].is_number_unsigned() && value["inode"].is_number_unsigned() &&
-           value["owner"].is_number_unsigned();
-}
-
-bool validate_logout_target(const json& target) {
-    return exact_fields(target, {"operation", "account", "remote_logout", "tdlib_request"}) &&
-           target["operation"] == "logout" && valid_account_identity(target["account"]) &&
-           target["remote_logout"].is_boolean() && target["remote_logout"].get<bool>() &&
-           target["tdlib_request"] == "logOut";
-}
-
-bool validate_account_remove_target(const json& target) {
-    if (!exact_fields(target, {"operation", "account", "remote_logout", "keep_session",
-                               "delete_paths", "config_path", "config_snapshot", "data_root",
-                               "state_root", "reassign_default"}) ||
-        target["operation"] != "account_remove" || !valid_account_identity(target["account"]) ||
-        !target["remote_logout"].is_boolean() || !target["keep_session"].is_boolean() ||
-        target["remote_logout"].get<bool>() == target["keep_session"].get<bool>() ||
-        !target["delete_paths"].is_array() || target["delete_paths"].size() != 2 ||
-        !valid_absolute_path(target["delete_paths"][0]) ||
-        !valid_absolute_path(target["delete_paths"][1]) ||
-        !valid_absolute_path(target["config_path"]) ||
-        !valid_config_identity(target["config_snapshot"]) ||
-        !valid_root_identity(target["data_root"], target["delete_paths"][0]) ||
-        !valid_root_identity(target["state_root"], target["delete_paths"][1])) {
-        return false;
-    }
-    const auto& reassignment = target["reassign_default"];
-    return reassignment.is_null() ||
-           (valid_account_identity(reassignment) && reassignment != target["account"]);
-}
-
 bool validate_destructive_details(const json& details, std::string& error) {
     if (!exact_fields(details, {"action", "target"}) || !details["action"].is_string() ||
         !details["target"].is_object()) {
         error = "challenge: invalid destructive_confirmation details";
         return false;
     }
+    std::string plan_error;
+    const auto plan = parse_destructive_plan(details["target"], plan_error);
     const auto& action = details["action"].get_ref<const std::string&>();
-    bool valid = false;
-    if (action == "logout") {
-        valid = validate_logout_target(details["target"]);
-    } else if (action == "account_remove") {
-        valid = validate_account_remove_target(details["target"]);
-    }
-    if (!valid) {
+    const bool matches =
+        plan && ((action == "logout" && std::holds_alternative<LogoutPlan>(*plan)) ||
+                 (action == "account_remove" && std::holds_alternative<AccountRemovePlan>(*plan)));
+    if (!matches) {
         error = "challenge: invalid destructive_confirmation target";
     }
-    return valid;
+    return matches;
 }
 
 bool validate_challenge_details(ChallengeKind kind, const json& details, std::string& error) {

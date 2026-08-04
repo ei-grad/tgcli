@@ -94,6 +94,7 @@ target_compile_options(tgcli_common INTERFACE
     $<$<BOOL:${TGCLI_WERROR}>:-Werror>)
 
 add_library(tgcli_proto STATIC
+    src/proto/destructive_plan.cpp
     src/proto/frame.cpp
     src/proto/frame_io.cpp)
 target_link_libraries(tgcli_proto
@@ -107,6 +108,7 @@ add_library(tgcli_util STATIC
 target_link_libraries(tgcli_util
     PUBLIC tgcli_common
     PRIVATE tomlplusplus::tomlplusplus)
+target_link_libraries(tgcli_proto PRIVATE tgcli_util)
 
 add_library(tgcli_td_runtime STATIC
     src/core/td_runtime.cpp)
@@ -125,6 +127,7 @@ target_link_libraries(tgcli_core
 add_library(tgcli_daemon STATIC
     src/daemon/activity_tracker.cpp
     src/daemon/config_runtime.cpp
+    src/daemon/destructive_contract.cpp
     src/daemon/dispatch.cpp
     src/daemon/request_session.cpp
     src/daemon/account_commands.cpp
