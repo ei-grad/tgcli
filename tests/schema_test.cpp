@@ -65,6 +65,12 @@ std::vector<SchemaCase> schema_cases() {
          {{"items", json::array({json{{"name", "main"}, {"default", true}}})}, {"next", nullptr}},
          "items",
          true},
+        {"account-remove.result.schema.json",
+         {{"account", "work"},
+          {"removed", true},
+          {"remote_logout", "confirmed"},
+          {"default_account", "main"}},
+         "account"},
         {"account-show.result.schema.json",
          {{"account", "main"},
           {"default", true},
@@ -175,6 +181,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                         {"commands",
                          {{"account add", {{"result", "account-add.result.schema.json"}}},
                           {"account list", {{"result", "account-list.result.schema.json"}}},
+                          {"account remove", {{"result", "account-remove.result.schema.json"}}},
                           {"account show", {{"result", "account-show.result.schema.json"}}},
                           {"account use", {{"result", "account-use.result.schema.json"}}},
                           {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
@@ -186,7 +193,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                           {"me", {{"result", "me.result.schema.json"}}},
                           {"version", {{"result", "version.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 12);
+    CHECK(manifest["commands"].size() == 13);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -294,4 +301,123 @@ TEST_CASE("result schemas reject missing required and unknown properties", "[sch
     show_paths_unknown["paths"]["unexpected"] = true;
     CHECK_THAT(show_paths_unknown,
                !tgcli::test::matches_json_schema("account-show.result.schema.json"));
+}
+
+TEST_CASE("account removal schema accepts only the exact dry-run plan", "[schema][removal]") {
+    const json dry{
+        {"dry_run", true},
+        {"plan",
+         {{"operation", "account_remove"},
+          {"account", "work"},
+          {"remote_logout", true},
+          {"keep_session", false},
+          {"delete_paths", json::array({"/data/work", "/state/work"})},
+          {"config_path", "/config/tgcli/config.toml"},
+          {"config_snapshot",
+           "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;"
+           "dev:1;ino:2;size:3;ctime_ns:4"},
+          {"data_root", nullptr},
+          {"state_root", {{"path", "/state/work"}, {"device", 1}, {"inode", 2}, {"owner", 1000}}},
+          {"reassign_default", "main"}}}};
+    CHECK_THAT(dry, tgcli::test::matches_json_schema("account-remove.result.schema.json"));
+
+    auto extra = dry;
+    extra["plan"]["unexpected"] = true;
+    CHECK_THAT(extra, !tgcli::test::matches_json_schema("account-remove.result.schema.json"));
+    auto wrong_policy = dry;
+    wrong_policy["plan"]["remote_logout"] = false;
+    CHECK_THAT(wrong_policy,
+               !tgcli::test::matches_json_schema("account-remove.result.schema.json"));
+
+    auto keep_session = dry;
+    keep_session["plan"]["remote_logout"] = false;
+    keep_session["plan"]["keep_session"] = true;
+    CHECK_THAT(keep_session, tgcli::test::matches_json_schema("account-remove.result.schema.json"));
+}
+
+TEST_CASE("account removal failures match the closed account error schema", "[schema][removal]") {
+    const json plan{{"operation", "account_remove"},
+                    {"account", "work"},
+                    {"remote_logout", true},
+                    {"keep_session", false},
+                    {"delete_paths", json::array({"/data/work", "/state/work"})},
+                    {"config_path", "/config/tgcli/config.toml"},
+                    {"config_snapshot", "snapshot"},
+                    {"data_root", nullptr},
+                    {"state_root", nullptr},
+                    {"reassign_default", "main"}};
+    const std::vector<json> errors{
+        {{"error",
+          {{"code", "DEFAULT_REASSIGNMENT_REQUIRED"},
+           {"message", "replacement required"},
+           {"details", {{"account", "work"}, {"candidates", json::array({"main"})}}}}}},
+        {{"error",
+          {{"code", "ACCOUNT_MISMATCH"},
+           {"message", "account mismatch"},
+           {"details", {{"requested_account", "work"}, {"daemon_account", "main"}}}}}},
+        {{"error",
+          {{"code", "WRITE_DENIED"},
+           {"message", "write denied"},
+           {"details", {{"account", "work"}, {"reason", "no_grant"}}}}}},
+        {{"error",
+          {{"code", "CONFIRMATION_REQUIRED"},
+           {"message", "confirmation required"},
+           {"details", {{"account", "work"}, {"action", "account_remove"}, {"target", plan}}}}}},
+        {{"error",
+          {{"code", "AUDIT_UNAVAILABLE"},
+           {"message", "audit unavailable"},
+           {"details", {{"account", "work"}, {"path", "/audit"}, {"reason", "sync_failed"}}}}}},
+        {{"error",
+          {{"code", "REMOTE_LOGOUT_UNCONFIRMED"},
+           {"message", "remote state unproven"},
+           {"details", {{"account", "work"}, {"state", "closing"}, {"reason", "timeout"}}}}}},
+        {{"error",
+          {{"code", "LOCAL_CLEANUP_FAILED"},
+           {"message", "cleanup failed"},
+           {"details",
+            {{"account", "work"},
+             {"reason", "path_changed"},
+             {"removed", json::array()},
+             {"retained", json::array({"/data/work", "/state/work"})}}}}}},
+        {{"error",
+          {{"code", "REMOVAL_INCOMPLETE"},
+           {"message", "retry required"},
+           {"details",
+            {{"account", "work"},
+             {"path", "/removals/0011.json"},
+             {"invocation_id", "00112233445566778899aabbccddeeff"},
+             {"stage", "intent_synced"},
+             {"completed_stages", json::array({"planned", "intent_synced"})},
+             {"reason", "prior_crash"}}}}}},
+        {{"error",
+          {{"code", "RATE_LIMITED"},
+           {"message", "rate limited"},
+           {"details",
+            {{"operation", "account_remove"}, {"tdlib_code", 429}, {"retry_after", 3}}}}}},
+        {{"error",
+          {{"code", "TDLIB_ERROR"},
+           {"message", "tdlib error"},
+           {"details", {{"operation", "account_remove"}, {"tdlib_code", 500}}}}}},
+        {{"error",
+          {{"code", "TIMEOUT"},
+           {"message", "timed out"},
+           {"details", {{"operation", "account_remove"}, {"state", "unknown"}}}}}},
+        {{"error",
+          {{"code", "DAEMON_SHUTDOWN"},
+           {"message", "daemon shutdown"},
+           {"details", {{"reason", "daemon_shutdown"}}}}}},
+        {{"error",
+          {{"code", "INTERNAL"},
+           {"message", "internal"},
+           {"details", {{"operation", "account_remove"}, {"reason", "internal_error"}}}}}},
+    };
+
+    for (const auto& error : errors) {
+        INFO(error.dump());
+        CHECK_THAT(error, tgcli::test::matches_json_schema("account.error.schema.json"));
+    }
+
+    auto wrong_plan_policy = errors.at(3);
+    wrong_plan_policy["error"]["details"]["target"]["remote_logout"] = false;
+    CHECK_THAT(wrong_plan_policy, !tgcli::test::matches_json_schema("account.error.schema.json"));
 }

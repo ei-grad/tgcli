@@ -126,11 +126,17 @@ target_link_libraries(tgcli_core
     PRIVATE tgcli_td_runtime)
 
 add_library(tgcli_daemon STATIC
+    src/daemon/account_removal.cpp
+    src/daemon/account_removal_remote.cpp
     src/daemon/activity_tracker.cpp
     src/daemon/config_runtime.cpp
     src/daemon/destructive_contract.cpp
     src/daemon/logout_audit.cpp
     src/daemon/logout_commands.cpp
+    src/daemon/removal_filesystem.cpp
+    src/daemon/removal_journal.cpp
+    src/daemon/removal_planner.cpp
+    src/daemon/removal_recovery.cpp
     src/daemon/dispatch.cpp
     src/daemon/request_session.cpp
     src/daemon/account_commands.cpp

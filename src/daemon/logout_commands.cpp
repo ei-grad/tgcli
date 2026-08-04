@@ -203,6 +203,39 @@ int terminal_exit(std::string_view code) {
 
 } // namespace
 
+core::TdClosedDecision
+LogoutLifecycle::begin(core::TdClient& client,
+                       const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                       RequestSession& session, std::function<void()> during_terminal_claim) {
+    return client.begin_logout_decision(
+        authorization, [&session, during_terminal_claim = std::move(during_terminal_claim)](
+                           std::chrono::steady_clock::time_point committed_at) {
+            if (during_terminal_claim) {
+                during_terminal_claim();
+            }
+            switch (session.claim_audited_terminal_event(committed_at)) {
+            case AuditedTerminalStatus::Designated:
+                return core::TdLifecycleClaimStatus::Active;
+            case AuditedTerminalStatus::Disconnected:
+                return core::TdLifecycleClaimStatus::Disconnected;
+            case AuditedTerminalStatus::Shutdown:
+                return core::TdLifecycleClaimStatus::Shutdown;
+            case AuditedTerminalStatus::TimedOut:
+                return core::TdLifecycleClaimStatus::TimedOut;
+            case AuditedTerminalStatus::ProtocolError:
+                return core::TdLifecycleClaimStatus::Rejected;
+            }
+            return core::TdLifecycleClaimStatus::Rejected;
+        });
+}
+
+std::future<core::TdValue>
+LogoutLifecycle::send(core::TdClient& client,
+                      const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                      core::TdClosedDecision& decision) {
+    return client.send_logout(authorization, decision);
+}
+
 LogoutCoordinator::LogoutCoordinator(core::TdClient& client, ConfigRuntime& config_runtime,
                                      paths::Environment environment, std::string account,
                                      std::string config_path,
@@ -714,31 +747,16 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
     AuditedDispatchStatus dispatch_status = AuditedDispatchStatus::ProtocolError;
     try {
         dispatch_status = session.dispatch_audited([&] {
-            auto decision = client_.begin_logout_decision(
-                starting, [this, &session](std::chrono::steady_clock::time_point committed_at) {
-                    if (hooks_ && hooks_->during_terminal_claim) {
-                        hooks_->during_terminal_claim();
-                    }
-                    switch (session.claim_audited_terminal_event(committed_at)) {
-                    case AuditedTerminalStatus::Designated:
-                        return core::TdLifecycleClaimStatus::Active;
-                    case AuditedTerminalStatus::Disconnected:
-                        return core::TdLifecycleClaimStatus::Disconnected;
-                    case AuditedTerminalStatus::Shutdown:
-                        return core::TdLifecycleClaimStatus::Shutdown;
-                    case AuditedTerminalStatus::TimedOut:
-                        return core::TdLifecycleClaimStatus::TimedOut;
-                    case AuditedTerminalStatus::ProtocolError:
-                        return core::TdLifecycleClaimStatus::Rejected;
-                    }
-                    return core::TdLifecycleClaimStatus::Rejected;
-                });
+            auto decision = LogoutLifecycle::begin(client_, starting, session,
+                                                   hooks_ ? hooks_->during_terminal_claim
+                                                          : std::function<void()>{});
             if (decision) {
                 closed_decision.emplace(std::move(decision));
                 if (hooks_ && hooks_->before_send) {
                     hooks_->before_send();
                 }
-                dispatched_response.emplace(client_.send_logout(starting, *closed_decision));
+                dispatched_response.emplace(
+                    LogoutLifecycle::send(client_, starting, *closed_decision));
             }
         });
     } catch (const std::exception&) {

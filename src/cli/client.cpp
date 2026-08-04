@@ -13,6 +13,8 @@
 #include "daemon/account_commands.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/logout_audit.hpp"
+#include "daemon/removal_journal.hpp"
+#include "daemon/removal_recovery.hpp"
 #include "daemon/request_session.hpp"
 #include "proto/destructive_plan.hpp"
 #include "proto/frame_io.hpp"
@@ -1221,7 +1223,8 @@ int run_config_global(const proto::Request& request, const RunOptions& options,
                       ChallengePrompt& prompt) {
     const auto env = paths::real_environment();
     const config::Store store(paths::config_file(env), env.uid);
-    const daemon::ConfigGlobalContext context{store, env};
+    daemon::RemovalJournal journal(paths::removals_state_dir(env), env.uid);
+    const daemon::ConfigGlobalContext context{store, env, &journal};
     daemon::Dispatcher dispatcher;
     daemon::register_account_commands(dispatcher, context);
 
@@ -1279,6 +1282,29 @@ int run_logout_dry_run(const proto::Request& request, const RunOptions& options)
     FrameRenderer renderer("logout", options.json);
     renderer.on_result({{"dry_run", true}, {"plan", proto::serialize(*plan)}});
     return renderer.exit_code();
+}
+
+int run_local_account_removal(const proto::Request& request, const RunOptions& options,
+                              ChallengePrompt& prompt) {
+    FrameRenderer renderer(command_key(request.command), options.json);
+    InProcessSink sink(renderer, prompt, request.context.tty);
+    std::string error;
+    if (!daemon::run_account_removal_local(request, sink, options.account, error)) {
+        print_error("GENERIC", error, json::object());
+        return kGeneric;
+    }
+    return renderer.exit_code();
+}
+
+bool can_fallback_to_local_removal_recovery(const proto::Request& request,
+                                            const paths::Environment& environment) {
+    if (request.command != std::vector<std::string>{"account", "remove"}) {
+        return false;
+    }
+    const daemon::RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+    const auto inspection = journal.inspect_account(request.account);
+    return inspection.status == daemon::RemovalInspectionStatus::Incomplete &&
+           inspection.tombstone && daemon::can_resume_removal_without_tdlib(*inspection.tombstone);
 }
 
 std::optional<Deadline> daemon_control_deadline(const proto::Request& request,
@@ -1563,8 +1589,14 @@ int run_daemon_control(const proto::Request& request, const RunOptions& options)
     return run_daemon_restart(options, env, *socket_path, *deadline);
 }
 
-int report_connect_failure(const RunOptions& options, const std::string& socket_path,
+int report_connect_failure(const proto::Request& request, const RunOptions& options,
+                           ChallengePrompt& prompt, bool account_removal,
+                           bool local_removal_recovery, const std::string& socket_path,
                            ConnectStatus connect_status, const std::string& error, bool is_doctor) {
+    if (account_removal && request.args.is_object() &&
+        (request.args.value("keep_session", false) || local_removal_recovery)) {
+        return run_local_account_removal(request, options, prompt);
+    }
     if (is_doctor) {
         return run_local_doctor(options.account, socket_path, options.json, error);
     }
@@ -1579,31 +1611,38 @@ int report_connect_failure(const RunOptions& options, const std::string& socket_
 
 int run_routed_command(const proto::Request& request, const RunOptions& options,
                        ChallengePrompt& prompt) {
-    const auto env = paths::real_environment();
+    const auto environment = paths::real_environment();
+    const bool account_removal = request.command == std::vector<std::string>{"account", "remove"};
     std::string error;
-    const auto socket_path = paths::socket_path(options.account, env, error);
+    const auto socket_path = paths::socket_path(options.account, environment, error);
     if (!socket_path) {
         print_error("USAGE", error, json::object());
         return kUsage;
     }
-    if (!paths::ensure_private_dir(paths::runtime_dir(env), env.uid, error)) {
+    // The client verifies the socket directory just like the daemon does
+    // (DESIGN.md §9): on the /tmp fallback a foreign-uid directory could
+    // otherwise plant an imposter socket the client would happily talk to.
+    if (!paths::ensure_private_dir(paths::runtime_dir(environment), environment.uid, error)) {
         print_error("GENERIC", error, json::object());
         return kGeneric;
     }
-    const std::string requested_command = command_key(request.command);
-    const bool is_doctor = requested_command == "doctor";
+    const bool is_doctor = command_key(request.command) == "doctor";
     const Deadline deadline = std::chrono::steady_clock::now() + options.restart_timeout;
+    const bool local_removal_recovery =
+        account_removal && can_fallback_to_local_removal_recovery(request, environment);
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         Session session;
         {
             ConnectStatus connect_status = ConnectStatus::Failed;
             auto connected =
-                connect_with_spawn(options.account, *socket_path, env.uid, options.auto_spawn,
+                connect_with_spawn(options.account, *socket_path, environment.uid,
+                                   options.auto_spawn && !local_removal_recovery,
                                    options.daemon_executable, deadline, connect_status, error);
             if (!connected) {
-                return report_connect_failure(options, *socket_path, connect_status, error,
-                                              is_doctor);
+                return report_connect_failure(request, options, prompt, account_removal,
+                                              local_removal_recovery, *socket_path, connect_status,
+                                              error, is_doctor);
             }
             session.fd = connected->fd;
             session.socket_identity = connected->identity;
@@ -1614,9 +1653,9 @@ int run_routed_command(const proto::Request& request, const RunOptions& options,
         case HandshakeOutcome::Failed: {
             const std::string handshake_error = error;
             if (attempt == 0 &&
-                wait_for_socket_change(*socket_path, env.uid, session.socket_identity, deadline,
-                                       "timed out waiting for failed daemon socket to change",
-                                       error)) {
+                wait_for_socket_change(
+                    *socket_path, environment.uid, session.socket_identity, deadline,
+                    "timed out waiting for failed daemon socket to change", error)) {
                 continue;
             }
             error = handshake_error;
@@ -1641,8 +1680,8 @@ int run_routed_command(const proto::Request& request, const RunOptions& options,
             break;
         }
 
-        if (!recover_mismatched_daemon(handshake_result.outcome, options.account, env, *socket_path,
-                                       session, reader, deadline, error)) {
+        if (!recover_mismatched_daemon(handshake_result.outcome, options.account, environment,
+                                       *socket_path, session, reader, deadline, error)) {
             print_error("GENERIC", error, json::object());
             return kGeneric;
         }
@@ -1675,6 +1714,10 @@ int run_command(const proto::Request& request, const RunOptions& options) {
     ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
     if (request.command == std::vector<std::string>{"logout"} && request.context.dry_run) {
         return run_logout_dry_run(request, options);
+    }
+    const bool account_removal = request.command == std::vector<std::string>{"account", "remove"};
+    if (account_removal && request.context.dry_run) {
+        return run_local_account_removal(request, options, prompt);
     }
     if (is_config_global_command(request.command)) {
         return run_config_global(request, options, prompt);

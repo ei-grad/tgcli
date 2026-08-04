@@ -172,6 +172,114 @@ TEST_CASE("config load distinguishes missing valid and invalid TOML", "[config]"
     CHECK(loaded.error->reason == ConfigReason::TypeError);
 }
 
+TEST_CASE("config removal callbacks remain inside one locked durable transaction",
+          "[config][removal][process]") {
+    const TempConfig temp;
+    temp.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n"
+               "[accounts.work]\nallow_write = false\n");
+    const Store store(temp.file());
+    const auto planned = store.load();
+    REQUIRE(planned);
+
+    std::promise<void> post_commit_entered;
+    auto entered = post_commit_entered.get_future();
+    std::promise<void> release_post_commit;
+    const auto release = release_post_commit.get_future().share();
+    std::atomic<bool> pre_commit_called = false;
+    std::atomic<bool> post_commit_called = false;
+    MutationControl control;
+    control.pre_commit = [&] {
+        pre_commit_called.store(true);
+        return true;
+    };
+    control.post_commit = [&] {
+        post_commit_called.store(true);
+        post_commit_entered.set_value();
+        return release.wait_for(5s) == std::future_status::ready;
+    };
+
+    MutationResult removed;
+    std::thread remover([&] {
+        removed = store.remove_account(planned.snapshot->identity, "work", std::nullopt, control);
+    });
+    REQUIRE(entered.wait_for(5s) == std::future_status::ready);
+
+    MutationControl competing_control;
+    competing_control.deadline = std::chrono::steady_clock::now() + 30ms;
+    const auto competing = store.use_account(planned.snapshot->identity, "main", competing_control);
+    CHECK(competing.status == MutationStatus::TimedOut);
+    release_post_commit.set_value();
+    remover.join();
+
+    CHECK(pre_commit_called.load());
+    CHECK(post_commit_called.load());
+    REQUIRE(removed.status == MutationStatus::Applied);
+    REQUIRE(removed.snapshot);
+    CHECK_FALSE(removed.snapshot->accounts.contains("work"));
+}
+
+TEST_CASE("post-commit failure reports durable config uncertainty without rollback",
+          "[config][removal]") {
+    const TempConfig temp;
+    temp.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n"
+               "[accounts.work]\nallow_write = false\n");
+    const Store store(temp.file());
+    const auto planned = store.load();
+    REQUIRE(planned);
+
+    MutationControl control;
+    control.pre_commit = [] { return true; };
+    control.post_commit = [] { return false; };
+    const auto removed =
+        store.remove_account(planned.snapshot->identity, "work", std::nullopt, control);
+    CHECK(removed.status == MutationStatus::DurabilityUnknown);
+    REQUIRE(removed.snapshot);
+    CHECK_FALSE(removed.snapshot->accounts.contains("work"));
+    REQUIRE(removed.error);
+    CHECK(removed.error->reason == ConfigReason::SyncError);
+
+    const auto current = store.load();
+    REQUIRE(current);
+    CHECK_FALSE(current.snapshot->accounts.contains("work"));
+}
+
+TEST_CASE("removal recovery can recognize an already committed snapshot under the same lock",
+          "[config][removal]") {
+    const TempConfig temp;
+    temp.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n"
+               "[accounts.work]\nallow_write = false\n");
+    const Store store(temp.file());
+    const auto planned = store.load();
+    REQUIRE(planned);
+    const auto first = store.remove_account(planned.snapshot->identity, "work", std::nullopt);
+    REQUIRE(first.status == MutationStatus::Applied);
+
+    bool recognized = false;
+    bool pre_commit_called = false;
+    bool post_commit_called = false;
+    MutationControl recovery;
+    recovery.pre_commit = [&] {
+        pre_commit_called = true;
+        return false;
+    };
+    recovery.already_committed_admission = [&](const ConfigSnapshot& current) {
+        recognized = !current.accounts.contains("work") && current.default_account == "main";
+        return recognized;
+    };
+    recovery.post_commit = [&] {
+        post_commit_called = true;
+        return true;
+    };
+    const auto resumed =
+        store.remove_account(planned.snapshot->identity, "work", std::nullopt, recovery);
+    CHECK(resumed.status == MutationStatus::Applied);
+    CHECK(recognized);
+    CHECK_FALSE(pre_commit_called);
+    CHECK(post_commit_called);
+    REQUIRE(resumed.snapshot);
+    CHECK(resumed.snapshot->identity == first.snapshot->identity);
+}
+
 TEST_CASE("known config fields are strict and secret plain values are rejected", "[config]") {
     const TempConfig temp;
     const Store store(temp.file());

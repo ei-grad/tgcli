@@ -1,8 +1,12 @@
 #include "common/config.hpp"
+#include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
+#include "daemon/account_removal.hpp"
+#include "daemon/daemon_run.hpp"
 #include "daemon/destructive_contract.hpp"
 #include "daemon/logout_audit.hpp"
+#include "daemon/request_session.hpp"
 #include "schema_matcher.hpp"
 
 #include <array>
@@ -12,8 +16,10 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/file.h>
@@ -215,6 +221,23 @@ ProcessOutcome run_cli(const ProcessEnvironment& environment,
     return {WEXITSTATUS(status), read_file(output_path), read_file(error_path)};
 }
 
+int run_daemon_direct(const std::string& account) {
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        const int null_fd = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (null_fd >= 0) {
+            ::dup2(null_fd, STDERR_FILENO);
+            ::close(null_fd);
+        }
+        ::_exit(daemon::run_daemon(account));
+    }
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    return WEXITSTATUS(status);
+}
+
 bool wait_for_exists(const std::string& filename) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -326,6 +349,29 @@ class ChildGuard {
 
   private:
     pid_t pid_;
+};
+
+class ProcessRemovalRemote final : public daemon::AccountRemovalRemote {
+  public:
+    daemon::RemovalRemoteProof
+    prove_remote_logout(const proto::AccountRemovePlan& /*plan*/,
+                        const std::shared_ptr<const config::ConfigSnapshot>& /*config_snapshot*/,
+                        bool /*send_checkpointed*/, daemon::RequestSession& /*session*/,
+                        const daemon::RemovalCheckpoint& checkpoint) override {
+        if (!checkpoint(daemon::AuditStage::RemoteNotPresent)) {
+            return daemon::RemovalOperationError{
+                "INTERNAL",
+                "checkpoint failed",
+                {{"operation", "account_remove"}, {"reason", "internal_error"}},
+                kGeneric};
+        }
+        return daemon::AccountRemoveRemoteResult::NotPresent;
+    }
+
+    std::optional<daemon::RemovalOperationError>
+    quiesce(daemon::RequestSession& /*session*/) override {
+        return std::nullopt;
+    }
 };
 
 } // namespace
@@ -677,6 +723,159 @@ TEST_CASE("real CLI account targets ignore environment/default and reject global
     CHECK(missing_error["error"]["details"] ==
           json{{"argument", nullptr}, {"reason", "missing_argument"}});
     CHECK_THAT(missing_error, test::matches_json_schema("account.error.schema.json"));
+}
+
+TEST_CASE("real CLI removal dry-run stays local and keep-session removes without a daemon",
+          "[account][removal][cli][process]") {
+    const ProcessEnvironment environment;
+    REQUIRE(run_cli(environment, {"account", "add", "work"}).exit_code == kOk);
+
+    const auto dry = run_cli(environment, {"--dry-run", "account", "remove", "work"});
+    INFO(dry.err);
+    REQUIRE(dry.exit_code == kOk);
+    CHECK(dry.err.empty());
+    const auto plan = json::parse(dry.out);
+    CHECK(plan["dry_run"] == true);
+    CHECK(plan["plan"]["account"] == "work");
+    CHECK(plan["plan"]["remote_logout"] == true);
+    CHECK(plan["plan"]["keep_session"] == false);
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/data/tgcli"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli/removals"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli/removals/.work.lock"));
+
+    const auto competing =
+        run_cli(environment, {"--account", "other", "account", "remove", "work"});
+    REQUIRE(competing.exit_code == kUsage);
+    CHECK(json::parse(competing.err)["error"]["details"] ==
+          json{{"argument", "--account"}, {"reason", "mutually_exclusive"}});
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli"));
+
+    const auto removed = run_cli(
+        environment, {"--allow-write", "--yes", "account", "remove", "work", "--keep-session"});
+    INFO(removed.err);
+    REQUIRE(removed.exit_code == kOk);
+    CHECK(removed.err.empty());
+    CHECK(json::parse(removed.out) == json{{"account", "work"},
+                                           {"removed", true},
+                                           {"remote_logout", "kept"},
+                                           {"default_account", nullptr}});
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli/work.sock"));
+
+    const auto listed = run_cli(environment, {"account", "list"});
+    REQUIRE(listed.exit_code == kOk);
+    CHECK(json::parse(listed.out) == json{{"items", json::array()}, {"next", nullptr}});
+}
+
+TEST_CASE("real CLI default removal auto-spawns proves absent session and stops its daemon",
+          "[account][removal][cli][process][tdlib]") {
+    const ProcessEnvironment environment;
+    REQUIRE(run_cli(environment, {"account", "add", "work"}).exit_code == kOk);
+
+    const auto removed = run_cli(
+        environment, {"--allow-write", "--yes", "--timeout", "5", "account", "remove", "work"});
+    INFO(removed.err);
+    REQUIRE(removed.exit_code == kOk);
+    CHECK(removed.err.empty());
+    CHECK(json::parse(removed.out) == json{{"account", "work"},
+                                           {"removed", true},
+                                           {"remote_logout", "not_present"},
+                                           {"default_account", nullptr}});
+
+    const std::string socket = environment.root() + "/run/tgcli/work.sock";
+    const std::string control = environment.root() + "/run/tgcli/work.ctl";
+    CHECK(wait_for_missing(socket, control));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/data/tgcli/accounts/work"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli/accounts/work"));
+    const auto listed = run_cli(environment, {"account", "list"});
+    REQUIRE(listed.exit_code == kOk);
+    CHECK(json::parse(listed.out) == json{{"items", json::array()}, {"next", nullptr}});
+}
+
+TEST_CASE("real CLI late recovery does not auto-spawn or recreate the removed state root",
+          "[account][removal][cli][process][recovery]") {
+    const ProcessEnvironment environment;
+    REQUIRE(run_cli(environment, {"account", "add", "work"}).exit_code == kOk);
+    const auto real_environment = paths::real_environment();
+    REQUIRE(real_environment.xdg_data_home);
+    REQUIRE(real_environment.xdg_state_home);
+    const auto data_root = paths::account_data_dir("work", real_environment);
+    const auto state_root = paths::account_state_dir("work", real_environment);
+    for (const auto& directory :
+         {std::filesystem::path(*real_environment.xdg_data_home) / "tgcli",
+          std::filesystem::path(*real_environment.xdg_data_home) / "tgcli" / "accounts",
+          std::filesystem::path(data_root),
+          std::filesystem::path(*real_environment.xdg_state_home) / "tgcli",
+          std::filesystem::path(*real_environment.xdg_state_home) / "tgcli" / "accounts",
+          std::filesystem::path(state_root)}) {
+        REQUIRE(std::filesystem::create_directories(directory));
+        REQUIRE(::chmod(directory.c_str(), 0700) == 0);
+    }
+    { std::ofstream(data_root + "/database") << "data"; }
+    { std::ofstream(state_root + "/audit.log") << "state"; }
+
+    const config::Store store(paths::config_file(real_environment), real_environment.uid);
+    auto crash_hooks = std::make_shared<daemon::testing::RemovalJournalHooks>();
+    crash_hooks->after_tombstone_sync = [](std::string_view, daemon::AuditStage stage) {
+        if (stage == daemon::AuditStage::StateRemoved) {
+            throw std::runtime_error("injected late-recovery crash");
+        }
+    };
+    daemon::RemovalJournal journal(paths::removals_state_dir(real_environment),
+                                   real_environment.uid, crash_hooks);
+    ProcessRemovalRemote remote;
+    auto coordinator_hooks = std::make_shared<daemon::testing::AccountRemovalHooks>();
+    coordinator_hooks->invocation_id = [] {
+        return std::string("00112233445566778899aabbccddeeff");
+    };
+    coordinator_hooks->timestamp = [] { return std::string("2026-08-04T12:00:00Z"); };
+    daemon::AccountRemovalCoordinator coordinator(store, journal, real_environment, "work", remote,
+                                                  {}, coordinator_hooks);
+    proto::Request request("work");
+    request.id = 7;
+    request.command = {"account", "remove"};
+    request.args = {{"account", "work"},
+                    {"global_account_supplied", false},
+                    {"keep_session", false},
+                    {"reassign_default", nullptr}};
+    request.context.yes = true;
+    request.context.write_authority = proto::WriteAuthority::Grant;
+    daemon::CallbackSink sink([](const json&) {}, [](const json&) {}, [](const json&) {},
+                              [](const std::string&, const std::string&, const json&, int) {});
+    daemon::RequestSession session(std::move(request), sink, 1,
+                                   [] { return std::string("ffeeddccbbaa99887766554433221100"); });
+    CHECK_THROWS_AS(coordinator.remove(session.request(), session), std::runtime_error);
+    CHECK_FALSE(std::filesystem::exists(data_root));
+    CHECK_FALSE(std::filesystem::exists(state_root));
+    CHECK(run_daemon_direct("work") == kGeneric);
+    CHECK_FALSE(std::filesystem::exists(state_root));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli/work.sock"));
+
+    daemon_lock::Identity competing_identity;
+    std::string gate_error;
+    const std::string gate_file = paths::removals_state_dir(real_environment) + "/.work.lock";
+    const int competing_gate = daemon_lock::acquire(gate_file, competing_identity, gate_error);
+    INFO(gate_error);
+    REQUIRE(competing_gate >= 0);
+    const auto blocked = run_cli(
+        environment, {"--allow-write", "--yes", "--timeout", "5", "account", "remove", "work"});
+    CHECK(blocked.exit_code == kGeneric);
+    CHECK_FALSE(std::filesystem::exists(state_root));
+    CHECK(::close(competing_gate) == 0);
+
+    const auto recovered = run_cli(
+        environment, {"--allow-write", "--yes", "--timeout", "5", "account", "remove", "work"});
+    INFO(recovered.err);
+    REQUIRE(recovered.exit_code == kOk);
+    CHECK(recovered.err.empty());
+    CHECK(json::parse(recovered.out) == json{{"account", "work"},
+                                             {"removed", true},
+                                             {"remote_logout", "not_present"},
+                                             {"default_account", nullptr}});
+    CHECK_FALSE(std::filesystem::exists(state_root));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli/work.sock"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli/work.ctl"));
 }
 
 TEST_CASE("real CLI returns exact duplicate, missing, and current-file config errors",

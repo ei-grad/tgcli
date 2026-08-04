@@ -1,15 +1,20 @@
 #include "daemon/daemon_run.hpp"
 
 #include "common/daemon_lock.hpp"
+#include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
 #include "common/paths.hpp"
 #include "core/td_client.hpp"
+#include "daemon/account_removal.hpp"
+#include "daemon/account_removal_remote.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
+#include "daemon/removal_journal.hpp"
+#include "daemon/removal_recovery.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
 
@@ -31,6 +36,46 @@
 namespace tgcli::daemon {
 
 namespace {
+
+class ScopedDescriptor final {
+  public:
+    explicit ScopedDescriptor(int descriptor = -1) : descriptor_(descriptor) {}
+    ~ScopedDescriptor() {
+        if (descriptor_ >= 0) {
+            ::close(descriptor_);
+        }
+    }
+    ScopedDescriptor(const ScopedDescriptor&) = delete;
+    ScopedDescriptor& operator=(const ScopedDescriptor&) = delete;
+    ScopedDescriptor(ScopedDescriptor&&) = delete;
+    ScopedDescriptor& operator=(ScopedDescriptor&&) = delete;
+
+    [[nodiscard]] explicit operator bool() const {
+        return descriptor_ >= 0;
+    }
+
+  private:
+    int descriptor_;
+};
+
+class LocalRemovalRemote final : public AccountRemovalRemote {
+  public:
+    RemovalRemoteProof
+    prove_remote_logout(const proto::AccountRemovePlan& /*plan*/,
+                        const std::shared_ptr<const config::ConfigSnapshot>& /*config_snapshot*/,
+                        bool /*send_checkpointed*/, RequestSession& /*session*/,
+                        const RemovalCheckpoint& /*checkpoint*/) override {
+        return RemovalOperationError{
+            "INTERNAL",
+            "local removal cannot inspect a remote Telegram session",
+            {{"operation", "account_remove"}, {"reason", "internal_error"}},
+            kGeneric};
+    }
+
+    std::optional<RemovalOperationError> quiesce(RequestSession& /*session*/) override {
+        return std::nullopt;
+    }
+};
 
 // Minimal sd_notify(READY=1) without libsystemd; a no-op outside systemd.
 void notify_systemd_ready() {
@@ -61,35 +106,69 @@ struct AccountPaths {
     std::string lock_file;
 };
 
-bool resolve_account_paths(const std::string& account, AccountPaths& out, std::string& error) {
-    const auto env = paths::real_environment();
-    const auto socket = paths::socket_path(account, env, error);
-    if (!socket) {
-        return false;
-    }
-    const auto control_socket = paths::control_socket_path(account, env, error);
-    if (!control_socket) {
-        return false;
-    }
-    if (!paths::ensure_private_dir(paths::runtime_dir(env), env.uid, error)) {
-        return false;
-    }
-    // Parents of the account state dir (…/tgcli, …/tgcli/accounts) are not
-    // secret-bearing; 0700 all the way down is still the simplest policy.
-    const auto state_dir = paths::account_state_dir(account, env);
+bool ensure_private_tree(const std::string& directory, const paths::Environment& environment,
+                         std::string& error) {
     std::string partial;
     for (std::size_t pos = 1; pos != std::string::npos;) {
-        pos = state_dir.find('/', pos + 1);
-        partial = state_dir.substr(0, pos);
-        if (!paths::ensure_private_dir(partial, env.uid, error)) {
-            // Pre-existing parents like ~/.local may legitimately be 0755;
-            // only the tgcli subtree must be private.
+        pos = directory.find('/', pos + 1);
+        partial = directory.substr(0, pos);
+        if (!paths::ensure_private_dir(partial, environment.uid, error)) {
             if (partial.find("/tgcli") == std::string::npos) {
                 error.clear();
                 continue;
             }
             return false;
         }
+    }
+    return true;
+}
+
+int acquire_removal_gate(const std::string& account, const paths::Environment& environment,
+                         daemon_lock::Identity& identity, std::string& error) {
+    const auto directory = paths::removals_state_dir(environment);
+    if (!ensure_private_tree(directory, environment, error)) {
+        return -1;
+    }
+    return daemon_lock::acquire(directory + "/." + account + ".lock", identity, error);
+}
+
+bool daemon_start_preserves_removal_recovery(const std::string& account,
+                                             const paths::Environment& environment,
+                                             std::string& error) {
+    const RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+    const auto inspection = journal.inspect_account(account);
+    if (inspection.status == RemovalInspectionStatus::Invalid) {
+        error = "cannot inspect pending account removal: " + (inspection.failure.reason.empty()
+                                                                  ? std::string("path_invalid")
+                                                                  : inspection.failure.reason);
+        return false;
+    }
+    if (inspection.status == RemovalInspectionStatus::Incomplete && inspection.tombstone &&
+        can_resume_removal_without_tdlib(*inspection.tombstone)) {
+        error = "pending account removal must resume without starting TDLib";
+        return false;
+    }
+    return true;
+}
+
+bool resolve_account_paths(const std::string& account, const paths::Environment& environment,
+                           AccountPaths& out, std::string& error) {
+    const auto socket = paths::socket_path(account, environment, error);
+    if (!socket) {
+        return false;
+    }
+    const auto control_socket = paths::control_socket_path(account, environment, error);
+    if (!control_socket) {
+        return false;
+    }
+    if (!paths::ensure_private_dir(paths::runtime_dir(environment), environment.uid, error)) {
+        return false;
+    }
+    // Parents of the account state dir (…/tgcli, …/tgcli/accounts) are not
+    // secret-bearing; 0700 all the way down is still the simplest policy.
+    const auto state_dir = paths::account_state_dir(account, environment);
+    if (!ensure_private_tree(state_dir, environment, error)) {
+        return false;
     }
     out.socket = *socket;
     out.control_socket = *control_socket;
@@ -101,16 +180,31 @@ bool resolve_account_paths(const std::string& account, AccountPaths& out, std::s
 } // namespace
 
 int run_daemon(const std::string& account) {
-    AccountPaths account_paths;
+    const auto environment = paths::real_environment();
+    daemon_lock::Identity removal_gate_identity;
     std::string error;
-    if (!resolve_account_paths(account, account_paths, error)) {
+    const int removal_gate_fd =
+        acquire_removal_gate(account, environment, removal_gate_identity, error);
+    if (removal_gate_fd < 0) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+    }
+    if (!daemon_start_preserves_removal_recovery(account, environment, error)) {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        ::close(removal_gate_fd);
+        return 1;
+    }
+    AccountPaths account_paths;
+    if (!resolve_account_paths(account, environment, account_paths, error)) {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        ::close(removal_gate_fd);
         return 1;
     }
     daemon_lock::Identity lock_identity;
     const int lock_fd = daemon_lock::acquire(account_paths.lock_file, lock_identity, error);
     if (lock_fd < 0) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
+        ::close(removal_gate_fd);
         return 1;
     }
 
@@ -124,7 +218,6 @@ int run_daemon(const std::string& account) {
     sigaddset(&signals, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &signals, nullptr);
 
-    const auto environment = paths::real_environment();
     core::TdClient td(core::TdLogConfiguration{
         .file_path = paths::tdlib_log_file(account, environment),
     });
@@ -139,12 +232,19 @@ int run_daemon(const std::string& account) {
     LoginCoordinator login(td, config_store, environment, account, kVersion,
                            environment_value("TGCLI_API_ID"), environment_value("TGCLI_API_HASH"));
     Server* server_pointer = nullptr;
+    const auto stop_server = [&server_pointer] {
+        if (server_pointer != nullptr) {
+            server_pointer->request_stop();
+        }
+    };
     LogoutCoordinator logout(td, config_runtime, environment, account, config_store.path(),
-                             [&server_pointer] {
-                                 if (server_pointer != nullptr) {
-                                     server_pointer->request_stop();
-                                 }
-                             });
+                             stop_server);
+    RemovalJournal removal_journal(paths::removals_state_dir(environment), environment.uid);
+    TdAccountRemovalRemote removal_remote(td, config_store, environment, account, kVersion,
+                                          environment_value("TGCLI_API_ID"),
+                                          environment_value("TGCLI_API_HASH"));
+    AccountRemovalCoordinator account_removal(config_store, removal_journal, environment, account,
+                                              removal_remote, stop_server, {}, stop_server);
 
     DaemonContext context;
     context.account = account;
@@ -154,6 +254,7 @@ int run_daemon(const std::string& account) {
     context.socket_path = account_paths.socket;
     context.login = &login;
     context.logout = &logout;
+    context.account_removal = &account_removal;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -179,6 +280,7 @@ int run_daemon(const std::string& account) {
     if (!server.start(error)) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         ::close(lock_fd);
+        ::close(removal_gate_fd);
         return 1;
     }
     notify_systemd_ready();
@@ -206,22 +308,43 @@ int run_daemon(const std::string& account) {
     server.stop();
     td.close();
     ::close(lock_fd);
+    ::close(removal_gate_fd);
     return 0;
 }
 
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
                    std::string& error, const Dispatcher* dispatcher_override) {
+    const auto environment = paths::real_environment();
+    if (request.command == std::vector<std::string>{"account", "remove"} &&
+        request.args.is_object()) {
+        const RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+        const auto inspection = journal.inspect_account(account);
+        const bool local_recovery = inspection.status == RemovalInspectionStatus::Incomplete &&
+                                    inspection.tombstone &&
+                                    can_resume_removal_without_tdlib(*inspection.tombstone);
+        if (request.context.dry_run || request.args.value("keep_session", false) ||
+            local_recovery) {
+            return run_account_removal_local(request, sink, account, error);
+        }
+    }
+    daemon_lock::Identity removal_gate_identity;
+    const int removal_gate_fd =
+        acquire_removal_gate(account, environment, removal_gate_identity, error);
+    if (removal_gate_fd < 0) {
+        return false;
+    }
     AccountPaths account_paths;
-    if (!resolve_account_paths(account, account_paths, error)) {
+    if (!resolve_account_paths(account, environment, account_paths, error)) {
+        ::close(removal_gate_fd);
         return false;
     }
     daemon_lock::Identity lock_identity;
     const int lock_fd = daemon_lock::acquire(account_paths.lock_file, lock_identity, error);
     if (lock_fd < 0) {
+        ::close(removal_gate_fd);
         return false;
     }
 
-    const auto environment = paths::real_environment();
     core::TdClient td(core::TdLogConfiguration{
         .file_path = paths::tdlib_log_file(account, environment),
         .json_diagnostics = request.context.json,
@@ -236,6 +359,12 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     LoginCoordinator login(td, config_store, environment, account, kVersion,
                            environment_value("TGCLI_API_ID"), environment_value("TGCLI_API_HASH"));
     LogoutCoordinator logout(td, config_runtime, environment, account, config_store.path());
+    RemovalJournal removal_journal(paths::removals_state_dir(environment), environment.uid);
+    TdAccountRemovalRemote removal_remote(td, config_store, environment, account, kVersion,
+                                          environment_value("TGCLI_API_ID"),
+                                          environment_value("TGCLI_API_HASH"));
+    AccountRemovalCoordinator account_removal(config_store, removal_journal, environment, account,
+                                              removal_remote);
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -244,6 +373,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.in_process = true;
     context.login = &login;
     context.logout = &logout;
+    context.account_removal = &account_removal;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -255,6 +385,40 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
 
     td.close();
     ::close(lock_fd);
+    ::close(removal_gate_fd);
+    return true;
+}
+
+bool run_account_removal_local(const proto::Request& request, ResponseSink& sink,
+                               const std::string& account, std::string& error) {
+    const auto environment = paths::real_environment();
+    RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+    const auto inspection = journal.inspect_account(account);
+    const bool resumable_without_tdlib = inspection.status == RemovalInspectionStatus::Incomplete &&
+                                         inspection.tombstone &&
+                                         can_resume_removal_without_tdlib(*inspection.tombstone);
+    if (request.command != std::vector<std::string>{"account", "remove"} ||
+        !request.args.is_object() || !request.args.contains("keep_session") ||
+        !request.args["keep_session"].is_boolean() ||
+        (!request.context.dry_run && !request.args["keep_session"].get<bool>() &&
+         !resumable_without_tdlib)) {
+        error = "local removal requires dry-run, --keep-session, or a durable remote proof";
+        return false;
+    }
+    daemon_lock::Identity removal_gate_identity;
+    const ScopedDescriptor removal_gate(
+        request.context.dry_run
+            ? -1
+            : acquire_removal_gate(account, environment, removal_gate_identity, error));
+    if (!request.context.dry_run && !removal_gate) {
+        return false;
+    }
+    const config::Store store(paths::config_file(environment), environment.uid);
+    LocalRemovalRemote remote;
+    AccountRemovalCoordinator coordinator(store, journal, environment, account, remote);
+    Dispatcher dispatcher;
+    register_account_removal_command(dispatcher, coordinator);
+    dispatcher.dispatch(request, sink);
     return true;
 }
 

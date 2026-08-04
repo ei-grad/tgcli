@@ -2,6 +2,7 @@
 // TSan suite per the sanitizer policy in CLAUDE.md.
 
 #include "core/td_client.hpp"
+#include "support/scripted_td_runtime.hpp"
 #include "support/td_client_test_access.hpp"
 
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
@@ -148,6 +150,26 @@ TEST_CASE("send after close returns a ready exceptional future", "[core][tdlib][
 
     REQUIRE(response.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
     CHECK_THROWS_AS(response.get(), std::runtime_error);
+}
+
+TEST_CASE("deadline-aware close can resume after a timed-out proof", "[core][lifecycle]") {
+    auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>(false);
+    auto* scripted = runtime.get();
+    TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_clients(1));
+    const auto generation = scripted->clients().front();
+
+    const auto first_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+    CHECK_FALSE(client.close_until(first_deadline));
+    CHECK(std::chrono::steady_clock::now() < first_deadline + std::chrono::milliseconds(100));
+
+    scripted->push_response(
+        generation, 1, {}, tgcli::core::AuthStateData{tgcli::core::AuthState::WaitTdlibParameters});
+    REQUIRE(scripted->wait_for_sent(2));
+    scripted->push_update(generation, {},
+                          tgcli::core::AuthStateData{tgcli::core::AuthState::Closed});
+    CHECK(client.close_until(std::chrono::steady_clock::now() + std::chrono::seconds(1)));
+    CHECK(client.close_until(std::chrono::steady_clock::now()));
 }
 
 TEST_CASE("forged bootstrap ownership cannot reach the production TD boundary",

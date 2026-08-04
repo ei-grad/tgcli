@@ -1,0 +1,4 @@
+account: work
+removed: yes
+remote logout: kept
+default account: none

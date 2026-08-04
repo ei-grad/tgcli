@@ -1130,6 +1130,7 @@ XDG layout, one subtree per account:
 ~/.local/share/tgcli/accounts/<name>/tdlib/    tdlib database + files
 ~/.local/state/tgcli/accounts/<name>/          audit.log, idempotency.db, tdlib.log
 ~/.local/state/tgcli/removals/                 removal audit + durable tombstones
+~/.local/state/tgcli/removals/.<name>.lock     stable removal/daemon exclusion gate
 $XDG_RUNTIME_DIR/tgcli/<name>.ctl              bootstrap stop socket
 $XDG_RUNTIME_DIR/tgcli/<name>.sock             daemon socket
 ```
@@ -1144,6 +1145,11 @@ length-validated accordingly. `audit.log` and `tdlib.log` rotate by size
 The `.ctl` endpoint and `<account-state-dir>/daemon.lock` form the bootstrap
 compatibility surface described in §10. They are account-scoped even though
 they are not part of the main JSONL protocol.
+The hidden removal gate uses the same verified `0600` regular-file and
+dual-lock mechanics as `daemon.lock`, but is not a control endpoint. A daemon
+holds it for its lifetime; no-daemon execution and an actual local removal hold
+it for the whole operation. It remains outside the deletable account roots and
+is reused rather than removed. Dry-run neither creates nor acquires it.
 
 `config.toml`:
 
@@ -1681,7 +1687,8 @@ directory for later login. Confirmation and dry-run state either
 `remote_logout:true` or `keep_session:true` explicitly. After remote logout is
 confirmed (or deliberately skipped), a later local deletion/config failure is
 reported with the exact `removed`/`retained` path lists; it is never described
-as an unconfirmed remote logout. Deletion holds the target account lock,
+as an unconfirmed remote logout. Deletion holds the target's stable removal
+gate in the global removals directory,
 opens the verified data/state parent directories, refuses a target root that
 is a symlink, foreign-owned or replaced since planning, and never follows a
 symlink while traversing beneath either root. A mismatch is
@@ -1724,6 +1731,17 @@ a repeated remove must obtain a fresh authority decision and confirmation,
 hold `config.lock`, and satisfy this exact table. “Captured” means path,
 device, inode and owner all equal the non-null `root_identity`; “planned
 absent” means the plan stored null.
+
+Before a durable remote proof, a retry may connect to or start TDLib to
+re-evaluate the remote state. At `remote_confirmed`, `remote_not_present`,
+`remote_kept`, or any later nonterminal stage, it first connects to an already
+running target daemon without spawning; if none exists, it acquires the stable
+removal gate and resumes locally without TDLib. `daemon run` rechecks the
+tombstone after acquiring that gate and refuses to create the account state
+root at those stages. This keeps a crash after `state_remove_started` or
+`state_removed` from recreating the deleted root, and the still-linked global
+gate prevents a competing daemon from replacing the unlinked in-root
+`daemon.lock` during deletion.
 
 | latest durable stage | required config entry/default | required data path | required state path | deterministic next action |
 |---|---|---|---|---|

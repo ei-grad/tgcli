@@ -12,6 +12,7 @@
 
 namespace tgcli::daemon {
 class LoginCoordinator;
+class LogoutLifecycle;
 class LogoutCoordinator;
 } // namespace tgcli::daemon
 
@@ -159,6 +160,11 @@ class TdClient {
     // receive thread and breaks any still-pending futures. Idempotent.
     void close();
 
+    // Begins the same intentional shutdown but never waits past deadline.
+    // False means Closed was not observed and the receive loop remains alive,
+    // so a later call may continue waiting for the same generation.
+    [[nodiscard]] bool close_until(std::chrono::steady_clock::time_point deadline);
+
     // tdlib version string, synchronously and without a client.
     static std::string tdlib_version();
 
@@ -176,7 +182,7 @@ class TdClient {
 
     friend class AuthBootstrap;
     friend class tgcli::daemon::LoginCoordinator;
-    friend class tgcli::daemon::LogoutCoordinator;
+    friend class tgcli::daemon::LogoutLifecycle;
 
     class Impl;
     std::unique_ptr<Impl> impl_;

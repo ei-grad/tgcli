@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli account remove result",
+  "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "rootIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "device", "inode", "owner"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "device": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "inode": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "owner": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      }
+    },
+    "remoteLogoutPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "account", "remote_logout", "keep_session", "delete_paths", "config_path", "config_snapshot", "data_root", "state_root", "reassign_default"],
+      "properties": {
+        "operation": { "const": "account_remove" },
+        "account": { "$ref": "#/$defs/account" },
+        "remote_logout": { "const": true },
+        "keep_session": { "const": false },
+        "delete_paths": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "string", "pattern": "^/" }
+        },
+        "config_path": { "type": "string", "pattern": "^/" },
+        "config_snapshot": { "type": "string" },
+        "data_root": {
+          "oneOf": [
+            { "$ref": "#/$defs/rootIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "state_root": {
+          "oneOf": [
+            { "$ref": "#/$defs/rootIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "reassign_default": {
+          "oneOf": [
+            { "$ref": "#/$defs/account" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "keepSessionPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "account", "remote_logout", "keep_session", "delete_paths", "config_path", "config_snapshot", "data_root", "state_root", "reassign_default"],
+      "properties": {
+        "operation": { "const": "account_remove" },
+        "account": { "$ref": "#/$defs/account" },
+        "remote_logout": { "const": false },
+        "keep_session": { "const": true },
+        "delete_paths": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "string", "pattern": "^/" }
+        },
+        "config_path": { "type": "string", "pattern": "^/" },
+        "config_snapshot": { "type": "string" },
+        "data_root": {
+          "oneOf": [
+            { "$ref": "#/$defs/rootIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "state_root": {
+          "oneOf": [
+            { "$ref": "#/$defs/rootIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "reassign_default": {
+          "oneOf": [
+            { "$ref": "#/$defs/account" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "removed", "remote_logout", "default_account"],
+      "properties": {
+        "account": { "$ref": "#/$defs/account" },
+        "removed": { "const": true },
+        "remote_logout": { "enum": ["confirmed", "not_present", "kept"] },
+        "default_account": {
+          "oneOf": [
+            { "$ref": "#/$defs/account" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dry_run", "plan"],
+      "properties": {
+        "dry_run": { "const": true },
+        "plan": {
+          "oneOf": [
+            { "$ref": "#/$defs/remoteLogoutPlan" },
+            { "$ref": "#/$defs/keepSessionPlan" }
+          ]
+        }
+      }
+    }
+  ]
+}

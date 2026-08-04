@@ -192,13 +192,45 @@ void populate_config_global_args(nlohmann::json& args, const std::vector<std::st
     }
 }
 
-std::optional<int> resolve_request_account(const std::vector<std::string>& command,
-                                           bool explicit_account, std::string& account,
-                                           nlohmann::json& args, bool& current_config_valid,
-                                           std::optional<tgcli::cli::RoutingError>& route_error,
-                                           const std::string& add_account,
-                                           const std::string& show_account,
-                                           const std::string& use_account) {
+std::optional<int>
+resolve_request_account(const std::vector<std::string>& command, bool explicit_account,
+                        std::string& account, nlohmann::json& args, bool& current_config_valid,
+                        std::optional<tgcli::cli::RoutingError>& route_error,
+                        const std::string& add_account, const std::string& show_account,
+                        const std::string& use_account, const std::string& remove_account,
+                        bool keep_session, const std::string& reassign_default,
+                        bool reassign_default_supplied) {
+    if (command == std::vector<std::string>{"account", "remove"}) {
+        if (explicit_account) {
+            const nlohmann::json rendered{
+                {"error",
+                 {{"code", "USAGE"},
+                  {"message", "--account cannot target an account subcommand"},
+                  {"details", {{"argument", "--account"}, {"reason", "mutually_exclusive"}}}}}};
+            std::fputs((rendered.dump() + "\n").c_str(), stderr);
+            return tgcli::kUsage;
+        }
+        std::string selection_error;
+        const auto selection = tgcli::paths::select_account(
+            {std::optional<std::string>{remove_account}, std::nullopt, std::nullopt},
+            selection_error);
+        if (!selection) {
+            const nlohmann::json rendered{
+                {"error",
+                 {{"code", "USAGE"},
+                  {"message", selection_error},
+                  {"details", {{"argument", "name"}, {"reason", "invalid_argument"}}}}}};
+            std::fputs((rendered.dump() + "\n").c_str(), stderr);
+            return tgcli::kUsage;
+        }
+        account = selection->name;
+        args = {{"account", account},
+                {"global_account_supplied", false},
+                {"keep_session", keep_session},
+                {"reassign_default", reassign_default_supplied ? nlohmann::json(reassign_default)
+                                                               : nlohmann::json(nullptr)}};
+        return std::nullopt;
+    }
     if (tgcli::cli::is_config_global_command(command)) {
         account = "main";
         populate_config_global_args(args, command, explicit_account, add_account, show_account,
@@ -285,6 +317,9 @@ int run(int argc, char** argv) {
     std::string add_account;
     std::string show_account;
     std::string use_account;
+    std::string remove_account;
+    std::string reassign_default;
+    bool keep_session = false;
     account_cmd->add_subcommand("add", "add an account")
         ->add_option("name", add_account)
         ->required();
@@ -295,6 +330,13 @@ int run(int argc, char** argv) {
     account_cmd->add_subcommand("use", "set the default account")
         ->add_option("name", use_account)
         ->required();
+    CLI::App* remove_cmd = account_cmd->add_subcommand("remove", "remove an account");
+    remove_cmd->add_option("name", remove_account)->required();
+    remove_cmd->add_flag("--keep-session", keep_session,
+                         "remove local state without revoking the Telegram session");
+    CLI::Option* reassign_default_option =
+        remove_cmd->add_option("--reassign-default", reassign_default,
+                               "new default when removing the current default account");
 
     if (const auto parse_exit = parse_arguments(app, argc, argv); parse_exit.has_value()) {
         return parse_exit.value();
@@ -355,7 +397,8 @@ int run(int argc, char** argv) {
     std::optional<tgcli::cli::RoutingError> unavailable_route_error;
     if (const auto route_exit = resolve_request_account(
             command, explicit_account, account, request_args, current_config_valid,
-            unavailable_route_error, add_account, show_account, use_account);
+            unavailable_route_error, add_account, show_account, use_account, remove_account,
+            keep_session, reassign_default, reassign_default_option->count() != 0);
         route_exit.has_value()) {
         return route_exit.value();
     }
@@ -379,9 +422,11 @@ int run(int argc, char** argv) {
     options.json = json_output;
     options.no_daemon = no_daemon;
     options.unavailable_route_error = std::move(unavailable_route_error);
-    options.auto_spawn = command != std::vector<std::string>{"daemon", "status"} &&
-                         command != std::vector<std::string>{"daemon", "stop"} && !dry_run &&
-                         current_config_valid && !tgcli::cli::is_config_global_command(command);
+    options.auto_spawn =
+        command != std::vector<std::string>{"daemon", "status"} &&
+        command != std::vector<std::string>{"daemon", "stop"} && !dry_run && current_config_valid &&
+        !tgcli::cli::is_config_global_command(command) &&
+        (command != std::vector<std::string>{"account", "remove"} || !keep_session);
     return tgcli::cli::run_command(request, options);
 }
 

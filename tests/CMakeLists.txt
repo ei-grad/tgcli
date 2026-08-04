@@ -1,6 +1,8 @@
 include(Catch)
 
 add_executable(tgcli_unit_tests
+    account_removal_test.cpp
+    account_removal_remote_test.cpp
     activity_tracker_test.cpp
     account_cli_test.cpp
     account_commands_test.cpp
@@ -13,6 +15,10 @@ add_executable(tgcli_unit_tests
     dependency_lock_schema_test.cpp
     destructive_contract_test.cpp
     destructive_plan_test.cpp
+    removal_filesystem_test.cpp
+    removal_journal_test.cpp
+    removal_planner_test.cpp
+    removal_recovery_test.cpp
     frame_test.cpp
     paths_test.cpp
     query_registry_test.cpp

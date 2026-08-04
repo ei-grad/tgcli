@@ -2,6 +2,7 @@
 
 #include "common/config.hpp"
 #include "common/exit_codes.hpp"
+#include "daemon/removal_journal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -82,6 +83,61 @@ RoutingResult route_without_snapshot(const std::vector<std::string>& command,
     return {{}, route_error, true};
 }
 
+bool inspects_removal_tombstone(const std::vector<std::string>& command) {
+    const auto key = command_key(command);
+    return key != "version" && key != "account remove" && key != "daemon run";
+}
+
+std::optional<RoutingError> removal_preflight(std::string_view account,
+                                              const paths::Environment& environment) {
+    const daemon::RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+    const auto inspection = journal.inspect_account(account);
+    if (inspection.status == daemon::RemovalInspectionStatus::Clean) {
+        return std::nullopt;
+    }
+    if (inspection.status == daemon::RemovalInspectionStatus::Incomplete && inspection.tombstone) {
+        const auto& tombstone = *inspection.tombstone;
+        nlohmann::json stages = nlohmann::json::array();
+        for (const auto stage : tombstone.completed_stages) {
+            stages.push_back(daemon::audit_stage_name(stage));
+        }
+        return RoutingError{"REMOVAL_INCOMPLETE",
+                            "account removal requires an explicit retry",
+                            {{"account", tombstone.account},
+                             {"path", inspection.path},
+                             {"invocation_id", tombstone.invocation_id},
+                             {"stage", daemon::audit_stage_name(tombstone.stage)},
+                             {"completed_stages", std::move(stages)},
+                             {"reason", "prior_crash"}},
+                            kGeneric};
+    }
+    return RoutingError{"AUDIT_UNAVAILABLE",
+                        "removal journal cannot be inspected",
+                        {{"account", account},
+                         {"path", inspection.path.empty() ? journal.directory() : inspection.path},
+                         {"reason", inspection.failure.reason.empty() ? "path_invalid"
+                                                                      : inspection.failure.reason}},
+                        kDenied};
+}
+
+std::optional<RoutingResult>
+preflight_preferred_removal(const std::vector<std::string>& command,
+                            const paths::Environment& environment,
+                            const std::optional<std::string>& explicit_account,
+                            const std::optional<std::string>& environment_account) {
+    if (!inspects_removal_tombstone(command)) {
+        return std::nullopt;
+    }
+    const auto& preferred = explicit_account ? explicit_account : environment_account;
+    if (!preferred || !paths::valid_account_name(*preferred)) {
+        return std::nullopt;
+    }
+    if (auto error = removal_preflight(*preferred, environment)) {
+        return RoutingResult{{}, std::move(error), true};
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 bool is_config_global_command(const std::vector<std::string>& command) {
@@ -95,6 +151,10 @@ RoutingResult resolve_account_route(const std::vector<std::string>& command,
                                     const paths::Environment& environment,
                                     const std::optional<std::string>& explicit_account,
                                     const std::optional<std::string>& environment_account) {
+    if (auto failure = preflight_preferred_removal(command, environment, explicit_account,
+                                                   environment_account)) {
+        return std::move(*failure);
+    }
     const config::Store store(paths::config_file(environment), environment.uid);
     config::SnapshotManager snapshots(store);
     const bool initialized = snapshots.initialize();
@@ -142,6 +202,12 @@ RoutingResult resolve_account_route(const std::vector<std::string>& command,
                              {{"path", store.path()}, {"reason", "invalid_default"}},
                              kGeneric},
                 true};
+    }
+
+    if (inspects_removal_tombstone(command)) {
+        if (auto error = removal_preflight(selection->name, environment)) {
+            return {{}, std::move(error), true};
+        }
     }
 
     if (snapshot->accounts.contains(selection->name)) {

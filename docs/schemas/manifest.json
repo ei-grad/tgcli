@@ -7,6 +7,9 @@
     "account list": {
       "result": "account-list.result.schema.json"
     },
+    "account remove": {
+      "result": "account-remove.result.schema.json"
+    },
     "account show": {
       "result": "account-show.result.schema.json"
     },

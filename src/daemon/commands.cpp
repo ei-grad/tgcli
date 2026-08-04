@@ -1,6 +1,7 @@
 #include "daemon/commands.hpp"
 
 #include "common/exit_codes.hpp"
+#include "daemon/account_removal.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/request_session.hpp"
@@ -42,17 +43,33 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.logout != nullptr) {
         register_logout_command(dispatcher, *context.logout);
-        dispatcher.set_request_preflight(
-            [&context](const std::string& command, RequestSession& session) {
-                if (command == "logout" && session.request().context.dry_run) {
-                    return true;
-                }
-                if (command == "login" || command == "logout" || command == "me" ||
-                    command == "doctor") {
-                    return context.logout->preflight(session);
-                }
+    }
+    if (context.account_removal != nullptr) {
+        register_account_removal_command(dispatcher, *context.account_removal);
+    }
+    if (context.logout != nullptr || context.account_removal != nullptr) {
+        dispatcher.set_request_preflight([&context](const std::string& command,
+                                                    RequestSession& session) {
+            if (command == "account remove") {
                 return true;
-            });
+            }
+            const bool account_command = command == "login" || command == "logout" ||
+                                         command == "me" || command == "doctor" ||
+                                         command == "daemon status" || command == "daemon stop" ||
+                                         command == "daemon restart";
+            if (context.account_removal != nullptr && account_command &&
+                !context.account_removal->preflight(context.account, session)) {
+                return false;
+            }
+            if (command == "logout" && session.request().context.dry_run) {
+                return true;
+            }
+            if (context.logout != nullptr && (command == "login" || command == "logout" ||
+                                              command == "me" || command == "doctor")) {
+                return context.logout->preflight(session);
+            }
+            return true;
+        });
     }
     dispatcher.register_command(
         "version", {Tier::Read, [&context](const proto::Request&, RequestSession& sink) {

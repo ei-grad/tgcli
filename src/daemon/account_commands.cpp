@@ -2,6 +2,7 @@
 
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
+#include "daemon/account_removal.hpp"
 #include "daemon/destructive_contract.hpp"
 #include "daemon/logout_audit.hpp"
 #include "daemon/request_session.hpp"
@@ -255,6 +256,10 @@ void account_add(const ConfigGlobalContext& context, const proto::Request& reque
     if (!validate_internal_args(request, session, true, account)) {
         return;
     }
+    if (context.removal_journal != nullptr &&
+        !preflight_account_removal_journal(*context.removal_journal, account, session)) {
+        return;
+    }
     const auto current = load_current(session, context, "account_add");
     if (!current) {
         return;
@@ -296,6 +301,10 @@ void account_show(const ConfigGlobalContext& context, const proto::Request& requ
                   RequestSession& session) {
     std::string account;
     if (!validate_internal_args(request, session, true, account)) {
+        return;
+    }
+    if (context.removal_journal != nullptr &&
+        !preflight_account_removal_journal(*context.removal_journal, account, session)) {
         return;
     }
     const auto current = load_current(session, context, "account_show");
@@ -347,6 +356,10 @@ void account_use(const ConfigGlobalContext& context, const proto::Request& reque
                  RequestSession& session) {
     std::string account;
     if (!validate_internal_args(request, session, true, account)) {
+        return;
+    }
+    if (context.removal_journal != nullptr &&
+        !preflight_account_removal_journal(*context.removal_journal, account, session)) {
         return;
     }
     const auto current = load_current(session, context, "account_use");

@@ -94,7 +94,10 @@ struct MutationControl {
 
     std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
     std::stop_token cancellation;
+    std::function<bool()> pre_commit;
     std::function<bool()> commit_admission;
+    std::function<bool(const ConfigSnapshot&)> already_committed_admission;
+    std::function<bool()> post_commit;
 };
 
 struct MutationResult {

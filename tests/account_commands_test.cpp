@@ -5,6 +5,7 @@
 #include "daemon/destructive_contract.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/logout_audit.hpp"
+#include "daemon/removal_journal.hpp"
 #include "daemon/request_session.hpp"
 #include "schema_matcher.hpp"
 
@@ -402,6 +403,46 @@ TEST_CASE("account commands always read the current file", "[account][dispatch][
     CHECK((*outcome.error)["error"]["details"] ==
           json{{"path", tree.config_path()}, {"reason", "parse_error"}});
     CHECK_THAT(*outcome.error, test::matches_json_schema("account.error.schema.json"));
+}
+
+TEST_CASE("named config commands stop at a nonterminal removal before reading config",
+          "[account][dispatch][removal]") {
+    const ConfigTree tree;
+    tree.write("default_account = \"work\"\n[accounts.work]\nallow_write = false\n");
+    const config::Store store(tree.config_path());
+    const auto loaded = store.load();
+    REQUIRE(loaded);
+    const auto environment = tree.environment();
+    daemon::RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+    std::string plan_error;
+    auto plan = proto::make_account_remove_plan(
+        {.account = "work",
+         .keep_session = true,
+         .delete_paths = {paths::account_data_dir("work", environment),
+                          paths::account_state_dir("work", environment)},
+         .config_path = tree.config_path(),
+         .config_snapshot = loaded.snapshot->identity,
+         .data_root = std::nullopt,
+         .state_root = std::nullopt,
+         .reassign_default = std::nullopt},
+        plan_error);
+    INFO(plan_error);
+    REQUIRE(plan);
+    daemon::RemovalJournalFailure journal_failure;
+    const std::string invocation = "00112233445566778899aabbccddeeff";
+    REQUIRE(journal.create(invocation, *plan, journal_failure));
+
+    tree.write("[accounts.work\n");
+    const daemon::ConfigGlobalContext context{store, environment, &journal};
+    for (const auto& command :
+         {std::vector<std::string>{"account", "add"}, std::vector<std::string>{"account", "show"},
+          std::vector<std::string>{"account", "use"}}) {
+        const auto outcome = dispatch(context, command, target_args("work"));
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "REMOVAL_INCOMPLETE");
+        CHECK((*outcome.error)["error"]["details"]["invocation_id"] == invocation);
+        CHECK((*outcome.error)["error"]["details"]["stage"] == "planned");
+    }
 }
 
 TEST_CASE("read-only account commands honor their absolute request deadline",

@@ -1,5 +1,7 @@
 #include "cli/routing.hpp"
+#include "common/config.hpp"
 #include "common/exit_codes.hpp"
+#include "daemon/removal_journal.hpp"
 
 #include <fcntl.h>
 #include <filesystem>
@@ -180,4 +182,52 @@ TEST_CASE("routing keeps doctor available when the current config is invalid",
     CHECK_FALSE(explicit_daemon.selection.has_value());
     REQUIRE(explicit_daemon.error.has_value());
     CHECK(explicit_daemon.error->code == "CONFIG_INVALID");
+}
+
+TEST_CASE("explicit client routing stops at a removal tombstone before account admission",
+          "[routing][account][removal]") {
+    const RoutingTree tree;
+    tree.write_config("default_account = \"work\"\n[accounts.work]\nallow_write = false\n");
+    const auto environment = tree.environment();
+    const config::Store store(paths::config_file(environment), environment.uid);
+    const auto loaded = store.load();
+    REQUIRE(loaded);
+    std::string plan_error;
+    auto plan = proto::make_account_remove_plan(
+        {.account = "work",
+         .keep_session = true,
+         .delete_paths = {paths::account_data_dir("work", environment),
+                          paths::account_state_dir("work", environment)},
+         .config_path = paths::config_file(environment),
+         .config_snapshot = loaded.snapshot->identity,
+         .data_root = std::nullopt,
+         .state_root = std::nullopt,
+         .reassign_default = std::nullopt},
+        plan_error);
+    INFO(plan_error);
+    REQUIRE(plan);
+    const daemon::RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
+    daemon::RemovalJournalFailure failure;
+    const std::string invocation = "00112233445566778899aabbccddeeff";
+    REQUIRE(journal.create(invocation, *plan, failure));
+
+    for (const auto& command :
+         {std::vector<std::string>{"login"}, std::vector<std::string>{"logout"},
+          std::vector<std::string>{"me"}, std::vector<std::string>{"doctor"},
+          std::vector<std::string>{"daemon", "status"}, std::vector<std::string>{"daemon", "stop"},
+          std::vector<std::string>{"daemon", "restart"}}) {
+        const auto routed = cli::resolve_account_route(command, environment, "work", std::nullopt);
+        REQUIRE(routed.error);
+        CHECK(routed.error->code == "REMOVAL_INCOMPLETE");
+        CHECK(routed.error->details ==
+              nlohmann::json{{"account", "work"},
+                             {"path", journal.tombstone_path(invocation)},
+                             {"invocation_id", invocation},
+                             {"stage", "planned"},
+                             {"completed_stages", nlohmann::json::array({"planned"})},
+                             {"reason", "prior_crash"}});
+    }
+
+    const auto version = cli::resolve_account_route({"version"}, environment, "work", std::nullopt);
+    REQUIRE(version.selection);
 }

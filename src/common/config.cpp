@@ -1349,6 +1349,15 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
     }
     ParsedConfig current_config = std::move(*current.parsed);
     if (current_config.snapshot->identity != expected_identity) {
+        if (control.already_committed_admission &&
+            control.already_committed_admission(*current_config.snapshot)) {
+            if (control.post_commit && !control.post_commit()) {
+                return {MutationStatus::DurabilityUnknown, std::move(current_config.snapshot),
+                        make_error(ConfigReason::SyncError,
+                                   "post-commit transaction finalization failed")};
+            }
+            return {MutationStatus::Applied, std::move(current_config.snapshot), {}};
+        }
         return {MutationStatus::Conflict, std::move(current_config.snapshot), {}};
     }
     if (!apply_mutation(current_config.document, mutation, error)) {
@@ -1415,7 +1424,13 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
         return {MutationStatus::IoError, {}, std::move(error)};
     }
 
-    // Detect a path replacement after planning/writing but before rename.
+    if (control.pre_commit && !control.pre_commit()) {
+        discard_temporary();
+        return {MutationStatus::PreconditionFailed, {}, {}};
+    }
+
+    // Detect a path replacement after planning/writing and any externally
+    // coordinated pre-commit work, but before rename.
     auto final_check = read_from_directory(directory->get(), expected_uid_);
     if (!final_check.parsed) {
         discard_temporary();
@@ -1576,6 +1591,10 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
     auto applied = read_from_directory(directory->get(), expected_uid_);
     if (!applied.parsed) {
         return {MutationStatus::IoError, {}, std::move(applied.error)};
+    }
+    if (control.post_commit && !control.post_commit()) {
+        return {MutationStatus::DurabilityUnknown, std::move(applied.parsed->snapshot),
+                make_error(ConfigReason::SyncError, "post-commit transaction finalization failed")};
     }
     return {MutationStatus::Applied, std::move(applied.parsed->snapshot), {}};
 }

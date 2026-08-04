@@ -102,6 +102,18 @@ std::string render_account_use(const nlohmann::json& data) {
                        data.value("default_account", std::string("?")), previous);
 }
 
+std::string render_account_remove(const nlohmann::json& data) {
+    if (data.value("dry_run", false)) {
+        return data.dump(2) + "\n";
+    }
+    const std::string next_default =
+        data["default_account"].is_null() ? "none" : data["default_account"].get<std::string>();
+    return fmt::format("account: {}\nremoved: {}\nremote logout: {}\ndefault account: {}\n",
+                       data.value("account", std::string("?")),
+                       yes_no(data.value("removed", false)),
+                       data.value("remote_logout", std::string("?")), next_default);
+}
+
 std::string render_daemon_status(const nlohmann::json& data) {
     std::string out =
         fmt::format("account: {}\nrunning: {}\n", data.value("account", std::string("?")),
@@ -178,6 +190,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "account use") {
         return render_account_use(data);
+    }
+    if (command_key == "account remove") {
+        return render_account_remove(data);
     }
     if (command_key == "daemon status") {
         return render_daemon_status(data);

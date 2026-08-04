@@ -8,9 +8,12 @@
 
 namespace tgcli::daemon {
 
+class RemovalJournal;
+
 struct ConfigGlobalContext {
     std::reference_wrapper<const config::Store> store;
     paths::Environment environment;
+    RemovalJournal* removal_journal = nullptr;
 };
 
 // Registers config-global account commands. These handlers operate on the

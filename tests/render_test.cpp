@@ -49,6 +49,11 @@ TEST_CASE("account human renderers match reviewed goldens", "[account][render][g
     CHECK(tgcli::cli::render_human("account use",
                                    {{"default_account", "work"}, {"previous_default", "main"}}) ==
           golden("account-use.txt"));
+    CHECK(tgcli::cli::render_human("account remove", {{"account", "work"},
+                                                      {"removed", true},
+                                                      {"remote_logout", "kept"},
+                                                      {"default_account", nullptr}}) ==
+          golden("account-remove.txt"));
 }
 
 TEST_CASE("login and me human renderers match reviewed goldens", "[auth][render][golden]") {

@@ -422,8 +422,8 @@ class TdClient::Impl {
         auth_states_.unsubscribe(id);
     }
 
-    void close() {
-        std::call_once(close_once_, [this] {
+    bool close_until(std::chrono::steady_clock::time_point deadline) {
+        std::call_once(close_begin_once_, [this] {
             std::shared_ptr<Generation> generation;
             {
                 const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -441,21 +441,39 @@ class TdClient::Impl {
                     }
                 }));
             }
+        });
 
-            {
-                std::unique_lock<std::mutex> lock(closed_mutex_);
-                if (generation != nullptr && !closed_cv_.wait_for(lock, kCloseTimeout, [this] {
-                        return shutdown_closed_;
-                    })) {
-                    std::fputs("warning: tdlib did not reach authorizationStateClosed within 30s; "
-                               "shutting down without the clean-close guarantee\n",
-                               stderr);
-                }
+        {
+            std::unique_lock<std::mutex> lock(closed_mutex_);
+            if (shutdown_generation_ != 0 &&
+                !closed_cv_.wait_until(lock, deadline, [this] { return shutdown_closed_; })) {
+                return false;
             }
+        }
+        finalize_shutdown();
+        return true;
+    }
 
+    void close() {
+        if (!close_until(std::chrono::steady_clock::now() + kCloseTimeout)) {
+            std::fputs("warning: tdlib did not reach authorizationStateClosed within 30s; "
+                       "shutting down without the clean-close guarantee\n",
+                       stderr);
+            finalize_shutdown();
+        }
+    }
+
+  private:
+    void finalize_shutdown() {
+        std::call_once(finalize_once_, [this] {
             stop_.store(true, std::memory_order_release);
             if (receive_thread_.joinable()) {
                 receive_thread_.join();
+            }
+            std::shared_ptr<Generation> generation;
+            {
+                const std::lock_guard<std::mutex> lock(state_mutex_);
+                generation = current_;
             }
             if (generation != nullptr) {
                 generation->queries.fail_all("tdlib client closed");
@@ -463,7 +481,6 @@ class TdClient::Impl {
         });
     }
 
-  private:
     struct Submission {
         std::uint64_t query_id = 0;
         std::future<TdValue> future;
@@ -888,7 +905,8 @@ class TdClient::Impl {
     std::mutex closed_mutex_;
     std::condition_variable closed_cv_;
     bool shutdown_closed_ = false;
-    std::once_flag close_once_;
+    std::once_flag close_begin_once_;
+    std::once_flag finalize_once_;
     std::thread receive_thread_;
 };
 
@@ -1104,6 +1122,10 @@ void TdClient::unsubscribe_auth_states(std::uint64_t id) {
 
 void TdClient::close() {
     impl_->close();
+}
+
+bool TdClient::close_until(std::chrono::steady_clock::time_point deadline) {
+    return impl_->close_until(deadline);
 }
 
 std::string TdClient::tdlib_version() {

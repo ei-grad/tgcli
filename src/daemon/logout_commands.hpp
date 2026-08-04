@@ -21,6 +21,18 @@ namespace tgcli::daemon {
 
 class Dispatcher;
 
+class LogoutLifecycle final {
+  public:
+    [[nodiscard]] static core::TdClosedDecision
+    begin(core::TdClient& client,
+          const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+          RequestSession& session, std::function<void()> during_terminal_claim = {});
+    static std::future<core::TdValue>
+    send(core::TdClient& client,
+         const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+         core::TdClosedDecision& decision);
+};
+
 namespace testing {
 
 struct LogoutHooks {

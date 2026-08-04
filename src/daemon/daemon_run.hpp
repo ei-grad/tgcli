@@ -25,4 +25,9 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
 bool reconcile_logout_audit_offline(const std::string& account,
                                     std::chrono::steady_clock::time_point deadline);
 
+// Executes only the no-spawn removal modes. Dry-run remains entirely
+// observational; keep-session uses no TDLib client when no daemon is present.
+bool run_account_removal_local(const proto::Request& request, ResponseSink& sink,
+                               const std::string& account, std::string& error);
+
 } // namespace tgcli::daemon
