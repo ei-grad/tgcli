@@ -256,20 +256,25 @@ fetch_inputs() {
 
 build_release() {
     local actual_home_identity
+    local actual_tmp_identity
     local canonical_work_directory
     local expected_image
     local expected_home_identity
     local jobs
     local common_flags
     local private_home
+    local private_tmp
 
     [[ "${SOURCE_DATE_EPOCH:-}" =~ ^[1-9][0-9]*$ ]] || \
         fail "SOURCE_DATE_EPOCH must be a positive integer"
     [[ "${TGCLI_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || \
         fail "TGCLI_SOURCE_SHA must be an exact Git commit"
     private_home="$WORK_DIRECTORY/release-home"
+    private_tmp="$WORK_DIRECTORY/release-tmp"
     HOME="$private_home"
+    TMPDIR="$private_tmp"
     export HOME
+    export TMPDIR
     canonical_work_directory="$(realpath -m -- "$WORK_DIRECTORY")"
     [[ "$canonical_work_directory" == "$WORK_DIRECTORY" ]] || \
         fail "release work directory must be an exact canonical path"
@@ -286,7 +291,7 @@ build_release() {
         fail "release work directory already exists: $WORK_DIRECTORY"
     [[ ! -e "$OUTPUT_DIRECTORY" && ! -L "$OUTPUT_DIRECTORY" ]] || \
         fail "release output directory already exists: $OUTPUT_DIRECTORY"
-    mkdir -p -m 0700 "$private_home"
+    mkdir -p -m 0700 "$private_home" "$private_tmp"
     [[ -d "$WORK_DIRECTORY" && ! -L "$WORK_DIRECTORY" ]] || \
         fail "release work directory is not a private directory"
     [[ "$(cd "$WORK_DIRECTORY" && pwd -P)" == "$WORK_DIRECTORY" ]] || \
@@ -299,6 +304,13 @@ build_release() {
     actual_home_identity="$(stat -c '%u:%g:%a' -- "$private_home")"
     [[ "$actual_home_identity" == "$expected_home_identity" ]] || \
         fail "release private HOME has unsafe owner or mode"
+    [[ -d "$private_tmp" && ! -L "$private_tmp" ]] || \
+        fail "release private TMPDIR is not a directory"
+    [[ "$(cd "$private_tmp" && pwd -P)" == "$private_tmp" ]] || \
+        fail "release private TMPDIR identity changed during creation"
+    actual_tmp_identity="$(stat -c '%u:%g:%a' -- "$private_tmp")"
+    [[ "$actual_tmp_identity" == "$expected_home_identity" ]] || \
+        fail "release private TMPDIR has unsafe owner or mode"
 
     python3 "$VERIFIER" \
         --repo-root "$REPO_ROOT" \
