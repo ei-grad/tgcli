@@ -1,11 +1,13 @@
 include(Catch)
 
 add_executable(tgcli_unit_tests
+    activity_tracker_test.cpp
     account_cli_test.cpp
     account_commands_test.cpp
     auth_bootstrap_test.cpp
     login_commands_test.cpp
     config_test.cpp
+    config_runtime_test.cpp
     daemon_lock_test.cpp
     dependency_lock_schema_test.cpp
     frame_test.cpp

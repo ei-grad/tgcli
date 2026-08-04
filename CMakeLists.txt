@@ -123,6 +123,8 @@ target_link_libraries(tgcli_core
     PRIVATE tgcli_td_runtime)
 
 add_library(tgcli_daemon STATIC
+    src/daemon/activity_tracker.cpp
+    src/daemon/config_runtime.cpp
     src/daemon/dispatch.cpp
     src/daemon/request_session.cpp
     src/daemon/account_commands.cpp
