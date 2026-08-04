@@ -16,11 +16,34 @@ from unittest import mock
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCRIPTS = REPOSITORY / "scripts"
+BYTECODE_CACHE_ROOTS = (
+    SCRIPTS / "__pycache__",
+    SCRIPTS / "release/__pycache__",
+    REPOSITORY / "tests/__pycache__",
+)
+
+
+def local_bytecode_cache_entries() -> frozenset[str]:
+    return frozenset(
+        str(entry.relative_to(REPOSITORY))
+        for root in BYTECODE_CACHE_ROOTS
+        if root.exists()
+        for entry in (root, *root.rglob("*"))
+    )
+
+
+INITIAL_BYTECODE_CACHE_ENTRIES = local_bytecode_cache_entries()
 sys.path.insert(0, str(SCRIPTS))
 
 import materialize_test_dc_fixtures as materializer
 import run_test_dc_e2e as acceptance
 import test_dc_contract as contract
+
+
+class BytecodeIsolationTests(unittest.TestCase):
+    def test_suite_disables_source_tree_bytecode_writes(self) -> None:
+        self.assertTrue(sys.dont_write_bytecode)
+        self.assertEqual(local_bytecode_cache_entries(), INITIAL_BYTECODE_CACHE_ENTRIES)
 
 
 class PrivateTree:

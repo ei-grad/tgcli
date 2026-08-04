@@ -71,6 +71,6 @@ set_tests_properties(
     PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 add_test(
     NAME test-dc-contract-tools
-    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+    COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
         -s "${CMAKE_CURRENT_SOURCE_DIR}"
         -p "test_test_dc_tools.py")
