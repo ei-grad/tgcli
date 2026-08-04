@@ -25,6 +25,15 @@ template <typename Response> class RequestLifecycle {
         return std::invoke(std::forward<Send>(send));
     }
 
+    template <typename Admit> bool admit(Admit&& admit) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (closing_) {
+            return false;
+        }
+        std::invoke(std::forward<Admit>(admit));
+        return true;
+    }
+
     template <typename BeginClose> bool begin_close(BeginClose&& begin_close) {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (closing_) {

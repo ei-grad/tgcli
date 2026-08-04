@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -36,6 +37,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     void initialize_process() override;
     std::int32_t create_client(std::uint64_t client_generation) override;
     core::TdValue make_function(core::TdBuiltinFunction function) override;
+    core::TdValue make_set_tdlib_parameters(core::TdlibParameters parameters) override;
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               core::TdValue function) override;
     std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;
@@ -52,6 +54,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     [[nodiscard]] std::vector<SentTdFunction> sent_functions() const;
     [[nodiscard]] std::vector<ScriptedClient> clients() const;
     [[nodiscard]] bool initialized_before_first_client() const;
+    void set_before_send(std::function<void(const core::TdFunctionData&)> hook);
 
   private:
     void push_event(core::TdRuntimeEvent event);
@@ -64,6 +67,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     std::vector<ScriptedClient> clients_;
     std::vector<SentTdFunction> sent_;
     std::deque<core::TdRuntimeEvent> events_;
+    std::function<void(const core::TdFunctionData&)> before_send_;
 };
 
 } // namespace tgcli::test

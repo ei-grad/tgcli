@@ -4,8 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace tgcli::secret_hook {
 
@@ -34,17 +36,25 @@ struct HookError {
 };
 
 struct HookRequest {
+    HookRequest(HookField field_value, std::string command_value,
+                std::optional<std::chrono::steady_clock::time_point> deadline_value,
+                std::stop_token cancellation_value = {})
+        : field(field_value), command(std::move(command_value)), request_deadline(deadline_value),
+          cancellation(std::move(cancellation_value)) {}
+
     HookField field;
     std::string command;
     std::optional<std::chrono::steady_clock::time_point> request_deadline;
+    std::stop_token cancellation;
 };
 
 struct HookResult {
     std::string value;
     std::optional<HookError> error;
+    bool cancelled = false;
 
     explicit operator bool() const {
-        return !error;
+        return !error && !cancelled;
     }
 };
 

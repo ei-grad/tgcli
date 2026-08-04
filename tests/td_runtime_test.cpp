@@ -1,5 +1,6 @@
 #include "core/td_client.hpp"
 #include "support/scripted_td_runtime.hpp"
+#include "support/td_client_test_access.hpp"
 
 #include <barrier>
 #include <chrono>
@@ -31,6 +32,8 @@ using tgcli::core::AuthWaitPassword;
 using tgcli::core::AuthWaitPremiumPurchase;
 using tgcli::core::AuthWaitRegistration;
 using tgcli::core::TdClient;
+using tgcli::core::TdFunctionKind;
+using tgcli::core::TdSendDescriptor;
 using tgcli::core::TdValue;
 using tgcli::test::ScriptedClient;
 using tgcli::test::ScriptedTdRuntime;
@@ -97,8 +100,11 @@ FakeClient make_fake_client(bool close_automatically = true) {
     return FakeClient{std::move(client), runtime_ptr, clients.front()};
 }
 
-TdValue test_function(std::string_view type) {
-    return TdValue::scripted_function(tgcli::core::TdFunctionData{type});
+std::future<TdValue> send_test_read(TdClient& client) {
+    const auto snapshot = client.auth_state();
+    return client.send_read(
+        snapshot, TdFunctionKind::GetOption,
+        TdValue::scripted_function(tgcli::core::TdFunctionData{TdFunctionKind::GetOption}));
 }
 
 } // namespace
@@ -284,8 +290,9 @@ TEST_CASE("reused query ids cannot be satisfied by late old-generation traffic",
     auto fake = make_fake_client();
     fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Ready});
     REQUIRE(eventually([&] { return fake.client->auth_state()->auth_sequence == 1; }));
+    const auto old_snapshot = fake.client->auth_state();
 
-    auto old_future = fake.client->send(test_function("oldGenerationRequest"));
+    auto old_future = send_test_read(*fake.client);
     REQUIRE(fake.runtime->wait_for_sent(2));
     CHECK(fake.runtime->sent_functions()[1].query_id == 2);
 
@@ -309,7 +316,14 @@ TEST_CASE("reused query ids cannot be satisfied by late old-generation traffic",
         const auto snapshot = fake.client->auth_state();
         return snapshot->client_generation == 2 && snapshot->auth_sequence == 1;
     }));
-    auto new_future = fake.client->send(test_function("newGenerationRequest"));
+    const auto sent_before_stale = fake.runtime->sent_functions().size();
+    auto stale = fake.client->send_read(
+        old_snapshot, TdFunctionKind::GetOption,
+        TdValue::scripted_function(tgcli::core::TdFunctionData{TdFunctionKind::GetOption}));
+    REQUIRE(stale.wait_for(0ms) == std::future_status::ready);
+    CHECK_THROWS_AS(stale.get(), tgcli::core::TdAuthorizationError);
+    CHECK(fake.runtime->sent_functions().size() == sent_before_stale);
+    auto new_future = send_test_read(*fake.client);
     REQUIRE(fake.runtime->wait_for_sent(4));
     CHECK(fake.runtime->sent_functions()[3].query_id == 2);
 
@@ -327,15 +341,16 @@ TEST_CASE("reused query ids cannot be satisfied by late old-generation traffic",
     CHECK(*response.get_if<std::string>() == "new");
 }
 
-TEST_CASE("Closed bootstrap fails queued sends without emitting them", "[core][td-runtime]") {
+TEST_CASE("pre-bootstrap sends are rejected without reserving or emitting a query",
+          "[core][td-runtime][safety]") {
     auto fake = make_fake_client();
-    auto queued = fake.client->send(test_function("mustNotCrossClosed"));
+    auto queued = send_test_read(*fake.client);
     std::this_thread::sleep_for(20ms);
     REQUIRE(fake.runtime->sent_functions().size() == 1);
+    REQUIRE(queued.wait_for(0ms) == std::future_status::ready);
+    CHECK_THROWS_AS(queued.get(), tgcli::core::TdAuthorizationError);
 
     fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Closed});
-    REQUIRE(queued.wait_for(2s) == std::future_status::ready);
-    CHECK_THROWS_AS(queued.get(), std::runtime_error);
     REQUIRE(fake.runtime->wait_for_clients(2));
     REQUIRE(fake.runtime->wait_for_sent(2));
 
@@ -344,6 +359,70 @@ TEST_CASE("Closed bootstrap fails queued sends without emitting them", "[core][t
     CHECK(sent[1].client_generation == 2);
     CHECK(sent[1].query_id == 1);
     CHECK(sent[1].function.has_type("getAuthorizationState"));
+}
+
+TEST_CASE("authorization publication cannot cross an admitted runtime send",
+          "[core][td-runtime][race][safety]") {
+    auto fake = make_fake_client();
+    fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return fake.client->auth_state()->auth_sequence == 1; }));
+
+    std::promise<void> send_entered;
+    auto send_entered_future = send_entered.get_future();
+    std::promise<void> release_send;
+    auto release_send_future = release_send.get_future().share();
+    fake.runtime->set_before_send([&](const tgcli::core::TdFunctionData& function) {
+        if (function.kind() == TdFunctionKind::GetOption) {
+            send_entered.set_value();
+            release_send_future.wait();
+        }
+    });
+
+    std::future<TdValue> response;
+    std::thread sender([&] { response = send_test_read(*fake.client); });
+    REQUIRE(send_entered_future.wait_for(2s) == std::future_status::ready);
+    fake.runtime->push_update(fake.first, {}, AuthStateData{AuthState::WaitPhoneNumber});
+    std::this_thread::sleep_for(20ms);
+    CHECK(fake.client->auth_state()->auth_sequence == 1);
+    CHECK(fake.client->auth_state()->data.state == AuthState::Ready);
+
+    release_send.set_value();
+    sender.join();
+    REQUIRE(fake.runtime->wait_for_sent(2));
+    REQUIRE(eventually([&] { return fake.client->auth_state()->auth_sequence == 2; }));
+    fake.runtime->set_before_send({});
+    fake.runtime->push_response(fake.first, 2, TdValue::from(std::string("ok")));
+    CHECK(*response.get().get_if<std::string>() == "ok");
+}
+
+TEST_CASE("unsupported initial state cannot repeat query 1 and still admits close query 2",
+          "[core][td-runtime][lifecycle][safety]") {
+    auto fake = make_fake_client(false);
+    fake.runtime->push_response(fake.first, 1, {},
+                                AuthStateData{AuthState::Unknown, {}, 0x7fffffff});
+    REQUIRE(eventually([&] { return fake.client->auth_state()->auth_sequence == 1; }));
+    const auto snapshot = fake.client->auth_state();
+    auto repeated = fake.client->send(
+        TdSendDescriptor{.function = TdFunctionKind::GetAuthorizationState,
+                         .tier = tgcli::core::DescriptorKind::AuthBootstrap,
+                         .owner = {tgcli::core::TdOwnerKind::InternalAuth, 999999},
+                         .client_generation = snapshot->client_generation,
+                         .auth_sequence = snapshot->auth_sequence,
+                         .auth_state = snapshot->data.state},
+        TdValue::scripted_function(
+            tgcli::core::TdFunctionData{TdFunctionKind::GetAuthorizationState}));
+    REQUIRE(repeated.wait_for(0ms) == std::future_status::ready);
+    CHECK_THROWS_AS(repeated.get(), tgcli::core::TdAuthorizationError);
+    CHECK(fake.runtime->sent_functions().size() == 1);
+
+    auto closing = std::async(std::launch::async, [&] { fake.client->close(); });
+    REQUIRE(fake.runtime->wait_for_sent(2));
+    const auto sent = fake.runtime->sent_functions();
+    REQUIRE(sent.size() == 2);
+    CHECK(sent[1].query_id == 2);
+    CHECK(sent[1].function.kind() == TdFunctionKind::Close);
+    fake.runtime->push_update(fake.first, {}, AuthStateData{AuthState::Closed});
+    CHECK(closing.wait_for(2s) == std::future_status::ready);
 }
 
 TEST_CASE("Closed replaces a logout generation once but daemon shutdown never respawns",
@@ -379,7 +458,7 @@ TEST_CASE("Closed closes request admission before auth-state callbacks run",
     auto fake = make_fake_client();
     fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Ready});
     REQUIRE(eventually([&] { return fake.client->auth_state()->data.state == AuthState::Ready; }));
-    auto unresolved_response = fake.client->send(test_function("unresolvedBeforeClosed"));
+    auto unresolved_response = send_test_read(*fake.client);
     REQUIRE(fake.runtime->wait_for_sent(2));
 
     std::promise<void> callback_entered;
@@ -403,7 +482,7 @@ TEST_CASE("Closed closes request admission before auth-state callbacks run",
     const bool callback_observed =
         callback_entered_future.wait_for(2s) == std::future_status::ready;
 
-    auto response = fake.client->send(test_function("mustNotReachClosedGeneration"));
+    auto response = send_test_read(*fake.client);
     const bool response_ready = response.wait_for(0ms) == std::future_status::ready;
     bool response_failed = false;
     if (response_ready) {
@@ -503,7 +582,7 @@ TEST_CASE("fake-boundary send and close race resolves every future exactly once"
         std::barrier start(3);
         std::thread sender([&] {
             start.arrive_and_wait();
-            response = fake.client->send(test_function("racingRequest"));
+            response = send_test_read(*fake.client);
         });
         std::thread closer([&] {
             start.arrive_and_wait();

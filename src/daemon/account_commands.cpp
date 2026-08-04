@@ -131,6 +131,10 @@ void mutation_failure(RequestSession& session, const ConfigGlobalContext& contex
         session.error("INTERNAL", "config mutation was cancelled",
                       {{"operation", operation}, {"reason", "internal_error"}}, kGeneric);
         return;
+    case config::MutationStatus::PreconditionFailed:
+        session.error("INTERNAL", "config mutation precondition failed",
+                      {{"operation", operation}, {"reason", "internal_error"}}, kGeneric);
+        return;
     case config::MutationStatus::Applied:
         break;
     }

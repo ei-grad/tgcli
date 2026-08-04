@@ -30,11 +30,16 @@ std::int32_t ScriptedTdRuntime::create_client(std::uint64_t client_generation) {
 core::TdValue ScriptedTdRuntime::make_function(core::TdBuiltinFunction function) {
     switch (function) {
     case core::TdBuiltinFunction::GetAuthorizationState:
-        return core::TdValue::scripted_function(core::TdFunctionData{"getAuthorizationState"});
+        return core::TdValue::scripted_function(
+            core::TdFunctionData{core::TdFunctionKind::GetAuthorizationState});
     case core::TdBuiltinFunction::Close:
-        return core::TdValue::scripted_function(core::TdFunctionData{"close"});
+        return core::TdValue::scripted_function(core::TdFunctionData{core::TdFunctionKind::Close});
     }
     throw std::logic_error("unknown built-in TDLib function");
+}
+
+core::TdValue ScriptedTdRuntime::make_set_tdlib_parameters(core::TdlibParameters parameters) {
+    return core::TdValue::scripted_function(core::describe_tdlib_parameters(parameters));
 }
 
 void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_generation,
@@ -44,6 +49,14 @@ void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_genera
     }
 
     const auto function_data = *function.function_data();
+    std::function<void(const core::TdFunctionData&)> before_send;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        before_send = before_send_;
+    }
+    if (before_send) {
+        before_send(function_data);
+    }
     bool close_automatically = false;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -113,6 +126,11 @@ std::vector<ScriptedClient> ScriptedTdRuntime::clients() const {
 bool ScriptedTdRuntime::initialized_before_first_client() const {
     const std::lock_guard<std::mutex> lock(mutex_);
     return initialized_before_first_client_;
+}
+
+void ScriptedTdRuntime::set_before_send(std::function<void(const core::TdFunctionData&)> hook) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    before_send_ = std::move(hook);
 }
 
 void ScriptedTdRuntime::push_event(core::TdRuntimeEvent event) {

@@ -2,6 +2,7 @@
 
 #include "core/td_runtime_test_adapter.hpp"
 
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -18,6 +19,48 @@ namespace {
 
 using NativeFunctionPtr = td_api::object_ptr<td_api::Function>;
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
+
+void wipe(std::string& value) {
+    volatile char* bytes = value.data();
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        bytes[index] = '\0';
+    }
+    value.clear();
+}
+
+bool native_function_matches(const td_api::Function& function, TdFunctionKind kind) {
+    switch (kind) {
+    case TdFunctionKind::GetAuthorizationState:
+        return function.get_id() == td_api::getAuthorizationState::ID;
+    case TdFunctionKind::SetTdlibParameters:
+        return function.get_id() == td_api::setTdlibParameters::ID;
+    case TdFunctionKind::SetAuthenticationPhoneNumber:
+        return function.get_id() == td_api::setAuthenticationPhoneNumber::ID;
+    case TdFunctionKind::RequestQrCodeAuthentication:
+        return function.get_id() == td_api::requestQrCodeAuthentication::ID;
+    case TdFunctionKind::CheckAuthenticationBotToken:
+        return function.get_id() == td_api::checkAuthenticationBotToken::ID;
+    case TdFunctionKind::SetAuthenticationEmailAddress:
+        return function.get_id() == td_api::setAuthenticationEmailAddress::ID;
+    case TdFunctionKind::CheckAuthenticationEmailCode:
+        return function.get_id() == td_api::checkAuthenticationEmailCode::ID;
+    case TdFunctionKind::CheckAuthenticationCode:
+        return function.get_id() == td_api::checkAuthenticationCode::ID;
+    case TdFunctionKind::RegisterUser:
+        return function.get_id() == td_api::registerUser::ID;
+    case TdFunctionKind::CheckAuthenticationPassword:
+        return function.get_id() == td_api::checkAuthenticationPassword::ID;
+    case TdFunctionKind::GetOption:
+        return function.get_id() == td_api::getOption::ID;
+    case TdFunctionKind::GetMe:
+        return function.get_id() == td_api::getMe::ID;
+    case TdFunctionKind::LogOut:
+        return function.get_id() == td_api::logOut::ID;
+    case TdFunctionKind::Close:
+        return function.get_id() == td_api::close::ID;
+    }
+    return false;
+}
 
 void enforce_error_verbosity() {
     td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
@@ -213,14 +256,29 @@ class ProductionTdRuntime final : public TdRuntime {
         switch (function) {
         case TdBuiltinFunction::GetAuthorizationState: {
             NativeFunctionPtr native = td_api::make_object<td_api::getAuthorizationState>();
-            return TdValue::function(std::move(native), TdFunctionData{"getAuthorizationState"});
+            return TdValue::function(std::move(native),
+                                     TdFunctionData{TdFunctionKind::GetAuthorizationState});
         }
         case TdBuiltinFunction::Close: {
             NativeFunctionPtr native = td_api::make_object<td_api::close>();
-            return TdValue::function(std::move(native), TdFunctionData{"close"});
+            return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::Close});
         }
         }
         throw std::logic_error("unknown built-in TDLib function");
+    }
+
+    TdValue make_set_tdlib_parameters(TdlibParameters parameters) override {
+        auto description = describe_tdlib_parameters(parameters);
+        NativeFunctionPtr native = td_api::make_object<td_api::setTdlibParameters>(
+            parameters.use_test_dc, parameters.database_directory, parameters.files_directory,
+            parameters.database_encryption_key, parameters.use_file_database,
+            parameters.use_chat_info_database, parameters.use_message_database,
+            parameters.use_secret_chats, parameters.api_id, parameters.api_hash,
+            parameters.system_language_code, parameters.device_model, parameters.system_version,
+            parameters.application_version);
+        wipe(parameters.database_encryption_key);
+        wipe(parameters.api_hash);
+        return TdValue::function(std::move(native), std::move(description));
     }
 
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
@@ -229,6 +287,12 @@ class ProductionTdRuntime final : public TdRuntime {
         auto* native_function = function.get_if<NativeFunctionPtr>();
         if (native_function == nullptr || *native_function == nullptr) {
             throw std::invalid_argument("TdClient request does not contain a native function");
+        }
+        const auto& function_data = function.function_data();
+        const auto function_kind =
+            function_data ? function_data->kind() : std::optional<TdFunctionKind>{};
+        if (!function_kind || !native_function_matches(**native_function, *function_kind)) {
+            throw std::invalid_argument("TdClient native function does not match its descriptor");
         }
         const bool is_authorization_state_query =
             (*native_function)->get_id() == td_api::getAuthorizationState::ID;
@@ -299,6 +363,26 @@ convert_production_authorization_state_for_test(const TdValue& object,
 }
 
 } // namespace detail
+
+TdFunctionData describe_tdlib_parameters(const TdlibParameters& parameters) {
+    return TdFunctionData{TdFunctionKind::SetTdlibParameters,
+                          {
+                              {"use_test_dc", parameters.use_test_dc},
+                              {"database_directory", parameters.database_directory},
+                              {"files_directory", parameters.files_directory},
+                              {"database_encryption_key", TdRedactedValue::Credential},
+                              {"use_file_database", parameters.use_file_database},
+                              {"use_chat_info_database", parameters.use_chat_info_database},
+                              {"use_message_database", parameters.use_message_database},
+                              {"use_secret_chats", parameters.use_secret_chats},
+                              {"api_id", static_cast<std::int64_t>(parameters.api_id)},
+                              {"api_hash", TdRedactedValue::Credential},
+                              {"system_language_code", parameters.system_language_code},
+                              {"device_model", parameters.device_model},
+                              {"system_version", parameters.system_version},
+                              {"application_version", parameters.application_version},
+                          }};
+}
 
 std::unique_ptr<TdRuntime> make_production_td_runtime() {
     return std::make_unique<ProductionTdRuntime>();

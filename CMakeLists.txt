@@ -97,9 +97,11 @@ target_link_libraries(tgcli_td_runtime
     PRIVATE Td::TdStatic)
 
 add_library(tgcli_core STATIC
+    src/core/auth_bootstrap.cpp
+    src/core/td_authorization.cpp
     src/core/td_client.cpp)
 target_link_libraries(tgcli_core
-    PUBLIC tgcli_common
+    PUBLIC tgcli_common tgcli_util
     PRIVATE tgcli_td_runtime)
 
 add_library(tgcli_daemon STATIC

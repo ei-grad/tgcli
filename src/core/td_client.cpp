@@ -2,6 +2,7 @@
 
 #include "core/query_registry.hpp"
 #include "core/request_lifecycle.hpp"
+#include "core/td_authorization.hpp"
 #include "core/update_bus.hpp"
 
 #include <atomic>
@@ -14,6 +15,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 namespace tgcli::core {
@@ -30,7 +32,23 @@ std::future<TdValue> failed_future(const std::string& message) {
     return future;
 }
 
+std::future<TdValue> failed_future(TdAuthorizationFailure failure) {
+    std::promise<TdValue> promise;
+    auto future = promise.get_future();
+    promise.set_exception(std::make_exception_ptr(TdAuthorizationError(failure)));
+    return future;
+}
+
 } // namespace
+
+struct TdSendLease::State {
+    std::function<std::future<TdValue>(TdlibParameters)> submit;
+};
+
+struct TdOwnerLease::State {
+    TdRequestOwner owner;
+    std::function<void()> revoke;
+};
 
 class TdClient::Impl {
   public:
@@ -52,7 +70,7 @@ class TdClient::Impl {
         close();
     }
 
-    std::future<TdValue> send(TdValue request) {
+    std::future<TdValue> send(TdSendDescriptor descriptor, TdValue request) {
         std::shared_ptr<Generation> generation;
         {
             const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -62,17 +80,142 @@ class TdClient::Impl {
             return failed_future("tdlib client closed");
         }
 
-        return generation->lifecycle.send(
-            [this, generation, request = std::move(request)]() mutable {
-                auto [query_id, future] = generation->queries.reserve();
-                const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
-                if (!generation->initial_state_installed) {
-                    generation->pending.emplace_back(query_id, std::move(request));
-                } else {
-                    send_or_fail(generation, query_id, std::move(request));
-                }
-                return std::move(future);
-            });
+        return generation->lifecycle.send([this, generation, descriptor = std::move(descriptor),
+                                           request = std::move(request)]() mutable {
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            if (!generation->initial_state_installed) {
+                return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+            }
+            return submit_locked(generation, descriptor, std::move(request)).future;
+        });
+    }
+
+    std::future<TdValue> send(TdSendDescriptor descriptor, TdlibParameters parameters) {
+        return send(std::move(descriptor),
+                    runtime_->make_set_tdlib_parameters(std::move(parameters)));
+    }
+
+    std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdFunctionKind function, TdValue request) {
+        if (!authorization ||
+            (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe)) {
+            return failed_future(TdAuthorizationFailure::FunctionDenied);
+        }
+        auto owner = issue_owner(TdOwnerKind::Request);
+        if (!owner) {
+            return failed_future(TdAuthorizationFailure::GenerationClosed);
+        }
+        return send(TdSendDescriptor{.function = function,
+                                     .tier = DescriptorKind::Read,
+                                     .owner = owner.owner(),
+                                     .client_generation = authorization->client_generation,
+                                     .auth_sequence = authorization->auth_sequence,
+                                     .auth_state = authorization->data.state},
+                    std::move(request));
+    }
+
+    TdSendLease acquire_send_lease(TdSendDescriptor descriptor) {
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard<std::mutex> lock(state_mutex_);
+            generation = current_;
+        }
+        if (generation == nullptr) {
+            return {};
+        }
+
+        TdSendLease lease;
+        const bool admitted = generation->lifecycle.admit([&] {
+            auto held = std::make_shared<LeaseLocks>();
+            held->auth_commit = std::unique_lock<std::mutex>(generation->auth_commit_mutex);
+            held->outbound = std::unique_lock<std::mutex>(generation->outbound_mutex);
+            if (!generation->initial_state_installed ||
+                authorization_failure_locked(generation, descriptor,
+                                             TdFunctionData{descriptor.function})) {
+                return;
+            }
+            auto state = std::make_shared<TdSendLease::State>();
+            state->submit = [this, generation, descriptor,
+                             held = std::move(held)](TdlibParameters parameters) mutable {
+                auto submission = submit_admitted_locked(
+                    generation, descriptor,
+                    runtime_->make_set_tdlib_parameters(std::move(parameters)));
+                held.reset();
+                return std::move(submission.future);
+            };
+            lease = TdSendLease(std::move(state));
+        });
+        return admitted ? std::move(lease) : TdSendLease{};
+    }
+
+    static std::future<TdValue> send(TdSendLease lease, TdlibParameters parameters) {
+        if (!lease.state_ || !lease.state_->submit) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        auto state = std::move(lease.state_);
+        return state->submit(std::move(parameters));
+    }
+
+    TdRequestOwner internal_auth_owner() const {
+        const std::lock_guard<std::mutex> lock(state_mutex_);
+        if (current_ == nullptr) {
+            return {};
+        }
+        const std::lock_guard<std::mutex> outbound_lock(current_->outbound_mutex);
+        return {TdOwnerKind::InternalAuth, current_->internal_auth_owner_id,
+                current_->internal_auth_owner_capability};
+    }
+
+    TdOwnerLease issue_owner(TdOwnerKind kind) {
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard<std::mutex> lock(state_mutex_);
+            generation = current_;
+        }
+        if (generation == nullptr || (kind != TdOwnerKind::Login && kind != TdOwnerKind::Request)) {
+            return {};
+        }
+        const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+        if (generation->final) {
+            return {};
+        }
+        const auto id = next_owner_id_.fetch_add(1, std::memory_order_relaxed);
+        auto capability = std::make_shared<const std::uint64_t>(id);
+        (kind == TdOwnerKind::Login ? generation->login_owner_capabilities
+                                    : generation->request_owner_capabilities)
+            .insert(capability);
+        auto state = std::make_unique<TdOwnerLease::State>();
+        state->owner = {kind, id, capability};
+        state->revoke = [generation, kind, capability = std::move(capability)] {
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            (kind == TdOwnerKind::Login ? generation->login_owner_capabilities
+                                        : generation->request_owner_capabilities)
+                .erase(capability);
+        };
+        return TdOwnerLease(std::move(state));
+    }
+
+    bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const {
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard<std::mutex> lock(state_mutex_);
+            generation = current_;
+        }
+        if (generation == nullptr || generation->number != client_generation) {
+            return false;
+        }
+        const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+        switch (owner.kind) {
+        case TdOwnerKind::InternalAuth:
+            return owner.capability == generation->internal_auth_owner_capability;
+        case TdOwnerKind::Lifecycle:
+            return owner.capability == generation->lifecycle_owner_capability;
+        case TdOwnerKind::Login:
+            return generation->login_owner_capabilities.contains(owner.capability);
+        case TdOwnerKind::Request:
+            return generation->request_owner_capabilities.contains(owner.capability);
+        }
+        return false;
     }
 
     std::uint64_t subscribe_updates(UpdateHandler handler) {
@@ -109,7 +252,6 @@ class TdClient::Impl {
                 static_cast<void>(generation->lifecycle.begin_close([this, generation] {
                     const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
                     generation->close_requested = true;
-                    fail_pending_locked(generation, "tdlib client closing");
                     if (generation->initial_state_installed && !generation->final) {
                         send_close_locked(generation);
                     }
@@ -138,12 +280,14 @@ class TdClient::Impl {
     }
 
   private:
-    struct PendingFunction {
-        PendingFunction(std::uint64_t query_id_value, TdValue function_value)
-            : query_id(query_id_value), function(std::move(function_value)) {}
+    struct Submission {
+        std::uint64_t query_id = 0;
+        std::future<TdValue> future;
+    };
 
-        std::uint64_t query_id;
-        TdValue function;
+    struct LeaseLocks {
+        std::unique_lock<std::mutex> auth_commit;
+        std::unique_lock<std::mutex> outbound;
     };
 
     struct Generation {
@@ -154,13 +298,19 @@ class TdClient::Impl {
         std::uint64_t number;
         QueryRegistry<TdValue> queries;
         detail::RequestLifecycle<TdValue> lifecycle{"tdlib client generation closed"};
+        std::mutex auth_commit_mutex;
         std::mutex outbound_mutex;
+        std::uint64_t internal_auth_owner_id = 0;
+        std::uint64_t lifecycle_owner_id = 0;
+        std::shared_ptr<const void> internal_auth_owner_capability;
+        std::shared_ptr<const void> lifecycle_owner_capability;
+        std::unordered_set<std::shared_ptr<const void>> login_owner_capabilities;
+        std::unordered_set<std::shared_ptr<const void>> request_owner_capabilities;
         bool initial_state_installed = false;
         bool accepted_auth_update = false;
         bool close_requested = false;
         bool close_sent = false;
         bool final = false;
-        std::deque<PendingFunction> pending;
         std::deque<TdValue> pending_updates;
     };
 
@@ -168,6 +318,12 @@ class TdClient::Impl {
         const auto generation_number = next_generation_++;
         const auto client_id = runtime_->create_client(generation_number);
         auto generation = std::make_shared<Generation>(client_id, generation_number);
+        generation->internal_auth_owner_id = next_owner_id_.fetch_add(1, std::memory_order_relaxed);
+        generation->lifecycle_owner_id = next_owner_id_.fetch_add(1, std::memory_order_relaxed);
+        generation->internal_auth_owner_capability =
+            std::make_shared<const std::uint64_t>(generation->internal_auth_owner_id);
+        generation->lifecycle_owner_capability =
+            std::make_shared<const std::uint64_t>(generation->lifecycle_owner_id);
         auto unknown = std::make_shared<const AuthStateSnapshot>(
             AuthStateSnapshot{.client_id = client_id,
                               .client_generation = generation_number,
@@ -175,13 +331,21 @@ class TdClient::Impl {
                               .data = AuthStateData{AuthState::Unknown}});
         auth_state_.store(std::move(unknown), std::memory_order_release);
 
-        auto [query_id, future] = generation->queries.reserve();
-        static_cast<void>(future);
-        if (query_id != 1) {
+        const TdSendDescriptor descriptor{
+            .function = TdFunctionKind::GetAuthorizationState,
+            .tier = DescriptorKind::AuthBootstrap,
+            .owner = {TdOwnerKind::InternalAuth, generation->internal_auth_owner_id,
+                      generation->internal_auth_owner_capability},
+            .client_generation = generation_number,
+            .auth_sequence = 0,
+            .auth_state = AuthState::Unknown,
+        };
+        auto submission =
+            submit_locked(generation, descriptor,
+                          runtime_->make_function(TdBuiltinFunction::GetAuthorizationState));
+        if (submission.query_id != 1) {
             throw std::logic_error("authorization bootstrap must reserve query id 1");
         }
-        runtime_->send(client_id, generation_number, query_id,
-                       runtime_->make_function(TdBuiltinFunction::GetAuthorizationState));
         return generation;
     }
 
@@ -190,24 +354,66 @@ class TdClient::Impl {
         current_ = make_generation();
     }
 
-    void send_or_fail(const std::shared_ptr<Generation>& generation, std::uint64_t query_id,
-                      TdValue function) {
+    Submission submit_locked(const std::shared_ptr<Generation>& generation,
+                             const TdSendDescriptor& descriptor, TdValue function) {
+        const auto& function_data = function.function_data();
+        if (const auto failure = authorization_failure_locked(
+                generation, descriptor, function_data ? &*function_data : nullptr)) {
+            return {0, failed_future(*failure)};
+        }
+        return submit_admitted_locked(generation, descriptor, std::move(function));
+    }
+
+    std::optional<TdAuthorizationFailure>
+    authorization_failure_locked(const std::shared_ptr<Generation>& generation,
+                                 const TdSendDescriptor& descriptor,
+                                 const TdFunctionData& function) const {
+        return authorization_failure_locked(generation, descriptor, &function);
+    }
+
+    std::optional<TdAuthorizationFailure>
+    authorization_failure_locked(const std::shared_ptr<Generation>& generation,
+                                 const TdSendDescriptor& descriptor,
+                                 const TdFunctionData* function) const {
+        const auto snapshot = auth_state_.load(std::memory_order_acquire);
+        if (snapshot == nullptr) {
+            return TdAuthorizationFailure::AuthStateMismatch;
+        }
+        if (const auto failure =
+                authorize_td_send(descriptor, function, *snapshot, generation->final)) {
+            return failure;
+        }
+        const bool owner_registered = [&] {
+            switch (descriptor.owner.kind) {
+            case TdOwnerKind::InternalAuth:
+                return descriptor.owner.capability == generation->internal_auth_owner_capability;
+            case TdOwnerKind::Lifecycle:
+                return descriptor.owner.capability == generation->lifecycle_owner_capability;
+            case TdOwnerKind::Login:
+                return generation->login_owner_capabilities.contains(descriptor.owner.capability);
+            case TdOwnerKind::Request:
+                return generation->request_owner_capabilities.contains(descriptor.owner.capability);
+            }
+            return false;
+        }();
+        if (!owner_registered) {
+            return TdAuthorizationFailure::OwnerMismatch;
+        }
+        return std::nullopt;
+    }
+
+    Submission submit_admitted_locked(const std::shared_ptr<Generation>& generation,
+                                      const TdSendDescriptor& admitted_descriptor,
+                                      TdValue function) {
+        static_cast<void>(admitted_descriptor);
+        auto [query_id, future] = generation->queries.reserve();
         try {
             runtime_->send(generation->client_id, generation->number, query_id,
                            std::move(function));
         } catch (const std::exception&) {
             static_cast<void>(generation->queries.fail(query_id, std::current_exception()));
         }
-    }
-
-    static void fail_pending_locked(const std::shared_ptr<Generation>& generation,
-                                    const std::string& message) {
-        while (!generation->pending.empty()) {
-            const auto query_id = generation->pending.front().query_id;
-            generation->pending.pop_front();
-            static_cast<void>(generation->queries.fail(
-                query_id, std::make_exception_ptr(std::runtime_error(message))));
-        }
+        return {query_id, std::move(future)};
     }
 
     void send_close_locked(const std::shared_ptr<Generation>& generation) {
@@ -215,9 +421,21 @@ class TdClient::Impl {
             return;
         }
         generation->close_sent = true;
-        auto [query_id, future] = generation->queries.reserve();
-        static_cast<void>(future);
-        send_or_fail(generation, query_id, runtime_->make_function(TdBuiltinFunction::Close));
+        const auto snapshot = auth_state_.load(std::memory_order_acquire);
+        if (snapshot == nullptr) {
+            return;
+        }
+        const TdSendDescriptor descriptor{
+            .function = TdFunctionKind::Close,
+            .tier = DescriptorKind::Lifecycle,
+            .owner = {TdOwnerKind::Lifecycle, generation->lifecycle_owner_id,
+                      generation->lifecycle_owner_capability},
+            .client_generation = generation->number,
+            .auth_sequence = snapshot->auth_sequence,
+            .auth_state = snapshot->data.state,
+        };
+        static_cast<void>(submit_locked(generation, descriptor,
+                                        runtime_->make_function(TdBuiltinFunction::Close)));
     }
 
     void receive_loop() {
@@ -291,7 +509,10 @@ class TdClient::Impl {
         }
 
         std::shared_ptr<const AuthStateSnapshot> snapshot;
+        std::deque<TdValue> pending_updates;
         {
+            const std::lock_guard<std::mutex> commit_lock(generation->auth_commit_mutex);
+            const std::lock_guard<std::mutex> outbound_lock(generation->outbound_mutex);
             const auto previous = auth_state_.load(std::memory_order_acquire);
             const auto sequence =
                 previous != nullptr && previous->client_generation == generation->number
@@ -303,22 +524,11 @@ class TdClient::Impl {
                                   .auth_sequence = sequence,
                                   .data = state});
             auth_state_.store(snapshot, std::memory_order_release);
-        }
-
-        std::deque<TdValue> pending_updates;
-        {
-            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
             generation->initial_state_installed = true;
             generation->accepted_auth_update |= from_update;
             if (state.state != AuthState::Closed) {
                 if (generation->close_requested) {
                     send_close_locked(generation);
-                } else {
-                    while (!generation->pending.empty() && !generation->final) {
-                        auto pending = std::move(generation->pending.front());
-                        generation->pending.pop_front();
-                        send_or_fail(generation, pending.query_id, std::move(pending.function));
-                    }
                 }
                 pending_updates.swap(generation->pending_updates);
             }
@@ -334,13 +544,11 @@ class TdClient::Impl {
         const auto closed_now = generation->lifecycle.begin_close([generation] {
             const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
             generation->final = true;
-            generation->pending.clear();
             generation->pending_updates.clear();
         });
         if (!closed_now) {
             const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
             generation->final = true;
-            generation->pending.clear();
             generation->pending_updates.clear();
         }
     }
@@ -379,6 +587,7 @@ class TdClient::Impl {
     mutable std::mutex state_mutex_;
     std::shared_ptr<Generation> current_;
     std::uint64_t next_generation_ = 1;
+    std::atomic<std::uint64_t> next_owner_id_{1};
     bool shutting_down_ = false;
     std::uint64_t shutdown_generation_ = 0;
     std::atomic<std::shared_ptr<const AuthStateSnapshot>> auth_state_;
@@ -392,6 +601,46 @@ class TdClient::Impl {
     std::thread receive_thread_;
 };
 
+TdAuthorizationError::TdAuthorizationError(TdAuthorizationFailure failure)
+    : std::runtime_error("TDLib send denied: " + std::string(authorization_failure_name(failure))),
+      failure_(failure) {}
+
+TdSendLease::TdSendLease() = default;
+TdSendLease::~TdSendLease() = default;
+TdSendLease::TdSendLease(std::shared_ptr<State> state) : state_(std::move(state)) {}
+TdSendLease::TdSendLease(TdSendLease&&) noexcept = default;
+TdSendLease& TdSendLease::operator=(TdSendLease&& other) noexcept = default;
+
+TdSendLease::operator bool() const noexcept {
+    return state_ != nullptr;
+}
+
+TdOwnerLease::TdOwnerLease() = default;
+TdOwnerLease::~TdOwnerLease() {
+    if (state_ && state_->revoke) {
+        state_->revoke();
+    }
+}
+TdOwnerLease::TdOwnerLease(std::unique_ptr<State> state) : state_(std::move(state)) {}
+TdOwnerLease::TdOwnerLease(TdOwnerLease&&) noexcept = default;
+TdOwnerLease& TdOwnerLease::operator=(TdOwnerLease&& other) noexcept {
+    if (this != &other) {
+        if (state_ && state_->revoke) {
+            state_->revoke();
+        }
+        state_ = std::move(other.state_);
+    }
+    return *this;
+}
+
+TdRequestOwner TdOwnerLease::owner() const noexcept {
+    return state_ ? state_->owner : TdRequestOwner{};
+}
+
+TdOwnerLease::operator bool() const noexcept {
+    return state_ != nullptr;
+}
+
 TdClient::TdClient() : TdClient(make_production_td_runtime()) {}
 
 TdClient::TdClient(std::unique_ptr<TdRuntime> runtime)
@@ -399,8 +648,38 @@ TdClient::TdClient(std::unique_ptr<TdRuntime> runtime)
 
 TdClient::~TdClient() = default;
 
-std::future<TdValue> TdClient::send(TdValue request) {
-    return impl_->send(std::move(request));
+std::future<TdValue> TdClient::send(TdSendDescriptor descriptor, TdValue request) {
+    return impl_->send(std::move(descriptor), std::move(request));
+}
+
+std::future<TdValue> TdClient::send(TdSendDescriptor descriptor, TdlibParameters parameters) {
+    return impl_->send(std::move(descriptor), std::move(parameters));
+}
+
+TdSendLease TdClient::acquire_send_lease(TdSendDescriptor descriptor) {
+    return impl_->acquire_send_lease(std::move(descriptor));
+}
+
+std::future<TdValue> TdClient::send(TdSendLease&& lease, TdlibParameters parameters) {
+    return impl_->send(std::move(lease), std::move(parameters));
+}
+
+std::future<TdValue>
+TdClient::send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    TdFunctionKind function, TdValue request) {
+    return impl_->send_read(authorization, function, std::move(request));
+}
+
+TdRequestOwner TdClient::internal_auth_owner() const {
+    return impl_->internal_auth_owner();
+}
+
+TdOwnerLease TdClient::issue_login_owner() {
+    return impl_->issue_owner(TdOwnerKind::Login);
+}
+
+bool TdClient::owns(const TdRequestOwner& owner, std::uint64_t client_generation) const {
+    return impl_->owns(owner, client_generation);
 }
 
 std::uint64_t TdClient::subscribe_updates(UpdateHandler handler) {

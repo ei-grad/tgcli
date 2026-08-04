@@ -243,6 +243,9 @@ HookResult run_impl(const HookRequest& request, const testing::RunHooks& hooks) 
     if (request.request_deadline && *request.request_deadline < deadline) {
         deadline = *request.request_deadline;
     }
+    if (request.cancellation.stop_requested()) {
+        return {{}, {}, true};
+    }
     if (start >= deadline) {
         return failure(request.field, HookFailure::Timeout);
     }
@@ -322,6 +325,10 @@ HookResult run_impl(const HookRequest& request, const testing::RunHooks& hooks) 
     int child_status = 0;
 
     while (!child_reaped || stdout_open || stderr_open || spawn_open) {
+        if (request.cancellation.stop_requested()) {
+            terminate_group(child, child_reaped);
+            return {{}, {}, true};
+        }
         if (stdout_open && drain_output(standard_output.read, stdout_open, &output.value,
                                         stdout_bytes) == DrainResult::Error) {
             terminate_group(child, child_reaped);
@@ -359,6 +366,10 @@ HookResult run_impl(const HookRequest& request, const testing::RunHooks& hooks) 
         if (child_reaped && !stdout_open && !stderr_open && !spawn_open) {
             if (hooks.before_accept) {
                 hooks.before_accept();
+            }
+            if (request.cancellation.stop_requested()) {
+                terminate_group(child, true);
+                return {{}, {}, true};
             }
             if (std::chrono::steady_clock::now() >= deadline) {
                 terminate_group(child, true);

@@ -3,6 +3,7 @@ include(Catch)
 add_executable(tgcli_unit_tests
     account_cli_test.cpp
     account_commands_test.cpp
+    auth_bootstrap_test.cpp
     config_test.cpp
     daemon_lock_test.cpp
     frame_test.cpp

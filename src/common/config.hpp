@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <sys/types.h>
+#include <utility>
 
 namespace tgcli::config {
 
@@ -80,12 +82,19 @@ enum class MutationStatus {
     IoError,
     TimedOut,
     Cancelled,
+    PreconditionFailed,
     DurabilityUnknown,
 };
 
 struct MutationControl {
+    MutationControl() = default;
+    MutationControl(std::chrono::steady_clock::time_point deadline_value,
+                    std::stop_token cancellation_value)
+        : deadline(deadline_value), cancellation(std::move(cancellation_value)) {}
+
     std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
     std::stop_token cancellation;
+    std::function<bool()> commit_admission;
 };
 
 struct MutationResult {

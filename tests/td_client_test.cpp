@@ -2,9 +2,11 @@
 // TSan suite per the sanitizer policy in CLAUDE.md.
 
 #include "core/td_client.hpp"
+#include "support/td_client_test_access.hpp"
 
 #include <chrono>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
@@ -27,19 +29,15 @@ TEST_CASE("static tdlib_version answers without a client", "[core][tdlib]") {
     CHECK(version != "unknown");
 }
 
-TEST_CASE("request/response correlation and clean close against real tdlib", "[core][tdlib]") {
+TEST_CASE("clean close against real tdlib", "[core][tdlib]") {
     TdClient client;
 
-    NativeFunctionPtr request = td_api::make_object<td_api::getOption>("version");
-    auto future = client.send(
-        TdValue::function(std::move(request), tgcli::core::TdFunctionData{"getOption"}));
-    auto response = future.get();
-    const auto* native_response = response.get_if<NativeObjectPtr>();
-    REQUIRE(native_response != nullptr);
-    REQUIRE(*native_response != nullptr);
-    REQUIRE((*native_response)->get_id() == td_api::optionValueString::ID);
-    CHECK(static_cast<const td_api::optionValueString&>(**native_response).value_ ==
-          TdClient::tdlib_version());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto snapshot = client.auth_state();
+    REQUIRE(snapshot->auth_sequence != 0);
 
     bool saw_closed = false;
     client.subscribe_updates([&saw_closed](const TdValue& update) {
@@ -68,9 +66,40 @@ TEST_CASE("send after close returns a ready exceptional future", "[core][tdlib][
     client.close();
 
     NativeFunctionPtr request = td_api::make_object<td_api::getOption>("version");
-    auto response = client.send(
-        TdValue::function(std::move(request), tgcli::core::TdFunctionData{"getOption"}));
+    auto response = client.send_read(
+        client.auth_state(), tgcli::core::TdFunctionKind::GetOption,
+        TdValue::function(std::move(request),
+                          tgcli::core::TdFunctionData{tgcli::core::TdFunctionKind::GetOption}));
 
     REQUIRE(response.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
     CHECK_THROWS_AS(response.get(), std::runtime_error);
+}
+
+TEST_CASE("forged bootstrap ownership cannot reach the production TD boundary",
+          "[core][tdlib][safety]") {
+    TdClient client;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto snapshot = client.auth_state();
+    REQUIRE(snapshot->auth_sequence != 0);
+    REQUIRE(snapshot->data.state == tgcli::core::AuthState::WaitTdlibParameters);
+
+    NativeFunctionPtr request = td_api::make_object<td_api::getMe>();
+    auto response = client.send(
+        tgcli::core::TdSendDescriptor{
+            .function = tgcli::core::TdFunctionKind::SetTdlibParameters,
+            .tier = tgcli::core::DescriptorKind::AuthBootstrap,
+            .owner = {tgcli::core::TdOwnerKind::InternalAuth, 1},
+            .client_generation = snapshot->client_generation,
+            .auth_sequence = snapshot->auth_sequence,
+            .auth_state = snapshot->data.state,
+        },
+        TdValue::function(
+            std::move(request),
+            tgcli::core::TdFunctionData{tgcli::core::TdFunctionKind::SetTdlibParameters}));
+
+    REQUIRE(response.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
+    CHECK_THROWS_AS(response.get(), tgcli::core::TdAuthorizationError);
 }

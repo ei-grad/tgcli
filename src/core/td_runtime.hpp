@@ -13,8 +13,63 @@
 
 namespace tgcli::core {
 
-using TdFieldValue =
-    std::variant<bool, std::int64_t, std::uint64_t, double, std::vector<std::int64_t>>;
+class TdClient;
+
+enum class TdFunctionKind {
+    GetAuthorizationState,
+    SetTdlibParameters,
+    SetAuthenticationPhoneNumber,
+    RequestQrCodeAuthentication,
+    CheckAuthenticationBotToken,
+    SetAuthenticationEmailAddress,
+    CheckAuthenticationEmailCode,
+    CheckAuthenticationCode,
+    RegisterUser,
+    CheckAuthenticationPassword,
+    GetOption,
+    GetMe,
+    LogOut,
+    Close,
+};
+
+constexpr std::string_view td_function_name(TdFunctionKind function) {
+    switch (function) {
+    case TdFunctionKind::GetAuthorizationState:
+        return "getAuthorizationState";
+    case TdFunctionKind::SetTdlibParameters:
+        return "setTdlibParameters";
+    case TdFunctionKind::SetAuthenticationPhoneNumber:
+        return "setAuthenticationPhoneNumber";
+    case TdFunctionKind::RequestQrCodeAuthentication:
+        return "requestQrCodeAuthentication";
+    case TdFunctionKind::CheckAuthenticationBotToken:
+        return "checkAuthenticationBotToken";
+    case TdFunctionKind::SetAuthenticationEmailAddress:
+        return "setAuthenticationEmailAddress";
+    case TdFunctionKind::CheckAuthenticationEmailCode:
+        return "checkAuthenticationEmailCode";
+    case TdFunctionKind::CheckAuthenticationCode:
+        return "checkAuthenticationCode";
+    case TdFunctionKind::RegisterUser:
+        return "registerUser";
+    case TdFunctionKind::CheckAuthenticationPassword:
+        return "checkAuthenticationPassword";
+    case TdFunctionKind::GetOption:
+        return "getOption";
+    case TdFunctionKind::GetMe:
+        return "getMe";
+    case TdFunctionKind::LogOut:
+        return "logOut";
+    case TdFunctionKind::Close:
+        return "close";
+    }
+    return "other";
+}
+
+enum class TdRedactedValue { Credential };
+
+using TdFieldValue = std::variant<bool, std::int64_t, std::uint64_t, double, std::string,
+                                  std::vector<std::int64_t>, TdRedactedValue>;
 
 namespace detail {
 
@@ -51,8 +106,16 @@ class TdFunctionField {
 
 class TdFunctionData {
   public:
+    explicit TdFunctionData(TdFunctionKind kind, std::vector<TdFunctionField> fields = {})
+        : kind_(kind), type_id_(detail::td_descriptor_label(td_function_name(kind))),
+          fields_(std::move(fields)) {}
+
     explicit TdFunctionData(std::string_view type, std::vector<TdFunctionField> fields = {})
         : type_id_(detail::td_descriptor_label(type)), fields_(std::move(fields)) {}
+
+    [[nodiscard]] const std::optional<TdFunctionKind>& kind() const {
+        return kind_;
+    }
 
     [[nodiscard]] bool has_type(std::string_view type) const {
         return type_id_ == detail::td_descriptor_label(type);
@@ -65,6 +128,7 @@ class TdFunctionData {
     bool operator==(const TdFunctionData&) const = default;
 
   private:
+    std::optional<TdFunctionKind> kind_;
     std::uint64_t type_id_;
     std::vector<TdFunctionField> fields_;
 };
@@ -296,6 +360,83 @@ struct AuthStateSnapshot {
     AuthStateData data;
 };
 
+enum class DescriptorKind { Read, AuthBootstrap, Write, Destructive, Lifecycle };
+enum class TdOwnerKind { InternalAuth, Login, Request, Lifecycle };
+
+struct TdRequestOwner {
+    TdRequestOwner() = default;
+    TdRequestOwner(TdOwnerKind kind_value, std::uint64_t id_value,
+                   std::shared_ptr<const void> capability_value = {})
+        : kind(kind_value), id(id_value), capability(std::move(capability_value)) {}
+
+    TdOwnerKind kind = TdOwnerKind::Request;
+    std::uint64_t id = 0;
+    std::shared_ptr<const void> capability;
+
+    bool operator==(const TdRequestOwner&) const = default;
+};
+
+struct TdSendDescriptor {
+    TdFunctionKind function = TdFunctionKind::GetAuthorizationState;
+    DescriptorKind tier = DescriptorKind::Read;
+    TdRequestOwner owner;
+    std::uint64_t client_generation = 0;
+    std::uint64_t auth_sequence = 0;
+    AuthState auth_state = AuthState::Unknown;
+};
+
+enum class TdAuthorizationFailure {
+    FunctionMismatch,
+    TierMismatch,
+    OwnerMismatch,
+    GenerationMismatch,
+    AuthSequenceMismatch,
+    AuthStateMismatch,
+    FunctionDenied,
+    GenerationClosed,
+};
+
+constexpr std::string_view authorization_failure_name(TdAuthorizationFailure failure) {
+    switch (failure) {
+    case TdAuthorizationFailure::FunctionMismatch:
+        return "function_mismatch";
+    case TdAuthorizationFailure::TierMismatch:
+        return "tier_mismatch";
+    case TdAuthorizationFailure::OwnerMismatch:
+        return "owner_mismatch";
+    case TdAuthorizationFailure::GenerationMismatch:
+        return "generation_mismatch";
+    case TdAuthorizationFailure::AuthSequenceMismatch:
+        return "auth_sequence_mismatch";
+    case TdAuthorizationFailure::AuthStateMismatch:
+        return "auth_state_mismatch";
+    case TdAuthorizationFailure::FunctionDenied:
+        return "function_denied";
+    case TdAuthorizationFailure::GenerationClosed:
+        return "generation_closed";
+    }
+    return "function_denied";
+}
+
+struct TdlibParameters {
+    bool use_test_dc = false;
+    std::string database_directory;
+    std::string files_directory;
+    std::string database_encryption_key;
+    bool use_file_database = true;
+    bool use_chat_info_database = true;
+    bool use_message_database = true;
+    bool use_secret_chats = false;
+    std::int32_t api_id = 0;
+    std::string api_hash;
+    std::string system_language_code = "en";
+    std::string device_model = "tgcli";
+    std::string system_version;
+    std::string application_version;
+};
+
+TdFunctionData describe_tdlib_parameters(const TdlibParameters& parameters);
+
 enum class TdBuiltinFunction { GetAuthorizationState, Close };
 
 struct TdRuntimeEvent {
@@ -317,9 +458,13 @@ class TdRuntime {
     TdRuntime& operator=(TdRuntime&&) = delete;
     virtual ~TdRuntime() = default;
 
+  private:
+    friend class TdClient;
+
     virtual void initialize_process() = 0;
     virtual std::int32_t create_client(std::uint64_t client_generation) = 0;
     virtual TdValue make_function(TdBuiltinFunction function) = 0;
+    virtual TdValue make_set_tdlib_parameters(TdlibParameters parameters) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
                       std::uint64_t query_id, TdValue function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;

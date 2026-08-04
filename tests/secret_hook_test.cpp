@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
@@ -204,6 +205,32 @@ TEST_CASE("trusted hook timeout leaves no process in its process group", "[hook]
         {HookField::Password, "sleep 30 & wait", std::chrono::steady_clock::now() + 100ms}, hooks);
     REQUIRE_FALSE(result);
     CHECK(result.error->reason == HookFailure::Timeout);
+    REQUIRE(process_group > 0);
+
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (::kill(-process_group, 0) == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    CHECK(::kill(-process_group, 0) == -1);
+    CHECK(errno == ESRCH);
+}
+
+TEST_CASE("trusted hook cancellation kills and reaps its process group promptly", "[hook]") {
+    pid_t process_group = -1;
+    std::stop_source cancellation;
+    testing::RunHooks hooks;
+    hooks.on_spawn = [&](pid_t child) {
+        process_group = child;
+        cancellation.request_stop();
+    };
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = testing::run(
+        {HookField::DatabaseKey, "sleep 30 & wait", std::nullopt, cancellation.get_token()}, hooks);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    REQUIRE_FALSE(result);
+    CHECK(result.cancelled);
+    CHECK_FALSE(result.error);
+    CHECK(elapsed < 3s);
     REQUIRE(process_group > 0);
 
     const auto deadline = std::chrono::steady_clock::now() + 2s;

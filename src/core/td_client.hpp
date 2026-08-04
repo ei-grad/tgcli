@@ -6,9 +6,63 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 namespace tgcli::core {
+
+class AuthBootstrap;
+
+class TdOwnerLease {
+  public:
+    TdOwnerLease();
+    ~TdOwnerLease();
+    TdOwnerLease(const TdOwnerLease&) = delete;
+    TdOwnerLease& operator=(const TdOwnerLease&) = delete;
+    TdOwnerLease(TdOwnerLease&&) noexcept;
+    TdOwnerLease& operator=(TdOwnerLease&& other) noexcept;
+
+    [[nodiscard]] TdRequestOwner owner() const noexcept;
+    explicit operator bool() const noexcept;
+
+  private:
+    struct State;
+    explicit TdOwnerLease(std::unique_ptr<State> state);
+
+    std::unique_ptr<State> state_;
+    friend class TdClient;
+};
+
+class TdSendLease {
+  public:
+    TdSendLease();
+    ~TdSendLease();
+    TdSendLease(const TdSendLease&) = delete;
+    TdSendLease& operator=(const TdSendLease&) = delete;
+    TdSendLease(TdSendLease&&) noexcept;
+    TdSendLease& operator=(TdSendLease&& other) noexcept;
+
+    explicit operator bool() const noexcept;
+
+  private:
+    struct State;
+    explicit TdSendLease(std::shared_ptr<State> state);
+
+    std::shared_ptr<State> state_;
+    friend class TdClient;
+};
+
+class TdAuthorizationError final : public std::runtime_error {
+  public:
+    explicit TdAuthorizationError(TdAuthorizationFailure failure);
+
+    [[nodiscard]] TdAuthorizationFailure failure() const noexcept {
+        return failure_;
+    }
+
+  private:
+    TdAuthorizationFailure failure_;
+};
 
 // Owns tdlib's ClientManager and its receive loop on a dedicated thread
 // (DESIGN.md §7). tdlib object lifecycle and receive-loop rules live
@@ -31,7 +85,21 @@ class TdClient {
     // generated TDLib types remain daemon-implementation details. Once
     // close begins, a valid request returns a ready future that throws
     // std::runtime_error instead of entering the request registry.
-    std::future<TdValue> send(TdValue request);
+    std::future<TdValue> send(TdSendDescriptor descriptor, TdValue request);
+    std::future<TdValue> send(TdSendDescriptor descriptor, TdlibParameters parameters);
+
+    // A lease pins one admitted authorization snapshot across a local commit
+    // and the following TDLib submission. It is deliberately move-only and
+    // can be consumed by exactly one parameter send.
+    [[nodiscard]] TdSendLease acquire_send_lease(TdSendDescriptor descriptor);
+    std::future<TdValue> send(TdSendLease&& lease, TdlibParameters parameters);
+
+    // Safe request-coordinator seam: only the closed read allowlist can be
+    // submitted, and the owner capability is minted and revoked internally.
+    std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdFunctionKind function, TdValue request);
+
+    [[nodiscard]] bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const;
 
     // Handlers run on the receive thread under the bus lock: fast, no tdlib
     // calls, no (un)subscribe from within a handler (see UpdateBus).
@@ -53,6 +121,11 @@ class TdClient {
     static std::string tdlib_version();
 
   private:
+    [[nodiscard]] TdRequestOwner internal_auth_owner() const;
+    [[nodiscard]] TdOwnerLease issue_login_owner();
+
+    friend class AuthBootstrap;
+
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

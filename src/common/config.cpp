@@ -1358,6 +1358,10 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
         return {MutationStatus::Conflict, std::move(final_check.parsed->snapshot), {}};
     }
     notify_stage(hooks_, testing::MutationStage::BeforeCommit);
+    if (control.commit_admission && !control.commit_admission()) {
+        discard_temporary();
+        return {MutationStatus::PreconditionFailed, {}, {}};
+    }
     if (!lock_entry_matches(directory->get(), lock_status, expected_uid_)) {
         discard_temporary();
         return {MutationStatus::IoError,
