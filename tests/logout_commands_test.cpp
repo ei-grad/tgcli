@@ -936,16 +936,35 @@ TEST_CASE("logout rechecks deadline and shutdown after syncing the send checkpoi
           "[logout][dispatch][audit][deadline][safety]") {
     SECTION("deadline expires during checkpoint persistence") {
         const LogoutTree tree;
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool checkpoint_synced = false;
+        std::optional<daemon::RequestSession::Clock::time_point> request_deadline;
         auto audit = std::make_shared<daemon::testing::LogoutAuditHooks>();
-        audit->after_sync = [](std::string_view phase) {
-            if (phase == "checkpoint") {
-                std::this_thread::sleep_for(40ms);
+        audit->after_sync = [&](std::string_view phase) {
+            if (phase != "checkpoint") {
+                return;
+            }
+            std::unique_lock lock(mutex);
+            checkpoint_synced = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return request_deadline.has_value(); });
+            while (daemon::RequestSession::Clock::now() < *request_deadline) {
+                condition.wait_until(lock, *request_deadline);
             }
         };
         FakeLogout logout(tree, fixed_hooks(audit));
-        const auto result = logout.dispatch(proto::WriteAuthority::Unset, true, false, 0.01).get();
+        auto controlled =
+            logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 2.0);
+        {
+            const std::lock_guard lock(mutex);
+            request_deadline = controlled.session->deadline();
+        }
+        condition.notify_all();
+        const auto result = controlled.outcome.get();
         REQUIRE(result.error);
-        CHECK((*result.error)["error"]["code"] == "REMOTE_LOGOUT_UNCONFIRMED");
+        REQUIRE(checkpoint_synced);
+        REQUIRE((*result.error)["error"]["code"] == "REMOTE_LOGOUT_UNCONFIRMED");
         CHECK((*result.error)["error"]["details"]["reason"] == "timeout");
         CHECK(logout.runtime().sent_functions().size() == 1);
         const auto records = audit_records(tree);
