@@ -8,8 +8,9 @@ namespace tgcli::test {
 ScriptedTdRuntime::ScriptedTdRuntime(bool close_automatically)
     : close_automatically_(close_automatically) {}
 
-void ScriptedTdRuntime::initialize_process() {
+void ScriptedTdRuntime::initialize_process(const core::TdLogConfiguration& logging) {
     const std::lock_guard<std::mutex> lock(mutex_);
+    logging_configuration_ = logging;
     initialized_ = true;
 }
 
@@ -157,6 +158,11 @@ std::vector<ScriptedClient> ScriptedTdRuntime::clients() const {
 bool ScriptedTdRuntime::initialized_before_first_client() const {
     const std::lock_guard<std::mutex> lock(mutex_);
     return initialized_before_first_client_;
+}
+
+core::TdLogConfiguration ScriptedTdRuntime::logging_configuration() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return logging_configuration_;
 }
 
 void ScriptedTdRuntime::set_before_send(std::function<void(const core::TdFunctionData&)> hook) {

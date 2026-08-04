@@ -102,6 +102,7 @@ TEST_CASE("XDG layout matches DESIGN.md §9", "[paths]") {
     CHECK(config_file(env) == "/home/user/.config/tgcli/config.toml");
     CHECK(account_data_dir("main", env) == "/home/user/.local/share/tgcli/accounts/main");
     CHECK(account_state_dir("work", env) == "/home/user/.local/state/tgcli/accounts/work");
+    CHECK(tdlib_log_file("work", env) == "/home/user/.local/state/tgcli/accounts/work/tdlib.log");
 
     Environment overridden = env;
     overridden.xdg_config_home = "/cfg";
@@ -120,6 +121,8 @@ TEST_CASE("test DC uses isolated names in every XDG root", "[paths][config]") {
     CHECK(config_file(env) == "/home/user/.config/tgcli-test/config.toml");
     CHECK(account_data_dir("main", env) == "/home/user/.local/share/tgcli-test/accounts/main");
     CHECK(account_state_dir("main", env) == "/home/user/.local/state/tgcli-test/accounts/main");
+    CHECK(tdlib_log_file("main", env) ==
+          "/home/user/.local/state/tgcli-test/accounts/main/tdlib.log");
     CHECK(runtime_dir(env) == "/run/user/1000/tgcli-test");
     REQUIRE(socket_path("main", env, error));
     CHECK(*socket_path("main", env, error) == "/run/user/1000/tgcli-test/main.sock");

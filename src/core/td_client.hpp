@@ -77,8 +77,9 @@ class TdClient {
     using UpdateHandler = std::function<void(const TdValue&)>;
     using AuthStateHandler = std::function<void(const std::shared_ptr<const AuthStateSnapshot>&)>;
 
-    TdClient();
+    explicit TdClient(const TdLogConfiguration& logging);
     explicit TdClient(std::unique_ptr<TdRuntime> runtime);
+    TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging);
     ~TdClient();
     TdClient(const TdClient&) = delete;
     TdClient& operator=(const TdClient&) = delete;

@@ -151,6 +151,26 @@ bool is_daemon_lifecycle(const std::vector<std::string>& command) {
            command == std::vector<std::string>{"daemon", "restart"};
 }
 
+void report_verbose_diagnostic(const std::string& account, const std::vector<std::string>& command,
+                               bool no_daemon, bool json_output) {
+    std::string transport = "daemon";
+    if (no_daemon) {
+        transport = "in-process";
+    } else if (command == std::vector<std::string>{"daemon", "run"}) {
+        transport = "foreground-daemon";
+    } else if (tgcli::cli::is_config_global_command(command)) {
+        transport = "local";
+    }
+    if (json_output) {
+        const nlohmann::json rendered{
+            {"diagnostic", {{"account", account}, {"transport", transport}}}};
+        std::fputs((rendered.dump() + "\n").c_str(), stderr);
+        return;
+    }
+    std::fprintf(stderr, "diagnostic: account=%s transport=%s\n", account.c_str(),
+                 transport.c_str());
+}
+
 void populate_config_global_args(nlohmann::json& args, const std::vector<std::string>& command,
                                  bool explicit_account, const std::string& add_account,
                                  const std::string& show_account, const std::string& use_account) {
@@ -214,10 +234,12 @@ int run(int argc, char** argv) {
     std::string account;
     bool json_output = false;
     bool no_daemon = false;
+    bool verbose = false;
     double timeout_seconds = 0.0;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
+    app.add_flag("-v,--verbose", verbose, "show tgcli diagnostics on stderr");
     app.add_flag("--no-daemon", no_daemon,
                  "run in-process without the daemon (debugging escape hatch)");
     CLI::Option* timeout_option =
@@ -297,6 +319,9 @@ int run(int argc, char** argv) {
     }
 
     const std::string resolved_account = account;
+    if (verbose) {
+        report_verbose_diagnostic(resolved_account, command, no_daemon, json_output);
+    }
     if (command == std::vector<std::string>{"daemon", "run"}) {
         return tgcli::daemon::run_daemon(resolved_account);
     }

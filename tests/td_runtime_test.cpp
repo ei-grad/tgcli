@@ -90,10 +90,11 @@ struct FakeClient {
     ScriptedClient first;
 };
 
-FakeClient make_fake_client(bool close_automatically = true) {
+FakeClient make_fake_client(bool close_automatically = true,
+                            tgcli::core::TdLogConfiguration logging = {}) {
     auto runtime = std::make_unique<ScriptedTdRuntime>(close_automatically);
     auto* runtime_ptr = runtime.get();
-    auto client = std::make_unique<TdClient>(std::move(runtime));
+    auto client = std::make_unique<TdClient>(std::move(runtime), std::move(logging));
     REQUIRE(runtime_ptr->wait_for_sent(1));
     const auto clients = runtime_ptr->clients();
     REQUIRE(clients.size() == 1);
@@ -127,6 +128,19 @@ TEST_CASE("activation emits no unsolicited update before exact query-1 bootstrap
     CHECK(snapshot->client_generation == 1);
     CHECK(snapshot->auth_sequence == 0);
     CHECK(snapshot->data.state == AuthState::Unknown);
+}
+
+TEST_CASE("process logging configuration is frozen before the first client id",
+          "[core][td-runtime][logging]") {
+    const tgcli::core::TdLogConfiguration logging{
+        .file_path = "/state/tgcli/accounts/work/tdlib.log",
+        .json_diagnostics = true,
+    };
+    auto fake = make_fake_client(true, logging);
+
+    CHECK(fake.runtime->initialized_before_first_client());
+    CHECK(fake.runtime->logging_configuration() == logging);
+    CHECK(fake.runtime->clients().size() == 1);
 }
 
 TEST_CASE("bootstrap response-first and update-first auth_sequence rules are exact",

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/td_log.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -515,7 +517,7 @@ class TdRuntime {
   private:
     friend class TdClient;
 
-    virtual void initialize_process() = 0;
+    virtual void initialize_process(const TdLogConfiguration& logging) = 0;
     virtual std::int32_t create_client(std::uint64_t client_generation) = 0;
     virtual TdValue make_function(TdBuiltinFunction function) = 0;
     virtual TdValue make_set_tdlib_parameters(TdlibParameters parameters) = 0;

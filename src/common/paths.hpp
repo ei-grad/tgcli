@@ -85,6 +85,7 @@ std::string config_file(const Environment& env);
 std::string config_lock_file(const Environment& env);
 std::string account_data_dir(const std::string& account, const Environment& env);
 std::string account_state_dir(const std::string& account, const Environment& env);
+std::string tdlib_log_file(const std::string& account, const Environment& env);
 
 // Creates `dir` with mode 0700 if missing, then verifies it is a directory
 // owned by `uid` with no group/other access — refuses sockets in a

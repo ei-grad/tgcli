@@ -1688,6 +1688,26 @@ TEST_CASE("daemon lifecycle parser exposes status stop restart and rejects no-da
     }
 }
 
+TEST_CASE("verbose is client-owned diagnostics and leaves command data on stdout",
+          "[cli][process][logging]") {
+    const IsolatedEnv env;
+    const auto help = run_binary_captured({"--help"}, env, "verbose-help");
+    REQUIRE(help.exit_code == kOk);
+    const auto help_text = help.out + help.err;
+    CHECK(help_text.find("-v") != std::string::npos);
+    CHECK(help_text.find("--verbose") != std::string::npos);
+
+    const auto outcome =
+        run_binary_captured({"-v", "--json", "daemon", "status"}, env, "verbose-status");
+    REQUIRE(outcome.exit_code == kOk);
+    const auto result = json::parse(outcome.out);
+    CHECK(result["running"] == false);
+    CHECK(json::parse(outcome.err) ==
+          json{{"diagnostic", {{"account", "main"}, {"transport", "daemon"}}}});
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/accounts/main/tdlib.log"));
+    CHECK(outcome.err.find("setLogVerbosityLevel") == std::string::npos);
+}
+
 TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli][tdlib]") {
     const IsolatedEnv env;
     cli::RunOptions options;

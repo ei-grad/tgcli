@@ -34,7 +34,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
   public:
     explicit ScriptedTdRuntime(bool close_automatically = true);
 
-    void initialize_process() override;
+    void initialize_process(const core::TdLogConfiguration& logging) override;
     std::int32_t create_client(std::uint64_t client_generation) override;
     core::TdValue make_function(core::TdBuiltinFunction function) override;
     core::TdValue make_set_tdlib_parameters(core::TdlibParameters parameters) override;
@@ -55,6 +55,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     [[nodiscard]] std::vector<SentTdFunction> sent_functions() const;
     [[nodiscard]] std::vector<ScriptedClient> clients() const;
     [[nodiscard]] bool initialized_before_first_client() const;
+    [[nodiscard]] core::TdLogConfiguration logging_configuration() const;
     void set_before_send(std::function<void(const core::TdFunctionData&)> hook);
     void set_receive_paused(bool paused);
     void set_close_automatically(bool enabled);
@@ -67,6 +68,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     mutable std::condition_variable cv_;
     bool initialized_ = false;
     bool initialized_before_first_client_ = false;
+    core::TdLogConfiguration logging_configuration_;
     bool receive_paused_ = false;
     std::vector<ScriptedClient> clients_;
     std::vector<SentTdFunction> sent_;

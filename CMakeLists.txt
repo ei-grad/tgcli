@@ -111,6 +111,7 @@ target_link_libraries(tgcli_util
 target_link_libraries(tgcli_proto PRIVATE tgcli_util)
 
 add_library(tgcli_td_runtime STATIC
+    src/core/td_log.cpp
     src/core/td_runtime.cpp)
 target_link_libraries(tgcli_td_runtime
     PUBLIC tgcli_common

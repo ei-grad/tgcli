@@ -27,6 +27,7 @@ add_executable(tgcli_unit_tests
     secret_hook_test.cpp
     cli_test.cpp
     td_client_test.cpp
+    td_logging_test.cpp
     td_runtime_conversion_test.cpp
     td_runtime_test.cpp
     support/scripted_td_runtime.cpp)

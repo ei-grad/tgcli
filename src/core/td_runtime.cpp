@@ -3,12 +3,16 @@
 #include "core/td_runtime_test_adapter.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <climits>
 #include <mutex>
 #include <stdexcept>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 
 #include <td/telegram/Client.h>
+#include <td/telegram/Log.h>
 #include <td/telegram/td_api.h>
 
 namespace tgcli::core {
@@ -191,7 +195,61 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
 }
 
 void enforce_error_verbosity() {
-    td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
+    td::Log::set_verbosity_level(kTdLogVerbosity);
+}
+
+struct ProcessLogState {
+    std::mutex mutex;
+    std::shared_ptr<TdLogSink> sink;
+    std::atomic<bool> failure_reported{false};
+    std::atomic<bool> json_diagnostics{false};
+};
+
+ProcessLogState& process_log_state() {
+    static ProcessLogState state;
+    return state;
+}
+
+constexpr std::string_view kHumanLogFailureMessage =
+    "warning: TDLib log sink failed; further records suppressed\n";
+constexpr std::string_view kJsonLogFailureMessage =
+    "{\"warning\":\"TDLib log sink failed; further records suppressed\"}\n";
+static_assert(kHumanLogFailureMessage.size() <= PIPE_BUF);
+static_assert(kJsonLogFailureMessage.size() <= PIPE_BUF);
+
+std::string_view process_log_failure_message(bool json) {
+    return json ? kJsonLogFailureMessage : kHumanLogFailureMessage;
+}
+
+void report_process_log_failure() noexcept {
+    if (process_log_state().failure_reported.exchange(true, std::memory_order_relaxed)) {
+        return;
+    }
+    const auto message = process_log_failure_message(
+        process_log_state().json_diagnostics.load(std::memory_order_relaxed));
+    static_cast<void>(::write(STDERR_FILENO, message.data(), message.size()));
+}
+
+void td_log_callback(int verbosity, const char* message) noexcept {
+    try {
+        std::shared_ptr<TdLogSink> sink;
+        {
+            const std::lock_guard<std::mutex> lock(process_log_state().mutex);
+            sink = process_log_state().sink;
+        }
+        if (sink == nullptr || message == nullptr) {
+            return;
+        }
+        std::string error;
+        if (!sink->append(verbosity, message, error)) {
+            report_process_log_failure();
+        }
+    } catch (const std::exception&) {
+        report_process_log_failure();
+    } catch (...) {
+        // A C callback cannot propagate any non-standard exception through TDLib.
+        report_process_log_failure();
+    }
 }
 
 AuthCodeDeliveryInfo code_delivery(const td_api::AuthenticationCodeType& type) {
@@ -369,12 +427,64 @@ std::optional<AuthStateData> extract_auth_state(const td_api::Object& object,
 
 class ProductionTdRuntime final : public TdRuntime {
   public:
-    void initialize_process() override {
-        enforce_error_verbosity();
+    ProductionTdRuntime() = default;
+    ProductionTdRuntime(const ProductionTdRuntime&) = delete;
+    ProductionTdRuntime& operator=(const ProductionTdRuntime&) = delete;
+    ProductionTdRuntime(ProductionTdRuntime&&) = delete;
+    ProductionTdRuntime& operator=(ProductionTdRuntime&&) = delete;
+
+    ~ProductionTdRuntime() override {
+        manager_.reset();
+        const std::lock_guard<std::mutex> lock(process_log_state().mutex);
+        if (process_log_state().sink == log_sink_) {
+            td::ClientManager::set_log_message_callback(0, nullptr);
+            process_log_state().sink.reset();
+        }
+    }
+
+    void initialize_process(const TdLogConfiguration& logging) override {
+        std::string error;
+        auto sink = TdLogSink::create(logging, ::getuid(), error);
+        if (sink == nullptr) {
+            throw std::runtime_error("cannot initialize TDLib logging: " + error);
+        }
+
+        {
+            const std::lock_guard<std::mutex> lock(process_log_state().mutex);
+            if (process_log_state().sink != nullptr) {
+                throw std::runtime_error("TDLib process logging is already initialized");
+            }
+            enforce_error_verbosity();
+            auto stream_result =
+                td::ClientManager::execute(td_api::make_object<td_api::setLogStream>(
+                    td_api::make_object<td_api::logStreamEmpty>()));
+            if (stream_result == nullptr || stream_result->get_id() != td_api::ok::ID) {
+                throw std::runtime_error("cannot disable TDLib's default log stream");
+            }
+            log_sink_ = std::shared_ptr<TdLogSink>(std::move(sink));
+            process_log_state().sink = log_sink_;
+            process_log_state().failure_reported.store(false, std::memory_order_relaxed);
+            process_log_state().json_diagnostics.store(logging.json_diagnostics,
+                                                       std::memory_order_relaxed);
+            td::ClientManager::set_log_message_callback(kTdLogVerbosity, td_log_callback);
+        }
+        try {
+            manager_ = std::make_unique<td::ClientManager>();
+        } catch (...) {
+            // Allocation and TDLib construction failures share the same global cleanup.
+            const std::lock_guard<std::mutex> lock(process_log_state().mutex);
+            td::ClientManager::set_log_message_callback(0, nullptr);
+            process_log_state().sink.reset();
+            log_sink_.reset();
+            throw;
+        }
     }
 
     std::int32_t create_client(std::uint64_t client_generation) override {
-        const auto client_id = manager_.create_client_id();
+        if (manager_ == nullptr) {
+            throw std::logic_error("TDLib process is not initialized");
+        }
+        const auto client_id = manager_->create_client_id();
         const std::lock_guard<std::mutex> lock(generations_mutex_);
         generations_.insert_or_assign(client_id, client_generation);
         return client_id;
@@ -432,11 +542,11 @@ class ProductionTdRuntime final : public TdRuntime {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
             authorization_queries_[client_id].insert(query_id);
         }
-        manager_.send(client_id, query_id, std::move(*native_function));
+        manager_->send(client_id, query_id, std::move(*native_function));
     }
 
     std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override {
-        auto response = manager_.receive(static_cast<double>(timeout.count()) / 1000.0);
+        auto response = manager_->receive(static_cast<double>(timeout.count()) / 1000.0);
         if (response.object == nullptr) {
             return std::nullopt;
         }
@@ -474,7 +584,8 @@ class ProductionTdRuntime final : public TdRuntime {
     }
 
   private:
-    td::ClientManager manager_;
+    std::unique_ptr<td::ClientManager> manager_;
+    std::shared_ptr<TdLogSink> log_sink_;
     std::mutex generations_mutex_;
     std::unordered_map<std::int32_t, std::uint64_t> generations_;
     std::unordered_map<std::int32_t, std::unordered_set<std::uint64_t>> authorization_queries_;
@@ -492,6 +603,19 @@ convert_production_authorization_state_for_test(const TdValue& object,
         return std::nullopt;
     }
     return extract_auth_state(**native, authorization_state_response);
+}
+
+std::string_view process_log_failure_message_for_test(bool json) {
+    return process_log_failure_message(json);
+}
+
+void reset_process_log_failure_for_test(bool json) {
+    process_log_state().failure_reported.store(false, std::memory_order_relaxed);
+    process_log_state().json_diagnostics.store(json, std::memory_order_relaxed);
+}
+
+void report_process_log_failure_for_test() {
+    report_process_log_failure();
 }
 
 } // namespace detail

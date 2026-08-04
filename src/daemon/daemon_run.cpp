@@ -118,8 +118,10 @@ int run_daemon(const std::string& account) {
     sigaddset(&signals, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &signals, nullptr);
 
-    core::TdClient td;
     const auto environment = paths::real_environment();
+    core::TdClient td(core::TdLogConfiguration{
+        .file_path = paths::tdlib_log_file(account, environment),
+    });
     const config::Store config_store(paths::config_file(environment), environment.uid);
 
     const auto environment_value = [](const char* name) -> std::optional<std::string> {
@@ -195,8 +197,11 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         return false;
     }
 
-    core::TdClient td;
     const auto environment = paths::real_environment();
+    core::TdClient td(core::TdLogConfiguration{
+        .file_path = paths::tdlib_log_file(account, environment),
+        .json_diagnostics = request.context.json,
+    });
     const config::Store config_store(paths::config_file(environment), environment.uid);
     const auto environment_value = [](const char* name) -> std::optional<std::string> {
         const char* value = std::getenv(name);

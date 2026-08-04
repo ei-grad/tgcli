@@ -208,6 +208,10 @@ std::string account_state_dir(const std::string& account, const Environment& env
     return base + "/" + namespace_name(env) + "/accounts/" + account;
 }
 
+std::string tdlib_log_file(const std::string& account, const Environment& env) {
+    return account_state_dir(account, env) + "/tdlib.log";
+}
+
 bool ensure_private_dir(const std::string& dir, uid_t uid, std::string& error) {
     if (mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) {
         error = "cannot create " + dir + ": " + std::string(std::strerror(errno));

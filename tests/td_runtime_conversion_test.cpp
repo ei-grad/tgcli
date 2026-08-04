@@ -3,13 +3,18 @@
 
 #include "core/td_runtime_test_adapter.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <sys/types.h>
+#include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 #include <td/telegram/td_api.h>
 
 using namespace tgcli::core;
@@ -80,6 +85,44 @@ void check_delivery(td_api::object_ptr<td_api::AuthenticationCodeType> type,
 }
 
 } // namespace
+
+TEST_CASE("async TDLib log failure diagnostics remain one sanitized NDJSON record",
+          "[core][tdlib][logging]") {
+    int output_pipe[2]{};
+    REQUIRE(::pipe(output_pipe) == 0);
+    const int saved_stderr = ::dup(STDERR_FILENO);
+    REQUIRE(saved_stderr >= 0);
+    REQUIRE(::dup2(output_pipe[1], STDERR_FILENO) == STDERR_FILENO);
+    REQUIRE(::close(output_pipe[1]) == 0);
+    detail::reset_process_log_failure_for_test(true);
+    std::thread reporter([] {
+        detail::report_process_log_failure_for_test();
+        detail::report_process_log_failure_for_test();
+    });
+    reporter.join();
+    REQUIRE(::dup2(saved_stderr, STDERR_FILENO) == STDERR_FILENO);
+    REQUIRE(::close(saved_stderr) == 0);
+    std::string json_message(512, '\0');
+    const auto byte_count = ::read(output_pipe[0], json_message.data(), json_message.size());
+    REQUIRE(byte_count > 0);
+    json_message.resize(static_cast<std::size_t>(byte_count));
+    REQUIRE(::close(output_pipe[0]) == 0);
+
+    CHECK(json_message == detail::process_log_failure_message_for_test(true));
+    REQUIRE_FALSE(json_message.empty());
+    CHECK(json_message.back() == '\n');
+    CHECK(std::count(json_message.begin(), json_message.end(), '\n') == 1);
+    const auto parsed = nlohmann::json::parse(json_message);
+    CHECK(parsed ==
+          nlohmann::json{{"warning", "TDLib log sink failed; further records suppressed"}});
+    for (const std::string_view sentinel :
+         {"token-secret", "code-secret", "password-secret", "database-key-secret"}) {
+        CHECK(json_message.find(sentinel) == std::string_view::npos);
+    }
+
+    const auto human_message = detail::process_log_failure_message_for_test(false);
+    CHECK(human_message == "warning: TDLib log sink failed; further records suppressed\n");
+}
 
 TEST_CASE("production converter covers all pinned authorization states and metadata",
           "[core][tdlib][td-runtime-converter]") {

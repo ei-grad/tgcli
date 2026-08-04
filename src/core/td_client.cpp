@@ -52,11 +52,12 @@ struct TdOwnerLease::State {
 
 class TdClient::Impl {
   public:
-    explicit Impl(std::unique_ptr<TdRuntime> runtime) : runtime_(std::move(runtime)) {
+    Impl(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging)
+        : runtime_(std::move(runtime)) {
         if (runtime_ == nullptr) {
             throw std::invalid_argument("TdClient runtime must not be null");
         }
-        runtime_->initialize_process();
+        runtime_->initialize_process(logging);
         activate_initial_generation();
         receive_thread_ = std::thread([this] { receive_loop(); });
     }
@@ -691,10 +692,14 @@ TdOwnerLease::operator bool() const noexcept {
     return state_ != nullptr;
 }
 
-TdClient::TdClient() : TdClient(make_production_td_runtime()) {}
+TdClient::TdClient(const TdLogConfiguration& logging)
+    : TdClient(make_production_td_runtime(), logging) {}
 
 TdClient::TdClient(std::unique_ptr<TdRuntime> runtime)
-    : impl_(std::make_unique<Impl>(std::move(runtime))) {}
+    : TdClient(std::move(runtime), TdLogConfiguration{}) {}
+
+TdClient::TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging)
+    : impl_(std::make_unique<Impl>(std::move(runtime), logging)) {}
 
 TdClient::~TdClient() = default;
 
