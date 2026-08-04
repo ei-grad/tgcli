@@ -1312,6 +1312,7 @@ TEST_CASE("a disconnected orphan deadline replaces the generation without a term
     session.disconnect();
     REQUIRE(auth.runtime().wait_for_clients(2));
     pending.get();
+    REQUIRE(auth.runtime().wait_for_sent(4));
 
     CHECK(outcome.terminal_count == 0);
     CHECK(outcome.result == std::nullopt);

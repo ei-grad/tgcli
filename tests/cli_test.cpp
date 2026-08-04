@@ -801,10 +801,12 @@ class ChildBootstrapDaemon {
         return pid_ > 0 && (::kill(pid_, 0) == 0 || errno == EPERM);
     }
 
+    [[nodiscard]] bool try_request_external_stop() const {
+        return pid_ > 0 && ::kill(pid_, SIGTERM) == 0;
+    }
+
     void request_external_stop() const {
-        if (pid_ > 0) {
-            ::kill(pid_, SIGTERM);
-        }
+        static_cast<void>(try_request_external_stop());
     }
 
     int wait_for_exit(std::chrono::milliseconds timeout) {
@@ -1003,6 +1005,119 @@ class ChildBootstrapDaemon {
     pid_t pid_ = -1;
     int queue_filler_fd_ = -1;
     std::string control_path_;
+};
+
+class DelayedExternalStop {
+  public:
+    DelayedExternalStop(const ChildBootstrapDaemon& daemon, std::chrono::milliseconds delay) {
+        std::array<int, 2> start_fds{-1, -1};
+        REQUIRE(::pipe(start_fds.data()) == 0);
+        pid_ = ::fork();
+        if (pid_ < 0) {
+            ::close(start_fds[0]);
+            ::close(start_fds[1]);
+        }
+        REQUIRE(pid_ >= 0);
+        if (pid_ == 0) {
+            ::close(start_fds[1]);
+            run_child(start_fds[0], daemon, delay);
+        }
+        ::close(start_fds[0]);
+        start_fd_ = start_fds[1];
+    }
+
+    DelayedExternalStop(const DelayedExternalStop&) = delete;
+    DelayedExternalStop& operator=(const DelayedExternalStop&) = delete;
+    DelayedExternalStop(DelayedExternalStop&&) = delete;
+    DelayedExternalStop& operator=(DelayedExternalStop&&) = delete;
+
+    ~DelayedExternalStop() {
+        close_start_fd();
+        if (wait_for_exit(std::chrono::seconds(2)) >= 0 || pid_ <= 0) {
+            return;
+        }
+        static_cast<void>(::kill(pid_, SIGKILL));
+        reap_blocking();
+    }
+
+    [[nodiscard]] bool start() {
+        if (start_fd_ < 0) {
+            return false;
+        }
+        constexpr char start = '1';
+        ssize_t count = -1;
+        do {
+            count = ::write(start_fd_, &start, 1);
+        } while (count < 0 && errno == EINTR);
+        close_start_fd();
+        return count == 1;
+    }
+
+    int wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return -1;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        int status = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
+            if (waited == pid_) {
+                pid_ = -1;
+                return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            if (waited < 0 && errno != EINTR) {
+                pid_ = -1;
+                return -1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return -1;
+    }
+
+  private:
+    [[noreturn]] static void run_child(int start_fd, const ChildBootstrapDaemon& daemon,
+                                       std::chrono::milliseconds delay) {
+        char start = 0;
+        ssize_t count = -1;
+        do {
+            count = ::read(start_fd, &start, 1);
+        } while (count < 0 && errno == EINTR);
+        ::close(start_fd);
+        if (count != 1 || start != '1') {
+            ::_exit(2);
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + delay;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            const int timeout = std::max(1, static_cast<int>(remaining.count()));
+            if (::poll(nullptr, 0, timeout) < 0 && errno != EINTR) {
+                ::_exit(3);
+            }
+        }
+        ::_exit(daemon.try_request_external_stop() ? 0 : 4);
+    }
+
+    void close_start_fd() {
+        if (start_fd_ >= 0) {
+            ::close(start_fd_);
+            start_fd_ = -1;
+        }
+    }
+
+    void reap_blocking() {
+        if (pid_ <= 0) {
+            return;
+        }
+        int status = 0;
+        while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+        }
+        pid_ = -1;
+    }
+
+    pid_t pid_ = -1;
+    int start_fd_ = -1;
 };
 
 bool wait_until_missing(const std::string& first, const std::string& second) {
@@ -1655,18 +1770,21 @@ TEST_CASE("external graceful shutdown converges on replacement within one deadli
           "[cli][restart][r3][tdlib]") {
     const IsolatedEnv env;
     ChildBootstrapDaemon old_daemon({.control_stop_delay = std::chrono::milliseconds(500)});
-    std::thread external_stop([&old_daemon] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        old_daemon.request_external_stop();
-    });
+    DelayedExternalStop external_stop(old_daemon, std::chrono::milliseconds(50));
 
     cli::RunOptions options;
     options.json = true;
     options.daemon_executable = TGCLI_TEST_BINARY;
     options.restart_timeout = std::chrono::seconds(3);
-    const auto result = run_captured({"version"}, options, env);
-    external_stop.join();
+    const bool helper_started = external_stop.start();
+    RunOutcome result;
+    if (helper_started) {
+        result = run_captured({"version"}, options, env);
+    }
+    const int helper_exit = external_stop.wait_for_exit(std::chrono::seconds(2));
 
+    REQUIRE(helper_started);
+    REQUIRE(helper_exit == 0);
     REQUIRE(result.exit_code == kOk);
     CHECK(result.err.empty());
     CHECK(json::parse(result.out)["version"] == kVersion);
