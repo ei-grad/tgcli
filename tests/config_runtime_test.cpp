@@ -50,6 +50,8 @@ class TempConfig {
 
     TempConfig(const TempConfig&) = delete;
     TempConfig& operator=(const TempConfig&) = delete;
+    TempConfig(TempConfig&&) = delete;
+    TempConfig& operator=(TempConfig&&) = delete;
 
     [[nodiscard]] std::string file() const {
         return (directory_ / "config.toml").string();
@@ -415,7 +417,7 @@ TEST_CASE("background config poll observes an atomic replacement within two seco
             condition.notify_all();
         }
     };
-    ConfigRuntime runtime(temp.file(), hooks);
+    const ConfigRuntime runtime(temp.file(), hooks);
     const auto initial = runtime.current("main");
     CHECK(initial.state == ConfigAdmissionState::Ready);
     CHECK(initial.idle_exit == 1s);
@@ -448,7 +450,7 @@ TEST_CASE("background config poll rejects invalid replacement within two seconds
             condition.notify_all();
         }
     };
-    ConfigRuntime runtime(temp.file(), hooks);
+    const ConfigRuntime runtime(temp.file(), hooks);
     const auto initial = runtime.current("main");
     CHECK(initial.state == ConfigAdmissionState::Ready);
     CHECK(initial.idle_exit == 23s);
@@ -473,6 +475,6 @@ TEST_CASE("config runtime stop interrupts the one-second condition wait",
     const TempConfig temp;
     temp.write_initial(one_account("main", false, "5"));
     const auto started = ConfigRuntime::Clock::now();
-    { ConfigRuntime runtime(temp.file()); }
+    { const ConfigRuntime runtime(temp.file()); }
     CHECK(ConfigRuntime::Clock::now() - started < 250ms);
 }
