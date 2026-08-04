@@ -67,3 +67,8 @@ add_test(
 set_tests_properties(
     release-toolchain-helpers
     PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+add_test(
+    NAME test-dc-contract-tools
+    COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}"
+        -p "test_test_dc_tools.py")

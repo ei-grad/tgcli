@@ -1,0 +1,100 @@
+name: Telegram test DC
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-test-dc
+  cancel-in-progress: false
+
+jobs:
+  m1-auth-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize mandatory skip artifact
+        run: >-
+          python3 scripts/test_dc_contract.py write-skips
+          --output build/debug/test-results/tgcli-test-dc-skips.json
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache
+
+      - name: Cache tdlib prefix
+        id: tdlib-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
+
+      - name: Build tdlib prefix
+        if: steps.tdlib-cache.outputs.cache-hit != 'true'
+        run: ./scripts/build-tdlib.sh "$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7"
+
+      - name: Configure
+        run: >-
+          TGCLI_TDLIB_PREFIX="$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7"
+          cmake --preset debug
+
+      - name: Build
+        run: cmake --build --preset debug
+
+      - name: Materialize private test fixtures
+        env:
+          TGCLI_TEST_DC_PHONE_NUMBER: ${{ secrets.TGCLI_TEST_DC_PHONE_NUMBER }}
+          TGCLI_TEST_DC_AUTHENTICATION_CODE: ${{ secrets.TGCLI_TEST_DC_AUTHENTICATION_CODE }}
+          TGCLI_TEST_DC_REGISTRATION_FIRST_NAME: ${{ secrets.TGCLI_TEST_DC_REGISTRATION_FIRST_NAME }}
+          TGCLI_TEST_DC_REGISTRATION_LAST_NAME: ${{ secrets.TGCLI_TEST_DC_REGISTRATION_LAST_NAME }}
+          TGCLI_TEST_DC_EMAIL_ADDRESS: ${{ secrets.TGCLI_TEST_DC_EMAIL_ADDRESS }}
+          TGCLI_TEST_DC_EMAIL_CODE: ${{ secrets.TGCLI_TEST_DC_EMAIL_CODE }}
+          TGCLI_TEST_DC_PASSWORD: ${{ secrets.TGCLI_TEST_DC_PASSWORD }}
+          TGCLI_TEST_DC_DATABASE_KEY: ${{ secrets.TGCLI_TEST_DC_DATABASE_KEY }}
+          TGCLI_TEST_DC_BOT_TOKEN: ${{ secrets.TGCLI_TEST_DC_BOT_TOKEN }}
+        run: >-
+          python3 scripts/materialize_test_dc_fixtures.py
+          --output "$RUNNER_TEMP/tgcli-test-dc-fixtures"
+
+      - name: Run M1 authentication smoke
+        env:
+          TGCLI_API_ID: ${{ secrets.TGCLI_TEST_DC_API_ID }}
+          TGCLI_API_HASH: ${{ secrets.TGCLI_TEST_DC_API_HASH }}
+          TGCLI_TEST_DC_QR_APPROVER: ${{ vars.TGCLI_TEST_DC_QR_APPROVER }}
+        run: |
+          arguments=(
+            --binary build/debug/tgcli
+            --build-dir build/debug
+            --fixture-dir "$RUNNER_TEMP/tgcli-test-dc-fixtures"
+            --unforceable-state wait_premium_purchase
+            --unforceable-state wait_email_address
+            --unforceable-state wait_email_code
+            --unforceable-state wait_registration
+            --unforceable-state wait_password
+          )
+          if [[ -n "$TGCLI_TEST_DC_QR_APPROVER" ]]; then
+            arguments+=(--qr-approver "$TGCLI_TEST_DC_QR_APPROVER")
+          fi
+          python3 scripts/run_test_dc_e2e.py "${arguments[@]}"
+
+      - name: Validate mandatory skip artifact
+        if: always()
+        run: >-
+          python3 scripts/test_dc_contract.py validate-skips
+          build/debug/test-results/tgcli-test-dc-skips.json
+
+      - name: Publish mandatory skip artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tgcli-test-dc-skips
+          path: build/debug/test-results/tgcli-test-dc-skips.json
+          if-no-files-found: error
+          retention-days: 14
