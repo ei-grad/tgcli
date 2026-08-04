@@ -422,6 +422,7 @@ PY
         "$OUTPUT_DIRECTORY/release-build-provenance.json"
 }
 
+export CCACHE_DISABLE=1
 export LC_ALL=C
 export PYTHONDONTWRITEBYTECODE=1
 export TZ=UTC

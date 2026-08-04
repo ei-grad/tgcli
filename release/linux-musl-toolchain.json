@@ -8,7 +8,7 @@
   },
   "recipe": {
     "path": "scripts/release/build-linux-musl.sh",
-    "sha256": "e934687bea0e7dd7d197bbad301ee732569df4c206d6fd4cee31179937782b89"
+    "sha256": "768c43b07a2ed99eb4984680758db566a923243457d30828839eaaffc9e0df10"
   },
   "schema_version": 1,
   "target": "x86_64-linux-musl",
