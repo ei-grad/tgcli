@@ -255,14 +255,26 @@ fetch_inputs() {
 }
 
 build_release() {
+    local actual_home_identity
+    local canonical_work_directory
     local expected_image
+    local expected_home_identity
     local jobs
     local common_flags
+    local private_home
 
     [[ "${SOURCE_DATE_EPOCH:-}" =~ ^[1-9][0-9]*$ ]] || \
         fail "SOURCE_DATE_EPOCH must be a positive integer"
     [[ "${TGCLI_SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || \
         fail "TGCLI_SOURCE_SHA must be an exact Git commit"
+    private_home="$WORK_DIRECTORY/release-home"
+    HOME="$private_home"
+    export HOME
+    canonical_work_directory="$(realpath -m -- "$WORK_DIRECTORY")"
+    [[ "$canonical_work_directory" == "$WORK_DIRECTORY" ]] || \
+        fail "release work directory must be an exact canonical path"
+    [[ "$WORK_DIRECTORY" == "$REPO_ROOT/build/"* ]] || \
+        fail "release work directory must be inside the repository build root"
     python3 "$PROVENANCE_TOOL" source-identity \
         --repo-root "$REPO_ROOT" \
         --expected-commit "$TGCLI_SOURCE_SHA" >/dev/null
@@ -274,6 +286,19 @@ build_release() {
         fail "release work directory already exists: $WORK_DIRECTORY"
     [[ ! -e "$OUTPUT_DIRECTORY" && ! -L "$OUTPUT_DIRECTORY" ]] || \
         fail "release output directory already exists: $OUTPUT_DIRECTORY"
+    mkdir -p -m 0700 "$private_home"
+    [[ -d "$WORK_DIRECTORY" && ! -L "$WORK_DIRECTORY" ]] || \
+        fail "release work directory is not a private directory"
+    [[ "$(cd "$WORK_DIRECTORY" && pwd -P)" == "$WORK_DIRECTORY" ]] || \
+        fail "release work directory identity changed during creation"
+    [[ -d "$private_home" && ! -L "$private_home" ]] || \
+        fail "release private HOME is not a directory"
+    [[ "$(cd "$private_home" && pwd -P)" == "$private_home" ]] || \
+        fail "release private HOME identity changed during creation"
+    expected_home_identity="$(id -u):$(id -g):700"
+    actual_home_identity="$(stat -c '%u:%g:%a' -- "$private_home")"
+    [[ "$actual_home_identity" == "$expected_home_identity" ]] || \
+        fail "release private HOME has unsafe owner or mode"
 
     python3 "$VERIFIER" \
         --repo-root "$REPO_ROOT" \
