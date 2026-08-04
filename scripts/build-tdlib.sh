@@ -16,6 +16,7 @@
 set -euo pipefail
 
 TDLIB_REV=a17f87c4cff7b90b278d12b91ba0614383aaee82  # v1.8.65, 2026-06-13
+TDLIB_REPOSITORY=https://github.com/tdlib/td
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tgcli-dev"
 SRC_DIR="${TDLIB_SRC:-$CACHE_DIR/td}"
@@ -28,12 +29,20 @@ else
 fi
 
 if [ ! -d "$SRC_DIR/.git" ]; then
-    git clone https://github.com/tdlib/td "$SRC_DIR"
+    git clone "$TDLIB_REPOSITORY" "$SRC_DIR"
 fi
 if ! git -C "$SRC_DIR" cat-file -e "$TDLIB_REV^{commit}" 2>/dev/null; then
     git -C "$SRC_DIR" fetch origin "$TDLIB_REV"
 fi
 git -C "$SRC_DIR" -c advice.detachedHead=false checkout --quiet "$TDLIB_REV"
+if [ "$(git -C "$SRC_DIR" rev-parse HEAD)" != "$TDLIB_REV" ]; then
+    echo "tdlib checkout did not resolve to $TDLIB_REV" >&2
+    exit 1
+fi
+if [ -n "$(git -C "$SRC_DIR" status --porcelain)" ]; then
+    echo "tdlib source checkout must be clean: $SRC_DIR" >&2
+    exit 1
+fi
 
 CMAKE_ARGS=(
     -DCMAKE_BUILD_TYPE=Release
@@ -74,6 +83,16 @@ CHECK_TU="$BUILD_DIR/tgcli-prefix-check.cpp"
 printf '#include <td/telegram/td_api_json.h>\nint main() { return 0; }\n' \
     > "$CHECK_TU"
 c++ -std=c++20 -fsyntax-only -I"$PREFIX/include" "$CHECK_TU"
+
+PROVENANCE_FILE="$BUILD_DIR/tgcli-tdlib-source.json"
+printf '%s\n' \
+    '{' \
+    '  "schema_version": 1,' \
+    "  \"source_repository\": \"$TDLIB_REPOSITORY\"," \
+    "  \"immutable_ref\": \"$TDLIB_REV\"" \
+    '}' > "$PROVENANCE_FILE"
+install -Dm644 "$PROVENANCE_FILE" \
+    "$PREFIX/share/tgcli/tdlib-source.json"
 
 echo "tdlib $TDLIB_REV installed into: $PREFIX" >&2
 echo "$PREFIX"

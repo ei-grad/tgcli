@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.tdlib.outputs.prefix }}
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux' && steps.tdlib-cache.outputs.cache-hit != 'true'
@@ -73,7 +73,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.tdlib.outputs.prefix }}
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -125,7 +125,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.tdlib.outputs.prefix }}
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -173,7 +173,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v1
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
 
       - name: Build tdlib prefix
         if: steps.tdlib-cache.outputs.cache-hit != 'true'

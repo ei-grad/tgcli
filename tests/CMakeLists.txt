@@ -6,6 +6,7 @@ add_executable(tgcli_unit_tests
     auth_bootstrap_test.cpp
     config_test.cpp
     daemon_lock_test.cpp
+    dependency_lock_schema_test.cpp
     frame_test.cpp
     paths_test.cpp
     query_registry_test.cpp
@@ -31,6 +32,7 @@ target_include_directories(tgcli_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(tgcli_unit_tests tgcli)
 target_compile_definitions(tgcli_unit_tests
     PRIVATE
+        TGCLI_RELEASE_DIR="${CMAKE_SOURCE_DIR}/release"
         TGCLI_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/docs/schemas"
         TGCLI_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden"
         TGCLI_TEST_BINARY="$<TARGET_FILE:tgcli>")
@@ -38,3 +40,17 @@ target_compile_definitions(tgcli_unit_tests
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).
 catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS)
+
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME dependency-lock-offline
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/scripts/verify_dependency_lock.py"
+        --repo-root "${CMAKE_SOURCE_DIR}")
+add_test(
+    NAME dependency-lock-enforcement
+    COMMAND "${CMAKE_COMMAND}"
+        -DREPO_ROOT=${CMAKE_SOURCE_DIR}
+        -DTEST_OUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/dependency-lock-enforcement
+        -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/dependency_lock_enforcement_test.cmake")

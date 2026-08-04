@@ -14,29 +14,45 @@ option(TGCLI_SYSTEM_TDLIB
 option(TGCLI_BUILD_TESTS "Build tests" ON)
 option(TGCLI_WERROR "Treat compiler warnings as errors" OFF)
 
-# The revision here and in scripts/build-tdlib.sh must stay in sync; bumping
-# it is a contract-change-class PR (REVIEW.md §7).
-set(TGCLI_TDLIB_REV a17f87c4cff7b90b278d12b91ba0614383aaee82) # v1.8.65
+# These exact source commits are mirrored in release/dependencies.lock.json.
+# A TDLib bump is a contract-change-class PR (REVIEW.md §7).
+set(TGCLI_TDLIB_REV a17f87c4cff7b90b278d12b91ba0614383aaee82)
+set(TGCLI_CLI11_REV 4160d259d961cd393fd8d67590a8c7d210207348)
+set(TGCLI_NLOHMANN_JSON_REV 55f93686c01528224f448c19128836e7df245f72)
+set(TGCLI_FMT_REV 40626af88bd7df9a5fb80be7b25ac85b122d6c21)
+set(TGCLI_TOMLPLUSPLUS_REV 30172438cee64926dc41fdd9c11fb3ba5b2ba9de)
+set(TGCLI_CATCH2_REV 2b60af89e23d28eefc081bc930831ee9d45ea58b)
+set(TGCLI_JSONCONS_REV cb54cdc3134a62634466bf7bcd24f1a906f4ef25)
+
+include(cmake/DependencyLock.cmake)
+tgcli_assert_dependency_lock(tdlib ${TGCLI_TDLIB_REV})
+tgcli_assert_dependency_lock(cli11 ${TGCLI_CLI11_REV})
+tgcli_assert_dependency_lock(nlohmann_json ${TGCLI_NLOHMANN_JSON_REV})
+tgcli_assert_dependency_lock(fmt ${TGCLI_FMT_REV})
+tgcli_assert_dependency_lock(tomlplusplus ${TGCLI_TOMLPLUSPLUS_REV})
+tgcli_assert_tdlib_build_script(${TGCLI_TDLIB_REV})
 
 include(FetchContent)
 
 FetchContent_Declare(cli11
     GIT_REPOSITORY https://github.com/CLIUtils/CLI11
-    GIT_TAG v2.5.0
-    GIT_SHALLOW TRUE)
+    GIT_TAG ${TGCLI_CLI11_REV})
 FetchContent_Declare(nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json
-    GIT_TAG v3.12.0
-    GIT_SHALLOW TRUE)
+    GIT_TAG ${TGCLI_NLOHMANN_JSON_REV})
 FetchContent_Declare(fmt
     GIT_REPOSITORY https://github.com/fmtlib/fmt
-    GIT_TAG 11.2.0
-    GIT_SHALLOW TRUE)
+    GIT_TAG ${TGCLI_FMT_REV})
 FetchContent_Declare(tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus
-    GIT_TAG v3.4.0
-    GIT_SHALLOW TRUE)
+    GIT_TAG ${TGCLI_TOMLPLUSPLUS_REV})
 FetchContent_MakeAvailable(cli11 nlohmann_json fmt tomlplusplus)
+tgcli_assert_resolved_git_revision(cli11 "${cli11_SOURCE_DIR}" ${TGCLI_CLI11_REV})
+tgcli_assert_resolved_git_revision(
+    nlohmann_json "${nlohmann_json_SOURCE_DIR}" ${TGCLI_NLOHMANN_JSON_REV})
+tgcli_assert_resolved_git_revision(fmt "${fmt_SOURCE_DIR}" ${TGCLI_FMT_REV})
+tgcli_assert_resolved_git_revision(
+    tomlplusplus "${tomlplusplus_SOURCE_DIR}" ${TGCLI_TOMLPLUSPLUS_REV})
 
 if(TGCLI_SYSTEM_TDLIB)
     find_package(Td REQUIRED)
@@ -44,12 +60,14 @@ if(TGCLI_SYSTEM_TDLIB)
         message(FATAL_ERROR "Td package found but Td::TdStatic is missing; "
             "build the prefix with scripts/build-tdlib.sh")
     endif()
+    tgcli_assert_tdlib_prefix_provenance("${Td_DIR}" ${TGCLI_TDLIB_REV})
 else()
     set(BUILD_TESTING OFF)
     FetchContent_Declare(td
         GIT_REPOSITORY https://github.com/tdlib/td
         GIT_TAG ${TGCLI_TDLIB_REV})
     FetchContent_MakeAvailable(td)
+    tgcli_assert_resolved_git_revision(tdlib "${td_SOURCE_DIR}" ${TGCLI_TDLIB_REV})
     # The installed-prefix path imports tdlib headers as SYSTEM; give the
     # in-tree build the same treatment so tdlib's headers are exempt from
     # our -Werror warning set.
@@ -131,14 +149,17 @@ target_link_libraries(tgcli
 
 if(TGCLI_BUILD_TESTS)
     set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "Disable jsoncons upstream tests" FORCE)
+    tgcli_assert_dependency_lock(catch2 ${TGCLI_CATCH2_REV})
+    tgcli_assert_dependency_lock(jsoncons ${TGCLI_JSONCONS_REV})
     FetchContent_Declare(jsoncons
         GIT_REPOSITORY https://github.com/danielaparker/jsoncons
-        GIT_TAG cb54cdc3134a62634466bf7bcd24f1a906f4ef25)
+        GIT_TAG ${TGCLI_JSONCONS_REV})
     FetchContent_Declare(catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2
-        GIT_TAG v3.8.1
-        GIT_SHALLOW TRUE)
+        GIT_TAG ${TGCLI_CATCH2_REV})
     FetchContent_MakeAvailable(catch2 jsoncons)
+    tgcli_assert_resolved_git_revision(catch2 "${catch2_SOURCE_DIR}" ${TGCLI_CATCH2_REV})
+    tgcli_assert_resolved_git_revision(jsoncons "${jsoncons_SOURCE_DIR}" ${TGCLI_JSONCONS_REV})
     list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
     enable_testing()
     add_subdirectory(tests)

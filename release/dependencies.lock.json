@@ -1,0 +1,228 @@
+{
+  "$schema": "./dependencies.lock.schema.json",
+  "schema_version": 1,
+  "archive_policy": {
+    "algorithm": "sha256",
+    "github_outer_compression": "GitHub commit archives are content-addressed by immutable_ref, but their outer compression can change. Any checksum refresh requires source-tree equivalence verification and review."
+  },
+  "components": [
+    {
+      "id": "tdlib",
+      "name": "TDLib",
+      "scope": "runtime",
+      "lock_state": "locked",
+      "integration": "fetchcontent-or-pinned-prefix",
+      "source_repository": "https://github.com/tdlib/td",
+      "source_archive": "https://github.com/tdlib/td/archive/a17f87c4cff7b90b278d12b91ba0614383aaee82.tar.gz",
+      "immutable_ref": "a17f87c4cff7b90b278d12b91ba0614383aaee82",
+      "version": "1.8.65",
+      "archive_sha256": "095a2e78ced222bbe4cf934d7a6796db6c13837b45f3c31e0a28df5d273770e7",
+      "license_expression": "BSL-1.0",
+      "license_files": [
+        {
+          "path": "release/licenses/TDLib.txt",
+          "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+        }
+      ],
+      "embedded_components": [
+        {
+          "id": "tdlib-sqlite-sqlcipher",
+          "name": "TDLib modified SQLite/SQLCipher amalgamation",
+          "version": "SQLite 3.31.0 / SQLCipher 4.4.0 community, modified by TDLib",
+          "source_path": "sqlite/sqlite",
+          "license_expression": "blessing AND BSD-3-Clause",
+          "license_files": [
+            {
+              "path": "release/licenses/SQLite-blessing.txt",
+              "sha256": "ef01c255778d37a1e5968f865318c49ce8ae391530583d6721acd548ded77557"
+            },
+            {
+              "path": "release/licenses/TDLib-SQLCipher.txt",
+              "sha256": "3eee3c7964a9becc94d747bd36703d31fc86eb994680b06a61bfd4f2661eaac8"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cli11",
+      "name": "CLI11",
+      "scope": "runtime",
+      "lock_state": "locked",
+      "integration": "fetchcontent",
+      "source_repository": "https://github.com/CLIUtils/CLI11",
+      "source_archive": "https://github.com/CLIUtils/CLI11/archive/4160d259d961cd393fd8d67590a8c7d210207348.tar.gz",
+      "immutable_ref": "4160d259d961cd393fd8d67590a8c7d210207348",
+      "version": "2.5.0",
+      "archive_sha256": "c91e8768600e61be11f7250e3cf3e71afd9d0f18f9c9e9e209a8e084ca08cd85",
+      "license_expression": "BSD-3-Clause",
+      "license_files": [
+        {
+          "path": "release/licenses/CLI11.txt",
+          "sha256": "88cffe4600851e8dad1b8eb1e304d54286a89d2373a1b98f59cb969b9e967b90"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "nlohmann_json",
+      "name": "JSON for Modern C++",
+      "scope": "runtime",
+      "lock_state": "locked",
+      "integration": "fetchcontent",
+      "source_repository": "https://github.com/nlohmann/json",
+      "source_archive": "https://github.com/nlohmann/json/archive/55f93686c01528224f448c19128836e7df245f72.tar.gz",
+      "immutable_ref": "55f93686c01528224f448c19128836e7df245f72",
+      "version": "3.12.0",
+      "archive_sha256": "67f4cdd9ca930c9c1e130af4a437c7fc98fab77a2846fc2d2a14b4943831f8ef",
+      "license_expression": "MIT",
+      "license_files": [
+        {
+          "path": "release/licenses/nlohmann-json.txt",
+          "sha256": "c0d068392ea65358b798b8c165103560f06e9e3b38c4ab4e2d8810a7b931af86"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "fmt",
+      "name": "fmt",
+      "scope": "runtime",
+      "lock_state": "locked",
+      "integration": "fetchcontent",
+      "source_repository": "https://github.com/fmtlib/fmt",
+      "source_archive": "https://github.com/fmtlib/fmt/archive/40626af88bd7df9a5fb80be7b25ac85b122d6c21.tar.gz",
+      "immutable_ref": "40626af88bd7df9a5fb80be7b25ac85b122d6c21",
+      "version": "11.2.0",
+      "archive_sha256": "992216a0605e03f0373984ecad11158f42d8569782f1b2c84035272da10f0ff1",
+      "license_expression": "MIT",
+      "license_files": [
+        {
+          "path": "release/licenses/fmt.txt",
+          "sha256": "07580f2a3b35709ce703d523f447b242f6dfec7582a8c0df102c7fa2849375f8"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "tomlplusplus",
+      "name": "toml++",
+      "scope": "runtime",
+      "lock_state": "locked",
+      "integration": "fetchcontent",
+      "source_repository": "https://github.com/marzer/tomlplusplus",
+      "source_archive": "https://github.com/marzer/tomlplusplus/archive/30172438cee64926dc41fdd9c11fb3ba5b2ba9de.tar.gz",
+      "immutable_ref": "30172438cee64926dc41fdd9c11fb3ba5b2ba9de",
+      "version": "3.4.0",
+      "archive_sha256": "291254ffe7f2433f90deef878d0d9335534a350a958ea23ecf511b7b2277bf7f",
+      "license_expression": "MIT",
+      "license_files": [
+        {
+          "path": "release/licenses/tomlplusplus.txt",
+          "sha256": "529bc3900a9571e49db285b0df432397e70b881cc3bf48de6667ae74ff4b06d8"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "openssl",
+      "name": "OpenSSL",
+      "scope": "release-runtime",
+      "lock_state": "locked",
+      "integration": "release-toolchain-pending",
+      "source_repository": "https://github.com/openssl/openssl",
+      "source_archive": "https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz",
+      "immutable_ref": "openssl-3.5.7",
+      "version": "3.5.7",
+      "archive_sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
+      "license_expression": "Apache-2.0",
+      "license_files": [
+        {
+          "path": "release/licenses/OpenSSL.txt",
+          "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "zlib",
+      "name": "zlib",
+      "scope": "release-runtime",
+      "lock_state": "locked",
+      "integration": "release-toolchain-pending",
+      "source_repository": "https://github.com/madler/zlib",
+      "source_archive": "https://zlib.net/zlib-1.3.2.tar.gz",
+      "immutable_ref": "v1.3.2",
+      "version": "1.3.2",
+      "archive_sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "license_expression": "Zlib",
+      "license_files": [
+        {
+          "path": "release/licenses/zlib.txt",
+          "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "catch2",
+      "name": "Catch2",
+      "scope": "test-only",
+      "lock_state": "locked",
+      "integration": "test-fetchcontent",
+      "source_repository": "https://github.com/catchorg/Catch2",
+      "source_archive": "https://github.com/catchorg/Catch2/archive/2b60af89e23d28eefc081bc930831ee9d45ea58b.tar.gz",
+      "immutable_ref": "2b60af89e23d28eefc081bc930831ee9d45ea58b",
+      "version": "3.8.1",
+      "archive_sha256": "553e6c94498c42edaecc9c8459f1a320a7e4cf49155635cf7123212bb9f09cf2",
+      "license_expression": "BSL-1.0",
+      "license_files": [],
+      "embedded_components": []
+    },
+    {
+      "id": "jsoncons",
+      "name": "jsoncons",
+      "scope": "test-only",
+      "lock_state": "locked",
+      "integration": "test-fetchcontent",
+      "source_repository": "https://github.com/danielaparker/jsoncons",
+      "source_archive": "https://github.com/danielaparker/jsoncons/archive/cb54cdc3134a62634466bf7bcd24f1a906f4ef25.tar.gz",
+      "immutable_ref": "cb54cdc3134a62634466bf7bcd24f1a906f4ef25",
+      "version": "1.7.0",
+      "archive_sha256": "5b24c82df11ac8fe4a0eaa55c9f991ba076ea6c6ceb6ecb7d841e36a7eacf3cb",
+      "license_expression": "BSL-1.0",
+      "license_files": [],
+      "embedded_components": []
+    },
+    {
+      "id": "musl",
+      "name": "musl libc",
+      "scope": "planned-runtime",
+      "lock_state": "unresolved",
+      "integration": "toolchain-unselected",
+      "source_repository": "https://git.musl-libc.org/cgit/musl",
+      "source_archive": null,
+      "immutable_ref": null,
+      "version": null,
+      "archive_sha256": null,
+      "license_expression": "MIT",
+      "license_files": [],
+      "embedded_components": []
+    },
+    {
+      "id": "gcc-runtime",
+      "name": "GCC runtime libraries (libgcc and libstdc++)",
+      "scope": "planned-runtime",
+      "lock_state": "unresolved",
+      "integration": "toolchain-unselected",
+      "source_repository": "https://gcc.gnu.org/git/gcc.git",
+      "source_archive": null,
+      "immutable_ref": null,
+      "version": null,
+      "archive_sha256": null,
+      "license_expression": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "license_files": [],
+      "embedded_components": []
+    }
+  ]
+}
