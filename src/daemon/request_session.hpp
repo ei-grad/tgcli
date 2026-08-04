@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <variant>
 
@@ -66,6 +67,8 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t connection_id() const;
     [[nodiscard]] Clock::time_point deadline() const;
+    [[nodiscard]] std::stop_token cancellation_token() const;
+    [[nodiscard]] bool cancellation_requested() const;
 
     ChallengeOutcome challenge(ChallengeSpec spec);
     AnswerDisposition receive_answer(const proto::Answer& answer);
@@ -134,6 +137,7 @@ class RequestSession final : public ResponseSink {
     std::optional<Identity> reserved_identity_;
     InFlightState in_flight_state_ = InFlightState::None;
     InFlightHook in_flight_hook_;
+    std::stop_source cancellation_source_;
 };
 
 } // namespace tgcli::daemon

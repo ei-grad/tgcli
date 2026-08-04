@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli account list result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "next"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "default"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,32}$"
+          },
+          "default": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "next": {
+      "type": "null"
+    }
+  }
+}

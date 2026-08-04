@@ -1,0 +1,4 @@
+accounts:
+- main (default)
+- work
+next: null

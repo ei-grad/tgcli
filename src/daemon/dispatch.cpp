@@ -105,6 +105,9 @@ void Dispatcher::dispatch(RequestSession& session) const {
         session.error("GENERIC", "command handler failed", nlohmann::json::object(), kGeneric);
         return;
     }
+    if (session.cancellation_requested()) {
+        return;
+    }
     if (!session.has_terminal()) {
         session.error("GENERIC", "command handler returned without a terminal response",
                       nlohmann::json::object(), kGeneric);

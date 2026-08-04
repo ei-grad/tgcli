@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli account show result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account", "default", "allow_write", "idle_exit", "credentials", "paths"],
+  "properties": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "default": {
+      "type": "boolean"
+    },
+    "allow_write": {
+      "type": "boolean"
+    },
+    "idle_exit": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_id", "api_hash", "db_key", "password", "bot_token"],
+      "properties": {
+        "api_id": {
+          "enum": ["value", "command", "missing"]
+        },
+        "api_hash": {
+          "enum": ["value", "command", "missing"]
+        },
+        "db_key": {
+          "enum": ["command", "none"]
+        },
+        "password": {
+          "enum": ["command", "interactive"]
+        },
+        "bot_token": {
+          "enum": ["command", "interactive"]
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data", "state", "socket"],
+      "properties": {
+        "data": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "state": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "socket": {
+          "type": "string",
+          "pattern": "^/"
+        }
+      }
+    }
+  }
+}

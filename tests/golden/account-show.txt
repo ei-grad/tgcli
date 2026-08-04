@@ -1,0 +1,14 @@
+account: main
+default: yes
+allow write: no
+idle exit: disabled
+credentials:
+  api_id: value
+  api_hash: command
+  db_key: none
+  password: interactive
+  bot_token: command
+paths:
+  data: /data/tgcli/accounts/main
+  state: /state/tgcli/accounts/main
+  socket: /run/tgcli/main.sock

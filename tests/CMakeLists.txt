@@ -1,6 +1,8 @@
 include(Catch)
 
 add_executable(tgcli_unit_tests
+    account_cli_test.cpp
+    account_commands_test.cpp
     config_test.cpp
     daemon_lock_test.cpp
     frame_test.cpp
@@ -9,8 +11,10 @@ add_executable(tgcli_unit_tests
     update_bus_test.cpp
     dispatch_test.cpp
     request_session_test.cpp
+    routing_test.cpp
     server_test.cpp
     prompt_test.cpp
+    render_test.cpp
     schema_matcher.cpp
     schema_test.cpp
     secret_hook_test.cpp
@@ -27,6 +31,7 @@ add_dependencies(tgcli_unit_tests tgcli)
 target_compile_definitions(tgcli_unit_tests
     PRIVATE
         TGCLI_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/docs/schemas"
+        TGCLI_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden"
         TGCLI_TEST_BINARY="$<TARGET_FILE:tgcli>")
 
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]

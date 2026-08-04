@@ -4,6 +4,7 @@
 
 #include "cli/client.hpp"
 #include "cli/prompt.hpp"
+#include "common/config.hpp"
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
@@ -264,6 +265,15 @@ void prepare_account_layout() {
     REQUIRE(paths::ensure_private_dir(accounts_dir.substr(0, tgcli_separator), env.uid, error));
     REQUIRE(paths::ensure_private_dir(accounts_dir, env.uid, error));
     REQUIRE(paths::ensure_private_dir(state_dir, env.uid, error));
+}
+
+void configure_main_account() {
+    const auto env = paths::real_environment();
+    const config::Store store(paths::config_file(env), env.uid);
+    const auto current = store.load();
+    REQUIRE(current);
+    const auto added = store.add_account(current.snapshot->identity, "main");
+    REQUIRE(added.status == config::MutationStatus::Applied);
 }
 
 class ScopedSleeper {
@@ -1555,6 +1565,7 @@ TEST_CASE("binary mismatch waits for both shutdown orderings before real replace
 TEST_CASE("two incompatible clients converge on one matching replacement",
           "[cli][restart][r3][process][tdlib]") {
     const IsolatedEnv env;
+    configure_main_account();
     ChildBootstrapDaemon old_daemon;
     AsyncCliProcess first(env.root() + "/first.out", env.root() + "/first.err");
     AsyncCliProcess second(env.root() + "/second.out", env.root() + "/second.err");
@@ -1576,6 +1587,7 @@ TEST_CASE("two incompatible clients converge on one matching replacement",
 TEST_CASE("two binary-mismatch clients join one replacement after duplicate-stop EOF",
           "[cli][restart][r3][process][tdlib]") {
     const IsolatedEnv env;
+    configure_main_account();
     ChildBinaryRaceDaemon old_daemon;
     AsyncCliProcess first(env.root() + "/binary-first.out", env.root() + "/binary-first.err");
     AsyncCliProcess second(env.root() + "/binary-second.out", env.root() + "/binary-second.err");

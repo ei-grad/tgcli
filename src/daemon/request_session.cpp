@@ -78,6 +78,14 @@ RequestSession::Clock::time_point RequestSession::deadline() const {
     return deadline_;
 }
 
+std::stop_token RequestSession::cancellation_token() const {
+    return cancellation_source_.get_token();
+}
+
+bool RequestSession::cancellation_requested() const {
+    return cancellation_source_.stop_requested();
+}
+
 ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
     if (!request_.context.tty) {
         return {ChallengeStatus::NoTty, std::monostate{}};
@@ -273,6 +281,7 @@ void RequestSession::disconnect() {
             return;
         }
         state_ = State::Disconnected;
+        cancellation_source_.request_stop();
         answer_reserved_ = false;
         reserved_identity_.reset();
         if (current_) {
@@ -293,6 +302,7 @@ void RequestSession::shutdown() {
         return;
     }
     state_ = State::Shutdown;
+    cancellation_source_.request_stop();
     answer_reserved_ = false;
     reserved_identity_.reset();
     error("DAEMON_SHUTDOWN", "daemon is shutting down", {{"reason", "daemon_shutdown"}}, kGeneric);

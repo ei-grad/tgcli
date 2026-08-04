@@ -1112,7 +1112,19 @@ Store::Store(std::string config_path, std::shared_ptr<const testing::StoreHooks>
       expected_uid_(expected_uid == static_cast<uid_t>(-1) ? ::getuid() : expected_uid),
       hooks_(std::move(hooks)) {}
 
-LoadResult Store::load() const {
+LoadResult Store::load(const MutationControl& control) const {
+    const auto interrupted = [&control]() -> std::optional<LoadResult> {
+        if (control.cancellation.stop_requested()) {
+            return LoadResult{{}, {}, false, true};
+        }
+        if (std::chrono::steady_clock::now() >= control.deadline) {
+            return LoadResult{{}, {}, true, false};
+        }
+        return std::nullopt;
+    };
+    if (auto result = interrupted()) {
+        return std::move(*result);
+    }
     ConfigError error;
     bool missing = false;
     auto directory =
@@ -1126,9 +1138,14 @@ LoadResult Store::load() const {
         return {std::move(snapshot), {}};
     }
     for (int attempt = 0; attempt < 256; ++attempt) {
+        if (auto result = interrupted()) {
+            return std::move(*result);
+        }
         if (transaction_marker_present(directory->get())) {
             if (transaction_is_active(directory->get(), expected_uid_, error)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                const auto wake = std::min(control.deadline, std::chrono::steady_clock::now() +
+                                                                 std::chrono::milliseconds(1));
+                std::this_thread::sleep_until(wake);
                 continue;
             }
             if (error.message.empty()) {
@@ -1138,6 +1155,9 @@ LoadResult Store::load() const {
             return {{}, std::move(error)};
         }
         auto loaded = read_from_directory(directory->get(), expected_uid_);
+        if (auto result = interrupted()) {
+            return std::move(*result);
+        }
         if (loaded.parsed || !loaded.error || loaded.error->reason != ConfigReason::PathInvalid) {
             return to_load_result(std::move(loaded));
         }

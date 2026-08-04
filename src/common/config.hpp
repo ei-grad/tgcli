@@ -65,9 +65,11 @@ struct ConfigSnapshot {
 struct LoadResult {
     std::shared_ptr<const ConfigSnapshot> snapshot;
     std::optional<ConfigError> error;
+    bool timed_out = false;
+    bool cancelled = false;
 
     explicit operator bool() const {
-        return snapshot != nullptr && !error;
+        return snapshot != nullptr && !error && !timed_out && !cancelled;
     }
 };
 
@@ -106,7 +108,7 @@ class Store {
     Store(std::string config_path, std::shared_ptr<const testing::StoreHooks> hooks,
           uid_t expected_uid = static_cast<uid_t>(-1));
 
-    [[nodiscard]] LoadResult load() const;
+    [[nodiscard]] LoadResult load(const MutationControl& control = {}) const;
     [[nodiscard]] MutationResult add_account(std::string_view expected_identity,
                                              std::string_view account,
                                              const MutationControl& control = {}) const;

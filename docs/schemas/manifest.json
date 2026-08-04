@@ -1,6 +1,18 @@
 {
   "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "commands": {
+    "account add": {
+      "result": "account-add.result.schema.json"
+    },
+    "account list": {
+      "result": "account-list.result.schema.json"
+    },
+    "account show": {
+      "result": "account-show.result.schema.json"
+    },
+    "account use": {
+      "result": "account-use.result.schema.json"
+    },
     "daemon stop": {
       "result": "daemon-stop.result.schema.json"
     },

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli account add result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account", "created", "default"],
+  "properties": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "created": {
+      "const": true
+    },
+    "default": {
+      "type": "boolean"
+    }
+  }
+}

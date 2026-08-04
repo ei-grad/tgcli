@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli account use result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["default_account", "previous_default"],
+  "properties": {
+    "default_account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "previous_default": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    }
+  }
+}

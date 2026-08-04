@@ -2,10 +2,13 @@
 
 #include "cli/prompt.hpp"
 #include "cli/render.hpp"
+#include "cli/routing.hpp"
+#include "common/config.hpp"
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
 #include "common/paths.hpp"
+#include "daemon/account_commands.hpp"
 #include "daemon/daemon_run.hpp"
 #include "proto/frame_io.hpp"
 
@@ -789,11 +792,34 @@ int run_in_process(const proto::Request& request, const RunOptions& options,
     return renderer.exit_code();
 }
 
+int run_config_global(const proto::Request& request, const RunOptions& options,
+                      ChallengePrompt& prompt) {
+    const auto env = paths::real_environment();
+    const config::Store store(paths::config_file(env), env.uid);
+    const daemon::ConfigGlobalContext context{store, env};
+    daemon::Dispatcher dispatcher;
+    daemon::register_account_commands(dispatcher, context);
+
+    FrameRenderer renderer(command_key(request.command), options.json);
+    InProcessSink sink(renderer, prompt, request.context.tty);
+    try {
+        dispatcher.dispatch(request, sink);
+    } catch (const std::invalid_argument&) {
+        print_error("USAGE", "invalid request timeout",
+                    {{"argument", "--timeout"}, {"reason", "invalid_argument"}});
+        return kUsage;
+    }
+    return renderer.exit_code();
+}
+
 } // namespace
 
 int run_command(const proto::Request& request, const RunOptions& options) {
     TerminalPrompt terminal_prompt;
     ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
+    if (is_config_global_command(request.command)) {
+        return run_config_global(request, options, prompt);
+    }
     if (options.no_daemon) {
         return run_in_process(request, options, prompt);
     }

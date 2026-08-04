@@ -58,6 +58,31 @@ struct SchemaCase {
 
 std::vector<SchemaCase> schema_cases() {
     return {
+        {"account-add.result.schema.json",
+         {{"account", "work"}, {"created", true}, {"default", false}},
+         "account"},
+        {"account-list.result.schema.json",
+         {{"items", json::array({json{{"name", "main"}, {"default", true}}})}, {"next", nullptr}},
+         "items",
+         true},
+        {"account-show.result.schema.json",
+         {{"account", "main"},
+          {"default", true},
+          {"allow_write", false},
+          {"idle_exit", nullptr},
+          {"credentials",
+           {{"api_id", "value"},
+            {"api_hash", "value"},
+            {"db_key", "none"},
+            {"password", "interactive"},
+            {"bot_token", "interactive"}}},
+          {"paths",
+           {{"data", "/tmp/data"}, {"state", "/tmp/state"}, {"socket", "/tmp/main.sock"}}}},
+         "account",
+         true},
+        {"account-use.result.schema.json",
+         {{"default_account", "work"}, {"previous_default", "main"}},
+         "default_account"},
         {"version.result.schema.json",
          {{"version", "0.1.0"}, {"protocol", 1}, {"tdlib", "1.8.65"}},
          "version"},
@@ -97,11 +122,15 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
     const auto manifest = tgcli::test::load_schema_document("manifest.json");
     const json expected{{"schemaDialect", kDialect},
                         {"commands",
-                         {{"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
+                         {{"account add", {{"result", "account-add.result.schema.json"}}},
+                          {"account list", {{"result", "account-list.result.schema.json"}}},
+                          {"account show", {{"result", "account-show.result.schema.json"}}},
+                          {"account use", {{"result", "account-use.result.schema.json"}}},
+                          {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
                           {"doctor", {{"result", "doctor.result.schema.json"}}},
                           {"version", {{"result", "version.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 3);
+    CHECK(manifest["commands"].size() == 7);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -141,6 +170,9 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     REQUIRE(doctor.contains("oneOf"));
     REQUIRE(doctor["oneOf"].is_array());
     CHECK(doctor["oneOf"].size() == 3);
+
+    const auto account_error = tgcli::test::load_schema_document("account.error.schema.json");
+    check_schema_node(account_error);
 }
 
 TEST_CASE("result schemas reject missing required and unknown properties", "[schema]") {
@@ -162,4 +194,19 @@ TEST_CASE("result schemas reject missing required and unknown properties", "[sch
             CHECK_THAT(nested_unknown, !tgcli::test::matches_json_schema(schema_case.filename));
         }
     }
+
+    auto list_item_unknown = schema_cases().at(1).instance;
+    list_item_unknown["items"][0]["unexpected"] = true;
+    CHECK_THAT(list_item_unknown,
+               !tgcli::test::matches_json_schema("account-list.result.schema.json"));
+
+    auto show_credentials_unknown = schema_cases().at(2).instance;
+    show_credentials_unknown["credentials"]["unexpected"] = true;
+    CHECK_THAT(show_credentials_unknown,
+               !tgcli::test::matches_json_schema("account-show.result.schema.json"));
+
+    auto show_paths_unknown = schema_cases().at(2).instance;
+    show_paths_unknown["paths"]["unexpected"] = true;
+    CHECK_THAT(show_paths_unknown,
+               !tgcli::test::matches_json_schema("account-show.result.schema.json"));
 }
