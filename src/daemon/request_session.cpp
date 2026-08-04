@@ -124,17 +124,21 @@ ChallengeStatus ChallengeOutcome::status() const {
 }
 
 RequestSession::RequestSession(proto::Request request, ResponseSink& transport,
-                               std::uint64_t connection_id, NonceGenerator nonce_generator)
+                               std::uint64_t connection_id, NonceGenerator nonce_generator,
+                               ActivityTracker::Token request_activity)
     : request_(std::move(request)), transport_(&transport), connection_id_(connection_id),
       deadline_(compute_deadline(request_)),
-      nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce) {}
+      nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
+      activity_(std::move(request_activity)) {}
 
 RequestSession::RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
-                               std::uint64_t connection_id, NonceGenerator nonce_generator)
+                               std::uint64_t connection_id, NonceGenerator nonce_generator,
+                               ActivityTracker::Token request_activity)
     : request_(std::move(request)), transport_owner_(std::move(transport)),
       transport_(transport_owner_.get()), connection_id_(connection_id),
       deadline_(compute_deadline(request_)),
-      nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce) {
+      nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
+      activity_(std::move(request_activity)) {
     if (transport_ == nullptr) {
         throw std::invalid_argument("request session transport is null");
     }
@@ -235,6 +239,7 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
     } else if (transport_->has_terminal()) {
         const std::lock_guard lock(session_mutex_);
         state_ = State::ProtocolError;
+        release_activity();
         resolve_current({ChallengeStatus::ProtocolError, std::monostate{}});
     }
 
@@ -380,11 +385,12 @@ void RequestSession::disconnect() {
     InFlightState state = InFlightState::None;
     {
         const std::lock_guard lock(session_mutex_);
-        if (state_ != State::Running) {
+        if (state_ != State::Running && state_ != State::TimedOut) {
             return;
         }
         state_ = State::Disconnected;
         cancellation_source_.request_stop();
+        release_activity();
         answer_reserved_ = false;
         reserved_identity_.reset();
         if (current_) {
@@ -412,6 +418,11 @@ void RequestSession::shutdown() {
     if (current_) {
         resolve_current({ChallengeStatus::Shutdown, std::monostate{}});
     }
+}
+
+bool RequestSession::promote_to_subscription() {
+    const std::lock_guard lock(activity_mutex_);
+    return activity_state_ == ActivityState::Active && activity_.promote_to_subscription();
 }
 
 bool RequestSession::reserve_in_flight() {
@@ -545,6 +556,31 @@ void RequestSession::notify_in_flight(InFlightState state, const InFlightHook& h
     }
 }
 
+bool RequestSession::begin_terminal_forwarding() {
+    const std::lock_guard lock(activity_mutex_);
+    if (activity_state_ != ActivityState::Active) {
+        return false;
+    }
+    activity_state_ = ActivityState::TerminalForwarding;
+    return true;
+}
+
+void RequestSession::finish_terminal_forwarding() {
+    const std::lock_guard lock(activity_mutex_);
+    if (activity_state_ == ActivityState::TerminalForwarding) {
+        activity_.reset();
+        activity_state_ = ActivityState::Released;
+    }
+}
+
+void RequestSession::release_activity() {
+    const std::lock_guard lock(activity_mutex_);
+    if (activity_state_ == ActivityState::Active) {
+        activity_.reset();
+        activity_state_ = ActivityState::Released;
+    }
+}
+
 void RequestSession::emit_item(nlohmann::json data) {
     transport_->item(std::move(data));
 }
@@ -554,12 +590,32 @@ void RequestSession::emit_progress(nlohmann::json data) {
 }
 
 void RequestSession::emit_result(nlohmann::json data) {
-    transport_->result(std::move(data));
+    if (!begin_terminal_forwarding()) {
+        return;
+    }
+    try {
+        transport_->result(std::move(data));
+    } catch (...) {
+        // A terminal claim cannot be retried regardless of the transport's exception type.
+        finish_terminal_forwarding();
+        throw;
+    }
+    finish_terminal_forwarding();
 }
 
 void RequestSession::emit_error(std::string code, std::string message, nlohmann::json details,
                                 int exit_code) {
-    transport_->error(std::move(code), std::move(message), std::move(details), exit_code);
+    if (!begin_terminal_forwarding()) {
+        return;
+    }
+    try {
+        transport_->error(std::move(code), std::move(message), std::move(details), exit_code);
+    } catch (...) {
+        // A terminal claim cannot be retried regardless of the transport's exception type.
+        finish_terminal_forwarding();
+        throw;
+    }
+    finish_terminal_forwarding();
 }
 
 ChallengeReply RequestSession::emit_challenge(nlohmann::json data) {

@@ -1,4 +1,5 @@
 #include "common/exit_codes.hpp"
+#include "daemon/activity_tracker.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/request_session.hpp"
 
@@ -9,8 +10,10 @@
 #include <cstddef>
 #include <functional>
 #include <future>
+#include <latch>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -33,6 +36,44 @@ struct Captured {
     std::optional<json> challenge;
     std::optional<json> result;
     std::optional<proto::Error> error;
+};
+
+class ThrowingTerminalSink final : public daemon::ResponseSink {
+  private:
+    void emit_item([[maybe_unused]] json data) override {}
+    void emit_progress([[maybe_unused]] json data) override {}
+    void emit_result([[maybe_unused]] json data) override {
+        throw std::runtime_error("terminal transport failure");
+    }
+    void emit_error([[maybe_unused]] std::string code, [[maybe_unused]] std::string message,
+                    [[maybe_unused]] json details, [[maybe_unused]] int exit_code) override {
+        throw std::runtime_error("terminal transport failure");
+    }
+    daemon::ChallengeReply emit_challenge([[maybe_unused]] json data) override {
+        return {};
+    }
+};
+
+class FailingChallengeSink final : public daemon::ResponseSink {
+  public:
+    [[nodiscard]] bool emitted_error() const {
+        return emitted_error_;
+    }
+
+  private:
+    void emit_item([[maybe_unused]] json data) override {}
+    void emit_progress([[maybe_unused]] json data) override {}
+    void emit_result([[maybe_unused]] json data) override {}
+    void emit_error([[maybe_unused]] std::string code, [[maybe_unused]] std::string message,
+                    [[maybe_unused]] json details, [[maybe_unused]] int exit_code) override {
+        emitted_error_ = true;
+    }
+    daemon::ChallengeReply emit_challenge([[maybe_unused]] json data) override {
+        return {std::nullopt, daemon::ChallengeFailure{"INPUT_FAILED", "challenge transport failed",
+                                                       json::object(), kGeneric}};
+    }
+
+    bool emitted_error_ = false;
 };
 
 std::shared_ptr<daemon::CallbackSink> make_sink(
@@ -99,7 +140,433 @@ json wait_challenge(Captured& captured) {
     return *captured.challenge;
 }
 
+daemon::ActivityTracker tracked_activity() {
+    daemon::ActivityTracker tracker([] {});
+    if (!tracker.daemon_ready(std::nullopt)) {
+        throw std::logic_error("activity tracker was already ready");
+    }
+    return tracker;
+}
+
+void wait_until_deadline(const daemon::RequestSession& session) {
+    while (daemon::RequestSession::Clock::now() < session.deadline()) {
+        std::this_thread::yield();
+    }
+}
+
 } // namespace
+
+// NOLINTBEGIN(misc-const-correctness): Catch2 and concurrency callbacks mutate test state.
+TEST_CASE("request session holds activity until terminal forwarding completes",
+          "[session][activity]") {
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    std::atomic<std::size_t> requests_during_result = 0;
+    auto sink = std::make_shared<daemon::CallbackSink>(
+        [](const json&) {}, [](const json&) {},
+        [&tracker, &requests_during_result](const json&) {
+            requests_during_result.store(tracker.snapshot().requests, std::memory_order_relaxed);
+        },
+        [](const std::string&, const std::string&, const json&, int) {});
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+
+    CHECK(tracker.snapshot().requests == 1);
+    session.result({{"ok", true}});
+    CHECK(requests_during_result.load(std::memory_order_relaxed) == 1);
+    CHECK(tracker.snapshot().requests == 0);
+    session.error("LATE", "suppressed", json::object(), kGeneric);
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("request session retains activity across challenge reservation and in-flight waits",
+          "[challenge][session][activity]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+
+    auto future =
+        std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
+    const auto emitted = wait_challenge(captured);
+    CHECK(tracker.snapshot().requests == 1);
+    CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::Accepted);
+    CHECK(future.get().status() == daemon::ChallengeStatus::Answered);
+    CHECK(tracker.snapshot().requests == 1);
+    REQUIRE(session.reserve_in_flight());
+    CHECK(tracker.snapshot().requests == 1);
+    session.result({{"ok", true}});
+    CHECK(tracker.snapshot().requests == 0);
+    CHECK(session.in_flight_state() == daemon::InFlightState::InFlight);
+    session.settle_in_flight();
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("request session disconnect releases activity before orphaned work settles",
+          "[session][activity][disconnect]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+    REQUIRE(session.reserve_direct_in_flight());
+    CHECK(tracker.snapshot().requests == 1);
+
+    session.disconnect();
+    CHECK(session.in_flight_state() == daemon::InFlightState::Orphaned);
+    CHECK(tracker.snapshot().requests == 0);
+    session.result({{"late", true}});
+    CHECK_FALSE(captured.result.has_value());
+    CHECK(tracker.snapshot().requests == 0);
+    session.settle_in_flight();
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("request session disconnect releases activity from an orphaned auth query",
+          "[challenge][session][activity][disconnect]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+    auto future =
+        std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
+    const auto emitted = wait_challenge(captured);
+    CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::Accepted);
+    CHECK(future.get().status() == daemon::ChallengeStatus::Answered);
+    REQUIRE(session.reserve_in_flight());
+    CHECK(tracker.snapshot().requests == 1);
+
+    session.disconnect();
+    CHECK(session.in_flight_state() == daemon::InFlightState::Orphaned);
+    CHECK(tracker.snapshot().requests == 0);
+    session.settle_in_flight();
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("request session promotes its sole activity owner to a subscription",
+          "[session][activity][subscription]") {
+    for (const auto termination : {std::string_view("planned_expiry"), std::string_view("error"),
+                                   std::string_view("disconnect")}) {
+        DYNAMIC_SECTION(termination) {
+            Captured captured;
+            auto sink = make_sink(captured);
+            daemon::ActivityTracker tracker = tracked_activity();
+            auto activity = tracker.try_request();
+            REQUIRE(activity);
+            daemon::RequestSession session(
+                request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+
+            REQUIRE(session.promote_to_subscription());
+            auto state = tracker.snapshot();
+            CHECK(state.requests == 0);
+            CHECK(state.subscriptions == 1);
+            CHECK_FALSE(state.zero_since);
+            CHECK_FALSE(session.promote_to_subscription());
+            if (termination == "planned_expiry") {
+                session.result({{"planned_expiry", true}});
+            } else if (termination == "error") {
+                session.error("CANCELLED", "subscription cancelled", json::object(), kGeneric);
+            } else {
+                session.disconnect();
+            }
+            state = tracker.snapshot();
+            CHECK(state.requests == 0);
+            CHECK(state.subscriptions == 0);
+        }
+    }
+}
+
+TEST_CASE("stale and cancelled challenge answers retain request activity until terminal",
+          "[challenge][session][activity]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+    auto future =
+        std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
+    const auto emitted = wait_challenge(captured);
+    auto stale = answer(emitted);
+    stale.answer["auth_sequence"] = 8;
+    const auto stale_disposition = session.receive_answer(std::move(stale));
+    CHECK(stale_disposition == daemon::AnswerDisposition::StaleIgnored);
+    CHECK(tracker.snapshot().requests == 1);
+    auto cancelled = answer(emitted);
+    cancelled.answer.erase("value");
+    cancelled.answer["cancelled"] = true;
+    const auto cancelled_disposition = session.receive_answer(std::move(cancelled));
+    CHECK(cancelled_disposition == daemon::AnswerDisposition::Cancelled);
+    CHECK(future.get().status() == daemon::ChallengeStatus::Cancelled);
+    CHECK(tracker.snapshot().requests == 1);
+    session.error("CANCELLED", "request cancelled", json::object(), kGeneric);
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("rejected challenge answers release activity through their protocol terminal",
+          "[challenge][session][activity]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+    auto future =
+        std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
+    const auto emitted = wait_challenge(captured);
+    auto rejected = answer(emitted);
+    rejected.answer["nonce"] = std::string(kNonce.size(), 'f');
+    const auto disposition = session.receive_answer(std::move(rejected));
+
+    CHECK(disposition == daemon::AnswerDisposition::Rejected);
+    CHECK(future.get().status() == daemon::ChallengeStatus::ProtocolError);
+    REQUIRE(captured.error.has_value());
+    CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("disconnect cleans up a request that timed out before its first challenge",
+          "[challenge][session][activity][timeout][disconnect]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(true, 0.01), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+    wait_until_deadline(session);
+
+    CHECK(session.challenge(challenge()).status() == daemon::ChallengeStatus::TimedOut);
+    CHECK_FALSE(session.cancellation_requested());
+    CHECK(tracker.snapshot().requests == 1);
+    session.disconnect();
+    CHECK(session.cancellation_requested());
+    CHECK(session.in_flight_state() == daemon::InFlightState::None);
+    CHECK(tracker.snapshot().requests == 0);
+    session.error("TIMEOUT", "late timeout terminal", json::object(), kTimeout);
+    CHECK_FALSE(captured.result.has_value());
+    CHECK_FALSE(captured.error.has_value());
+}
+
+TEST_CASE("disconnect cleans up a timed-out challenge before a late answer",
+          "[challenge][session][activity][timeout][disconnect]") {
+    Captured captured;
+    auto sink = make_sink(captured);
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(true, 0.01), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+    auto future =
+        std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
+    const auto emitted = wait_challenge(captured);
+
+    CHECK(future.get().status() == daemon::ChallengeStatus::TimedOut);
+    CHECK_FALSE(session.cancellation_requested());
+    CHECK(tracker.snapshot().requests == 1);
+    session.disconnect();
+    CHECK(session.cancellation_requested());
+    CHECK(tracker.snapshot().requests == 0);
+    CHECK(session.receive_answer(answer(emitted)) == daemon::AnswerDisposition::RequestTerminated);
+    session.error("TIMEOUT", "late timeout terminal", json::object(), kTimeout);
+    CHECK_FALSE(captured.result.has_value());
+    CHECK_FALSE(captured.error.has_value());
+}
+
+TEST_CASE("disconnect cleans up direct and auth work orphaned after timeout",
+          "[challenge][session][activity][timeout][disconnect]") {
+    for (const auto mode : {std::string_view("direct"), std::string_view("auth")}) {
+        DYNAMIC_SECTION(mode) {
+            Captured captured;
+            auto sink = make_sink(captured);
+            daemon::ActivityTracker tracker = tracked_activity();
+            auto activity = tracker.try_request();
+            REQUIRE(activity);
+            daemon::RequestSession session(
+                request(true, 0.05), sink, 17, [] { return std::string(kNonce); },
+                std::move(*activity));
+            std::vector<daemon::InFlightState> transitions;
+            session.set_in_flight_hook(
+                [&transitions](daemon::InFlightState state) { transitions.push_back(state); });
+            if (mode == "direct") {
+                REQUIRE(session.reserve_direct_in_flight());
+            } else {
+                auto future = std::async(std::launch::async,
+                                         [&session] { return session.challenge(challenge()); });
+                const auto emitted = wait_challenge(captured);
+                CHECK(session.receive_answer(answer(emitted)) ==
+                      daemon::AnswerDisposition::Accepted);
+                CHECK(future.get().status() == daemon::ChallengeStatus::Answered);
+                REQUIRE(session.reserve_in_flight());
+            }
+            wait_until_deadline(session);
+            proto::Answer timeout_probe{session.request().id, json::object()};
+            const auto timeout_disposition = session.receive_answer(std::move(timeout_probe));
+            CHECK(timeout_disposition == daemon::AnswerDisposition::RequestTerminated);
+            CHECK_FALSE(session.cancellation_requested());
+            CHECK(session.in_flight_state() == daemon::InFlightState::InFlight);
+            CHECK(tracker.snapshot().requests == 1);
+
+            session.disconnect();
+            CHECK(session.cancellation_requested());
+            CHECK(session.in_flight_state() == daemon::InFlightState::Orphaned);
+            CHECK(tracker.snapshot().requests == 0);
+            session.result({{"late", true}});
+            CHECK_FALSE(captured.result.has_value());
+            CHECK_FALSE(captured.error.has_value());
+            session.settle_in_flight();
+            CHECK(session.in_flight_state() == daemon::InFlightState::None);
+            REQUIRE(transitions.size() == 3);
+            CHECK(transitions[0] == daemon::InFlightState::InFlight);
+            CHECK(transitions[1] == daemon::InFlightState::Orphaned);
+            CHECK(transitions[2] == daemon::InFlightState::None);
+            CHECK(tracker.snapshot().requests == 0);
+        }
+    }
+}
+
+TEST_CASE("challenge transport terminal releases request activity", "[session][activity]") {
+    FailingChallengeSink sink;
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+
+    CHECK(session.challenge(challenge()).status() == daemon::ChallengeStatus::ProtocolError);
+    CHECK(sink.emitted_error());
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("terminal transport exceptions cannot retain request activity",
+          "[session][activity][exception]") {
+    ThrowingTerminalSink sink;
+    daemon::ActivityTracker tracker = tracked_activity();
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    daemon::RequestSession session(
+        request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+
+    CHECK_THROWS_AS(session.result({{"ok", true}}), std::runtime_error);
+    CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("request session terminal races release activity exactly once",
+          "[session][activity][race][stress]") {
+    for (int iteration = 0; iteration < 250; ++iteration) {
+        daemon::ActivityTracker tracker = tracked_activity();
+        auto activity = tracker.try_request();
+        REQUIRE(activity);
+        std::atomic<int> terminals = 0;
+        std::atomic<bool> held_during_terminal = true;
+        auto record_terminal = [&] {
+            held_during_terminal.store(held_during_terminal.load(std::memory_order_relaxed) &&
+                                           tracker.snapshot().requests == 1,
+                                       std::memory_order_relaxed);
+            terminals.fetch_add(1, std::memory_order_relaxed);
+        };
+        auto sink = std::make_shared<daemon::CallbackSink>(
+            [](const json&) {}, [](const json&) {},
+            [&record_terminal](const json&) { record_terminal(); },
+            [&record_terminal](const std::string&, const std::string&, const json&, int) {
+                record_terminal();
+            });
+        daemon::RequestSession session(
+            request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+        std::latch start(3);
+        std::thread result([&] {
+            start.count_down();
+            start.wait();
+            session.result({{"iteration", iteration}});
+        });
+        std::thread error([&] {
+            start.count_down();
+            start.wait();
+            session.error("RACE", "terminal race", json::object(), kGeneric);
+        });
+        start.count_down();
+        start.wait();
+        result.join();
+        error.join();
+
+        CHECK(terminals.load(std::memory_order_relaxed) == 1);
+        CHECK(held_during_terminal.load(std::memory_order_relaxed));
+        CHECK(tracker.snapshot().requests == 0);
+    }
+}
+
+TEST_CASE("request session releases activity on timeout shutdown destruction and construction",
+          "[session][activity][lifecycle]") {
+    SECTION("timeout remains active until its terminal error") {
+        Captured captured;
+        auto sink = make_sink(captured);
+        daemon::ActivityTracker tracker = tracked_activity();
+        auto activity = tracker.try_request();
+        REQUIRE(activity);
+        daemon::RequestSession session(
+            request(true, 0.002), sink, 17, [] { return std::string(kNonce); },
+            std::move(*activity));
+        auto future =
+            std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
+        wait_challenge(captured);
+        CHECK(future.get().status() == daemon::ChallengeStatus::TimedOut);
+        CHECK(tracker.snapshot().requests == 1);
+        session.error("TIMEOUT", "request timed out", json::object(), kTimeout);
+        CHECK(tracker.snapshot().requests == 0);
+    }
+
+    SECTION("shutdown terminal releases activity") {
+        Captured captured;
+        auto sink = make_sink(captured);
+        daemon::ActivityTracker tracker = tracked_activity();
+        auto activity = tracker.try_request();
+        REQUIRE(activity);
+        daemon::RequestSession session(
+            request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+        session.shutdown();
+        REQUIRE(captured.error.has_value());
+        CHECK(captured.error->code == "DAEMON_SHUTDOWN");
+        CHECK(tracker.snapshot().requests == 0);
+    }
+
+    SECTION("destruction releases unterminated activity") {
+        Captured captured;
+        auto sink = make_sink(captured);
+        daemon::ActivityTracker tracker = tracked_activity();
+        auto activity = tracker.try_request();
+        REQUIRE(activity);
+        {
+            daemon::RequestSession session(
+                request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity));
+            CHECK(tracker.snapshot().requests == 1);
+        }
+        CHECK(tracker.snapshot().requests == 0);
+    }
+
+    SECTION("throwing construction releases supplied activity") {
+        daemon::ActivityTracker tracker = tracked_activity();
+        auto activity = tracker.try_request();
+        REQUIRE(activity);
+        std::shared_ptr<daemon::ResponseSink> sink;
+        CHECK_THROWS_AS(
+            daemon::RequestSession(
+                request(), sink, 17, [] { return std::string(kNonce); }, std::move(*activity)),
+            std::invalid_argument);
+        CHECK(tracker.snapshot().requests == 0);
+    }
+}
+// NOLINTEND(misc-const-correctness)
 
 TEST_CASE("request session accepts one exact answer", "[challenge][session]") {
     // NOLINTBEGIN(misc-const-correctness): Catch2 and async callbacks mutate test state.

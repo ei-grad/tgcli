@@ -67,6 +67,16 @@ struct ActivityTracker::State {
         }
     }
 
+    [[nodiscard]] bool promote_request() {
+        const std::lock_guard lock(mutex);
+        if (requests == 0) {
+            return false;
+        }
+        --requests;
+        ++subscriptions;
+        return true;
+    }
+
     mutable std::mutex mutex;
     bool ready = false;
     bool expired = false;
@@ -97,6 +107,14 @@ ActivityTracker::Token& ActivityTracker::Token::operator=(Token&& other) noexcep
         kind_ = other.kind_;
     }
     return *this;
+}
+
+bool ActivityTracker::Token::promote_to_subscription() {
+    if (!state_ || kind_ != Kind::Request || !state_->promote_request()) {
+        return false;
+    }
+    kind_ = Kind::Subscription;
+    return true;
 }
 
 void ActivityTracker::Token::reset() {

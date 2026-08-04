@@ -1,5 +1,6 @@
 #pragma once
 
+#include "daemon/activity_tracker.hpp"
 #include "daemon/dispatch.hpp"
 #include "proto/frame.hpp"
 
@@ -80,9 +81,11 @@ class RequestSession final : public ResponseSink {
     using ChallengeReturnHook = std::function<void(ChallengeStatus)>;
 
     RequestSession(proto::Request request, ResponseSink& transport, std::uint64_t connection_id = 0,
-                   NonceGenerator nonce_generator = {});
+                   NonceGenerator nonce_generator = {},
+                   ActivityTracker::Token request_activity = {});
     RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
-                   std::uint64_t connection_id = 0, NonceGenerator nonce_generator = {});
+                   std::uint64_t connection_id = 0, NonceGenerator nonce_generator = {},
+                   ActivityTracker::Token request_activity = {});
 
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t connection_id() const;
@@ -96,6 +99,7 @@ class RequestSession final : public ResponseSink {
 
     void disconnect();
     void shutdown();
+    [[nodiscard]] bool promote_to_subscription();
 
     bool reserve_in_flight();
     bool reserve_direct_in_flight();
@@ -106,6 +110,7 @@ class RequestSession final : public ResponseSink {
 
   private:
     enum class State { Running, Disconnected, Shutdown, TimedOut, ProtocolError };
+    enum class ActivityState { Active, TerminalForwarding, Released };
 
     struct Identity {
         std::uint64_t request_id = 0;
@@ -133,6 +138,9 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] bool exact_consumed(const proto::Answer& answer) const;
     void resolve_current(ChallengeOutcome outcome);
     static void notify_in_flight(InFlightState state, const InFlightHook& hook);
+    [[nodiscard]] bool begin_terminal_forwarding();
+    void finish_terminal_forwarding();
+    void release_activity();
 
     void emit_item(nlohmann::json data) override;
     void emit_progress(nlohmann::json data) override;
@@ -162,6 +170,10 @@ class RequestSession final : public ResponseSink {
     InFlightHook in_flight_hook_;
     ChallengeReturnHook challenge_return_hook_;
     std::stop_source cancellation_source_;
+
+    std::mutex activity_mutex_;
+    ActivityTracker::Token activity_;
+    ActivityState activity_state_ = ActivityState::Active;
 };
 
 } // namespace tgcli::daemon

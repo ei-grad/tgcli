@@ -152,6 +152,37 @@ TEST_CASE("activity tokens are move-only and release exactly once", "[daemon][ac
     CHECK(tracker.snapshot().requests == 0);
 }
 
+TEST_CASE("request activity promotes atomically to one subscription without an idle transition",
+          "[daemon][activity]") {
+    ManualClock clock;
+    ActivityTracker tracker([] {}, clock.hooks());
+    REQUIRE(tracker.daemon_ready(10s));
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+
+    clock.advance(4s);
+    REQUIRE(activity->promote_to_subscription());
+    auto state = tracker.snapshot();
+    CHECK(state.requests == 0);
+    CHECK(state.subscriptions == 1);
+    CHECK_FALSE(state.zero_since);
+    CHECK_FALSE(state.deadline);
+    CHECK_FALSE(activity->promote_to_subscription());
+
+    ActivityTracker::Token moved = std::move(*activity);
+    CHECK_FALSE(static_cast<bool>(*activity));
+    activity.reset();
+    CHECK(tracker.snapshot().subscriptions == 1);
+
+    clock.advance(3s);
+    moved.reset();
+    state = tracker.snapshot();
+    CHECK(state.requests == 0);
+    CHECK(state.subscriptions == 0);
+    CHECK(state.zero_since == clock.now());
+    CHECK(state.deadline == clock.now() + 10s);
+}
+
 TEST_CASE("idle policy extension shortening and disable apply from the same zero transition",
           "[daemon][activity]") {
     ManualClock clock;
@@ -289,6 +320,47 @@ TEST_CASE("admit versus expiry stress has exactly one winner", "[daemon][activit
 
         CHECK(static_cast<bool>(admission) != expired);
         CHECK(callbacks.load(std::memory_order_relaxed) == (expired ? 1 : 0));
+    }
+}
+
+TEST_CASE("request promotion racing expiry never exposes zero activity",
+          "[daemon][activity][race][stress]") {
+    for (int iteration = 0; iteration < 500; ++iteration) {
+        ManualClock clock;
+        std::atomic<int> callbacks = 0;
+        ActivityTracker tracker([&] { callbacks.fetch_add(1, std::memory_order_relaxed); },
+                                clock.hooks());
+        REQUIRE(tracker.daemon_ready(1s));
+        auto activity = tracker.try_request();
+        REQUIRE(activity);
+        clock.advance(10s);
+
+        std::latch start(3);
+        bool promoted = false;
+        bool expired = false;
+        std::thread promote([&] {
+            start.count_down();
+            start.wait();
+            promoted = activity->promote_to_subscription();
+        });
+        std::thread expiry([&] {
+            start.count_down();
+            start.wait();
+            expired = tracker.expire_if_due();
+        });
+        start.count_down();
+        start.wait();
+        promote.join();
+        expiry.join();
+
+        CHECK(promoted);
+        CHECK_FALSE(expired);
+        const auto state = tracker.snapshot();
+        CHECK(state.requests == 0);
+        CHECK(state.subscriptions == 1);
+        CHECK_FALSE(state.zero_since);
+        CHECK_FALSE(state.deadline);
+        CHECK(callbacks.load(std::memory_order_relaxed) == 0);
     }
 }
 

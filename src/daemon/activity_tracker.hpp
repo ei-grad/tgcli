@@ -44,6 +44,7 @@ class ActivityTracker {
             return state_ != nullptr;
         }
 
+        [[nodiscard]] bool promote_to_subscription();
         void reset();
 
       private:
