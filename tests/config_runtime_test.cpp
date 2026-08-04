@@ -3,11 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <stop_token>
 #include <string>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -57,6 +59,10 @@ class TempConfig {
         return (directory_ / "config.toml").string();
     }
 
+    [[nodiscard]] const std::filesystem::path& dir() const {
+        return directory_;
+    }
+
     void write_initial(std::string_view bytes) const {
         write_file(file(), bytes);
     }
@@ -79,6 +85,43 @@ class TempConfig {
     std::filesystem::path root_;
     std::filesystem::path parent_;
     std::filesystem::path directory_;
+};
+
+class HeldTransaction {
+  public:
+    explicit HeldTransaction(const TempConfig& temp)
+        : marker_(temp.dir() / ".config.toml.transaction") {
+        const auto lock_file = temp.dir() / "config.lock";
+        lock_fd_ = ::open(lock_file.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(lock_fd_ >= 0);
+        REQUIRE(::fchmod(lock_fd_, 0600) == 0);
+        REQUIRE(::flock(lock_fd_, LOCK_EX | LOCK_NB) == 0);
+        std::ofstream marker(marker_, std::ios::binary | std::ios::trunc);
+        REQUIRE(marker.good());
+        marker << "pending-present\n"
+               << std::string(64, '0') << '\n'
+               << std::string(64, '1') << '\n';
+        marker.close();
+        REQUIRE(::chmod(marker_.c_str(), 0600) == 0);
+    }
+
+    ~HeldTransaction() {
+        std::error_code ignored;
+        std::filesystem::remove(marker_, ignored);
+        if (lock_fd_ >= 0) {
+            static_cast<void>(::flock(lock_fd_, LOCK_UN));
+            static_cast<void>(::close(lock_fd_));
+        }
+    }
+
+    HeldTransaction(const HeldTransaction&) = delete;
+    HeldTransaction& operator=(const HeldTransaction&) = delete;
+    HeldTransaction(HeldTransaction&&) = delete;
+    HeldTransaction& operator=(HeldTransaction&&) = delete;
+
+  private:
+    std::filesystem::path marker_;
+    int lock_fd_ = -1;
 };
 
 std::string two_accounts(std::string_view default_account = "main",
@@ -477,4 +520,37 @@ TEST_CASE("config runtime stop interrupts the one-second condition wait",
     const auto started = ConfigRuntime::Clock::now();
     { const ConfigRuntime runtime(temp.file()); }
     CHECK(ConfigRuntime::Clock::now() - started < 250ms);
+}
+
+TEST_CASE("config runtime stop interrupts a reload blocked by an active transaction",
+          "[daemon][config-runtime]") {
+    const TempConfig temp;
+    temp.write_initial(one_account("main", false, "5"));
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool armed = false;
+    bool reload_started = false;
+    auto hooks = std::make_shared<tgcli::daemon::testing::ConfigRuntimeHooks>();
+    hooks->before_reload = [&](bool) {
+        const std::lock_guard lock(mutex);
+        if (armed) {
+            reload_started = true;
+            condition.notify_all();
+        }
+    };
+    auto runtime = std::make_unique<ConfigRuntime>(temp.file(), hooks);
+    const HeldTransaction transaction(temp);
+    {
+        const std::lock_guard lock(mutex);
+        armed = true;
+    }
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 1900ms, [&] { return reload_started; }));
+    }
+    std::this_thread::sleep_for(20ms);
+
+    const auto started = ConfigRuntime::Clock::now();
+    runtime.reset();
+    CHECK(ConfigRuntime::Clock::now() - started < 500ms);
 }

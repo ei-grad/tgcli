@@ -118,7 +118,9 @@ void ConfigRuntime::run(std::stop_token stop) {
         if (hooks_ && hooks_->before_reload) {
             hooks_->before_reload(forced);
         }
-        static_cast<void>(snapshots_.reload());
+        const config::MutationControl reload_control{
+            Clock::now() + config::SnapshotManager::kLoadTimeout, stop};
+        static_cast<void>(snapshots_.reload(reload_control));
         const auto published = snapshots_.current();
         lock.lock();
 

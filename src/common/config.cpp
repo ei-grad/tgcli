@@ -162,6 +162,13 @@ void notify_stage(const std::shared_ptr<const testing::StoreHooks>& hooks,
     }
 }
 
+void notify_read_stage(const std::shared_ptr<const testing::StoreHooks>& hooks,
+                       testing::ReadStage stage) {
+    if (hooks && hooks->at_read_stage) {
+        hooks->at_read_stage(stage);
+    }
+}
+
 bool lock_entry_matches(int directory_fd, const struct stat& opened, uid_t expected_uid) {
     struct stat entry {};
     return ::fstatat(directory_fd, kLockName.data(), &entry, AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -859,29 +866,67 @@ bool transaction_marker_present(int directory_fd) {
            errno != ENOENT;
 }
 
-bool transaction_is_active(int directory_fd, uid_t expected_uid, ConfigError& error) {
+enum class TransactionObservation { Active, Cleared, RecoveryRequired, Invalid };
+enum class TransactionReadAction { ReadSnapshot, Retry, Fail };
+
+TransactionObservation observe_transaction(int directory_fd, uid_t expected_uid,
+                                           ConfigError& error) {
     const int raw_lock = ::openat(directory_fd, kLockName.data(), nofollow_flags(O_RDONLY));
     if (raw_lock < 0) {
         error = make_error(ConfigReason::SyncError,
                            "config transaction exists without a valid config.lock");
-        return false;
+        return TransactionObservation::Invalid;
     }
     const Descriptor lock(raw_lock);
     struct stat lock_status {};
     if (!validate_regular_file(lock.get(), expected_uid, kLockName, lock_status, error)) {
         error.reason = ConfigReason::SyncError;
-        return false;
+        return TransactionObservation::Invalid;
     }
     if (::flock(lock.get(), LOCK_SH | LOCK_NB) == 0) {
+        if (!lock_entry_matches(directory_fd, lock_status, expected_uid)) {
+            ::flock(lock.get(), LOCK_UN);
+            error = make_error(ConfigReason::SyncError,
+                               "config.lock changed while inspecting config transaction");
+            return TransactionObservation::Invalid;
+        }
+        const bool marker_present = transaction_marker_present(directory_fd);
         ::flock(lock.get(), LOCK_UN);
-        return false;
+        return marker_present ? TransactionObservation::RecoveryRequired
+                              : TransactionObservation::Cleared;
     }
     if (errno == EWOULDBLOCK || errno == EAGAIN) {
-        return true;
+        return TransactionObservation::Active;
     }
     error = make_error(ConfigReason::SyncError,
                        "cannot determine whether config transaction is active");
-    return false;
+    return TransactionObservation::Invalid;
+}
+
+TransactionReadAction
+inspect_transaction_for_load(int directory_fd, uid_t expected_uid,
+                             const std::shared_ptr<const testing::StoreHooks>& hooks,
+                             std::chrono::steady_clock::time_point deadline, ConfigError& error) {
+    if (!transaction_marker_present(directory_fd)) {
+        return TransactionReadAction::ReadSnapshot;
+    }
+    notify_read_stage(hooks, testing::ReadStage::AfterTransactionMarker);
+    switch (observe_transaction(directory_fd, expected_uid, error)) {
+    case TransactionObservation::Active:
+        std::this_thread::sleep_until(
+            std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
+        return TransactionReadAction::Retry;
+    case TransactionObservation::Cleared:
+        return TransactionReadAction::Retry;
+    case TransactionObservation::RecoveryRequired:
+    case TransactionObservation::Invalid:
+        if (error.message.empty()) {
+            error = make_error(ConfigReason::SyncError,
+                               "config transaction requires recovery under config.lock");
+        }
+        return TransactionReadAction::Fail;
+    }
+    return TransactionReadAction::Fail;
 }
 
 bool cleanup_transaction(int directory_fd, ConfigError& error) {
@@ -1154,21 +1199,17 @@ LoadResult Store::load(const MutationControl& control) const {
         snapshot->identity = "missing";
         return {std::move(snapshot), {}};
     }
-    for (int attempt = 0; attempt < 256; ++attempt) {
+    int unstable_snapshots = 0;
+    while (unstable_snapshots < 256) {
         if (auto result = interrupted()) {
             return std::move(*result);
         }
-        if (transaction_marker_present(directory->get())) {
-            if (transaction_is_active(directory->get(), expected_uid_, error)) {
-                const auto wake = std::min(control.deadline, std::chrono::steady_clock::now() +
-                                                                 std::chrono::milliseconds(1));
-                std::this_thread::sleep_until(wake);
-                continue;
-            }
-            if (error.message.empty()) {
-                error = make_error(ConfigReason::SyncError,
-                                   "config transaction requires recovery under config.lock");
-            }
+        const auto transaction = inspect_transaction_for_load(directory->get(), expected_uid_,
+                                                              hooks_, control.deadline, error);
+        if (transaction == TransactionReadAction::Retry) {
+            continue;
+        }
+        if (transaction == TransactionReadAction::Fail) {
             return {{}, std::move(error)};
         }
         auto loaded = read_from_directory(directory->get(), expected_uid_);
@@ -1178,6 +1219,7 @@ LoadResult Store::load(const MutationControl& control) const {
         if (loaded.parsed || !loaded.error || loaded.error->reason != ConfigReason::PathInvalid) {
             return to_load_result(std::move(loaded));
         }
+        ++unstable_snapshots;
     }
     return {{},
             make_error(ConfigReason::IoError,
@@ -1538,17 +1580,43 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
     return {MutationStatus::Applied, std::move(applied.parsed->snapshot), {}};
 }
 
+namespace {
+
+MutationControl bounded_snapshot_control() {
+    return {SnapshotManager::Clock::now() + SnapshotManager::kLoadTimeout, {}};
+}
+
+ConfigError snapshot_load_error(const LoadResult& loaded) {
+    if (loaded.error) {
+        return *loaded.error;
+    }
+    if (loaded.timed_out) {
+        return make_error(ConfigReason::SyncError,
+                          "config snapshot load did not settle before its deadline");
+    }
+    if (loaded.cancelled) {
+        return make_error(ConfigReason::SyncError, "config snapshot load was cancelled");
+    }
+    return make_error(ConfigReason::IoError, "config snapshot load failed");
+}
+
+} // namespace
+
 SnapshotManager::SnapshotManager(const Store& store) : store_(store) {
     current_.store(std::make_shared<PublishedSnapshot>());
 }
 
 bool SnapshotManager::initialize(Clock::time_point now) {
+    return initialize(now, bounded_snapshot_control());
+}
+
+bool SnapshotManager::initialize(Clock::time_point now, const MutationControl& control) {
     const std::lock_guard lock(reload_mutex_);
-    const auto loaded = store_.load();
+    const auto loaded = store_.load(control);
     next_poll_ = now + kPollInterval;
     if (!loaded) {
-        current_.store(
-            std::make_shared<PublishedSnapshot>(PublishedSnapshot{nullptr, false, loaded.error}));
+        current_.store(std::make_shared<PublishedSnapshot>(
+            PublishedSnapshot{nullptr, false, snapshot_load_error(loaded)}));
         return false;
     }
     current_.store(std::make_shared<PublishedSnapshot>(
@@ -1557,12 +1625,16 @@ bool SnapshotManager::initialize(Clock::time_point now) {
 }
 
 ReloadStatus SnapshotManager::reload() {
+    return reload(bounded_snapshot_control());
+}
+
+ReloadStatus SnapshotManager::reload(const MutationControl& control) {
     const std::lock_guard lock(reload_mutex_);
-    const auto loaded = store_.load();
+    const auto loaded = store_.load(control);
     const auto previous = current_.load();
     if (!loaded) {
-        current_.store(std::make_shared<PublishedSnapshot>(
-            PublishedSnapshot{previous ? previous->snapshot : nullptr, false, loaded.error}));
+        current_.store(std::make_shared<PublishedSnapshot>(PublishedSnapshot{
+            previous ? previous->snapshot : nullptr, false, snapshot_load_error(loaded)}));
         return ReloadStatus::Invalid;
     }
     if (previous && previous->snapshot &&
@@ -1575,6 +1647,10 @@ ReloadStatus SnapshotManager::reload() {
 }
 
 ReloadStatus SnapshotManager::poll(Clock::time_point now) {
+    return poll(now, bounded_snapshot_control());
+}
+
+ReloadStatus SnapshotManager::poll(Clock::time_point now, const MutationControl& control) {
     {
         const std::lock_guard lock(reload_mutex_);
         if (now < next_poll_) {
@@ -1582,7 +1658,7 @@ ReloadStatus SnapshotManager::poll(Clock::time_point now) {
         }
         next_poll_ = now + kPollInterval;
     }
-    return reload();
+    return reload(control);
 }
 
 std::shared_ptr<const PublishedSnapshot> SnapshotManager::current() const {

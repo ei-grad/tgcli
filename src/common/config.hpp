@@ -175,12 +175,16 @@ class SnapshotManager {
   public:
     using Clock = std::chrono::steady_clock;
     static constexpr auto kPollInterval = std::chrono::seconds(1);
+    static constexpr auto kLoadTimeout = std::chrono::seconds(2);
 
     explicit SnapshotManager(const Store& store);
 
     bool initialize(Clock::time_point now = Clock::now());
+    bool initialize(Clock::time_point now, const MutationControl& control);
     ReloadStatus reload();
+    ReloadStatus reload(const MutationControl& control);
     ReloadStatus poll(Clock::time_point now = Clock::now());
+    ReloadStatus poll(Clock::time_point now, const MutationControl& control);
 
     [[nodiscard]] std::shared_ptr<const PublishedSnapshot> current() const;
 

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <stop_token>
 #include <string>
 #include <sys/file.h>
@@ -80,6 +81,43 @@ class TempConfig {
     std::filesystem::path root_;
     std::filesystem::path config_parent_;
     std::filesystem::path config_dir_;
+};
+
+class HeldTransaction {
+  public:
+    explicit HeldTransaction(const TempConfig& temp)
+        : marker_(temp.dir() / ".config.toml.transaction") {
+        const auto lock_file = temp.dir() / "config.lock";
+        lock_fd_ = ::open(lock_file.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(lock_fd_ >= 0);
+        REQUIRE(::fchmod(lock_fd_, 0600) == 0);
+        REQUIRE(::flock(lock_fd_, LOCK_EX | LOCK_NB) == 0);
+        std::ofstream marker(marker_, std::ios::binary | std::ios::trunc);
+        REQUIRE(marker.good());
+        marker << "pending-present\n"
+               << std::string(64, '0') << '\n'
+               << std::string(64, '1') << '\n';
+        marker.close();
+        REQUIRE(::chmod(marker_.c_str(), 0600) == 0);
+    }
+
+    ~HeldTransaction() {
+        std::error_code ignored;
+        std::filesystem::remove(marker_, ignored);
+        if (lock_fd_ >= 0) {
+            static_cast<void>(::flock(lock_fd_, LOCK_UN));
+            static_cast<void>(::close(lock_fd_));
+        }
+    }
+
+    HeldTransaction(const HeldTransaction&) = delete;
+    HeldTransaction& operator=(const HeldTransaction&) = delete;
+    HeldTransaction(HeldTransaction&&) = delete;
+    HeldTransaction& operator=(HeldTransaction&&) = delete;
+
+  private:
+    std::filesystem::path marker_;
+    int lock_fd_ = -1;
 };
 
 std::string valid_config(std::string_view extra = {}) {
@@ -793,6 +831,224 @@ TEST_CASE("atomic config replacement never exposes a partial snapshot to concurr
         reader.join();
     }
     CHECK(invalid.load() == 0);
+}
+
+TEST_CASE("reader retries when a config transaction clears after marker observation",
+          "[config][process]") {
+    const TempConfig temp;
+    temp.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n"
+               "[accounts.work]\nallow_write = false\n");
+    const Store baseline_store(temp.file());
+    const auto baseline = baseline_store.load();
+    REQUIRE(baseline);
+
+    std::promise<void> prepared_signal;
+    auto prepared = prepared_signal.get_future();
+    std::promise<void> allow_commit_signal;
+    const auto allow_commit = allow_commit_signal.get_future().share();
+    std::promise<void> marker_signal;
+    auto marker_observed = marker_signal.get_future();
+    std::promise<void> allow_inspection_signal;
+    const auto allow_inspection = allow_inspection_signal.get_future().share();
+    std::atomic<bool> synchronization_timed_out = false;
+
+    auto hooks = std::make_shared<testing::StoreHooks>();
+    hooks->at_stage = [&](testing::MutationStage stage) {
+        if (stage == testing::MutationStage::AfterPrepare) {
+            prepared_signal.set_value();
+            if (allow_commit.wait_for(5s) != std::future_status::ready) {
+                synchronization_timed_out.store(true);
+            }
+        }
+    };
+    hooks->at_read_stage = [&](testing::ReadStage stage) {
+        if (stage == testing::ReadStage::AfterTransactionMarker) {
+            marker_signal.set_value();
+            if (allow_inspection.wait_for(5s) != std::future_status::ready) {
+                synchronization_timed_out.store(true);
+            }
+        }
+    };
+    const Store store(temp.file(), hooks);
+
+    MutationResult changed;
+    std::thread writer([&] { changed = store.use_account(baseline.snapshot->identity, "work"); });
+    const bool transaction_prepared = prepared.wait_for(5s) == std::future_status::ready;
+
+    LoadResult observed;
+    std::thread reader;
+    bool marker_was_observed = false;
+    if (transaction_prepared) {
+        reader = std::thread([&] { observed = store.load(); });
+        marker_was_observed = marker_observed.wait_for(5s) == std::future_status::ready;
+    }
+
+    allow_commit_signal.set_value();
+    writer.join();
+    allow_inspection_signal.set_value();
+    if (reader.joinable()) {
+        reader.join();
+    }
+
+    REQUIRE(transaction_prepared);
+    REQUIRE(marker_was_observed);
+    REQUIRE_FALSE(synchronization_timed_out.load());
+    REQUIRE(changed.status == MutationStatus::Applied);
+    INFO("load error: " << (observed.error ? reason_name(observed.error->reason)
+                                           : std::string_view("none")));
+    REQUIRE(observed);
+    CHECK(observed.snapshot->default_account == "work");
+    CHECK(observed.snapshot->accounts.size() == 2);
+}
+
+TEST_CASE("active config transaction wait does not consume the unstable snapshot budget",
+          "[config][process]") {
+    const TempConfig temp;
+    temp.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n"
+               "[accounts.work]\nallow_write = false\n");
+    const Store baseline_store(temp.file());
+    const auto baseline = baseline_store.load();
+    REQUIRE(baseline);
+
+    std::promise<void> prepared_signal;
+    auto prepared = prepared_signal.get_future();
+    std::promise<void> allow_commit_signal;
+    const auto allow_commit = allow_commit_signal.get_future().share();
+    std::promise<void> observation_signal;
+    auto enough_observations = observation_signal.get_future();
+    std::atomic<int> observations = 0;
+    std::atomic<bool> synchronization_timed_out = false;
+
+    auto hooks = std::make_shared<testing::StoreHooks>();
+    hooks->at_stage = [&](testing::MutationStage stage) {
+        if (stage == testing::MutationStage::AfterPrepare) {
+            prepared_signal.set_value();
+            if (allow_commit.wait_for(5s) != std::future_status::ready) {
+                synchronization_timed_out.store(true);
+            }
+        }
+    };
+    hooks->at_read_stage = [&](testing::ReadStage stage) {
+        if (stage == testing::ReadStage::AfterTransactionMarker &&
+            observations.fetch_add(1) + 1 == 300) {
+            observation_signal.set_value();
+        }
+    };
+    const Store store(temp.file(), hooks);
+
+    MutationResult changed;
+    std::thread writer([&] { changed = store.use_account(baseline.snapshot->identity, "work"); });
+    const bool transaction_prepared = prepared.wait_for(5s) == std::future_status::ready;
+
+    LoadResult observed;
+    std::thread reader;
+    bool observed_beyond_budget = false;
+    if (transaction_prepared) {
+        reader = std::thread([&] { observed = store.load(); });
+        observed_beyond_budget = enough_observations.wait_for(2s) == std::future_status::ready;
+    }
+
+    allow_commit_signal.set_value();
+    writer.join();
+    if (reader.joinable()) {
+        reader.join();
+    }
+
+    REQUIRE(transaction_prepared);
+    REQUIRE(observed_beyond_budget);
+    REQUIRE_FALSE(synchronization_timed_out.load());
+    REQUIRE(changed.status == MutationStatus::Applied);
+    REQUIRE(observed);
+    CHECK(observed.snapshot->default_account == "work");
+}
+
+TEST_CASE("active config transaction loads obey deadline and cancellation", "[config][process]") {
+    const TempConfig temp;
+    temp.write("[accounts.main]\nallow_write = false\n");
+    const HeldTransaction transaction(temp);
+
+    SECTION("deadline") {
+        const Store store(temp.file());
+        MutationControl control;
+        control.deadline = std::chrono::steady_clock::now() + 40ms;
+        const auto started = std::chrono::steady_clock::now();
+        const auto loaded = store.load(control);
+        CHECK_FALSE(loaded);
+        CHECK(loaded.timed_out);
+        CHECK_FALSE(loaded.cancelled);
+        CHECK(std::chrono::steady_clock::now() - started < 500ms);
+    }
+
+    SECTION("cancellation") {
+        std::promise<void> marker_signal;
+        auto marker_observed = marker_signal.get_future();
+        std::atomic<bool> signalled = false;
+        auto hooks = std::make_shared<testing::StoreHooks>();
+        hooks->at_read_stage = [&](testing::ReadStage stage) {
+            if (stage == testing::ReadStage::AfterTransactionMarker && !signalled.exchange(true)) {
+                marker_signal.set_value();
+            }
+        };
+        const Store store(temp.file(), hooks);
+        const std::stop_source stop;
+        LoadResult loaded;
+        std::thread reader([&] {
+            MutationControl control;
+            control.cancellation = stop.get_token();
+            loaded = store.load(control);
+        });
+        const bool entered = marker_observed.wait_for(1s) == std::future_status::ready;
+        stop.request_stop();
+        reader.join();
+
+        REQUIRE(entered);
+        CHECK_FALSE(loaded);
+        CHECK_FALSE(loaded.timed_out);
+        CHECK(loaded.cancelled);
+    }
+}
+
+TEST_CASE("snapshot publication rejects a held transaction with a diagnostic", "[config]") {
+    const TempConfig temp;
+    temp.write("[accounts.main]\nallow_write = false\n");
+    const Store store(temp.file());
+    SnapshotManager manager(store);
+    REQUIRE(manager.initialize());
+    const auto baseline = manager.current();
+    REQUIRE(baseline);
+    REQUIRE(baseline->snapshot);
+    const HeldTransaction transaction(temp);
+
+    SECTION("deadline") {
+        MutationControl control;
+        control.deadline = std::chrono::steady_clock::now() + 40ms;
+        CHECK(manager.reload(control) == ReloadStatus::Invalid);
+    }
+
+    SECTION("default production deadline") {
+        const auto started = std::chrono::steady_clock::now();
+        CHECK(manager.reload() == ReloadStatus::Invalid);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        CHECK(elapsed >= SnapshotManager::kLoadTimeout);
+        CHECK(elapsed < SnapshotManager::kLoadTimeout + 1s);
+    }
+
+    SECTION("cancellation") {
+        const std::stop_source stop;
+        stop.request_stop();
+        MutationControl control;
+        control.cancellation = stop.get_token();
+        CHECK(manager.reload(control) == ReloadStatus::Invalid);
+    }
+
+    const auto published = manager.current();
+    REQUIRE(published);
+    REQUIRE(published->snapshot);
+    CHECK(published->snapshot->identity == baseline->snapshot->identity);
+    CHECK_FALSE(published->standing_write_grants_valid);
+    REQUIRE(published->error);
+    CHECK(published->error->reason == ConfigReason::SyncError);
+    CHECK(SnapshotManager::kLoadTimeout == 2s);
 }
 
 TEST_CASE("implicit main materialization is deterministic and CAS guarded", "[config]") {
