@@ -3,11 +3,13 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 class VerificationError(RuntimeError):
@@ -28,20 +30,77 @@ FETCHCONTENT_DECLARATIONS = {
 }
 FETCHCONTENT_DECLARATIONS["tdlib"] = "td"
 
-LOCKED_SCOPES = {"runtime", "release-runtime", "test-only"}
+LOCKED_SCOPES = {"runtime", "release-runtime", "test-only", "build-only"}
 RUNTIME_SCOPES = {"runtime", "release-runtime"}
-PLANNED_IDS = {"musl", "gcc-runtime"}
-EXPECTED_LOCKED_INTEGRATIONS = {
-    "runtime": "fetchcontent",
-    "release-runtime": "release-toolchain-pending",
-    "test-only": "test-fetchcontent",
+BUILD_ONLY_SCOPE = "build-only"
+RELEASE_RUNTIME_IDS = {"openssl", "zlib", "musl", "gcc-runtime"}
+BUILD_INPUT_IDS = {
+    "tdlib",
+    "cli11",
+    "nlohmann_json",
+    "fmt",
+    "tomlplusplus",
+    "openssl",
+    "zlib",
+    "catch2",
+    "jsoncons",
+    "gperf",
+    "linux-musl-toolchain",
 }
+SOURCE_TREE_IDS = {
+    "tdlib",
+    "cli11",
+    "nlohmann_json",
+    "fmt",
+    "tomlplusplus",
+    "openssl",
+    "zlib",
+    "catch2",
+    "jsoncons",
+    "gperf",
+}
+EXPECTED_INTEGRATIONS = {
+    "tdlib": "fetchcontent-or-pinned-prefix",
+    "cli11": "fetchcontent",
+    "nlohmann_json": "fetchcontent",
+    "fmt": "fetchcontent",
+    "tomlplusplus": "fetchcontent",
+    "openssl": "release-source-build",
+    "zlib": "release-source-build",
+    "catch2": "test-fetchcontent",
+    "jsoncons": "test-fetchcontent",
+    "musl": "release-toolchain-runtime",
+    "gcc-runtime": "release-toolchain-runtime",
+    "gperf": "release-host-tool-source",
+    "linux-musl-toolchain": "release-input-artifact",
+    "linux-build-image": "pinned-build-image",
+}
+EXPECTED_COMPONENT_IDS = set(EXPECTED_INTEGRATIONS)
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+SHA512_PATTERN = re.compile(r"^[0-9a-f]{128}$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 LICENSE_PATH_PATTERN = re.compile(r"^release/licenses/[A-Za-z0-9.+_-]+\.txt$")
+IMAGE_PATTERN = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
-COMPONENT_KEYS = {
+RELEASE_TOOLCHAIN_KEYS = {
+    "id",
+    "target",
+    "image",
+    "image_component",
+    "toolchain_component",
+    "archive_root",
+    "compiler",
+    "producer_build_log",
+    "source_evidence",
+    "runtime_files",
+}
+COMPILER_KEYS = {"path", "target", "version"}
+BUILD_LOG_KEYS = {"path", "sha256"}
+SOURCE_EVIDENCE_KEYS = {"component_id", "archive_filename", "sha512"}
+ARTIFACT_FILE_KEYS = {"component_id", "path", "sha256"}
+
+COMPONENT_REQUIRED_KEYS = {
     "id",
     "name",
     "scope",
@@ -52,10 +111,12 @@ COMPONENT_KEYS = {
     "immutable_ref",
     "version",
     "archive_sha256",
+    "archive_size",
     "license_expression",
     "license_files",
     "embedded_components",
 }
+COMPONENT_OPTIONAL_KEYS = {"generated_source_tree_sha256", "source_tree_sha256"}
 LICENSE_FILE_KEYS = {"path", "sha256"}
 EMBEDDED_KEYS = {
     "id",
@@ -132,9 +193,189 @@ def validate_embedded_component(
     }
 
 
-def validate_lock_document(document: dict, repo_root: Path) -> dict[str, dict]:
+def validate_artifact_path(value: object, owner: str) -> str:
+    require(isinstance(value, str) and value, f"{owner}: artifact path is required")
+    candidate = PurePosixPath(value)
     require(
-        set(document) == {"$schema", "schema_version", "archive_policy", "components"},
+        not candidate.is_absolute()
+        and ".." not in candidate.parts
+        and "." not in candidate.parts
+        and str(candidate) == value,
+        f"{owner}: unsafe artifact path",
+    )
+    return value
+
+
+def archive_basename(component: dict) -> str:
+    name = PurePosixPath(urllib.parse.urlparse(component["source_archive"]).path).name
+    require(name, f"{component['id']}: source archive has no filename")
+    return name
+
+
+def validate_release_toolchain(document: dict, by_id: dict[str, dict]) -> dict:
+    toolchains = document["release_toolchains"]
+    require(
+        isinstance(toolchains, list) and len(toolchains) == 1,
+        "exactly one release toolchain is required",
+    )
+    toolchain = toolchains[0]
+    require(isinstance(toolchain, dict), "release toolchain must be an object")
+    require(
+        set(toolchain) == RELEASE_TOOLCHAIN_KEYS,
+        "release toolchain has unknown or missing keys",
+    )
+    require(
+        toolchain["id"] == "linux-musl-x86_64",
+        "unexpected release toolchain id",
+    )
+    require(
+        toolchain["target"] == "x86_64-unknown-linux-musl",
+        "unexpected release toolchain target",
+    )
+    require(
+        isinstance(toolchain["image"], str)
+        and IMAGE_PATTERN.fullmatch(toolchain["image"]),
+        "release toolchain image must be pinned by SHA256 digest",
+    )
+    require(
+        toolchain["image_component"] == "linux-build-image",
+        "release toolchain image component is invalid",
+    )
+    require(
+        toolchain["toolchain_component"] == "linux-musl-toolchain",
+        "release toolchain artifact component is invalid",
+    )
+    require(
+        by_id[toolchain["image_component"]]["integration"] == "pinned-build-image",
+        "release image is not tied to its source component",
+    )
+    require(
+        by_id[toolchain["toolchain_component"]]["integration"]
+        == "release-input-artifact",
+        "release toolchain is not tied to its archive component",
+    )
+    require(
+        toolchain["archive_root"] == "x86_64-unknown-linux-musl",
+        "release toolchain archive root is invalid",
+    )
+
+    compiler = toolchain["compiler"]
+    require(isinstance(compiler, dict), "release compiler must be an object")
+    require(set(compiler) == COMPILER_KEYS, "release compiler keys are invalid")
+    require(
+        validate_artifact_path(compiler["path"], "release compiler")
+        == "bin/x86_64-unknown-linux-musl-g++",
+        "release compiler path is invalid",
+    )
+    require(
+        compiler["target"] == toolchain["target"],
+        "release compiler target differs from toolchain target",
+    )
+    require(
+        compiler["version"] == by_id["gcc-runtime"]["version"],
+        "release compiler version differs from GCC runtime source",
+    )
+
+    build_log = toolchain["producer_build_log"]
+    require(isinstance(build_log, dict), "producer build log must be an object")
+    require(set(build_log) == BUILD_LOG_KEYS, "producer build log keys are invalid")
+    require(
+        validate_artifact_path(build_log["path"], "producer build log")
+        == "build.log.bz2",
+        "producer build log path is invalid",
+    )
+    require(
+        isinstance(build_log["sha256"], str)
+        and SHA256_PATTERN.fullmatch(build_log["sha256"]),
+        "producer build log SHA256 is invalid",
+    )
+
+    evidence = toolchain["source_evidence"]
+    require(
+        isinstance(evidence, list) and len(evidence) == 2,
+        "toolchain source evidence must cover musl and GCC",
+    )
+    evidence_ids: set[str] = set()
+    for entry in evidence:
+        require(isinstance(entry, dict), "source evidence must be an object")
+        require(set(entry) == SOURCE_EVIDENCE_KEYS, "source evidence keys are invalid")
+        component_id = entry["component_id"]
+        require(
+            component_id in {"musl", "gcc-runtime"}
+            and component_id not in evidence_ids,
+            "toolchain source evidence component set is invalid",
+        )
+        evidence_ids.add(component_id)
+        require(
+            entry["archive_filename"] == archive_basename(by_id[component_id]),
+            f"{component_id}: source evidence archive differs from source lock",
+        )
+        require(
+            isinstance(entry["sha512"], str)
+            and SHA512_PATTERN.fullmatch(entry["sha512"]),
+            f"{component_id}: source evidence SHA512 is invalid",
+        )
+    require(
+        evidence_ids == {"musl", "gcc-runtime"},
+        "toolchain source evidence is incomplete",
+    )
+
+    runtime_files = toolchain["runtime_files"]
+    require(
+        isinstance(runtime_files, list) and len(runtime_files) == 12,
+        "toolchain runtime file inventory is incomplete",
+    )
+    runtime_names: dict[str, set[str]] = {"musl": set(), "gcc-runtime": set()}
+    runtime_paths: set[str] = set()
+    for entry in runtime_files:
+        require(isinstance(entry, dict), "runtime file entry must be an object")
+        require(set(entry) == ARTIFACT_FILE_KEYS, "runtime file keys are invalid")
+        component_id = entry["component_id"]
+        require(
+            component_id in runtime_names,
+            "runtime file refers to a non-toolchain component",
+        )
+        relative = validate_artifact_path(entry["path"], f"{component_id} runtime file")
+        require(relative not in runtime_paths, "duplicate toolchain runtime file path")
+        runtime_paths.add(relative)
+        runtime_names[component_id].add(PurePosixPath(relative).name)
+        require(
+            isinstance(entry["sha256"], str)
+            and SHA256_PATTERN.fullmatch(entry["sha256"]),
+            f"{component_id}: runtime file SHA256 is invalid",
+        )
+    require(
+        runtime_names["musl"]
+        == {"libc.a", "libdl.a", "libm.a", "crt1.o", "crti.o", "crtn.o"},
+        "musl runtime input inventory is incomplete",
+    )
+    require(
+        runtime_names["gcc-runtime"]
+        == {
+            "libatomic.a",
+            "libgcc.a",
+            "libgcc_eh.a",
+            "libstdc++.a",
+            "crtbeginT.o",
+            "crtend.o",
+        },
+        "GCC runtime input inventory is incomplete",
+    )
+    return toolchain
+
+
+def validate_lock_document(
+    document: dict, repo_root: Path
+) -> tuple[dict[str, dict], dict]:
+    require(
+        set(document)
+        == {
+            "$schema",
+            "schema_version",
+            "archive_policy",
+            "release_toolchains",
+            "components",
+        },
         "dependency lock has unknown or missing top-level keys",
     )
     require(
@@ -142,20 +383,37 @@ def validate_lock_document(document: dict, repo_root: Path) -> dict[str, dict]:
         "dependency lock references the wrong schema",
     )
     require(
-        type(document["schema_version"]) is int and document["schema_version"] == 1,
+        type(document["schema_version"]) is int and document["schema_version"] == 2,
         "unsupported dependency lock version",
     )
     policy = document["archive_policy"]
     require(isinstance(policy, dict), "archive_policy must be an object")
     require(
-        set(policy) == {"algorithm", "github_outer_compression"},
+        set(policy)
+        == {
+            "algorithm",
+            "github_outer_compression",
+            "max_expanded_size",
+            "max_member_count",
+            "max_member_size",
+            "release_asset_integrity",
+        },
         "archive_policy has unknown or missing keys",
     )
     require(policy["algorithm"] == "sha256", "only SHA256 archives are supported")
+    for field in ("github_outer_compression", "release_asset_integrity"):
+        require(
+            isinstance(policy[field], str) and policy[field],
+            f"archive policy {field} must be documented",
+        )
+    for field in ("max_expanded_size", "max_member_count", "max_member_size"):
+        require(
+            type(policy[field]) is int and policy[field] > 0,
+            f"archive policy {field} must be a positive integer",
+        )
     require(
-        isinstance(policy["github_outer_compression"], str)
-        and policy["github_outer_compression"],
-        "GitHub archive policy must be documented",
+        policy["max_member_size"] <= policy["max_expanded_size"],
+        "archive per-file safety cap exceeds cumulative cap",
     )
 
     components = document["components"]
@@ -167,12 +425,18 @@ def validate_lock_document(document: dict, repo_root: Path) -> dict[str, dict]:
     for component in components:
         require(isinstance(component, dict), "component must be an object")
         require(
-            set(component) == COMPONENT_KEYS, "component has unknown or missing keys"
+            COMPONENT_REQUIRED_KEYS <= set(component)
+            and set(component) <= COMPONENT_REQUIRED_KEYS | COMPONENT_OPTIONAL_KEYS,
+            "component has unknown or missing keys",
         )
         component_id = component["id"]
         require(
             isinstance(component_id, str) and ID_PATTERN.fullmatch(component_id),
             "component has invalid id",
+        )
+        require(
+            component_id in EXPECTED_COMPONENT_IDS,
+            f"unexpected dependency component: {component_id}",
         )
         require(component_id not in by_id, f"duplicate component id: {component_id}")
         by_id[component_id] = component
@@ -186,6 +450,84 @@ def validate_lock_document(document: dict, repo_root: Path) -> dict[str, dict]:
             f"{component_id}: source_repository must use HTTPS",
         )
         require(
+            component["lock_state"] == "locked",
+            f"{component_id}: every release component must be locked",
+        )
+        require(
+            component["scope"] in LOCKED_SCOPES,
+            f"{component_id}: invalid locked scope",
+        )
+        require(
+            component["integration"] == EXPECTED_INTEGRATIONS[component_id],
+            f"{component_id}: integration differs from the release contract",
+        )
+        for field in ("source_archive", "immutable_ref", "version", "archive_sha256"):
+            require(
+                isinstance(component[field], str) and component[field],
+                f"{component_id}: locked {field} is required",
+            )
+        require(
+            component["source_archive"].startswith("https://"),
+            f"{component_id}: source archive must use HTTPS",
+        )
+        require(
+            SHA256_PATTERN.fullmatch(component["archive_sha256"]),
+            f"{component_id}: invalid archive SHA256",
+        )
+        require(
+            type(component["archive_size"]) is int and component["archive_size"] > 0,
+            f"{component_id}: invalid archive size",
+        )
+        if component_id in SOURCE_TREE_IDS:
+            require(
+                isinstance(component.get("source_tree_sha256"), str)
+                and SHA256_PATTERN.fullmatch(component["source_tree_sha256"]),
+                f"{component_id}: invalid source tree SHA256",
+            )
+        else:
+            require(
+                "source_tree_sha256" not in component,
+                f"{component_id}: source tree digest is not a release input",
+            )
+        if component_id == "tdlib":
+            require(
+                isinstance(component.get("generated_source_tree_sha256"), str)
+                and SHA256_PATTERN.fullmatch(component["generated_source_tree_sha256"]),
+                "tdlib: invalid generated source tree SHA256",
+            )
+        else:
+            require(
+                "generated_source_tree_sha256" not in component,
+                f"{component_id}: unexpected generated source tree digest",
+            )
+        require(
+            component["source_archive"] not in archives,
+            f"{component_id}: duplicate source archive",
+        )
+        archives.add(component["source_archive"])
+        if component_id in DIRECT_FETCHCONTENT:
+            require(
+                COMMIT_PATTERN.fullmatch(component["immutable_ref"]),
+                f"{component_id}: FetchContent ref must be a full commit",
+            )
+            require(
+                component["source_archive"].endswith(
+                    f"/{component['immutable_ref']}.tar.gz"
+                ),
+                f"{component_id}: source archive is not bound to its commit",
+            )
+        if component_id == "linux-build-image":
+            require(
+                COMMIT_PATTERN.fullmatch(component["immutable_ref"]),
+                "Linux build image source ref must be a full commit",
+            )
+            require(
+                component["source_archive"].endswith(
+                    f"/{component['immutable_ref']}.tar.gz"
+                ),
+                "Linux build image source archive is not bound to its commit",
+            )
+        require(
             isinstance(component["license_files"], list),
             f"{component_id}: license_files must be an array",
         )
@@ -193,124 +535,52 @@ def validate_lock_document(document: dict, repo_root: Path) -> dict[str, dict]:
             isinstance(component["embedded_components"], list),
             f"{component_id}: embedded_components must be an array",
         )
-
-        if component["lock_state"] == "locked":
+        if component["scope"] == "test-only":
             require(
-                component["scope"] in LOCKED_SCOPES,
-                f"{component_id}: invalid locked scope",
-            )
-            expected_integration = EXPECTED_LOCKED_INTEGRATIONS[component["scope"]]
-            if component_id == "tdlib":
-                expected_integration = "fetchcontent-or-pinned-prefix"
-            require(
-                component["integration"] == expected_integration,
-                f"{component_id}: integration differs from scope",
-            )
-            for field in (
-                "source_archive",
-                "immutable_ref",
-                "version",
-                "archive_sha256",
-            ):
-                require(
-                    isinstance(component[field], str) and component[field],
-                    f"{component_id}: locked {field} is required",
-                )
-            require(
-                component["source_archive"].startswith("https://"),
-                f"{component_id}: source archive must use HTTPS",
-            )
-            require(
-                SHA256_PATTERN.fullmatch(component["archive_sha256"]),
-                f"{component_id}: invalid archive SHA256",
-            )
-            require(
-                component["source_archive"] not in archives,
-                f"{component_id}: duplicate source archive",
-            )
-            archives.add(component["source_archive"])
-            if component_id in DIRECT_FETCHCONTENT:
-                require(
-                    COMMIT_PATTERN.fullmatch(component["immutable_ref"]),
-                    f"{component_id}: FetchContent ref must be a full commit",
-                )
-                require(
-                    component["source_archive"].endswith(
-                        f"/{component['immutable_ref']}.tar.gz"
-                    ),
-                    f"{component_id}: source archive is not bound to its commit",
-                )
-            if component["scope"] in RUNTIME_SCOPES:
-                require(
-                    component["license_files"],
-                    f"{component_id}: runtime license files are required",
-                )
-            else:
-                require(
-                    not component["license_files"],
-                    f"{component_id}: test-only licenses belong outside the runtime bundle",
-                )
-            for license_entry in component["license_files"]:
-                referenced_licenses.add(
-                    validate_license_file(license_entry, repo_root, component_id)
-                )
-            embedded_ids: set[str] = set()
-            for embedded in component["embedded_components"]:
-                require(
-                    isinstance(embedded, dict),
-                    f"{component_id}: embedded component must be an object",
-                )
-                embedded_id = embedded.get("id")
-                require(
-                    isinstance(embedded_id, str) and ID_PATTERN.fullmatch(embedded_id),
-                    f"{component_id}: invalid embedded component id",
-                )
-                require(
-                    embedded_id not in embedded_ids,
-                    f"{component_id}: duplicate embedded component id",
-                )
-                embedded_ids.add(embedded_id)
-                referenced_licenses.update(
-                    validate_embedded_component(embedded, repo_root, component_id)
-                )
-        elif component["lock_state"] == "unresolved":
-            require(
-                component_id in PLANNED_IDS,
-                f"{component_id}: unexpected unresolved component",
-            )
-            require(
-                component["scope"] == "planned-runtime",
-                f"{component_id}: unresolved component must be planned-runtime",
-            )
-            require(
-                component["integration"] == "toolchain-unselected",
-                f"{component_id}: unresolved toolchain integration is invalid",
-            )
-            for field in (
-                "source_archive",
-                "immutable_ref",
-                "version",
-                "archive_sha256",
-            ):
-                require(
-                    component[field] is None,
-                    f"{component_id}: unresolved {field} must be null",
-                )
-            require(
-                not component["license_files"] and not component["embedded_components"],
-                f"{component_id}: unresolved component cannot claim exact notices",
+                not component["license_files"],
+                f"{component_id}: test-only licenses belong outside the release bundle",
             )
         else:
-            raise VerificationError(f"{component_id}: invalid lock_state")
+            require(
+                component["license_files"],
+                f"{component_id}: locked license files are required",
+            )
+        for license_entry in component["license_files"]:
+            referenced_licenses.add(
+                validate_license_file(license_entry, repo_root, component_id)
+            )
+        embedded_ids: set[str] = set()
+        for embedded in component["embedded_components"]:
+            require(
+                isinstance(embedded, dict),
+                f"{component_id}: embedded component must be an object",
+            )
+            embedded_id = embedded.get("id")
+            require(
+                isinstance(embedded_id, str) and ID_PATTERN.fullmatch(embedded_id),
+                f"{component_id}: invalid embedded component id",
+            )
+            require(
+                embedded_id not in embedded_ids,
+                f"{component_id}: duplicate embedded component id",
+            )
+            embedded_ids.add(embedded_id)
+            referenced_licenses.update(
+                validate_embedded_component(embedded, repo_root, component_id)
+            )
 
     require(
-        PLANNED_IDS
-        == {item for item in by_id if by_id[item]["lock_state"] == "unresolved"},
-        "planned runtime set is incomplete",
+        set(by_id) == EXPECTED_COMPONENT_IDS,
+        "dependency component inventory is incomplete",
     )
     require(
-        set(DIRECT_FETCHCONTENT) <= set(by_id),
-        "FetchContent lock entries are incomplete",
+        {
+            component_id
+            for component_id, item in by_id.items()
+            if item["scope"] == "release-runtime"
+        }
+        == RELEASE_RUNTIME_IDS,
+        "release runtime component inventory is incomplete",
     )
     tdlib_embedded = {
         embedded["id"]: embedded for embedded in by_id["tdlib"]["embedded_components"]
@@ -338,9 +608,10 @@ def validate_lock_document(document: dict, repo_root: Path) -> dict[str, dict]:
     }
     require(
         checked_in_licenses == referenced_licenses,
-        "checked-in runtime license set differs from dependency lock",
+        "checked-in license set differs from dependency lock",
     )
-    return by_id
+    toolchain = validate_release_toolchain(document, by_id)
+    return by_id, toolchain
 
 
 def extract_fetchcontent_block(cmake: str, dependency: str) -> str:
@@ -471,15 +742,24 @@ def validate_repo_consistency(
                 f"<!-- lock-id:{component_id} -->" in notices,
                 f"runtime notice marker missing for {component_id}",
             )
-        elif component["scope"] == "planned-runtime":
             require(
-                f"<!-- planned-lock-id:{component_id} -->" in notices,
-                f"planned runtime marker missing for {component_id}",
+                f"<!-- build-lock-id:{component_id} -->" not in notices,
+                f"runtime component has a build-only marker: {component_id}",
+            )
+        elif component["scope"] == BUILD_ONLY_SCOPE:
+            require(
+                f"<!-- build-lock-id:{component_id} -->" in notices,
+                f"build-only notice marker missing for {component_id}",
+            )
+            require(
+                f"<!-- lock-id:{component_id} -->" not in notices,
+                f"build-only component has a runtime marker: {component_id}",
             )
         else:
             require(
-                f"<!-- lock-id:{component_id} -->" not in notices,
-                f"test-only component has a runtime notice marker: {component_id}",
+                f"<!-- lock-id:{component_id} -->" not in notices
+                and f"<!-- build-lock-id:{component_id} -->" not in notices,
+                f"test-only component has a release notice marker: {component_id}",
             )
         for license_entry in component["license_files"]:
             require(
@@ -494,40 +774,251 @@ def validate_repo_consistency(
                 )
 
 
-def verify_archives(by_id: dict[str, dict], selected: set[str]) -> None:
-    locked = {
-        component_id: component
-        for component_id, component in by_id.items()
-        if component["lock_state"] == "locked"
-    }
-    unknown = selected - set(locked)
+def sha256_file(file: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with file.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as error:
+        raise VerificationError(f"cannot read {file}: {error}") from error
+    return digest.hexdigest()
+
+
+def require_regular_file(file: Path, owner: str) -> None:
+    require(file.is_file(), f"{owner}: missing {file}")
+    require(not file.is_symlink(), f"{owner}: file cannot be a symlink: {file}")
+
+
+def validate_release_contract(
+    repo_root: Path,
+    lock_file: Path,
+    by_id: dict[str, dict],
+    release_toolchain: dict,
+    contract_file: Path,
+    release_build_script: Path,
+) -> None:
+    require_regular_file(contract_file, "Linux toolchain contract")
+    require_regular_file(release_build_script, "Linux release build recipe")
+    contract = load_json(contract_file)
+    require(
+        set(contract)
+        == {
+            "dependency_lock_sha256",
+            "image",
+            "openssl",
+            "recipe",
+            "schema_version",
+            "target",
+            "tdlib_revision",
+            "zlib",
+        },
+        "Linux toolchain contract has unknown or missing keys",
+    )
+    require(
+        type(contract["schema_version"]) is int and contract["schema_version"] == 1,
+        "unsupported Linux toolchain contract version",
+    )
+    require(
+        contract["dependency_lock_sha256"] == sha256_file(lock_file),
+        "Linux toolchain contract dependency lock digest differs",
+    )
+    require(
+        contract["image"] == release_toolchain["image"],
+        "Linux toolchain contract image differs from dependency lock",
+    )
+    require(
+        contract["target"] == "x86_64-linux-musl",
+        "Linux toolchain contract target is invalid",
+    )
+    require(
+        contract["tdlib_revision"] == by_id["tdlib"]["immutable_ref"],
+        "Linux toolchain contract TDLib revision differs",
+    )
+
+    recipe = contract["recipe"]
+    require(isinstance(recipe, dict), "Linux toolchain recipe must be an object")
+    require(
+        set(recipe) == {"path", "sha256"}, "Linux toolchain recipe keys are invalid"
+    )
+    require(
+        recipe["path"] == "scripts/release/build-linux-musl.sh",
+        "Linux toolchain recipe path is invalid",
+    )
+    expected_script = (repo_root / recipe["path"]).resolve()
+    require(
+        release_build_script == expected_script
+        or release_build_script.name == expected_script.name,
+        "Linux toolchain recipe override has an unexpected filename",
+    )
+    require(
+        isinstance(recipe["sha256"], str)
+        and SHA256_PATTERN.fullmatch(recipe["sha256"])
+        and recipe["sha256"] == sha256_file(release_build_script),
+        "Linux toolchain recipe digest differs",
+    )
+
+    for component_id in ("openssl", "zlib"):
+        entry = contract[component_id]
+        require(
+            isinstance(entry, dict)
+            and set(entry) == {"source_sha256", "source_url", "version"},
+            f"Linux toolchain {component_id} entry is invalid",
+        )
+        component = by_id[component_id]
+        require(
+            entry["version"] == component["version"]
+            and entry["source_url"] == component["source_archive"]
+            and entry["source_sha256"] == component["archive_sha256"],
+            f"Linux toolchain {component_id} entry differs from dependency lock",
+        )
+
+
+def staged_archive_name(component_id: str, component: dict) -> str:
+    source_name = archive_basename(component)
+    for suffix in (".tar.gz", ".tar.xz"):
+        if source_name.endswith(suffix):
+            return f"{component_id}{suffix}"
+    raise VerificationError(
+        f"{component_id}: source archive must be a .tar.gz or .tar.xz file"
+    )
+
+
+def verify_staged_archive(file: Path, component_id: str, component: dict) -> None:
+    require_regular_file(file, component_id)
+    require(
+        file.stat().st_size == component["archive_size"],
+        f"{component_id}: archive size mismatch",
+    )
+    require(
+        sha256_file(file) == component["archive_sha256"],
+        f"{component_id}: archive SHA256 mismatch",
+    )
+
+
+def stream_archive(
+    component_id: str, component: dict, destination: Path | None
+) -> None:
+    request = urllib.request.Request(
+        component["source_archive"],
+        headers={"User-Agent": "tgcli-dependency-lock-verifier/2"},
+    )
+    digest = hashlib.sha256()
+    output = None
+    downloaded = 0
+    try:
+        if destination is not None:
+            output = destination.open("xb")
+        with urllib.request.urlopen(request, timeout=60) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    parsed_length = int(content_length)
+                except ValueError as error:
+                    raise VerificationError(
+                        f"{component_id}: invalid archive Content-Length"
+                    ) from error
+                require(
+                    parsed_length == component["archive_size"],
+                    f"{component_id}: archive Content-Length mismatch",
+                )
+            while chunk := response.read(1024 * 1024):
+                downloaded += len(chunk)
+                require(
+                    downloaded <= component["archive_size"],
+                    f"{component_id}: archive download exceeds locked size",
+                )
+                digest.update(chunk)
+                if output is not None:
+                    output.write(chunk)
+    except (OSError, urllib.error.URLError) as error:
+        raise VerificationError(
+            f"{component_id}: archive download failed: {error}"
+        ) from error
+    finally:
+        if output is not None:
+            output.close()
+    require(
+        downloaded == component["archive_size"],
+        f"{component_id}: archive size mismatch",
+    )
+    require(
+        digest.hexdigest() == component["archive_sha256"],
+        f"{component_id}: archive SHA256 mismatch",
+    )
+
+
+def verify_archives(
+    by_id: dict[str, dict],
+    selected: set[str],
+    *,
+    archive_directory: Path | None = None,
+    download_directory: Path | None = None,
+) -> None:
+    unknown = selected - set(by_id)
+    action = "verify" if archive_directory is not None else "download"
     require(
         not unknown,
-        f"cannot download unlocked or unknown components: {sorted(unknown)}",
+        f"cannot {action} unknown components: {sorted(unknown)}",
     )
     candidates = (
-        locked.items()
+        by_id.items()
         if not selected
-        else ((component_id, locked[component_id]) for component_id in sorted(selected))
+        else ((component_id, by_id[component_id]) for component_id in sorted(selected))
     )
-    for component_id, component in candidates:
-        request = urllib.request.Request(
-            component["source_archive"],
-            headers={"User-Agent": "tgcli-dependency-lock-verifier/1"},
+    if archive_directory is not None:
+        require(
+            archive_directory.is_dir() and not archive_directory.is_symlink(),
+            f"archive directory is missing or unsafe: {archive_directory}",
         )
-        digest = hashlib.sha256()
+    if download_directory is not None:
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                while chunk := response.read(1024 * 1024):
-                    digest.update(chunk)
-        except (OSError, urllib.error.URLError) as error:
+            download_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
             raise VerificationError(
-                f"{component_id}: archive download failed: {error}"
+                f"cannot create archive download directory: {error}"
             ) from error
         require(
-            digest.hexdigest() == component["archive_sha256"],
-            f"{component_id}: archive SHA256 mismatch",
+            download_directory.is_dir() and not download_directory.is_symlink(),
+            f"archive download directory is unsafe: {download_directory}",
         )
+
+    for component_id, component in candidates:
+        filename = staged_archive_name(component_id, component)
+        if archive_directory is not None:
+            verify_staged_archive(archive_directory / filename, component_id, component)
+            continue
+        if download_directory is None:
+            stream_archive(component_id, component, None)
+            continue
+
+        destination = download_directory / filename
+        if destination.exists() or destination.is_symlink():
+            verify_staged_archive(destination, component_id, component)
+            continue
+        partial = download_directory / f".{filename}.partial-{os.getpid()}"
+        require(
+            not partial.exists() and not partial.is_symlink(),
+            f"{component_id}: partial archive path already exists",
+        )
+        try:
+            stream_archive(component_id, component, partial)
+            try:
+                partial.replace(destination)
+            except OSError as error:
+                raise VerificationError(
+                    f"{component_id}: cannot finalize archive download: {error}"
+                ) from error
+            verify_staged_archive(destination, component_id, component)
+        except (OSError, VerificationError):
+            if partial.is_file() and not partial.is_symlink():
+                try:
+                    partial.unlink()
+                except OSError as error:
+                    raise VerificationError(
+                        f"{component_id}: cannot clean partial archive: {error}"
+                    ) from error
+            raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -557,6 +1048,16 @@ def parse_args() -> argparse.Namespace:
         help="third-party notices override used by fail-closed tests",
     )
     parser.add_argument(
+        "--contract-file",
+        type=Path,
+        help="Linux toolchain contract override used by fail-closed tests",
+    )
+    parser.add_argument(
+        "--release-build-script-file",
+        type=Path,
+        help="Linux release recipe override used by fail-closed tests",
+    )
+    parser.add_argument(
         "--network",
         action="store_true",
         help="explicitly download and verify locked source archives",
@@ -565,7 +1066,22 @@ def parse_args() -> argparse.Namespace:
         "--component",
         action="append",
         default=[],
-        help="with --network, verify only this locked component (repeatable)",
+        help="verify only this locked component (repeatable)",
+    )
+    parser.add_argument(
+        "--build-inputs",
+        action="store_true",
+        help="verify the complete Linux offline-build input archive set",
+    )
+    parser.add_argument(
+        "--archive-directory",
+        type=Path,
+        help="verify staged archives without network access",
+    )
+    parser.add_argument(
+        "--download-directory",
+        type=Path,
+        help="with --network, retain verified archives in this directory",
     )
     return parser.parse_args()
 
@@ -581,6 +1097,19 @@ def main() -> int:
         args.build_script_file or repo_root / "scripts/build-tdlib.sh"
     ).resolve()
     notices_file = (args.notices_file or repo_root / "THIRD_PARTY_NOTICES.md").resolve()
+    contract_file = (
+        args.contract_file or repo_root / "release/linux-musl-toolchain.json"
+    ).resolve()
+    release_build_script = (
+        args.release_build_script_file
+        or repo_root / "scripts/release/build-linux-musl.sh"
+    ).resolve()
+    archive_directory = (
+        args.archive_directory.absolute() if args.archive_directory else None
+    )
+    download_directory = (
+        args.download_directory.absolute() if args.download_directory else None
+    )
     try:
         document = load_json(lock_file)
         schema = load_json(repo_root / "release/dependencies.lock.schema.json")
@@ -588,20 +1117,51 @@ def main() -> int:
             schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema",
             "dependency lock schema must use Draft 2020-12",
         )
-        by_id = validate_lock_document(document, repo_root)
+        by_id, release_toolchain = validate_lock_document(document, repo_root)
         validate_repo_consistency(
             repo_root, by_id, cmake_file, build_script_file, notices_file
         )
-        require(
-            args.network or not args.component,
-            "--component requires explicit --network mode",
+        validate_release_contract(
+            repo_root,
+            lock_file,
+            by_id,
+            release_toolchain,
+            contract_file,
+            release_build_script,
         )
-        if args.network:
-            verify_archives(by_id, set(args.component))
+        require(
+            not (args.network and archive_directory is not None),
+            "--network and --archive-directory are mutually exclusive",
+        )
+        require(
+            download_directory is None or args.network,
+            "--download-directory requires explicit --network mode",
+        )
+        require(
+            not (args.component and args.build_inputs),
+            "--component and --build-inputs are mutually exclusive",
+        )
+        selected = BUILD_INPUT_IDS if args.build_inputs else set(args.component)
+        require(
+            args.network or archive_directory is not None or not selected,
+            "archive selection requires --network or --archive-directory",
+        )
+        if args.network or archive_directory is not None:
+            verify_archives(
+                by_id,
+                selected,
+                archive_directory=archive_directory,
+                download_directory=download_directory,
+            )
     except VerificationError as error:
         print(f"dependency lock verification failed: {error}", file=sys.stderr)
         return 1
-    mode = "network" if args.network else "offline"
+    if args.network:
+        mode = "network+staged" if download_directory is not None else "network"
+    elif archive_directory is not None:
+        mode = "offline+staged"
+    else:
+        mode = "offline"
     print(f"dependency lock verified ({mode})")
     return 0
 

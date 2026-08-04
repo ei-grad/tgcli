@@ -1,8 +1,8 @@
 # Third-party notices
 
-This file records the third-party components that are compiled into tgcli or
-are pinned for the v1.0 release-runtime closure. Exact source identities and
-archive checksums are in
+This file records the third-party components compiled into tgcli and the
+build-only inputs pinned for the v1.0 release. Exact source identities,
+archive checksums, and Linux toolchain evidence are in
 [`release/dependencies.lock.json`](release/dependencies.lock.json). tgcli's own
 license is in [`LICENSE`](LICENSE).
 
@@ -62,12 +62,16 @@ Source: <https://github.com/marzer/tomlplusplus> at
 toml++ is available under the MIT License. Its exact license text is reproduced
 in [`release/licenses/tomlplusplus.txt`](release/licenses/tomlplusplus.txt).
 
-## Locked release-runtime closure
+## Linux release-runtime closure
 
-The following source releases are locked for the future static-release
-toolchain. The current build still resolves them from the host toolchain, so
-this lock does not claim that an existing artifact contains these exact
-versions.
+The Linux release recipe builds OpenSSL and zlib from the following verified
+source archives. The pinned musl toolchain artifact supplies the selected musl
+and GCC static archives and ELF startup objects. The dependency lock records
+canonical paths and hashes for libc, libdl, libm, libatomic, libgcc,
+libgcc_eh, libstdc++, crt1, crti, crtbeginT, crtend, and crtn, plus the
+producer build log that ties them to the source releases below. The release
+recipe rejects any different same-basename input selected by the compiler
+driver or final linker map.
 
 <!-- lock-id:openssl -->
 ### OpenSSL 3.5.7
@@ -86,21 +90,61 @@ Source: <https://github.com/madler/zlib>, release `v1.3.2`.
 zlib is available under the zlib License. Its exact license text is reproduced
 in [`release/licenses/zlib.txt`](release/licenses/zlib.txt).
 
-## Planned but unresolved release runtimes
+<!-- lock-id:musl -->
+### musl 1.2.6
 
-<!-- planned-lock-id:musl -->
-- musl libc is expected in the static Linux artifact and is generally licensed
-  under MIT terms. No source version or archive is locked yet.
+Source: <https://musl.libc.org/releases/musl-1.2.6.tar.gz>, release `v1.2.6`.
 
-<!-- planned-lock-id:gcc-runtime -->
-- libgcc and libstdc++ may be embedded by the selected compiler toolchain under
-  `GPL-3.0-or-later WITH GCC-exception-3.1`. No GCC source version or archive is
-  locked yet.
+musl is available under the MIT License with the additional compatible terms
+and attribution inventory reproduced in
+[`release/licenses/musl.txt`](release/licenses/musl.txt).
 
-An artifact containing either planned component is not release-ready until the
-toolchain selects an exact source version, the lock records its immutable source
-and checksum, and the corresponding upstream notices are checked in. This file
-does not infer those facts from the host compiler.
+<!-- lock-id:gcc-runtime -->
+### GCC runtime libraries and startup objects 16.1.0
+
+Source: <https://ftp.gnu.org/gnu/gcc/gcc-16.1.0/gcc-16.1.0.tar.xz>, release
+`releases/gcc-16.1.0`.
+
+The selected libatomic, libgcc, libgcc_eh, libstdc++, crtbeginT, and crtend
+runtime portions are covered by GPL-3.0-or-later with the GCC Runtime Library
+Exception 3.1. The terms are reproduced in
+[`release/licenses/GCC-GPL-3.0.txt`](release/licenses/GCC-GPL-3.0.txt) and
+[`release/licenses/GCC-Runtime-Library-Exception.txt`](release/licenses/GCC-Runtime-Library-Exception.txt).
+
+## Build-only Linux inputs
+
+The following components are used to produce the Linux binary but are not
+distributed in the release package as runtime components.
+
+<!-- build-lock-id:gperf -->
+### GNU gperf 3.3
+
+Source: <https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz>, release `gperf-3.3`.
+The release recipe builds this host tool from source because the pinned build
+image does not provide it. gperf is available under GPL-3.0-or-later; the terms
+are reproduced in
+[`release/licenses/GCC-GPL-3.0.txt`](release/licenses/GCC-GPL-3.0.txt).
+
+<!-- build-lock-id:linux-musl-toolchain -->
+### cross-tools musl toolchain 20260515
+
+Source and release producer: <https://github.com/cross-tools/musl-cross> at
+`aa4bf173d705256e7fc2db82604bdccca090e9c3`. The x86_64 release archive is
+accepted only with the content digest in the dependency lock. The producer
+wrapper is available under the MIT License, reproduced in
+[`release/licenses/cross-tools-musl-cross.txt`](release/licenses/cross-tools-musl-cross.txt).
+
+The toolchain archive also carries its complete upstream build-tool license
+tree. Runtime-linked musl and GCC terms are independently checked in above.
+
+<!-- build-lock-id:linux-build-image -->
+### Dockcross base image 20260515-5fd14ac
+
+Source: <https://github.com/dockcross/dockcross> at
+`5fd14ac6dca6c8d89e6942ff35879906a5f3a932`. The workflow pulls the image only
+by its OCI SHA-256 digest and runs the verified source build without network
+access. Dockcross is available under the MIT License, reproduced in
+[`release/licenses/dockcross.txt`](release/licenses/dockcross.txt).
 
 ## Build and test only
 

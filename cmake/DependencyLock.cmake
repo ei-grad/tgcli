@@ -38,20 +38,68 @@ function(tgcli_assert_dependency_lock dependency expected_ref)
 endfunction()
 
 function(tgcli_assert_resolved_git_revision dependency source_directory expected_ref)
-    find_package(Git REQUIRED QUIET)
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${source_directory}" rev-parse HEAD
-        RESULT_VARIABLE git_result
-        OUTPUT_VARIABLE resolved_ref
-        ERROR_VARIABLE git_error
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(NOT git_result EQUAL 0)
-        message(FATAL_ERROR
-            "Cannot resolve fetched ${dependency} revision: ${git_error}")
+    if(EXISTS "${source_directory}/.git")
+        find_package(Git REQUIRED QUIET)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${source_directory}" rev-parse HEAD
+            RESULT_VARIABLE git_result
+            OUTPUT_VARIABLE resolved_ref
+            ERROR_VARIABLE git_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT git_result EQUAL 0)
+            message(FATAL_ERROR
+                "Cannot resolve fetched ${dependency} revision: ${git_error}")
+        endif()
+        if(NOT resolved_ref STREQUAL expected_ref)
+            message(FATAL_ERROR
+                "Fetched ${dependency} revision ${resolved_ref} differs from lock ${expected_ref}")
+        endif()
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${source_directory}"
+                status --porcelain=v1 --untracked-files=all
+            RESULT_VARIABLE status_result
+            OUTPUT_VARIABLE source_status
+            ERROR_VARIABLE status_error)
+        if(NOT status_result EQUAL 0)
+            message(FATAL_ERROR
+                "Cannot inspect fetched ${dependency} source state: ${status_error}")
+        endif()
+        if(NOT source_status STREQUAL "")
+            message(FATAL_ERROR
+                "Fetched ${dependency} Git source has local changes")
+        endif()
+        return()
     endif()
-    if(NOT resolved_ref STREQUAL expected_ref)
+
+    if(NOT TGCLI_RELEASE_ARCHIVE_MODE
+       OR NOT CMAKE_BUILD_TYPE STREQUAL "Release"
+       OR NOT FETCHCONTENT_FULLY_DISCONNECTED)
         message(FATAL_ERROR
-            "Fetched ${dependency} revision ${resolved_ref} differs from lock ${expected_ref}")
+            "Fetched ${dependency} has no Git identity outside locked release archive mode")
+    endif()
+    find_package(Python3 REQUIRED QUIET COMPONENTS Interpreter)
+    if(dependency STREQUAL "tdlib")
+        tgcli_dependency_lock_field(
+            "${dependency}" generated_source_tree_sha256 locked_tree_sha256)
+    else()
+        tgcli_dependency_lock_field(
+            "${dependency}" source_tree_sha256 locked_tree_sha256)
+    endif()
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../scripts/release/archive_tool.py"
+            tree-sha256 --root "${source_directory}"
+        RESULT_VARIABLE tree_result
+        OUTPUT_VARIABLE resolved_tree_sha256
+        ERROR_VARIABLE tree_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT tree_result EQUAL 0)
+        message(FATAL_ERROR
+            "Cannot verify fetched ${dependency} archive tree: ${tree_error}")
+    endif()
+    if(NOT resolved_tree_sha256 STREQUAL locked_tree_sha256)
+        message(FATAL_ERROR
+            "Fetched ${dependency} archive tree differs from the source lock")
     endif()
 endfunction()
 

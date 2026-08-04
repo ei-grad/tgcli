@@ -59,3 +59,8 @@ add_test(
         -DTEST_OUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/dependency-lock-enforcement
         -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/dependency_lock_enforcement_test.cmake")
+add_test(
+    NAME release-toolchain-helpers
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/release_toolchain_helpers_test.py"
+        "${CMAKE_SOURCE_DIR}")

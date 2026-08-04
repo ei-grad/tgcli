@@ -9,6 +9,8 @@ endforeach()
 set(probe "${REPO_ROOT}/tests/dependency_lock_failure_probe.cmake")
 set(verifier "${REPO_ROOT}/scripts/verify_dependency_lock.py")
 set(canonical_lock "${REPO_ROOT}/release/dependencies.lock.json")
+set(canonical_contract "${REPO_ROOT}/release/linux-musl-toolchain.json")
+set(canonical_recipe "${REPO_ROOT}/scripts/release/build-linux-musl.sh")
 file(MAKE_DIRECTORY "${TEST_OUTPUT_DIR}")
 file(READ "${canonical_lock}" lock_json)
 
@@ -56,6 +58,9 @@ function(expect_success name)
 endfunction()
 
 lock_field(cli11 immutable_ref cli11_ref)
+lock_field(cli11 source_repository cli11_repository)
+lock_field(cli11 archive_sha256 cli11_archive_sha256)
+lock_field(cli11 source_tree_sha256 cli11_source_tree_sha256)
 lock_field(tdlib immutable_ref tdlib_ref)
 lock_field(tdlib source_repository tdlib_repository)
 
@@ -98,6 +103,66 @@ expect_failure(
     -DREPO_ROOT=${REPO_ROOT}
     -DMODE=resolved
     -DSOURCE_DIRECTORY=${REPO_ROOT}
+    -DEXPECTED_REF=${cli11_ref}
+    -P "${probe}")
+
+set(missing_archive_provenance "${TEST_OUTPUT_DIR}/missing-archive-provenance")
+file(MAKE_DIRECTORY "${missing_archive_provenance}")
+expect_failure(
+    "archive mode is release-only" "no Git identity outside locked release archive mode"
+    "${CMAKE_COMMAND}"
+    -DREPO_ROOT=${REPO_ROOT}
+    -DMODE=no_archive
+    -DSOURCE_DIRECTORY=${missing_archive_provenance}
+    -DEXPECTED_REF=${cli11_ref}
+    -P "${probe}")
+
+set(mismatched_archive_provenance "${TEST_OUTPUT_DIR}/mismatched-archive-provenance")
+file(MAKE_DIRECTORY "${mismatched_archive_provenance}")
+file(WRITE "${mismatched_archive_provenance}/arbitrary.cpp" "int arbitrary;\n")
+file(WRITE "${mismatched_archive_provenance}/.tgcli-source.json"
+    "{\n"
+    "  \"archive_sha256\": \"${cli11_archive_sha256}\",\n"
+    "  \"immutable_ref\": \"0000000000000000000000000000000000000000\",\n"
+    "  \"schema_version\": 1,\n"
+    "  \"source_repository\": \"${cli11_repository}\"\n"
+    "}\n")
+expect_failure(
+    "arbitrary tree with copied sidecar" "archive tree differs from the source lock"
+    "${CMAKE_COMMAND}"
+    -DREPO_ROOT=${REPO_ROOT}
+    -DMODE=archive
+    -DSOURCE_DIRECTORY=${mismatched_archive_provenance}
+    -DEXPECTED_REF=${cli11_ref}
+    -P "${probe}")
+
+set(valid_archive_provenance "${TEST_OUTPUT_DIR}/valid-archive-provenance")
+file(MAKE_DIRECTORY "${valid_archive_provenance}")
+file(WRITE "${valid_archive_provenance}/locked.cpp" "int locked;\n")
+execute_process(
+    COMMAND "${PYTHON_EXECUTABLE}"
+        "${REPO_ROOT}/scripts/release/archive_tool.py"
+        tree-sha256 --root "${valid_archive_provenance}"
+    RESULT_VARIABLE tree_hash_result
+    OUTPUT_VARIABLE valid_tree_sha256
+    ERROR_VARIABLE tree_hash_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT tree_hash_result EQUAL 0)
+    message(FATAL_ERROR "Cannot hash test source tree: ${tree_hash_error}")
+endif()
+string(REPLACE
+    "\"source_tree_sha256\": \"${cli11_source_tree_sha256}\""
+    "\"source_tree_sha256\": \"${valid_tree_sha256}\""
+    valid_tree_lock_json "${lock_json}")
+set(valid_tree_lock "${TEST_OUTPUT_DIR}/valid-tree-lock.json")
+file(WRITE "${valid_tree_lock}" "${valid_tree_lock_json}")
+expect_success(
+    "matching locked archive tree"
+    "${CMAKE_COMMAND}"
+    -DREPO_ROOT=${REPO_ROOT}
+    -DMODE=archive
+    -DLOCK_FILE=${valid_tree_lock}
+    -DSOURCE_DIRECTORY=${valid_archive_provenance}
     -DEXPECTED_REF=${cli11_ref}
     -P "${probe}")
 
@@ -150,7 +215,7 @@ expect_success(
     -DEXPECTED_REF=${tdlib_ref}
     -P "${probe}")
 
-string(REPLACE "\"schema_version\": 1" "\"schema_version\": true"
+string(REPLACE "\"schema_version\": 2" "\"schema_version\": true"
     boolean_version_json "${lock_json}")
 set(boolean_version_lock "${TEST_OUTPUT_DIR}/boolean-version-lock.json")
 file(WRITE "${boolean_version_lock}" "${boolean_version_json}")
@@ -205,8 +270,51 @@ expect_failure(
     --repo-root "${REPO_ROOT}"
     --lock-file "${drifted_license_lock}")
 
+file(READ "${canonical_contract}" contract_json)
+string(REPLACE
+    "\"dependency_lock_sha256\": \""
+    "\"dependency_lock_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000-"
+    drifted_contract_json "${contract_json}")
+set(drifted_contract "${TEST_OUTPUT_DIR}/drifted-linux-musl-toolchain.json")
+file(WRITE "${drifted_contract}" "${drifted_contract_json}")
 expect_failure(
-    "component selection without network" "requires explicit --network mode"
+    "dependency lock contract drift" "dependency lock digest differs"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --contract-file "${drifted_contract}")
+
+set(drifted_recipe_directory "${TEST_OUTPUT_DIR}/drifted-recipe")
+file(MAKE_DIRECTORY "${drifted_recipe_directory}")
+file(READ "${canonical_recipe}" recipe_text)
+set(drifted_recipe "${drifted_recipe_directory}/build-linux-musl.sh")
+file(WRITE "${drifted_recipe}" "${recipe_text}\n")
+expect_failure(
+    "Linux release recipe drift" "recipe digest differs"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --release-build-script-file "${drifted_recipe}")
+
+set(missing_archive_directory "${TEST_OUTPUT_DIR}/missing-archives")
+file(MAKE_DIRECTORY "${missing_archive_directory}")
+expect_failure(
+    "missing staged archive" "missing .*cli11.tar.gz"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --archive-directory "${missing_archive_directory}"
+    --component cli11)
+
+set(mismatched_archive_directory "${TEST_OUTPUT_DIR}/mismatched-archives")
+file(MAKE_DIRECTORY "${mismatched_archive_directory}")
+file(WRITE "${mismatched_archive_directory}/cli11.tar.gz" "not the locked archive\n")
+expect_failure(
+    "mismatched staged archive" "archive size mismatch"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --archive-directory "${mismatched_archive_directory}"
+    --component cli11)
+
+expect_failure(
+    "component selection without archive mode" "archive selection requires"
     "${PYTHON_EXECUTABLE}" "${verifier}"
     --repo-root "${REPO_ROOT}"
     --component cli11)

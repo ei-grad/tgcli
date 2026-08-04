@@ -1,10 +1,107 @@
 {
   "$schema": "./dependencies.lock.schema.json",
-  "schema_version": 1,
+  "schema_version": 2,
   "archive_policy": {
     "algorithm": "sha256",
-    "github_outer_compression": "GitHub commit archives are content-addressed by immutable_ref, but their outer compression can change. Any checksum refresh requires source-tree equivalence verification and review."
+    "github_outer_compression": "GitHub commit archives are content-addressed by immutable_ref, but their outer compression can change. Any checksum refresh requires source-tree equivalence verification and review.",
+    "max_expanded_size": 536870912,
+    "max_member_count": 100000,
+    "max_member_size": 268435456,
+    "release_asset_integrity": "Release assets and OCI images are accepted only by reviewed content digest. A changed byte is a hard failure even when its versioned URL or tag is unchanged."
   },
+  "release_toolchains": [
+    {
+      "id": "linux-musl-x86_64",
+      "target": "x86_64-unknown-linux-musl",
+      "image": "docker.io/dockcross/base@sha256:846afc88d415b67fed1c2c0a6961d9ca0d11fee739c8644d5b670ced497674ea",
+      "image_component": "linux-build-image",
+      "toolchain_component": "linux-musl-toolchain",
+      "archive_root": "x86_64-unknown-linux-musl",
+      "compiler": {
+        "path": "bin/x86_64-unknown-linux-musl-g++",
+        "target": "x86_64-unknown-linux-musl",
+        "version": "16.1.0"
+      },
+      "producer_build_log": {
+        "path": "build.log.bz2",
+        "sha256": "ab3fb1ae2f820313af58367a98f904d4e5a32328013d4f41b00be3f186348e84"
+      },
+      "source_evidence": [
+        {
+          "component_id": "gcc-runtime",
+          "archive_filename": "gcc-16.1.0.tar.xz",
+          "sha512": "b3454958891ab47e1e5b6cb9396c0ad3b04f32fe2a7bf1153a143f21013fdb6b295ca94c98964698a688e4c1d7555ffd8ffbc20187507cce6b1c32cbcc09897a"
+        },
+        {
+          "component_id": "musl",
+          "archive_filename": "musl-1.2.6.tar.gz",
+          "sha512": "1adad96eddb3a2eb0cacb3e363b0046568925fcdd75cf8b0503f2139df1f693d64730779ca0ce8131b7624ab2d37f4247bb1d3393c523de6e30d2b1d7732555c"
+        }
+      ],
+      "runtime_files": [
+        {
+          "component_id": "gcc-runtime",
+          "path": "lib/gcc/x86_64-unknown-linux-musl/16.1.0/libgcc.a",
+          "sha256": "38ef9f987af4388461f7030f06213af29e3cd5c45d1ea1f77debb75073d5e15c"
+        },
+        {
+          "component_id": "gcc-runtime",
+          "path": "lib/gcc/x86_64-unknown-linux-musl/16.1.0/libgcc_eh.a",
+          "sha256": "2ca670dbacffb6abb5b9c62eb044dc50a2cbfd641f0eb05f6094b3508bec2347"
+        },
+        {
+          "component_id": "gcc-runtime",
+          "path": "x86_64-unknown-linux-musl/sysroot/lib/libatomic.a",
+          "sha256": "5d794b5192f36596968375dd40935061e72f40d2311ee0007d3cf6aabdc963c6"
+        },
+        {
+          "component_id": "gcc-runtime",
+          "path": "lib/gcc/x86_64-unknown-linux-musl/16.1.0/crtbeginT.o",
+          "sha256": "7595b5524b31da75ae285127573505b2183841bff165e6e76d93f167c6163e55"
+        },
+        {
+          "component_id": "gcc-runtime",
+          "path": "lib/gcc/x86_64-unknown-linux-musl/16.1.0/crtend.o",
+          "sha256": "8c0531d0840b6b2f58fcfdb1c3c6498e67b794246d566e8581a9ed430e4dbce3"
+        },
+        {
+          "component_id": "gcc-runtime",
+          "path": "x86_64-unknown-linux-musl/sysroot/lib/libstdc++.a",
+          "sha256": "01b6d5ea505c24ed44393e95d1a9ed36ff08b5c99975f2fa91b220bf23b31200"
+        },
+        {
+          "component_id": "musl",
+          "path": "x86_64-unknown-linux-musl/sysroot/usr/lib/crt1.o",
+          "sha256": "43b2b3127571d0c335bffcf8feb9a8ed29c6649dddb25c7f14de9a82428e5393"
+        },
+        {
+          "component_id": "musl",
+          "path": "x86_64-unknown-linux-musl/sysroot/usr/lib/crti.o",
+          "sha256": "0ce8f93d0c76352e29c3bd087a461cac7421ba52050293c9a1bbba07444b155a"
+        },
+        {
+          "component_id": "musl",
+          "path": "x86_64-unknown-linux-musl/sysroot/usr/lib/crtn.o",
+          "sha256": "458b02dafac7ab07bc4eb15476db552d80ab8a0d10027d651856ef013cfc445b"
+        },
+        {
+          "component_id": "musl",
+          "path": "x86_64-unknown-linux-musl/sysroot/usr/lib/libc.a",
+          "sha256": "477c271915f01fd11a16f737fac1d54a834fa6e9035d4e184364e1b1eb379534"
+        },
+        {
+          "component_id": "musl",
+          "path": "x86_64-unknown-linux-musl/sysroot/usr/lib/libdl.a",
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"
+        },
+        {
+          "component_id": "musl",
+          "path": "x86_64-unknown-linux-musl/sysroot/usr/lib/libm.a",
+          "sha256": "f0a17a43c74d2fe5474fa2fd29c8f14799e777d7d75a2cc4d11c20a6e7b161c5"
+        }
+      ]
+    }
+  ],
   "components": [
     {
       "id": "tdlib",
@@ -17,6 +114,9 @@
       "immutable_ref": "a17f87c4cff7b90b278d12b91ba0614383aaee82",
       "version": "1.8.65",
       "archive_sha256": "095a2e78ced222bbe4cf934d7a6796db6c13837b45f3c31e0a28df5d273770e7",
+      "archive_size": 5747723,
+      "source_tree_sha256": "b7b7a35caefdc6d083f42fc8f331344fd6e021bdf30fde7518326303c2bdca35",
+      "generated_source_tree_sha256": "5999031e3cbfe0ebbd95f88b152fe2724df7042beb9e74843feb65b02ca6588d",
       "license_expression": "BSL-1.0",
       "license_files": [
         {
@@ -55,6 +155,8 @@
       "immutable_ref": "4160d259d961cd393fd8d67590a8c7d210207348",
       "version": "2.5.0",
       "archive_sha256": "c91e8768600e61be11f7250e3cf3e71afd9d0f18f9c9e9e209a8e084ca08cd85",
+      "archive_size": 362003,
+      "source_tree_sha256": "7ea3110b1cf9dbfa7d3a762f45d3bcd491b44f5e926fabf0579b9a3523a4a8f1",
       "license_expression": "BSD-3-Clause",
       "license_files": [
         {
@@ -75,6 +177,8 @@
       "immutable_ref": "55f93686c01528224f448c19128836e7df245f72",
       "version": "3.12.0",
       "archive_sha256": "67f4cdd9ca930c9c1e130af4a437c7fc98fab77a2846fc2d2a14b4943831f8ef",
+      "archive_size": 9681256,
+      "source_tree_sha256": "8bee88e4cacdf3b35220ebcd5589ad298f7e38a383c2d5423b3b915cf700ab71",
       "license_expression": "MIT",
       "license_files": [
         {
@@ -95,6 +199,8 @@
       "immutable_ref": "40626af88bd7df9a5fb80be7b25ac85b122d6c21",
       "version": "11.2.0",
       "archive_sha256": "992216a0605e03f0373984ecad11158f42d8569782f1b2c84035272da10f0ff1",
+      "archive_size": 705751,
+      "source_tree_sha256": "21942bc73a714c6c3d78d6a4d6993f4eb3f252833eb47500daa9ff7b14cb0c87",
       "license_expression": "MIT",
       "license_files": [
         {
@@ -115,6 +221,8 @@
       "immutable_ref": "30172438cee64926dc41fdd9c11fb3ba5b2ba9de",
       "version": "3.4.0",
       "archive_sha256": "291254ffe7f2433f90deef878d0d9335534a350a958ea23ecf511b7b2277bf7f",
+      "archive_size": 1295179,
+      "source_tree_sha256": "2d635c077fd6aee0f7042e66ba3780dc8a30ca2e4f563cbab40d267282b2916e",
       "license_expression": "MIT",
       "license_files": [
         {
@@ -129,12 +237,14 @@
       "name": "OpenSSL",
       "scope": "release-runtime",
       "lock_state": "locked",
-      "integration": "release-toolchain-pending",
+      "integration": "release-source-build",
       "source_repository": "https://github.com/openssl/openssl",
       "source_archive": "https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz",
       "immutable_ref": "openssl-3.5.7",
       "version": "3.5.7",
       "archive_sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
+      "archive_size": 53153930,
+      "source_tree_sha256": "73fea4483c905cdac5adfd47f3a21b0cb29231d991423cb272acc1121b2709b3",
       "license_expression": "Apache-2.0",
       "license_files": [
         {
@@ -149,12 +259,14 @@
       "name": "zlib",
       "scope": "release-runtime",
       "lock_state": "locked",
-      "integration": "release-toolchain-pending",
+      "integration": "release-source-build",
       "source_repository": "https://github.com/madler/zlib",
       "source_archive": "https://zlib.net/zlib-1.3.2.tar.gz",
       "immutable_ref": "v1.3.2",
       "version": "1.3.2",
       "archive_sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "archive_size": 1502830,
+      "source_tree_sha256": "10da632ddff0d9113b2d1116da9324bdf3982f77f9afc2e9d777777d78c88bd9",
       "license_expression": "Zlib",
       "license_files": [
         {
@@ -175,6 +287,8 @@
       "immutable_ref": "2b60af89e23d28eefc081bc930831ee9d45ea58b",
       "version": "3.8.1",
       "archive_sha256": "553e6c94498c42edaecc9c8459f1a320a7e4cf49155635cf7123212bb9f09cf2",
+      "archive_size": 1198376,
+      "source_tree_sha256": "1d27b3e79625f3be9cda19dfff1924ea916f4eeb3bea13c8e2ebf4a2ad32dc30",
       "license_expression": "BSL-1.0",
       "license_files": [],
       "embedded_components": []
@@ -190,6 +304,8 @@
       "immutable_ref": "cb54cdc3134a62634466bf7bcd24f1a906f4ef25",
       "version": "1.7.0",
       "archive_sha256": "5b24c82df11ac8fe4a0eaa55c9f991ba076ea6c6ceb6ecb7d841e36a7eacf3cb",
+      "archive_size": 1609894,
+      "source_tree_sha256": "6e686844f18170412b5f63e0de63282851decabab2018b9f1e23965b835e9255",
       "license_expression": "BSL-1.0",
       "license_files": [],
       "embedded_components": []
@@ -197,31 +313,111 @@
     {
       "id": "musl",
       "name": "musl libc",
-      "scope": "planned-runtime",
-      "lock_state": "unresolved",
-      "integration": "toolchain-unselected",
+      "scope": "release-runtime",
+      "lock_state": "locked",
+      "integration": "release-toolchain-runtime",
       "source_repository": "https://git.musl-libc.org/cgit/musl",
-      "source_archive": null,
-      "immutable_ref": null,
-      "version": null,
-      "archive_sha256": null,
+      "source_archive": "https://musl.libc.org/releases/musl-1.2.6.tar.gz",
+      "immutable_ref": "v1.2.6",
+      "version": "1.2.6",
+      "archive_sha256": "d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a",
+      "archive_size": 1082499,
       "license_expression": "MIT",
-      "license_files": [],
+      "license_files": [
+        {
+          "path": "release/licenses/musl.txt",
+          "sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
+        }
+      ],
       "embedded_components": []
     },
     {
       "id": "gcc-runtime",
-      "name": "GCC runtime libraries (libgcc and libstdc++)",
-      "scope": "planned-runtime",
-      "lock_state": "unresolved",
-      "integration": "toolchain-unselected",
+      "name": "GCC runtime libraries and startup objects",
+      "scope": "release-runtime",
+      "lock_state": "locked",
+      "integration": "release-toolchain-runtime",
       "source_repository": "https://gcc.gnu.org/git/gcc.git",
-      "source_archive": null,
-      "immutable_ref": null,
-      "version": null,
-      "archive_sha256": null,
+      "source_archive": "https://ftp.gnu.org/gnu/gcc/gcc-16.1.0/gcc-16.1.0.tar.xz",
+      "immutable_ref": "releases/gcc-16.1.0",
+      "version": "16.1.0",
+      "archive_sha256": "50efb4d94c3397aff3b0d61a5abd748b4dd31d9d3f2ab7be05b171d36a510f79",
+      "archive_size": 102456900,
       "license_expression": "GPL-3.0-or-later WITH GCC-exception-3.1",
-      "license_files": [],
+      "license_files": [
+        {
+          "path": "release/licenses/GCC-GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "path": "release/licenses/GCC-Runtime-Library-Exception.txt",
+          "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "gperf",
+      "name": "GNU gperf",
+      "scope": "build-only",
+      "lock_state": "locked",
+      "integration": "release-host-tool-source",
+      "source_repository": "https://www.gnu.org/software/gperf/",
+      "source_archive": "https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz",
+      "immutable_ref": "gperf-3.3",
+      "version": "3.3",
+      "archive_sha256": "fd87e0aba7e43ae054837afd6cd4db03a3f2693deb3619085e6ed9d8d9604ad8",
+      "archive_size": 1831294,
+      "source_tree_sha256": "40af3660883f0d887ac1f7251af23e94713b83cacca55cd7764a8714b4f560c5",
+      "license_expression": "GPL-3.0-or-later",
+      "license_files": [
+        {
+          "path": "release/licenses/GCC-GPL-3.0.txt",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "linux-musl-toolchain",
+      "name": "cross-tools x86_64 musl toolchain release",
+      "scope": "build-only",
+      "lock_state": "locked",
+      "integration": "release-input-artifact",
+      "source_repository": "https://github.com/cross-tools/musl-cross",
+      "source_archive": "https://github.com/cross-tools/musl-cross/releases/download/20260515/x86_64-unknown-linux-musl.tar.xz",
+      "immutable_ref": "aa4bf173d705256e7fc2db82604bdccca090e9c3",
+      "version": "20260515",
+      "archive_sha256": "5f20e367608d6e547c04534d37d00ecedbaa0c2e82730df12957b3332fa36a2d",
+      "archive_size": 85186472,
+      "license_expression": "MIT",
+      "license_files": [
+        {
+          "path": "release/licenses/cross-tools-musl-cross.txt",
+          "sha256": "1ba4fd82422348f6d7a652363fa214ffbdfa9c9aff70f1b44cda1fdb125661ac"
+        }
+      ],
+      "embedded_components": []
+    },
+    {
+      "id": "linux-build-image",
+      "name": "Dockcross base Linux build image",
+      "scope": "build-only",
+      "lock_state": "locked",
+      "integration": "pinned-build-image",
+      "source_repository": "https://github.com/dockcross/dockcross",
+      "source_archive": "https://github.com/dockcross/dockcross/archive/5fd14ac6dca6c8d89e6942ff35879906a5f3a932.tar.gz",
+      "immutable_ref": "5fd14ac6dca6c8d89e6942ff35879906a5f3a932",
+      "version": "20260515-5fd14ac",
+      "archive_sha256": "7b2502541e334392294aef31ff8f3d043744b490784053bd5c1bffc7a923a4eb",
+      "archive_size": 185829,
+      "license_expression": "MIT",
+      "license_files": [
+        {
+          "path": "release/licenses/dockcross.txt",
+          "sha256": "9cd9af2d424740cc14c3dce54b5bb0a3c393fdbd13bc2a27c795b81e6c77bb23"
+        }
+      ],
       "embedded_components": []
     }
   ]

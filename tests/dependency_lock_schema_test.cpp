@@ -58,11 +58,43 @@ TEST_CASE("dependency source lock schema rejects incomplete and unknown data",
     incomplete["components"][0].erase("archive_sha256");
     CHECK_FALSE(validate(incomplete).empty());
 
-    auto falsely_resolved = canonical;
-    auto* musl = find_component(falsely_resolved, "musl");
+    auto unresolved = canonical;
+    auto* musl = find_component(unresolved, "musl");
     REQUIRE(musl != nullptr);
-    (*musl)["version"] = "unverified";
-    CHECK_FALSE(validate(falsely_resolved).empty());
+    (*musl)["lock_state"] = "unresolved";
+    CHECK_FALSE(validate(unresolved).empty());
+
+    auto incomplete_toolchain = canonical;
+    incomplete_toolchain["release_toolchains"][0].erase("producer_build_log");
+    CHECK_FALSE(validate(incomplete_toolchain).empty());
+
+    auto incomplete_runtime = canonical;
+    incomplete_runtime["release_toolchains"][0]["runtime_files"] = jsoncons::json::array();
+    CHECK_FALSE(validate(incomplete_runtime).empty());
+
+    auto invalid_archive_size = canonical;
+    invalid_archive_size["components"][0]["archive_size"] = true;
+    CHECK_FALSE(validate(invalid_archive_size).empty());
+
+    auto incomplete_tree = canonical;
+    incomplete_tree["components"][0].erase("source_tree_sha256");
+    CHECK_FALSE(validate(incomplete_tree).empty());
+
+    auto incomplete_generated_tree = canonical;
+    auto* generated_tdlib = find_component(incomplete_generated_tree, "tdlib");
+    REQUIRE(generated_tdlib != nullptr);
+    generated_tdlib->erase("generated_source_tree_sha256");
+    CHECK_FALSE(validate(incomplete_generated_tree).empty());
+
+    auto unexpected_tree = canonical;
+    auto* unexpected_musl = find_component(unexpected_tree, "musl");
+    REQUIRE(unexpected_musl != nullptr);
+    (*unexpected_musl)["source_tree_sha256"] = std::string(64, '0');
+    CHECK_FALSE(validate(unexpected_tree).empty());
+
+    auto unpinned_image = canonical;
+    unpinned_image["release_toolchains"][0]["image"] = "docker.io/dockcross/base:latest";
+    CHECK_FALSE(validate(unpinned_image).empty());
 
     auto boolean_version = canonical;
     boolean_version["schema_version"] = true;
