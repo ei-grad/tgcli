@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -139,13 +140,27 @@ fixed_hooks(std::shared_ptr<const daemon::testing::LogoutAuditHooks> audit = {})
     return hooks;
 }
 
+std::shared_ptr<daemon::testing::ConfigRuntimeHooks>
+counted_runtime_hooks(std::atomic<std::size_t>& reloads) {
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->now = [] { return daemon::ConfigRuntime::Clock::time_point{}; };
+    hooks->wait_until = [](std::condition_variable& condition, std::unique_lock<std::mutex>& lock,
+                           daemon::ConfigRuntime::Clock::time_point,
+                           const daemon::testing::ConfigRuntimeHooks::Predicate& predicate) {
+        condition.wait(lock, predicate);
+    };
+    hooks->before_reload = [&reloads](bool) { reloads.fetch_add(1, std::memory_order_relaxed); };
+    return hooks;
+}
+
 class FakeLogout final {
   public:
     FakeLogout(const LogoutTree& tree,
                std::shared_ptr<const daemon::testing::LogoutHooks> hooks = {},
                std::function<void()> audit_fatal = {},
-               core::AuthState initial_state = core::AuthState::Ready)
-        : config_(tree.config_path(), {}, tree.environment().uid) {
+               core::AuthState initial_state = core::AuthState::Ready,
+               std::shared_ptr<const daemon::testing::ConfigRuntimeHooks> config_hooks = {})
+        : config_(tree.config_path(), std::move(config_hooks), tree.environment().uid) {
         auto runtime = std::make_unique<test::ScriptedTdRuntime>(true);
         runtime_ = runtime.get();
         client_ = std::make_unique<core::TdClient>(std::move(runtime));
@@ -226,12 +241,16 @@ class FakeLogout final {
             .outcome;
     }
 
-    ControlledLogout
-    dispatch_controlled(proto::WriteAuthority authority = proto::WriteAuthority::Unset,
-                        bool yes = true, bool tty = false, std::optional<double> timeout = 2.0,
-                        bool dry_run = false, std::optional<bool> confirmation = std::nullopt,
-                        std::vector<std::string> command = {"logout"},
-                        std::function<void(std::size_t)> challenge_hook = {}) {
+    ControlledLogout dispatch_controlled(
+        proto::WriteAuthority authority = proto::WriteAuthority::Unset, bool yes = true,
+        bool tty = false, std::optional<double> timeout = 2.0, bool dry_run = false,
+        std::optional<bool> confirmation = std::nullopt,
+        std::vector<std::string> command = {"logout"},
+        std::function<void(std::size_t)> challenge_hook = {},
+        std::shared_ptr<const daemon::AdmittedAccountConfig> admitted_config = {},
+        std::optional<daemon::RequestSession::Clock::time_point> admission_deadline = {},
+        daemon::ConfigAdmissionMode config_admission_mode =
+            daemon::ConfigAdmissionMode::DirectFallback) {
         auto outcome = std::make_shared<Outcome>();
         auto sink = std::make_shared<daemon::CallbackSink>(
             [](const json&) {}, [](const json&) {},
@@ -271,12 +290,37 @@ class FakeLogout final {
         request.context.tty = tty;
         request.context.timeout_seconds = timeout;
         request.context.dry_run = dry_run;
-        auto session = std::make_shared<daemon::RequestSession>(std::move(request), sink);
+        auto session = std::make_shared<daemon::RequestSession>(
+            std::move(request), sink, 0, daemon::RequestSession::NonceGenerator{},
+            daemon::ActivityTracker::Token{}, std::move(admitted_config), admission_deadline,
+            config_admission_mode);
         auto future = std::async(std::launch::async, [this, outcome, session] {
             dispatcher_.dispatch(*session);
             return *outcome;
         });
         return {std::move(session), std::move(future)};
+    }
+
+    ControlledLogout
+    dispatch_frozen(std::shared_ptr<const daemon::AdmittedAccountConfig> admitted_config,
+                    daemon::RequestSession::Clock::time_point admission_deadline,
+                    proto::WriteAuthority authority = proto::WriteAuthority::Unset) {
+        return dispatch_controlled(authority, true, false, 2.0, false, std::nullopt, {"logout"}, {},
+                                   std::move(admitted_config), admission_deadline,
+                                   daemon::ConfigAdmissionMode::FrozenRuntime);
+    }
+
+    std::shared_ptr<const daemon::AdmittedAccountConfig>
+    admit_config(daemon::ConfigRuntime::Clock::time_point deadline) {
+        const auto result = config_.admit("main", deadline);
+        REQUIRE(result.refresh_status == daemon::ConfigRefreshStatus::Completed);
+        REQUIRE(result.decision);
+        REQUIRE(std::holds_alternative<std::shared_ptr<const daemon::AdmittedAccountConfig>>(
+            *result.decision));
+        auto admitted =
+            std::get<std::shared_ptr<const daemon::AdmittedAccountConfig>>(*result.decision);
+        REQUIRE(admitted);
+        return admitted;
     }
 
     test::ScriptedTdRuntime& runtime() {
@@ -727,6 +771,95 @@ TEST_CASE("logout rejects implicit main at daemon-side config admission",
         CHECK(logout.runtime().sent_functions().size() == 1);
         CHECK_FALSE(std::filesystem::exists(tree.audit_path()));
     }
+}
+
+TEST_CASE("logout keeps the socket admission snapshot across config changes",
+          "[logout][dispatch][config][admission-snapshot][safety]") {
+    SECTION("a denied standing grant cannot be enabled after admission") {
+        const LogoutTree tree(false);
+        std::atomic<std::size_t> reloads = 0;
+        FakeLogout logout(tree, {}, {}, core::AuthState::Ready, counted_runtime_hooks(reloads));
+        const auto deadline = daemon::RequestSession::Clock::now() + 5s;
+        const auto frozen = logout.admit_config(deadline);
+        REQUIRE(frozen->account == "main");
+        REQUIRE_FALSE(frozen->settings.allow_write);
+        const auto generation = frozen->generation;
+        const auto snapshot_identity = frozen->snapshot_identity;
+        const auto account_snapshot = frozen->account_snapshot;
+
+        tree.write_config("[accounts.main]\nallow_write = true\n");
+        auto controlled = logout.dispatch_frozen(frozen, deadline);
+        const auto outcome = controlled.outcome.get();
+
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "WRITE_DENIED");
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "no_grant");
+        CHECK(controlled.session->deadline() == deadline);
+        REQUIRE(controlled.session->admitted_config());
+        CHECK(controlled.session->admitted_config() == frozen);
+        CHECK(controlled.session->admitted_config()->account == "main");
+        CHECK(controlled.session->admitted_config()->generation == generation);
+        CHECK(controlled.session->admitted_config()->snapshot_identity == snapshot_identity);
+        CHECK(controlled.session->admitted_config()->account_snapshot == account_snapshot);
+        CHECK(reloads.load(std::memory_order_relaxed) == 1);
+        CHECK(logout.runtime().sent_functions().size() == 1);
+        CHECK_FALSE(std::filesystem::exists(tree.audit_path()));
+    }
+
+    SECTION("an accepted standing grant cannot be revoked after admission") {
+        const LogoutTree tree;
+        std::atomic<std::size_t> reloads = 0;
+        FakeLogout logout(tree, {}, {}, core::AuthState::Ready, counted_runtime_hooks(reloads));
+        const auto deadline = daemon::RequestSession::Clock::now() + 5s;
+        const auto frozen = logout.admit_config(deadline);
+        REQUIRE(frozen->account == "main");
+        REQUIRE(frozen->settings.allow_write);
+        const auto generation = frozen->generation;
+        const auto snapshot_identity = frozen->snapshot_identity;
+        const auto account_snapshot = frozen->account_snapshot;
+
+        tree.write_config("[accounts.main]\nallow_write = false\n");
+        auto controlled = logout.dispatch_frozen(frozen, deadline);
+        REQUIRE(logout.runtime().wait_for_sent(2));
+        logout.runtime().push_update(logout.first(), {},
+                                     core::AuthStateData{core::AuthState::Closed});
+        const auto outcome = controlled.outcome.get();
+
+        REQUIRE(outcome.result);
+        CHECK(controlled.session->deadline() == deadline);
+        REQUIRE(controlled.session->admitted_config());
+        CHECK(controlled.session->admitted_config() == frozen);
+        CHECK(controlled.session->admitted_config()->account == "main");
+        CHECK(controlled.session->admitted_config()->generation == generation);
+        CHECK(controlled.session->admitted_config()->snapshot_identity == snapshot_identity);
+        CHECK(controlled.session->admitted_config()->account_snapshot == account_snapshot);
+        CHECK(reloads.load(std::memory_order_relaxed) == 1);
+        const auto sent = logout.runtime().sent_functions();
+        REQUIRE(sent.size() >= 2);
+        CHECK(sent[1].function.has_type("logOut"));
+        CHECK(audit_records(tree).front()["authority_source"] == "config");
+    }
+}
+
+TEST_CASE("logout never reloads a missing socket admission snapshot",
+          "[logout][dispatch][config][admission-snapshot][safety]") {
+    const LogoutTree tree;
+    std::atomic<std::size_t> reloads = 0;
+    FakeLogout logout(tree, {}, {}, core::AuthState::Ready, counted_runtime_hooks(reloads));
+    const auto deadline = daemon::RequestSession::Clock::now() + 5s;
+
+    auto controlled = logout.dispatch_frozen({}, deadline);
+    const auto outcome = controlled.outcome.get();
+
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+    CHECK((*outcome.error)["error"]["details"] ==
+          json{{"operation", "logout"}, {"reason", "internal_error"}});
+    CHECK(controlled.session->deadline() == deadline);
+    CHECK_FALSE(controlled.session->admitted_config());
+    CHECK(reloads.load(std::memory_order_relaxed) == 0);
+    CHECK(logout.runtime().sent_functions().size() == 1);
+    CHECK_FALSE(std::filesystem::exists(tree.audit_path()));
 }
 
 TEST_CASE("logout preflight reconciles every definite prior audit prefix before a new send",

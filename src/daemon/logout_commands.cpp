@@ -447,27 +447,36 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
         return;
     }
 
-    const auto admission =
-        config_runtime_.admit(account_, session.deadline(), session.cancellation_token());
-    if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
-        session.error("TIMEOUT", "logout config admission timed out",
-                      {{"operation", "logout"}, {"state", nullptr}}, kTimeout);
-        return;
-    }
-    if (admission.refresh_status != ConfigRefreshStatus::Completed || !admission.decision) {
-        return;
-    }
-
-    std::shared_ptr<const AdmittedAccountConfig> admitted;
-    std::optional<ConfigAdmissionDenied> denied;
-    if (const auto* value =
-            std::get_if<std::shared_ptr<const AdmittedAccountConfig>>(&*admission.decision)) {
-        admitted = *value;
+    auto admitted = session.admitted_config();
+    ConfigAdmissionDenied denied;
+    bool admission_denied = false;
+    if (session.config_admission_mode() == ConfigAdmissionMode::FrozenRuntime) {
+        if (!admitted || admitted->account != account_ || !admitted->account_snapshot) {
+            session.error("INTERNAL", "logout config admission is missing",
+                          {{"operation", "logout"}, {"reason", "internal_error"}}, kGeneric);
+            return;
+        }
     } else {
-        denied = std::get<ConfigAdmissionDenied>(*admission.decision);
+        const auto admission =
+            config_runtime_.admit(account_, session.deadline(), session.cancellation_token());
+        if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
+            session.error("TIMEOUT", "logout config admission timed out",
+                          {{"operation", "logout"}, {"state", nullptr}}, kTimeout);
+            return;
+        }
+        if (admission.refresh_status != ConfigRefreshStatus::Completed || !admission.decision) {
+            return;
+        }
+        if (const auto* value =
+                std::get_if<std::shared_ptr<const AdmittedAccountConfig>>(&*admission.decision)) {
+            admitted = *value;
+        } else {
+            denied = std::get<ConfigAdmissionDenied>(*admission.decision);
+            admission_denied = true;
+        }
     }
 
-    if (denied && denied->state == ConfigAdmissionState::AccountMissing) {
+    if (admission_denied && denied.state == ConfigAdmissionState::AccountMissing) {
         session.error("ACCOUNT_NOT_FOUND", "account is not configured", {{"account", account_}},
                       kNotFound);
         return;
@@ -477,11 +486,11 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
                       kNotFound);
         return;
     }
-    if (denied && denied->state == ConfigAdmissionState::ConfigInvalidWithoutLastGood) {
+    if (admission_denied && denied.state == ConfigAdmissionState::ConfigInvalidWithoutLastGood) {
         session.error("CONFIG_INVALID", "cannot validate logout config",
                       {{"path", config_path_},
-                       {"reason", denied->reload_diagnostic
-                                      ? config::reason_name(denied->reload_diagnostic->reason)
+                       {"reason", denied.reload_diagnostic
+                                      ? config::reason_name(denied.reload_diagnostic->reason)
                                       : "io_error"}},
                       kGeneric);
         return;
@@ -489,10 +498,10 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
     const bool invalid_last_good_account_missing =
         (admitted && admitted->state == ConfigAdmissionState::ConfigInvalidWithLastGood &&
          !admitted->last_good_account_present) ||
-        (denied && denied->state == ConfigAdmissionState::ConfigInvalidWithLastGood &&
-         !denied->last_good_account_present);
+        (admission_denied && denied.state == ConfigAdmissionState::ConfigInvalidWithLastGood &&
+         !denied.last_good_account_present);
     if (invalid_last_good_account_missing) {
-        const auto diagnostic = admitted ? admitted->reload_diagnostic : denied->reload_diagnostic;
+        const auto diagnostic = admitted ? admitted->reload_diagnostic : denied.reload_diagnostic;
         session.error(
             "CONFIG_INVALID", "cannot validate logout account",
             {{"path", config_path_},
@@ -514,9 +523,9 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
         config_snapshot = admitted->snapshot_identity;
     } else {
         config_authority = {.grant_valid = false,
-                            .allow_write = denied->last_good_settings &&
-                                           denied->last_good_settings->allow_write};
-        config_snapshot = denied->snapshot_identity.value_or("missing");
+                            .allow_write = denied.last_good_settings &&
+                                           denied.last_good_settings->allow_write};
+        config_snapshot = denied.snapshot_identity.value_or("missing");
     }
     const auto authority = evaluate_destructive_authority(request.context, config_authority);
     if (const auto* rejected = std::get_if<DeniedAuthority>(&authority)) {

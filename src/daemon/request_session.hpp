@@ -75,6 +75,7 @@ enum class AnswerDisposition {
 enum class InFlightState { None, InFlight, Orphaned };
 enum class AuditedDispatchStatus { Dispatched, Disconnected, Shutdown, TimedOut, ProtocolError };
 enum class AuditedTerminalStatus { Designated, Disconnected, Shutdown, TimedOut, ProtocolError };
+enum class ConfigAdmissionMode { DirectFallback, FrozenRuntime };
 
 class RequestSession final : public ResponseSink {
   public:
@@ -87,12 +88,14 @@ class RequestSession final : public ResponseSink {
                    NonceGenerator nonce_generator = {},
                    ActivityTracker::Token request_activity = {},
                    std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
-                   std::optional<Clock::time_point> admission_deadline = {});
+                   std::optional<Clock::time_point> admission_deadline = {},
+                   ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback);
     RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
                    std::uint64_t connection_id = 0, NonceGenerator nonce_generator = {},
                    ActivityTracker::Token request_activity = {},
                    std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
-                   std::optional<Clock::time_point> admission_deadline = {});
+                   std::optional<Clock::time_point> admission_deadline = {},
+                   ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback);
 
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t connection_id() const;
@@ -101,6 +104,7 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] bool cancellation_requested() const;
     [[nodiscard]] bool shutdown_requested() const;
     [[nodiscard]] const std::shared_ptr<const AdmittedAccountConfig>& admitted_config() const;
+    [[nodiscard]] ConfigAdmissionMode config_admission_mode() const;
 
     ChallengeOutcome challenge(ChallengeSpec spec);
     AnswerDisposition receive_answer(proto::Answer answer);
@@ -169,6 +173,7 @@ class RequestSession final : public ResponseSink {
     Clock::time_point deadline_;
     NonceGenerator nonce_generator_;
     std::shared_ptr<const AdmittedAccountConfig> admitted_config_;
+    ConfigAdmissionMode config_admission_mode_;
 
     mutable std::mutex session_mutex_;
     std::condition_variable challenge_cv_;

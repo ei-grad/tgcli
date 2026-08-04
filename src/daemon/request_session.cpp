@@ -127,22 +127,26 @@ RequestSession::RequestSession(proto::Request request, ResponseSink& transport,
                                std::uint64_t connection_id, NonceGenerator nonce_generator,
                                ActivityTracker::Token request_activity,
                                std::shared_ptr<const AdmittedAccountConfig> admitted_config,
-                               std::optional<Clock::time_point> admission_deadline)
+                               std::optional<Clock::time_point> admission_deadline,
+                               ConfigAdmissionMode config_admission_mode)
     : request_(std::move(request)), transport_(&transport), connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
       nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
-      admitted_config_(std::move(admitted_config)), activity_(std::move(request_activity)) {}
+      admitted_config_(std::move(admitted_config)), config_admission_mode_(config_admission_mode),
+      activity_(std::move(request_activity)) {}
 
 RequestSession::RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
                                std::uint64_t connection_id, NonceGenerator nonce_generator,
                                ActivityTracker::Token request_activity,
                                std::shared_ptr<const AdmittedAccountConfig> admitted_config,
-                               std::optional<Clock::time_point> admission_deadline)
+                               std::optional<Clock::time_point> admission_deadline,
+                               ConfigAdmissionMode config_admission_mode)
     : request_(std::move(request)), transport_owner_(std::move(transport)),
       transport_(transport_owner_.get()), connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
       nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
-      admitted_config_(std::move(admitted_config)), activity_(std::move(request_activity)) {
+      admitted_config_(std::move(admitted_config)), config_admission_mode_(config_admission_mode),
+      activity_(std::move(request_activity)) {
     if (transport_ == nullptr) {
         throw std::invalid_argument("request session transport is null");
     }
@@ -175,6 +179,10 @@ bool RequestSession::shutdown_requested() const {
 
 const std::shared_ptr<const AdmittedAccountConfig>& RequestSession::admitted_config() const {
     return admitted_config_;
+}
+
+ConfigAdmissionMode RequestSession::config_admission_mode() const {
+    return config_admission_mode_;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

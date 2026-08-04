@@ -600,7 +600,8 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
             auto sink = std::make_shared<ConnectionSink>(connection, request->id);
             active_session = std::make_shared<RequestSession>(
                 *request, sink, connection->id(), RequestSession::NonceGenerator{},
-                std::move(*activity), std::move(admitted_config), admission_deadline);
+                std::move(*activity), std::move(admitted_config), admission_deadline,
+                ConfigAdmissionMode::FrozenRuntime);
             if (options_.request_observer) {
                 options_.request_observer(testing::RequestObservationStage::SessionConstruction);
             }
