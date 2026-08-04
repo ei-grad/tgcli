@@ -19,13 +19,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from test_dc_contract import (
+    M1_BOT_TEST,
+    M1_QR_TEST,
     PINNED_AUTH_STATES,
     ContractError,
     FrozenSentinel,
     SkipEntry,
+    auth_state_test_id,
     freeze_auth_sentinels,
     read_secret_fixture,
     scan_frozen_auth_sentinels,
+    validate_m1_coverage,
     write_skip_artifact,
 )
 
@@ -55,6 +59,16 @@ PROMPTS = {
     b"Bot token: ": "bot_token",
     b"Telegram api_id: ": "unexpected_app_credential",
     b"Telegram api_hash: ": "unexpected_app_credential",
+}
+PROMPT_AUTH_STATES = {
+    "phone_number": "wait_phone_number",
+    "authentication_code": "wait_code",
+    "email_address": "wait_email_address",
+    "email_code": "wait_email_code",
+    "registration_terms": "wait_registration",
+    "registration_first_name": "wait_registration",
+    "registration_last_name": "wait_registration",
+    "password": "wait_password",
 }
 
 
@@ -703,6 +717,14 @@ def _require_qr_approval(runner: Runner) -> None:
         raise AcceptanceError("QR login completed without an auth_qr approval")
 
 
+def _observed_auth_state_tests(result: CommandResult) -> set[str]:
+    return {
+        auth_state_test_id(state)
+        for prompt, state in PROMPT_AUTH_STATES.items()
+        if prompt in result.observed_prompts
+    }
+
+
 def _state_log_directory(environment: Mapping[str, str], account: str) -> Path:
     return Path(environment["XDG_STATE_HOME"]) / "tgcli-test" / "accounts" / account
 
@@ -713,7 +735,8 @@ def _smoke(
     fixtures: Mapping[str, bytes],
     sources: Mapping[str, Path],
     qr_approver: Path | None,
-) -> None:
+) -> set[str]:
+    executed: set[str] = set()
     accounts = [USER_ACCOUNT]
     if "bot_token" in sources:
         accounts.append(BOT_ACCOUNT)
@@ -760,9 +783,13 @@ def _smoke(
 
     _require_phone_code_flow(results[USER_ACCOUNT], "initial login")
     user_identity = _assert_login(results[USER_ACCOUNT].document, USER_ACCOUNT)
+    executed.update(_observed_auth_state_tests(results[USER_ACCOUNT]))
+    executed.add(auth_state_test_id("wait_tdlib_parameters"))
+    executed.add(auth_state_test_id("ready"))
     if BOT_ACCOUNT in results:
         bot_identity = _assert_login(results[BOT_ACCOUNT].document, BOT_ACCOUNT)
         _assert_bot_identity(bot_identity)
+        executed.add(M1_BOT_TEST)
     me = runner.run_json(
         "me-user", ["--json", "--account", USER_ACCOUNT, "me"]
     ).document
@@ -783,9 +810,11 @@ def _smoke(
     ).document
     if logout != {"account": USER_ACCOUNT, "logged_out": True}:
         raise AcceptanceError("logout did not report correlated Closed completion")
+    executed.add(auth_state_test_id("closed"))
     relogin = runner.run_interactive("relogin-user", user_arguments, fixtures)
     _require_phone_code_flow(relogin, "re-login")
     relogin_identity = _assert_login(relogin.document, USER_ACCOUNT)
+    executed.update(_observed_auth_state_tests(relogin))
     if relogin_identity.get("id") != user_identity.get("id"):
         raise AcceptanceError("re-login returned a different identity")
     if (
@@ -805,6 +834,9 @@ def _smoke(
         )
         _assert_login(qr.document, QR_ACCOUNT)
         _require_qr_approval(runner)
+        executed.add(M1_QR_TEST)
+        executed.add(auth_state_test_id("wait_other_device_confirmation"))
+    return executed
 
 
 def _skip_entries(
@@ -812,14 +844,14 @@ def _skip_entries(
 ) -> list[SkipEntry]:
     entries: list[SkipEntry] = []
     if arguments.qr_approver is None:
-        entries.append(SkipEntry("m1.auth.qr", "fixture_missing:qr_approver"))
+        entries.append(SkipEntry(M1_QR_TEST, "fixture_missing:qr_approver"))
     if "bot_token" not in sources:
-        entries.append(SkipEntry("m1.auth.bot", "fixture_missing:bot_token_cmd"))
+        entries.append(SkipEntry(M1_BOT_TEST, "fixture_missing:bot_token_cmd"))
     for state in arguments.unforceable_state:
         if state not in PINNED_AUTH_STATES:
             raise AcceptanceError(f"unknown pinned authorization state: {state}")
         entries.append(
-            SkipEntry(f"m1.auth.state.{state}", f"test_dc_state_not_forceable:{state}")
+            SkipEntry(auth_state_test_id(state), f"test_dc_state_not_forceable:{state}")
         )
     return entries
 
@@ -887,13 +919,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 [_state_log_directory(environment, account) for account in accounts],
             )
-            _smoke(
+            executed = _smoke(
                 runner,
                 environment,
                 fixtures,
                 sources,
                 arguments.qr_approver,
             )
+            validate_m1_coverage(executed, entries)
     except (AcceptanceError, ContractError, OSError) as error:
         failure = error
     finally:

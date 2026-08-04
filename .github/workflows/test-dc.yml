@@ -78,9 +78,13 @@ jobs:
             --unforceable-state wait_email_code
             --unforceable-state wait_registration
             --unforceable-state wait_password
+            --unforceable-state logging_out
+            --unforceable-state closing
           )
           if [[ -n "$TGCLI_TEST_DC_QR_APPROVER" ]]; then
             arguments+=(--qr-approver "$TGCLI_TEST_DC_QR_APPROVER")
+          else
+            arguments+=(--unforceable-state wait_other_device_confirmation)
           fi
           python3 scripts/run_test_dc_e2e.py "${arguments[@]}"
 

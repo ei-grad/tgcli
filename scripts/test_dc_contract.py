@@ -30,8 +30,17 @@ PINNED_AUTH_STATES = frozenset(
         "closed",
     }
 )
-FIXTURE_REASONS = frozenset(
-    {"fixture_missing:qr_approver", "fixture_missing:bot_token_cmd"}
+M1_BOT_TEST = "m1.auth.bot"
+M1_QR_TEST = "m1.auth.qr"
+
+
+def auth_state_test_id(state: str) -> str:
+    return f"m1.auth.state.{state}"
+
+
+M1_EXPECTED_TESTS = frozenset(
+    {M1_BOT_TEST, M1_QR_TEST}
+    | {auth_state_test_id(state) for state in PINNED_AUTH_STATES}
 )
 
 
@@ -56,16 +65,19 @@ class FrozenSentinel:
 
 
 def validate_skip(entry: SkipEntry) -> None:
-    if not entry.test:
-        raise ContractError("skip test name must be non-empty")
-    if entry.reason in FIXTURE_REASONS:
+    if entry.test not in M1_EXPECTED_TESTS:
+        raise ContractError("skip test is outside the M1 closed set")
+    if entry.test == M1_QR_TEST and entry.reason == "fixture_missing:qr_approver":
         return
-    prefix = "test_dc_state_not_forceable:"
-    if not entry.reason.startswith(prefix):
-        raise ContractError("skip reason is outside the M1 closed enum")
-    state = entry.reason[len(prefix) :]
-    if state not in PINNED_AUTH_STATES:
-        raise ContractError("skip reason names an unknown authorization state")
+    if entry.test == M1_BOT_TEST and entry.reason == "fixture_missing:bot_token_cmd":
+        return
+    for state in PINNED_AUTH_STATES:
+        if entry.test == auth_state_test_id(state):
+            expected = f"test_dc_state_not_forceable:{state}"
+            if entry.reason == expected:
+                return
+            raise ContractError("state skip reason does not match its M1 test")
+    raise ContractError("fixture skip reason does not match its M1 test")
 
 
 def canonical_skips(entries: Iterable[SkipEntry]) -> list[SkipEntry]:
@@ -75,7 +87,28 @@ def canonical_skips(entries: Iterable[SkipEntry]) -> list[SkipEntry]:
     result.sort()
     if len(set(result)) != len(result):
         raise ContractError("duplicate skip entries are not permitted")
+    if len({entry.test for entry in result}) != len(result):
+        raise ContractError("each M1 test may have at most one skip")
     return result
+
+
+def validate_m1_coverage(executed: Iterable[str], entries: Iterable[SkipEntry]) -> None:
+    executed_tests = frozenset(executed)
+    unknown = executed_tests - M1_EXPECTED_TESTS
+    if unknown:
+        raise ContractError(
+            f"executed test is outside the M1 closed set: {min(unknown)}"
+        )
+
+    skips = canonical_skips(entries)
+    skipped_tests = frozenset(entry.test for entry in skips)
+    overlap = executed_tests & skipped_tests
+    if overlap:
+        raise ContractError(f"executed M1 test also has a stale skip: {min(overlap)}")
+
+    missing = M1_EXPECTED_TESTS - executed_tests - skipped_tests
+    if missing:
+        raise ContractError(f"M1 test is neither executed nor skipped: {min(missing)}")
 
 
 def _open_private_replacement(target: Path) -> tuple[int, Path]:

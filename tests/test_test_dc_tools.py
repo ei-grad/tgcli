@@ -63,19 +63,25 @@ class SkipArtifactTests(unittest.TestCase):
             artifact,
             [
                 contract.SkipEntry(
-                    "z", "test_dc_state_not_forceable:wait_premium_purchase"
+                    contract.auth_state_test_id("wait_premium_purchase"),
+                    "test_dc_state_not_forceable:wait_premium_purchase",
                 ),
-                contract.SkipEntry("a", "fixture_missing:qr_approver"),
-                contract.SkipEntry("a", "fixture_missing:bot_token_cmd"),
+                contract.SkipEntry(contract.M1_QR_TEST, "fixture_missing:qr_approver"),
+                contract.SkipEntry(
+                    contract.M1_BOT_TEST, "fixture_missing:bot_token_cmd"
+                ),
             ],
         )
         self.assertEqual(
             contract.load_skip_artifact(artifact),
             [
-                contract.SkipEntry("a", "fixture_missing:bot_token_cmd"),
-                contract.SkipEntry("a", "fixture_missing:qr_approver"),
                 contract.SkipEntry(
-                    "z", "test_dc_state_not_forceable:wait_premium_purchase"
+                    contract.M1_BOT_TEST, "fixture_missing:bot_token_cmd"
+                ),
+                contract.SkipEntry(contract.M1_QR_TEST, "fixture_missing:qr_approver"),
+                contract.SkipEntry(
+                    contract.auth_state_test_id("wait_premium_purchase"),
+                    "test_dc_state_not_forceable:wait_premium_purchase",
                 ),
             ],
         )
@@ -83,13 +89,31 @@ class SkipArtifactTests(unittest.TestCase):
     def test_loader_rejects_silent_or_noncanonical_artifacts(self) -> None:
         cases = (
             {"skips": [], "extra": True},
-            {"skips": [{"test": "a", "reason": "fixture_missing:qr_approver", "x": 1}]},
-            {"skips": [{"test": 1, "reason": "fixture_missing:qr_approver"}]},
-            {"skips": [{"test": "a", "reason": "fixture_missing:anything"}]},
             {
                 "skips": [
-                    {"test": "b", "reason": "fixture_missing:qr_approver"},
-                    {"test": "a", "reason": "fixture_missing:bot_token_cmd"},
+                    {
+                        "test": contract.M1_QR_TEST,
+                        "reason": "fixture_missing:qr_approver",
+                        "x": 1,
+                    }
+                ]
+            },
+            {"skips": [{"test": 1, "reason": "fixture_missing:qr_approver"}]},
+            {
+                "skips": [
+                    {"test": contract.M1_QR_TEST, "reason": "fixture_missing:anything"}
+                ]
+            },
+            {
+                "skips": [
+                    {
+                        "test": contract.M1_QR_TEST,
+                        "reason": "fixture_missing:qr_approver",
+                    },
+                    {
+                        "test": contract.M1_BOT_TEST,
+                        "reason": "fixture_missing:bot_token_cmd",
+                    },
                 ]
             },
         )
@@ -104,13 +128,92 @@ class SkipArtifactTests(unittest.TestCase):
             contract.load_skip_artifact(self.tree.root / "missing.json")
 
     def test_duplicate_and_unknown_state_reasons_are_rejected(self) -> None:
-        duplicate = contract.SkipEntry("a", "fixture_missing:qr_approver")
+        duplicate = contract.SkipEntry(
+            contract.M1_QR_TEST, "fixture_missing:qr_approver"
+        )
         with self.assertRaises(contract.ContractError):
             contract.canonical_skips([duplicate, duplicate])
         with self.assertRaises(contract.ContractError):
             contract.canonical_skips(
-                [contract.SkipEntry("a", "test_dc_state_not_forceable:future_state")]
+                [
+                    contract.SkipEntry(
+                        contract.auth_state_test_id("wait_password"),
+                        "test_dc_state_not_forceable:future_state",
+                    )
+                ]
             )
+
+
+class CoveragePartitionTests(unittest.TestCase):
+    def test_expected_set_is_exactly_the_pinned_states_and_fixture_flows(self) -> None:
+        self.assertEqual(
+            contract.M1_EXPECTED_TESTS,
+            {
+                contract.M1_BOT_TEST,
+                contract.M1_QR_TEST,
+                *(
+                    contract.auth_state_test_id(state)
+                    for state in contract.PINNED_AUTH_STATES
+                ),
+            },
+        )
+
+    def test_executed_and_skipped_tests_form_a_complete_disjoint_partition(
+        self,
+    ) -> None:
+        executed = {
+            contract.M1_BOT_TEST,
+            contract.auth_state_test_id("wait_tdlib_parameters"),
+            contract.auth_state_test_id("wait_phone_number"),
+            contract.auth_state_test_id("wait_code"),
+            contract.auth_state_test_id("ready"),
+            contract.auth_state_test_id("closed"),
+        }
+        skips = [
+            contract.SkipEntry(contract.M1_QR_TEST, "fixture_missing:qr_approver"),
+            *(
+                contract.SkipEntry(
+                    contract.auth_state_test_id(state),
+                    f"test_dc_state_not_forceable:{state}",
+                )
+                for state in contract.PINNED_AUTH_STATES
+                if contract.auth_state_test_id(state) not in executed
+            ),
+        ]
+        contract.validate_m1_coverage(executed, skips)
+
+    def test_missing_unknown_and_stale_coverage_are_rejected(self) -> None:
+        complete = set(contract.M1_EXPECTED_TESTS)
+        with self.assertRaisesRegex(
+            contract.ContractError, "neither executed nor skipped"
+        ):
+            contract.validate_m1_coverage(complete - {contract.M1_QR_TEST}, [])
+        with self.assertRaisesRegex(
+            contract.ContractError, "outside the M1 closed set"
+        ):
+            contract.validate_m1_coverage(complete | {"m1.auth.future"}, [])
+        with self.assertRaisesRegex(contract.ContractError, "stale skip"):
+            contract.validate_m1_coverage(
+                complete,
+                [
+                    contract.SkipEntry(
+                        contract.M1_QR_TEST, "fixture_missing:qr_approver"
+                    )
+                ],
+            )
+
+    def test_skip_test_and_reason_are_exactly_bound(self) -> None:
+        cases = [
+            contract.SkipEntry("m1.auth.future", "fixture_missing:qr_approver"),
+            contract.SkipEntry(contract.M1_BOT_TEST, "fixture_missing:qr_approver"),
+            contract.SkipEntry(
+                contract.auth_state_test_id("wait_code"),
+                "test_dc_state_not_forceable:wait_password",
+            ),
+        ]
+        for entry in cases:
+            with self.subTest(entry=entry), self.assertRaises(contract.ContractError):
+                contract.canonical_skips([entry])
 
 
 class SentinelTests(unittest.TestCase):
@@ -264,7 +367,13 @@ SUBCOMMANDS:
         )
         return binary
 
-    def _run(self, binary: Path, extra: list[str] | None = None) -> int:
+    def _run(
+        self,
+        binary: Path,
+        extra: list[str] | None = None,
+        *,
+        preflight_only: bool = True,
+    ) -> int:
         arguments = [
             "--binary",
             str(binary),
@@ -272,8 +381,9 @@ SUBCOMMANDS:
             str(self.build),
             "--fixture-dir",
             str(self.fixtures),
-            "--preflight-only",
         ]
+        if preflight_only:
+            arguments.append("--preflight-only")
         arguments.extend(extra or [])
         with (
             mock.patch.dict(
@@ -368,6 +478,36 @@ SUBCOMMANDS:
         binary = self._binary("substring-only", substring_only)
         self.assertEqual(self._run(binary), 1)
 
+    def test_full_run_accepts_a_complete_partition(self) -> None:
+        binary = self._binary("tgcli-complete", self.VALID_HELP)
+        executed = set(contract.M1_EXPECTED_TESTS) - {
+            contract.M1_BOT_TEST,
+            contract.M1_QR_TEST,
+        }
+        with (
+            mock.patch.object(acceptance, "_smoke", return_value=executed),
+            mock.patch.object(acceptance, "scan_frozen_auth_sentinels"),
+        ):
+            self.assertEqual(self._run(binary, preflight_only=False), 0)
+
+    def test_full_run_rejects_an_incomplete_partition_and_writes_skips(self) -> None:
+        binary = self._binary("tgcli-incomplete-coverage", self.VALID_HELP)
+        with (
+            mock.patch.object(acceptance, "_smoke", return_value=set()),
+            mock.patch.object(acceptance, "scan_frozen_auth_sentinels"),
+        ):
+            self.assertEqual(self._run(binary, preflight_only=False), 1)
+        artifact = self.build / "test-results" / "tgcli-test-dc-skips.json"
+        self.assertEqual(
+            contract.load_skip_artifact(artifact),
+            [
+                contract.SkipEntry(
+                    contract.M1_BOT_TEST, "fixture_missing:bot_token_cmd"
+                ),
+                contract.SkipEntry(contract.M1_QR_TEST, "fixture_missing:qr_approver"),
+            ],
+        )
+
 
 class HarnessInvariantTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -413,6 +553,33 @@ class HarnessInvariantTests(unittest.TestCase):
             acceptance._require_qr_approval(runner)
         runner.qr_approvals = 1
         acceptance._require_qr_approval(runner)
+
+    def test_observed_prompts_map_only_to_their_pinned_auth_states(self) -> None:
+        result = acceptance.CommandResult(
+            {},
+            frozenset(
+                {
+                    "phone_number",
+                    "authentication_code",
+                    "email_address",
+                    "email_code",
+                    "registration_first_name",
+                    "password",
+                    "database_key",
+                }
+            ),
+        )
+        self.assertEqual(
+            acceptance._observed_auth_state_tests(result),
+            {
+                contract.auth_state_test_id("wait_phone_number"),
+                contract.auth_state_test_id("wait_code"),
+                contract.auth_state_test_id("wait_email_address"),
+                contract.auth_state_test_id("wait_email_code"),
+                contract.auth_state_test_id("wait_registration"),
+                contract.auth_state_test_id("wait_password"),
+            },
+        )
 
     def test_noop_account_add_is_rejected_before_config_augmentation(self) -> None:
         runner = mock.Mock()
@@ -585,6 +752,19 @@ class WorkflowContractTests(unittest.TestCase):
         smoke = workflow.split("name: Run M1 authentication smoke", maxsplit=1)[1]
         self.assertNotIn("TGCLI_TEST_DC_PASSWORD:", smoke)
         self.assertNotIn("TGCLI_TEST_DC_BOT_TOKEN:", smoke)
+        for state in (
+            "wait_premium_purchase",
+            "wait_email_address",
+            "wait_email_code",
+            "wait_registration",
+            "wait_password",
+            "logging_out",
+            "closing",
+        ):
+            self.assertIn(f"--unforceable-state {state}", smoke)
+        qr_else = smoke.split('if [[ -n "$TGCLI_TEST_DC_QR_APPROVER" ]]', maxsplit=1)[1]
+        self.assertIn("else", qr_else)
+        self.assertIn("--unforceable-state wait_other_device_confirmation", qr_else)
 
 
 if __name__ == "__main__":
