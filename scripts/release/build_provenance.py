@@ -67,27 +67,30 @@ def source_identity(repo_root: pathlib.Path, expected_commit: str) -> dict:
     require(tracked.returncode in {0, 1}, "cannot inspect tracked source changes")
     require(tracked.returncode == 0, "release source has tracked worktree changes")
 
-    untracked = run_git(repo_root, ["ls-files", "--others", "--exclude-standard", "-z"])
-    require(untracked.returncode == 0, "cannot inspect untracked source files")
-    require(not untracked.stdout, "release source has untracked files")
-
-    ignored = run_git(
-        repo_root, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+    untracked = run_git(
+        repo_root,
+        ["ls-files", "--others", "--directory", "--no-empty-directory", "-z"],
     )
-    require(ignored.returncode == 0, "cannot inspect ignored source files")
-    ignored_entries = [
+    require(untracked.returncode == 0, "cannot inspect untracked source files")
+    untracked_entries = [
         entry.decode("utf-8", errors="strict")
-        for entry in ignored.stdout.split(b"\0")
+        for entry in untracked.stdout.split(b"\0")
         if entry
     ]
-    unsafe_ignored = [
-        entry
-        for entry in ignored_entries
-        if not entry.startswith("build/") and not entry.startswith(".ruff_cache/")
-    ]
+    allowed_generated_roots = {".ruff_cache/", "build/"}
+    unsafe_untracked = []
+    for entry in untracked_entries:
+        generated_root = repo_root / entry.removesuffix("/")
+        if (
+            entry not in allowed_generated_roots
+            or not generated_root.is_dir()
+            or generated_root.is_symlink()
+        ):
+            unsafe_untracked.append(entry)
     require(
-        not unsafe_ignored,
-        f"release source has ignored files outside build/cache roots: {unsafe_ignored[:3]}",
+        not unsafe_untracked,
+        "release source has untracked files outside build/cache roots: "
+        f"{unsafe_untracked[:3]}",
     )
 
     tree = git_text(repo_root, ["rev-parse", "HEAD^{tree}"], "source tree")

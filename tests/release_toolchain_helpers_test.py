@@ -53,7 +53,7 @@ def initialize_source_repo(root: pathlib.Path) -> str:
     run(["git", "init", "--quiet", str(root)])
     run(["git", "-C", str(root), "config", "user.name", "tgcli test"])
     run(["git", "-C", str(root), "config", "user.email", "tgcli@example.invalid"])
-    (root / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".ruff_cache/\nbuild/\n", encoding="utf-8")
     (root / "tracked.txt").write_text("locked\n", encoding="utf-8")
     run(["git", "-C", str(root), "add", ".gitignore", "tracked.txt"])
     run(["git", "-C", str(root), "commit", "--quiet", "-m", "fixture"])
@@ -92,6 +92,70 @@ def source_identity_tests(base: pathlib.Path) -> None:
     relevant.unlink()
     relevant.parent.rmdir()
     run(command)
+
+    for generated_root in (source / ".ruff_cache", source / "build"):
+        generated_root.mkdir()
+        (generated_root / "generated.cache").write_text("cache\n", encoding="utf-8")
+    run(command)
+
+    exclude_file = source / ".git/release-test-excludes"
+    exclude_file.write_text("concealed/\n", encoding="utf-8")
+    run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "config",
+            "core.excludesFile",
+            str(exclude_file),
+        ]
+    )
+    concealed = source / "concealed/generated.pyc"
+    concealed.parent.mkdir()
+    concealed.write_bytes(b"concealed")
+    if run(
+        ["git", "-C", str(source), "ls-files", "--others", "--exclude-standard"]
+    ).stdout:
+        raise AssertionError("test exclude rule did not conceal the untracked fixture")
+    expect_failure(command, "untracked files")
+    concealed.unlink()
+    concealed.parent.rmdir()
+    run(command)
+
+    prefix_lookalike = source / "build-output/forged"
+    prefix_lookalike.parent.mkdir()
+    prefix_lookalike.write_text("forged\n", encoding="utf-8")
+    expect_failure(command, "untracked files")
+    prefix_lookalike.unlink()
+    prefix_lookalike.parent.rmdir()
+
+    nested_lookalike = source / "src/build/forged"
+    nested_lookalike.parent.mkdir(parents=True)
+    nested_lookalike.write_text("forged\n", encoding="utf-8")
+    expect_failure(command, "untracked files")
+    nested_lookalike.unlink()
+    nested_lookalike.parent.rmdir()
+    nested_lookalike.parent.parent.rmdir()
+    run(command)
+
+    unsafe_source = base / "unsafe-generated-root"
+    unsafe_source.mkdir()
+    unsafe_commit = initialize_source_repo(unsafe_source)
+    external_build = base / "external-build"
+    external_build.mkdir()
+    (unsafe_source / "build").symlink_to(external_build, target_is_directory=True)
+    expect_failure(
+        [
+            sys.executable,
+            str(PROVENANCE),
+            "source-identity",
+            "--repo-root",
+            str(unsafe_source),
+            "--expected-commit",
+            unsafe_commit,
+        ],
+        "untracked files",
+    )
 
     no_git = base / "no-git"
     no_git.mkdir()
