@@ -19,6 +19,12 @@
     "doctor": {
       "result": "doctor.result.schema.json"
     },
+    "login": {
+      "result": "login.result.schema.json"
+    },
+    "me": {
+      "result": "me.result.schema.json"
+    },
     "version": {
       "result": "version.result.schema.json"
     }

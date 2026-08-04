@@ -225,6 +225,9 @@ std::optional<BootstrapResult> resolve_credentials(const BootstrapSnapshot& snap
         if (!secret_hook::parse_api_id(*snapshot.environment_api_id, credentials.api_id)) {
             return failure(BootstrapFailure::InvalidCredential, {HookField::ApiId});
         }
+    } else if (attempt.interactive && attempt.prompted_app.api_id) {
+        credentials.api_id = *attempt.prompted_app.api_id;
+        credentials.interactive_source_used = true;
     } else if (snapshot.account_config.api_id) {
         credentials.api_id = *snapshot.account_config.api_id;
     } else if (snapshot.account_config.api_id_cmd) {
@@ -244,9 +247,6 @@ std::optional<BootstrapResult> resolve_credentials(const BootstrapSnapshot& snap
             return failure(BootstrapFailure::InvalidCredential, {HookField::ApiId});
         }
         wipe(value);
-    } else if (attempt.prompted_app.api_id) {
-        credentials.api_id = *attempt.prompted_app.api_id;
-        credentials.interactive_source_used = true;
     } else {
         return failure(BootstrapFailure::InputRequired, {HookField::ApiId});
     }
@@ -256,6 +256,9 @@ std::optional<BootstrapResult> resolve_credentials(const BootstrapSnapshot& snap
             return failure(BootstrapFailure::InvalidCredential, {HookField::ApiHash});
         }
         credentials.api_hash = *snapshot.environment_api_hash;
+    } else if (attempt.interactive && attempt.prompted_app.api_hash) {
+        credentials.api_hash = *attempt.prompted_app.api_hash;
+        credentials.interactive_source_used = true;
     } else if (snapshot.account_config.api_hash) {
         credentials.api_hash = *snapshot.account_config.api_hash;
     } else if (snapshot.account_config.api_hash_cmd) {
@@ -265,9 +268,6 @@ std::optional<BootstrapResult> resolve_credentials(const BootstrapSnapshot& snap
                                     credentials.interactive_source_used)) {
             return error;
         }
-    } else if (attempt.prompted_app.api_hash) {
-        credentials.api_hash = *attempt.prompted_app.api_hash;
-        credentials.interactive_source_used = true;
     } else {
         return failure(BootstrapFailure::InputRequired, {HookField::ApiHash});
     }
@@ -297,7 +297,8 @@ std::optional<BootstrapResult> mutation_failure(const config::MutationResult& re
     case config::MutationStatus::Applied:
         return std::nullopt;
     case config::MutationStatus::Conflict:
-        return failure(BootstrapFailure::ConfigConflict);
+        return BootstrapResult{
+            {}, BootstrapError{BootstrapFailure::ConfigConflict, {}, {}}, result.snapshot};
     case config::MutationStatus::TimedOut:
         return failure(BootstrapFailure::TimedOut);
     case config::MutationStatus::Cancelled:
@@ -510,6 +511,19 @@ BootstrapResult AuthBootstrap::run(const std::shared_ptr<const AuthStateSnapshot
             return std::move(*mutation_error);
         }
         materialized = mutation.snapshot;
+    } else if (attempt.interactive && attempt.prompted_app.api_id &&
+               attempt.prompted_app.api_hash) {
+        auto mutation_control = attempt.control;
+        mutation_control.commit_admission = [&] {
+            lease = client_.acquire_send_lease(descriptor);
+            return static_cast<bool>(lease);
+        };
+        const auto mutation = store_.replace_app_credentials(
+            snapshot_.config_identity, snapshot_.account, attempt.prompted_app, mutation_control);
+        if (auto mutation_error = mutation_failure(mutation)) {
+            return std::move(*mutation_error);
+        }
+        materialized = mutation.snapshot;
     } else {
         lease = client_.acquire_send_lease(descriptor);
         if (!lease) {
@@ -528,25 +542,47 @@ BootstrapResult AuthBootstrap::run(const std::shared_ptr<const AuthStateSnapshot
 #error "tgcli bootstrap supports only Linux and macOS"
 #endif
 
-    TdlibParameters parameters{
-        .use_test_dc = snapshot_.test_dc,
-        .database_directory = snapshot_.database_directory,
-        .files_directory = snapshot_.files_directory,
-        .database_encryption_key = std::move(credentials.database_key),
-        .use_file_database = true,
-        .use_chat_info_database = true,
-        .use_message_database = true,
-        .use_secret_chats = false,
-        .api_id = credentials.api_id,
-        .api_hash = std::move(credentials.api_hash),
-        .system_language_code = "en",
-        .device_model = "tgcli",
-        .system_version = std::string(system_version),
-        .application_version = snapshot_.application_version,
-    };
+    TdlibParameters parameters;
+    parameters.use_test_dc = snapshot_.test_dc;
+    parameters.database_directory = snapshot_.database_directory;
+    parameters.files_directory = snapshot_.files_directory;
+    parameters.database_encryption_key = credentials.database_key;
+    wipe(credentials.database_key);
+    parameters.use_file_database = true;
+    parameters.use_chat_info_database = true;
+    parameters.use_message_database = true;
+    parameters.use_secret_chats = false;
+    parameters.api_id = credentials.api_id;
+    parameters.api_hash = credentials.api_hash;
+    wipe(credentials.api_hash);
+    parameters.system_language_code = "en";
+    parameters.device_model = "tgcli";
+    parameters.system_version = system_version;
+    parameters.application_version = snapshot_.application_version;
     occurrence.sent = true;
     auto response = client_.send(std::move(lease), std::move(parameters));
     return {std::optional<std::future<TdValue>>(std::move(response)), {}, std::move(materialized)};
+}
+
+bool AuthBootstrap::retry_after_rejection(
+    const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!authorization || authorization->data.state != AuthState::WaitTdlibParameters) {
+        return false;
+    }
+    const auto live = client_.auth_state();
+    if (!live || live->client_generation != authorization->client_generation ||
+        live->auth_sequence != authorization->auth_sequence ||
+        live->data.state != authorization->data.state) {
+        return false;
+    }
+    const auto found =
+        state_->occurrences.find({authorization->client_generation, authorization->auth_sequence});
+    if (found == state_->occurrences.end() || !found->second.sent) {
+        return false;
+    }
+    found->second.sent = false;
+    return true;
 }
 
 } // namespace tgcli::core

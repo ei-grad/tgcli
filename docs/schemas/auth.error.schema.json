@@ -1,0 +1,385 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli login and me error",
+  "$defs": {
+    "state": {
+      "enum": [
+        "unknown",
+        "wait_tdlib_parameters",
+        "wait_phone_number",
+        "wait_premium_purchase",
+        "wait_email_address",
+        "wait_email_code",
+        "wait_code",
+        "wait_other_device_confirmation",
+        "wait_registration",
+        "wait_password",
+        "ready",
+        "logging_out",
+        "closing",
+        "closed"
+      ]
+    },
+    "credential": {
+      "enum": [
+        "app_credentials",
+        "database_key",
+        "phone_number",
+        "bot_token",
+        "email_address",
+        "email_code",
+        "authentication_code",
+        "registration_name",
+        "password"
+      ]
+    },
+    "challenge": {
+      "enum": [
+        "api_id",
+        "api_hash",
+        "database_key",
+        "phone_number",
+        "authentication_code",
+        "email_address",
+        "email_code",
+        "password",
+        "bot_token",
+        "registration_first_name",
+        "registration_last_name",
+        "registration_terms"
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "USAGE" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["argument", "reason"],
+              "properties": {
+                "argument": { "type": ["string", "null"] },
+                "reason": {
+                  "enum": ["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "invalid_environment", "unsupported_mode"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "INSECURE_SECRET_INPUT" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["argument", "replacement"],
+              "properties": {
+                "argument": { "const": "--bot-token" },
+                "replacement": { "const": "--bot" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "CONFIG_INVALID" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "reason"],
+              "properties": {
+                "path": { "type": "string", "pattern": "^/" },
+                "reason": {
+                  "enum": ["path_invalid", "wrong_owner", "wrong_type", "wrong_mode", "wrong_link_count", "too_large", "parse_error", "type_error", "invalid_default", "conflicting_credentials", "io_error", "sync_error"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "CONFIG_CONFLICT" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "expected", "current"],
+              "properties": {
+                "path": { "type": "string", "pattern": "^/" },
+                "expected": { "type": "string" },
+                "current": { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "HOOK_FAILED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["hook", "reason", "status"],
+              "properties": {
+                "hook": { "enum": ["api_id_cmd", "api_hash_cmd", "db_key_cmd", "password_cmd", "bot_token_cmd"] },
+                "reason": { "enum": ["spawn", "exit", "signal", "timeout", "stdout_empty", "stdout_invalid", "stdout_too_large", "stderr_too_large"] },
+                "status": { "type": ["integer", "null"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "AUTH_FLOW_IN_PROGRESS" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": { "$ref": "#/$defs/state" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "NOT_AUTHED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state", "reason"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": { "$ref": "#/$defs/state" },
+                "reason": { "enum": ["not_ready", "authorization_lost", "login_required"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "enum": ["AUTH_INPUT_REQUIRED", "AUTH_CANCELLED"] },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state", "challenge"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": { "$ref": "#/$defs/state" },
+                "challenge": { "$ref": "#/$defs/challenge" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "AUTH_CREDENTIAL_REJECTED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state", "credential", "tdlib_code"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": { "$ref": "#/$defs/state" },
+                "credential": { "$ref": "#/$defs/credential" },
+                "tdlib_code": { "type": "integer" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "AUTH_PREMIUM_REQUIRED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state", "store_product_id", "premium_day_count", "support_email_address", "support_email_subject"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": { "const": "wait_premium_purchase" },
+                "store_product_id": { "type": "string" },
+                "premium_day_count": { "type": "integer" },
+                "support_email_address": { "type": "string" },
+                "support_email_subject": { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "UNSUPPORTED_AUTH_STATE" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "tdlib_type_id"],
+              "properties": {
+                "account": { "type": "string" },
+                "tdlib_type_id": { "type": "integer" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "PROTOCOL_ANSWER_INVALID" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["request_id", "reason"],
+              "properties": {
+                "request_id": { "type": "integer", "minimum": 0 },
+                "reason": { "enum": ["future_sequence", "nonce_mismatch", "generation_mismatch", "malformed", "unknown_request"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "RATE_LIMITED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "tdlib_code", "retry_after"],
+              "properties": {
+                "operation": { "enum": ["login", "me"] },
+                "tdlib_code": { "const": 429 },
+                "retry_after": { "type": "integer" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "TDLIB_ERROR" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "tdlib_code"],
+              "properties": {
+                "operation": { "enum": ["login", "me"] },
+                "tdlib_code": { "type": "integer" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "TIMEOUT" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "state"],
+              "properties": {
+                "operation": { "enum": ["login", "me"] },
+                "state": {
+                  "oneOf": [
+                    { "$ref": "#/$defs/state" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "DAEMON_SHUTDOWN" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reason"],
+              "properties": { "reason": { "const": "daemon_shutdown" } }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "INTERNAL" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "reason"],
+              "properties": {
+                "operation": { "enum": ["auth_bootstrap", "login", "me"] },
+                "reason": { "const": "internal_error" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

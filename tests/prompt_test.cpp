@@ -1,8 +1,10 @@
 #include "cli/prompt.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -14,6 +16,8 @@
 #include <termios.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -240,16 +244,34 @@ TEST_CASE("secret terminal prompt does not echo the submitted sentinel", "[promp
     std::array<int, 2> prompt_pipe{-1, -1};
     REQUIRE(::pipe(prompt_pipe.data()) == 0);
 
-    tgcli::cli::TerminalPrompt prompt(slave, prompt_pipe[1]);
+    constexpr std::string_view secret_value = "p4ssw0rd";
+    std::vector<std::pair<std::string, bool>> wipe_observations;
+    auto observer = [&wipe_observations, secret_value](std::string_view stage, const char* bytes,
+                                                       std::size_t size) {
+        if (size == secret_value.size()) {
+            wipe_observations.emplace_back(
+                stage, std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                   [](char value) { return value == '\0'; }));
+        }
+    };
+    tgcli::cli::TerminalPrompt prompt(slave, prompt_pipe[1], ::tcsetattr, observer);
     auto result =
         std::async(std::launch::async, [&prompt] { return prompt.prompt(secret_challenge()); });
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    constexpr std::string_view sentinel = "NEVER_ECHO_THIS_SENTINEL\n";
-    REQUIRE(::write(master, sentinel.data(), sentinel.size()) ==
-            static_cast<ssize_t>(sentinel.size()));
-    const auto response = result.get();
-    REQUIRE(response.kind == tgcli::cli::PromptResultKind::Answer);
-    CHECK(response.answer["value"] == "NEVER_ECHO_THIS_SENTINEL");
+    const std::string submitted = std::string(secret_value) + '\n';
+    REQUIRE(::write(master, submitted.data(), submitted.size()) ==
+            static_cast<ssize_t>(submitted.size()));
+    {
+        const auto response = result.get();
+        REQUIRE(response.kind == tgcli::cli::PromptResultKind::Answer);
+        CHECK(response.answer["value"] == secret_value);
+    }
+    for (const std::string_view required_stage : {"prompt_input_move_source", "prompt_input_source",
+                                                  "prompt_answer_source", "prompt_answer"}) {
+        CHECK(std::ranges::any_of(wipe_observations, [required_stage](const auto& observation) {
+            return observation.first == required_stage && observation.second;
+        }));
+    }
 
     pollfd readable{master, POLLIN, 0};
     std::string terminal_output;
@@ -260,7 +282,7 @@ TEST_CASE("secret terminal prompt does not echo the submitted sentinel", "[promp
             terminal_output.assign(buffer.data(), static_cast<std::size_t>(count));
         }
     }
-    CHECK(terminal_output.find("NEVER_ECHO_THIS_SENTINEL") == std::string::npos);
+    CHECK(terminal_output.find(secret_value) == std::string::npos);
 
     ::close(prompt_pipe[0]);
     ::close(prompt_pipe[1]);

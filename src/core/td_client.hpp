@@ -9,6 +9,10 @@
 #include <stdexcept>
 #include <string>
 
+namespace tgcli::daemon {
+class LoginCoordinator;
+}
+
 namespace tgcli::core {
 
 class AuthBootstrap;
@@ -98,6 +102,7 @@ class TdClient {
     // submitted, and the owner capability is minted and revoked internally.
     std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    TdFunctionKind function, TdValue request);
+    std::future<TdValue> get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization);
 
     [[nodiscard]] bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const;
 
@@ -123,8 +128,12 @@ class TdClient {
   private:
     [[nodiscard]] TdRequestOwner internal_auth_owner() const;
     [[nodiscard]] TdOwnerLease issue_login_owner();
+    std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    const TdRequestOwner& owner, TdAuthRequest request);
+    bool restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization);
 
     friend class AuthBootstrap;
+    friend class tgcli::daemon::LoginCoordinator;
 
     class Impl;
     std::unique_ptr<Impl> impl_;

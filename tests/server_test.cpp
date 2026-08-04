@@ -11,9 +11,12 @@
 #include "daemon/server.hpp"
 #include "proto/frame_io.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <latch>
@@ -90,8 +93,10 @@ struct TestDaemon {
     TestDaemon& operator=(TestDaemon&&) = delete;
 
     explicit TestDaemon(const std::function<void(daemon::Dispatcher&)>& configure = {},
-                        bool register_default_commands = true)
-        : server({socket, "9.9.9", proto::kProtocolVersion, {}, {}}, dispatcher) {
+                        bool register_default_commands = true,
+                        secure::WipeObserver wipe_observer = {})
+        : server({socket, "9.9.9", proto::kProtocolVersion, {}, {}, std::move(wipe_observer)},
+                 dispatcher) {
         std::string error;
         const auto separator = socket.rfind('/');
         REQUIRE(separator != std::string::npos);
@@ -265,15 +270,18 @@ void install_challenge_command(daemon::Dispatcher& dispatcher) {
     dispatcher.register_command(
         "challenge socket",
         {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {
-             const auto outcome = session.challenge(code_challenge());
-             switch (outcome.status) {
-             case daemon::ChallengeStatus::Answered:
+             auto outcome = session.challenge(code_challenge());
+             switch (outcome.status()) {
+             case daemon::ChallengeStatus::Answered: {
                  if (!session.reserve_in_flight()) {
                      return;
                  }
                  session.settle_in_flight();
-                 session.result({{"value", std::get<std::string>(outcome.value)}});
+                 std::string value;
+                 static_cast<void>(outcome.take_string(value));
+                 session.result({{"value", value}});
                  return;
+             }
              case daemon::ChallengeStatus::Cancelled:
                  session.error("AUTH_CANCELLED", "authentication cancelled",
                                {{"account", "test"},
@@ -322,6 +330,66 @@ TEST_CASE("challenge answer round-trip keeps the socket reader live", "[server][
     const auto* result = std::get_if<proto::Result>(&terminal);
     REQUIRE(result != nullptr);
     CHECK(result->data == json{{"value", "12345"}});
+    ::close(fd);
+}
+
+TEST_CASE("answer sources are wiped before the challenged worker resumes",
+          "[server][challenge][secret][ordering]") {
+    std::atomic<bool> parsed_line_wiped{false};
+    std::atomic<bool> answer_source_wiped{false};
+    std::atomic<bool> answer_move_source_wiped{false};
+    std::atomic<bool> answer_payload_wiped{false};
+    std::atomic<bool> challenge_value_source_wiped{false};
+    std::atomic<bool> candidate_copy_seen{false};
+    const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
+        const bool all_zero =
+            size == 0 || std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                     [](char value) { return value == '\0'; });
+        if (stage == "parsed_line" && all_zero) {
+            parsed_line_wiped.store(true, std::memory_order_release);
+        } else if (stage == "answer_source" && all_zero) {
+            answer_source_wiped.store(true, std::memory_order_release);
+        } else if (stage == "answer_move_source" && all_zero) {
+            answer_move_source_wiped.store(true, std::memory_order_release);
+        } else if (stage == "answer_payload" && all_zero) {
+            answer_payload_wiped.store(true, std::memory_order_release);
+        } else if (stage == "challenge_value_source" && all_zero) {
+            challenge_value_source_wiped.store(true, std::memory_order_release);
+        } else if (stage == "candidate_line" || stage == "candidate_json") {
+            candidate_copy_seen.store(true, std::memory_order_release);
+        }
+    };
+    const TestDaemon daemon(
+        [&](daemon::Dispatcher& dispatcher) {
+            dispatcher.register_command(
+                "wipe order",
+                {daemon::Tier::Read, [&](const proto::Request&, daemon::RequestSession& session) {
+                     auto outcome = session.challenge(code_challenge());
+                     std::string value;
+                     const bool answered = outcome.take_string(value);
+                     secure::wipe(value);
+                     session.result(
+                         {{"answered", answered},
+                          {"sources_wiped_before_resume",
+                           parsed_line_wiped.load(std::memory_order_acquire) &&
+                               answer_source_wiped.load(std::memory_order_acquire) &&
+                               answer_move_source_wiped.load(std::memory_order_acquire) &&
+                               answer_payload_wiped.load(std::memory_order_acquire) &&
+                               challenge_value_source_wiped.load(std::memory_order_acquire) &&
+                               !candidate_copy_seen.load(std::memory_order_acquire)}});
+                 }});
+        },
+        false, observer);
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    read_frame(reader);
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"wipe", "order"}, 711));
+    const auto challenge_frame = std::get<proto::Challenge>(read_frame(reader));
+    send_frame(fd, answer_for(711, challenge_frame.challenge, "123456"));
+    const auto result = std::get<proto::Result>(read_frame(reader));
+    CHECK(result.data == json{{"answered", true}, {"sources_wiped_before_resume", true}});
+    CHECK_FALSE(candidate_copy_seen.load(std::memory_order_acquire));
     ::close(fd);
 }
 

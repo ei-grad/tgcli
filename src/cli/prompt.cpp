@@ -189,9 +189,37 @@ bool write_all(int fd, std::string_view data) {
 enum class ReadKind { Value, Eof, Error, Interrupted };
 
 struct ReadResult {
+    ReadResult(ReadKind kind_value, int signal_value = 0,
+               secure::WipeObserver wipe_observer_value = {})
+        : kind(kind_value), signal(signal_value), wipe_observer(std::move(wipe_observer_value)) {}
+    ~ReadResult() {
+        secure::wipe(value, wipe_observer, "prompt_input");
+    }
+    ReadResult(const ReadResult&) = delete;
+    ReadResult& operator=(const ReadResult&) = delete;
+    // Copying preserves the source allocation until its bytes have been wiped.
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,cppcoreguidelines-prefer-member-initializer,performance-noexcept-move-constructor)
+    ReadResult(ReadResult&& other) : kind(other.kind), signal(other.signal) {
+        secure::transfer(other.value, value, other.wipe_observer, "prompt_input_move_source");
+        // NOLINTNEXTLINE(cppcoreguidelines-prefer-member-initializer)
+        wipe_observer = std::move(other.wipe_observer);
+    }
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    ReadResult& operator=(ReadResult&& other) {
+        if (this != &other) {
+            secure::wipe(value, wipe_observer, "prompt_input");
+            kind = other.kind;
+            signal = other.signal;
+            secure::transfer(other.value, value, other.wipe_observer, "prompt_input_move_source");
+            wipe_observer = std::move(other.wipe_observer);
+        }
+        return *this;
+    }
+
     ReadKind kind;
     std::string value;
     int signal = 0;
+    secure::WipeObserver wipe_observer;
 };
 
 void report_restore_failure_and_forward(int output_fd, const ReadResult& input,
@@ -209,25 +237,25 @@ void finish_secret_prompt_line(int output_fd, bool secret) {
     }
 }
 
-ReadResult read_line(int fd) {
-    ReadResult result{ReadKind::Value, {}};
+ReadResult read_line(int fd, const secure::WipeObserver& wipe_observer) {
+    ReadResult result{ReadKind::Value, 0, wipe_observer};
     for (;;) {
         if (const int signal = PromptSignalGuard::take_pending(); signal != 0) {
-            return {ReadKind::Interrupted, {}, signal};
+            return {ReadKind::Interrupted, signal, wipe_observer};
         }
         char character = 0;
         const ssize_t count = ::read(fd, &character, 1);
         if (count < 0 && errno == EINTR) {
             if (const int signal = PromptSignalGuard::take_pending(); signal != 0) {
-                return {ReadKind::Interrupted, {}, signal};
+                return {ReadKind::Interrupted, signal, wipe_observer};
             }
             continue;
         }
         if (count < 0) {
-            return {ReadKind::Error, {}};
+            return {ReadKind::Error, 0, wipe_observer};
         }
         if (count == 0) {
-            return {ReadKind::Eof, {}};
+            return {ReadKind::Eof, 0, wipe_observer};
         }
         if (character == '\n') {
             break;
@@ -248,13 +276,50 @@ nlohmann::json answer_identity(const nlohmann::json& challenge) {
 
 } // namespace
 
+PromptResult::PromptResult(PromptResultKind kind_value, secure::WipeObserver wipe_observer_value)
+    : kind(kind_value), wipe_observer_(std::move(wipe_observer_value)) {}
+
+// NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
+PromptResult::PromptResult(PromptResultKind kind_value, nlohmann::json&& answer_value,
+                           secure::WipeObserver wipe_observer_value)
+    : kind(kind_value), wipe_observer_(std::move(wipe_observer_value)) {
+    secure::transfer(answer_value, answer, wipe_observer_, "prompt_answer_source");
+}
+
+PromptResult::~PromptResult() {
+    secure::wipe(answer, wipe_observer_, "prompt_answer");
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,cppcoreguidelines-prefer-member-initializer,performance-noexcept-move-constructor)
+PromptResult::PromptResult(PromptResult&& other) : kind(other.kind) {
+    secure::transfer(other.answer, answer, other.wipe_observer_, "prompt_result_move_source");
+    // NOLINTNEXTLINE(cppcoreguidelines-prefer-member-initializer)
+    wipe_observer_ = std::move(other.wipe_observer_);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+PromptResult& PromptResult::operator=(PromptResult&& other) {
+    if (this != &other) {
+        secure::wipe(answer, wipe_observer_, "prompt_answer");
+        kind = other.kind;
+        secure::transfer(other.answer, answer, other.wipe_observer_, "prompt_result_move_source");
+        wipe_observer_ = std::move(other.wipe_observer_);
+    }
+    return *this;
+}
+
 TerminalPrompt::TerminalPrompt() : TerminalPrompt(STDIN_FILENO, STDERR_FILENO) {}
 
 TerminalPrompt::TerminalPrompt(int input_fd, int output_fd)
     : TerminalPrompt(input_fd, output_fd, ::tcsetattr) {}
 
 TerminalPrompt::TerminalPrompt(int input_fd, int output_fd, TerminalAttributeSetter set_attributes)
-    : input_fd_(input_fd), output_fd_(output_fd), set_attributes_(std::move(set_attributes)) {}
+    : TerminalPrompt(input_fd, output_fd, std::move(set_attributes), {}) {}
+
+TerminalPrompt::TerminalPrompt(int input_fd, int output_fd, TerminalAttributeSetter set_attributes,
+                               secure::WipeObserver wipe_observer)
+    : input_fd_(input_fd), output_fd_(output_fd), set_attributes_(std::move(set_attributes)),
+      wipe_observer_(std::move(wipe_observer)) {}
 
 PromptResult TerminalPrompt::prompt(const nlohmann::json& challenge) {
     std::string validation_error;
@@ -274,13 +339,13 @@ PromptResult TerminalPrompt::prompt(const nlohmann::json& challenge) {
         return {PromptResultKind::Error};
     }
 
-    ReadResult input{ReadKind::Error, {}};
+    ReadResult input{ReadKind::Error, 0, wipe_observer_};
     for (;;) {
         EchoGuard echo(input_fd_, secret, set_attributes_);
         if (!echo.active_or_unneeded(secret)) {
             return {PromptResultKind::Error};
         }
-        input = read_line(input_fd_);
+        input = read_line(input_fd_, wipe_observer_);
         const bool echo_restored = echo.restore();
         if (!echo_restored) {
             report_restore_failure_and_forward(output_fd_, input, signals);
@@ -304,7 +369,7 @@ PromptResult TerminalPrompt::prompt(const nlohmann::json& challenge) {
     auto answer = answer_identity(challenge);
     if (input.kind == ReadKind::Eof) {
         answer["cancelled"] = true;
-        return {PromptResultKind::Cancelled, std::move(answer)};
+        return {PromptResultKind::Cancelled, std::move(answer), wipe_observer_};
     }
     if (input.kind == ReadKind::Error) {
         return {PromptResultKind::Error};
@@ -316,9 +381,10 @@ PromptResult TerminalPrompt::prompt(const nlohmann::json& challenge) {
     if (proto::challenge_kind_expects_boolean(*kind)) {
         answer["value"] = input.value == "y" || input.value == "yes";
     } else {
-        answer["value"] = std::move(input.value);
+        answer["value"] = input.value;
+        secure::wipe(input.value, wipe_observer_, "prompt_input_source");
     }
-    return {PromptResultKind::Answer, std::move(answer)};
+    return {PromptResultKind::Answer, std::move(answer), wipe_observer_};
 }
 
 } // namespace tgcli::cli

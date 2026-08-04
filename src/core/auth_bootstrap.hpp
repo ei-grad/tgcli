@@ -102,6 +102,7 @@ class AuthBootstrap {
 
     BootstrapResult run(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                         const BootstrapAttempt& attempt);
+    bool retry_after_rejection(const std::shared_ptr<const AuthStateSnapshot>& authorization);
 
   private:
     struct State;

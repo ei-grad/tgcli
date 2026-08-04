@@ -87,6 +87,28 @@ std::vector<SchemaCase> schema_cases() {
          {{"version", "0.1.0"}, {"protocol", 1}, {"tdlib", "1.8.65"}},
          "version"},
         {"daemon-stop.result.schema.json", {{"stopping", true}}, "stopping"},
+        {"login.result.schema.json",
+         {{"account", "main"},
+          {"auth_state", "ready"},
+          {"user",
+           {{"id", 123456},
+            {"first_name", "Ada"},
+            {"last_name", "Lovelace"},
+            {"usernames", json::array({"ada"})},
+            {"phone_number", "12025550123"},
+            {"is_bot", false},
+            {"is_premium", true}}}},
+         "account",
+         true},
+        {"me.result.schema.json",
+         {{"id", 123456},
+          {"first_name", "Ada"},
+          {"last_name", "Lovelace"},
+          {"usernames", json::array({"ada"})},
+          {"phone_number", "12025550123"},
+          {"is_bot", false},
+          {"is_premium", true}},
+         "id"},
         {"doctor.result.schema.json",
          {{"account", "main"},
           {"daemon",
@@ -128,9 +150,11 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                           {"account use", {{"result", "account-use.result.schema.json"}}},
                           {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
                           {"doctor", {{"result", "doctor.result.schema.json"}}},
+                          {"login", {{"result", "login.result.schema.json"}}},
+                          {"me", {{"result", "me.result.schema.json"}}},
                           {"version", {{"result", "version.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 7);
+    CHECK(manifest["commands"].size() == 9);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -173,6 +197,8 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
 
     const auto account_error = tgcli::test::load_schema_document("account.error.schema.json");
     check_schema_node(account_error);
+    const auto auth_error = tgcli::test::load_schema_document("auth.error.schema.json");
+    check_schema_node(auth_error);
 }
 
 TEST_CASE("result schemas reject missing required and unknown properties", "[schema]") {

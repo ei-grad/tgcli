@@ -50,7 +50,7 @@
           "required": ["state"],
           "properties": {
             "state": {
-              "const": "unknown"
+              "enum": ["unknown", "wait_tdlib_parameters", "wait_phone_number", "wait_premium_purchase", "wait_email_address", "wait_email_code", "wait_code", "wait_other_device_confirmation", "wait_registration", "wait_password", "ready", "logging_out", "closing", "closed"]
             }
           }
         }
@@ -101,7 +101,7 @@
           "required": ["state"],
           "properties": {
             "state": {
-              "const": "unknown"
+              "enum": ["unknown", "wait_tdlib_parameters", "wait_phone_number", "wait_premium_purchase", "wait_email_address", "wait_email_code", "wait_code", "wait_other_device_confirmation", "wait_registration", "wait_password", "ready", "logging_out", "closing", "closed"]
             }
           }
         }

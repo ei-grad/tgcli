@@ -6,6 +6,7 @@
 #include "core/td_client.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
+#include "daemon/login_commands.hpp"
 #include "daemon/server.hpp"
 
 #include <cerrno>
@@ -118,6 +119,16 @@ int run_daemon(const std::string& account) {
     pthread_sigmask(SIG_BLOCK, &signals, nullptr);
 
     core::TdClient td;
+    const auto environment = paths::real_environment();
+    const config::Store config_store(paths::config_file(environment), environment.uid);
+
+    const auto environment_value = [](const char* name) -> std::optional<std::string> {
+        const char* value = std::getenv(name);
+        return value != nullptr && *value != '\0' ? std::optional<std::string>{value}
+                                                  : std::nullopt;
+    };
+    LoginCoordinator login(td, config_store, environment, account, kVersion,
+                           environment_value("TGCLI_API_ID"), environment_value("TGCLI_API_HASH"));
 
     DaemonContext context;
     context.account = account;
@@ -125,6 +136,11 @@ int run_daemon(const std::string& account) {
     context.protocol_version = proto::kProtocolVersion;
     context.tdlib_version = core::TdClient::tdlib_version();
     context.socket_path = account_paths.socket;
+    context.login = &login;
+    context.auth_state = [&td] {
+        const auto state = td.auth_state();
+        return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
+    };
 
     Dispatcher dispatcher;
     register_commands(dispatcher, context);
@@ -179,19 +195,33 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         return false;
     }
 
-    // No TdClient instance yet: M0's commands only need the static tdlib
-    // version. The instance appears here once a handler needs live tdlib.
+    core::TdClient td;
+    const auto environment = paths::real_environment();
+    const config::Store config_store(paths::config_file(environment), environment.uid);
+    const auto environment_value = [](const char* name) -> std::optional<std::string> {
+        const char* value = std::getenv(name);
+        return value != nullptr && *value != '\0' ? std::optional<std::string>{value}
+                                                  : std::nullopt;
+    };
+    LoginCoordinator login(td, config_store, environment, account, kVersion,
+                           environment_value("TGCLI_API_ID"), environment_value("TGCLI_API_HASH"));
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
     context.protocol_version = proto::kProtocolVersion;
     context.tdlib_version = core::TdClient::tdlib_version();
     context.in_process = true;
+    context.login = &login;
+    context.auth_state = [&td] {
+        const auto state = td.auth_state();
+        return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
+    };
 
     Dispatcher dispatcher;
     register_commands(dispatcher, context);
     (dispatcher_override != nullptr ? *dispatcher_override : dispatcher).dispatch(request, sink);
 
+    td.close();
     ::close(lock_fd);
     return true;
 }

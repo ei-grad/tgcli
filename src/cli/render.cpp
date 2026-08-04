@@ -102,6 +102,28 @@ std::string render_account_use(const nlohmann::json& data) {
                        data.value("default_account", std::string("?")), previous);
 }
 
+std::string render_user(const nlohmann::json& data) {
+    std::string usernames;
+    for (const auto& username : data.at("usernames")) {
+        if (!usernames.empty()) {
+            usernames += ", ";
+        }
+        usernames += username.get<std::string>();
+    }
+    return fmt::format("id: {}\nname: {} {}\nusernames: {}\nphone number: {}\nbot: {}\n"
+                       "premium: {}\n",
+                       data.value("id", std::int64_t{0}), data.value("first_name", std::string{}),
+                       data.value("last_name", std::string{}), usernames,
+                       data.value("phone_number", std::string{}),
+                       yes_no(data.value("is_bot", false)),
+                       yes_no(data.value("is_premium", false)));
+}
+
+std::string render_login(const nlohmann::json& data) {
+    return fmt::format("account: {}\nauth state: {}\n{}", data.value("account", std::string("?")),
+                       data.value("auth_state", std::string("?")), render_user(data.at("user")));
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -122,6 +144,12 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "account use") {
         return render_account_use(data);
+    }
+    if (command_key == "login") {
+        return render_login(data);
+    }
+    if (command_key == "me") {
+        return render_user(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

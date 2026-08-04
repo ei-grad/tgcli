@@ -1,0 +1,8 @@
+account: main
+auth state: ready
+id: 123456
+name: Ada Lovelace
+usernames: ada, analytical_engine
+phone number: 12025550123
+bot: no
+premium: yes

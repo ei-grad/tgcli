@@ -1,6 +1,7 @@
 #include "daemon/commands.hpp"
 
 #include "common/exit_codes.hpp"
+#include "daemon/login_commands.hpp"
 #include "daemon/request_session.hpp"
 
 #include <cstdint>
@@ -29,13 +30,15 @@ json doctor_payload(const DaemonContext& context) {
     return {{"account", context.account},
             {"daemon", std::move(daemon_info)},
             {"tdlib", json{{"version", context.tdlib_version}}},
-            // Real auth reporting arrives with the M1 auth FSM.
-            {"auth", json{{"state", "unknown"}}}};
+            {"auth", json{{"state", context.auth_state()}}}};
 }
 
 } // namespace
 
 void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
+    if (context.login != nullptr) {
+        register_login_commands(dispatcher, *context.login);
+    }
     dispatcher.register_command(
         "version", {Tier::Read, [&context](const proto::Request&, RequestSession& sink) {
                         sink.result(version_payload(context));

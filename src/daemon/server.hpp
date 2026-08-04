@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace tgcli::daemon {
@@ -17,11 +18,21 @@ class ConnectionState;
 class RequestSession;
 
 struct ServerOptions {
+    ServerOptions(std::string socket_path_value, std::string binary_version_value,
+                  int protocol_version_value, std::string control_socket_path_value,
+                  std::string control_token_value, secure::WipeObserver wipe_observer_value = {})
+        : socket_path(std::move(socket_path_value)),
+          binary_version(std::move(binary_version_value)), protocol_version(protocol_version_value),
+          control_socket_path(std::move(control_socket_path_value)),
+          control_token(std::move(control_token_value)),
+          wipe_observer(std::move(wipe_observer_value)) {}
+
     std::string socket_path;
     std::string binary_version;
     int protocol_version = 0;
     std::string control_socket_path;
     std::string control_token;
+    secure::WipeObserver wipe_observer;
 };
 
 // Accepts connections on the account's unix socket and serves the JSONL

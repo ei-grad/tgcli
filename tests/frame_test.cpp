@@ -1,9 +1,14 @@
 #include "proto/frame.hpp"
+#include "proto/frame_io.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -19,7 +24,7 @@ Frame round_trip(const Frame& frame) {
     auto parsed = parse(serialize(frame), error);
     INFO("parse error: " << error);
     REQUIRE(parsed.has_value());
-    return *parsed;
+    return std::move(*parsed);
 }
 
 Request make_request() {
@@ -192,7 +197,7 @@ TEST_CASE("response frames round-trip", "[proto]") {
                           {"client_generation", 3},
                           {"auth_sequence", 8},
                           {"value", "sentinel"}};
-        auto a = std::get<Answer>(round_trip(Answer{9, answer}));
+        auto a = std::get<Answer>(round_trip(Answer{9, json(answer)}));
         CHECK(a.answer == answer);
     }
 }
@@ -325,7 +330,9 @@ TEST_CASE("answer payloads have one exact value or cancellation shape", "[proto]
         mutate(invalid);
         std::string error;
         INFO(invalid.dump());
-        CHECK_FALSE(parse(serialize(Answer{7, invalid}), error).has_value());
+        auto encoded = serialize(Answer{7, std::move(invalid)});
+        const auto parsed = parse(std::move(encoded), error);
+        CHECK_FALSE(parsed.has_value());
         CHECK_FALSE(error.empty());
     }
 }
@@ -346,7 +353,7 @@ TEST_CASE("malformed input is rejected with a reason", "[proto]") {
     for (auto line : cases) {
         std::string error;
         INFO("input: " << line);
-        CHECK_FALSE(parse(line, error).has_value());
+        CHECK_FALSE(parse(std::string(line), error).has_value());
         CHECK_FALSE(error.empty());
     }
 }
@@ -367,9 +374,9 @@ TEST_CASE("strict and answer-recovery parsers never throw on malformed field typ
     for (const auto line : cases) {
         INFO(line);
         std::string error;
-        CHECK_NOTHROW(parse(line, error));
-        CHECK_FALSE(parse(line, error).has_value());
-        CHECK_NOTHROW(parse_answer_candidate(line));
+        CHECK_NOTHROW(parse(std::string(line), error));
+        CHECK_FALSE(parse(std::string(line), error).has_value());
+        CHECK_NOTHROW(parse_answer_candidate(std::string(line)));
     }
 }
 
@@ -411,4 +418,100 @@ TEST_CASE("write_authority outside the tri-state is rejected", "[proto]") {
     std::string error;
     CHECK_FALSE(parse(doc.dump(), error).has_value());
     CHECK(error.find("write_authority") != std::string::npos);
+}
+
+TEST_CASE("secret frame buffers are zeroed across serialization transport and parsing",
+          "[proto][secret][wipe]") {
+    struct Observation {
+        std::string stage;
+        std::size_t size = 0;
+        bool all_zero = false;
+    };
+    std::vector<Observation> observations;
+    const auto observer = [&observations](std::string_view stage, const char* bytes,
+                                          std::size_t size) {
+        const bool all_zero =
+            size == 0 || std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                     [](char value) { return value == '\0'; });
+        observations.push_back({std::string(stage), size, all_zero});
+    };
+    constexpr std::string_view sentinel = "1:token";
+    const json payload{{"nonce", "00112233445566778899aabbccddeeff"},
+                       {"sequence", 1},
+                       {"client_generation", 4},
+                       {"auth_sequence", 9},
+                       {"value", sentinel}};
+    std::array<int, 2> descriptors{-1, -1};
+    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors.data()) == 0);
+    std::string error;
+    {
+        const Frame outbound{Answer{7, json(payload), observer}};
+        REQUIRE(write_frame(descriptors[0], outbound, error, observer));
+    }
+    {
+        FrameReader reader(descriptors[1], observer);
+        auto line = reader.read_line(error);
+        REQUIRE(line);
+        auto parsed = parse(std::move(*line), error, observer);
+        REQUIRE(parsed);
+        const auto& answer = std::get<Answer>(*parsed);
+        CHECK(answer.answer["value"] == sentinel);
+    }
+    ::close(descriptors[0]);
+    ::close(descriptors[1]);
+
+    for (const auto* const stage :
+         {"serialized_json", "write_line", "answer_source", "answer_move_source", "answer_payload",
+          "frame_reader_chunk", "frame_reader_buffer", "parsed_line", "parsed_json"}) {
+        const auto matching = [&stage](const Observation& item) { return item.stage == stage; };
+        INFO(stage);
+        REQUIRE(std::ranges::any_of(observations, matching));
+        CHECK(std::ranges::all_of(observations, [&](const Observation& item) {
+            return !matching(item) || item.all_zero;
+        }));
+    }
+    CHECK(std::ranges::count_if(observations, [sentinel](const Observation& item) {
+              return item.stage == "answer_payload" && item.size == sentinel.size() &&
+                     item.all_zero;
+          }) == 2);
+
+    observations.clear();
+    auto malformed_document = json{{"type", "answer"}, {"id", 7}, {"answer", payload}};
+    malformed_document["answer"]["unexpected"] = true;
+    const auto malformed = malformed_document.dump();
+    CHECK_FALSE(parse(malformed, error, observer));
+    CHECK(error.find(sentinel) == std::string::npos);
+    CHECK(std::ranges::any_of(observations, [sentinel](const Observation& item) {
+        return item.stage == "parsed_json" && item.size == sentinel.size() && item.all_zero;
+    }));
+
+    observations.clear();
+    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors.data()) == 0);
+    ::close(descriptors[1]);
+    {
+        const Frame outbound{Answer{7, json(payload), observer}};
+        CHECK_FALSE(write_frame(descriptors[0], outbound, error, observer));
+    }
+    ::close(descriptors[0]);
+    CHECK(error.find(sentinel) == std::string::npos);
+    CHECK(std::ranges::any_of(observations, [](const Observation& item) {
+        return item.stage == "write_line" && item.all_zero;
+    }));
+    CHECK(std::ranges::any_of(observations, [sentinel](const Observation& item) {
+        return item.stage == "answer_payload" && item.size == sentinel.size() && item.all_zero;
+    }));
+
+    observations.clear();
+    {
+        const Frame cancelled{Answer{7,
+                                     {{"nonce", "00112233445566778899aabbccddeeff"},
+                                      {"sequence", 1},
+                                      {"client_generation", 4},
+                                      {"auth_sequence", 9},
+                                      {"cancelled", true}},
+                                     observer}};
+    }
+    CHECK(std::ranges::any_of(observations, [](const Observation& item) {
+        return item.stage == "answer_payload" && item.all_zero;
+    }));
 }

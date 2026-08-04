@@ -210,12 +210,14 @@ void install_client_challenge(daemon::Dispatcher& dispatcher) {
                  9,
                  "Code: ",
                  {{"delivery_type", "sms"}, {"expected_length", 5}, {"resend_timeout", 30}}};
-             const auto outcome = session.challenge(spec);
-             switch (outcome.status) {
+             auto outcome = session.challenge(spec);
+             switch (outcome.status()) {
              case daemon::ChallengeStatus::Answered:
                  if (session.reserve_in_flight()) {
                      session.settle_in_flight();
-                     session.result({{"value", std::get<std::string>(outcome.value)}});
+                     std::string value;
+                     static_cast<void>(outcome.take_string(value));
+                     session.result({{"value", value}});
                  }
                  return;
              case daemon::ChallengeStatus::Cancelled:
@@ -1152,6 +1154,49 @@ TEST_CASE("invalid TGCLI_TEST_DC is a narrow process-level usage error", "[cli][
                           {"message", "TGCLI_TEST_DC must be exactly 1 when set"},
                           {"details",
                            {{"argument", "TGCLI_TEST_DC"}, {"reason", "invalid_environment"}}}}}});
+}
+
+TEST_CASE("legacy bot token argv is rejected without echoing or routing it", "[cli][process]") {
+    const IsolatedEnv env;
+    const std::string output_path = env.root() + "/bot-token.out";
+    const std::string error_path = env.root() + "/bot-token.err";
+    constexpr const char* sensitive_token = "123456:must-not-be-rendered";
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        const int output = ::open(output_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        const int errors = ::open(error_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        if (output < 0 || errors < 0) {
+            ::_exit(126);
+        }
+        ::dup2(output, STDOUT_FILENO);
+        ::dup2(errors, STDERR_FILENO);
+        ::close(output);
+        ::close(errors);
+        ::execl(TGCLI_TEST_BINARY, "tgcli", "--json", "login", "--bot-token", sensitive_token,
+                "--bogus", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == kUsage);
+
+    const auto read_file = [](const std::string& file_path) {
+        const std::ifstream input(file_path);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        return contents.str();
+    };
+    CHECK(read_file(output_path).empty());
+    const auto rendered_error = read_file(error_path);
+    CHECK(rendered_error.find(sensitive_token) == std::string::npos);
+    CHECK(json::parse(rendered_error) ==
+          json{{"error",
+                {{"code", "INSECURE_SECRET_INPUT"},
+                 {"message", "bot tokens are not accepted on the command line"},
+                 {"details", {{"argument", "--bot-token"}, {"replacement", "--bot"}}}}}});
 }
 
 TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli][tdlib]") {

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli login result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["account", "auth_state", "user"],
+  "properties": {
+    "account": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"},
+    "auth_state": {"const": "ready"},
+    "user": {"$ref": "#/$defs/user"}
+  },
+  "$defs": {
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "first_name", "last_name", "usernames", "phone_number", "is_bot", "is_premium"],
+      "properties": {
+        "id": {"type": "integer"},
+        "first_name": {"type": "string"},
+        "last_name": {"type": "string"},
+        "usernames": {"type": "array", "items": {"type": "string"}},
+        "phone_number": {"type": "string"},
+        "is_bot": {"type": "boolean"},
+        "is_premium": {"type": "boolean"}
+      }
+    }
+  }
+}

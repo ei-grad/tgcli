@@ -114,6 +114,48 @@ class TdClient::Impl {
                     std::move(request));
     }
 
+    std::future<TdValue> get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+        if (!authorization) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        return send_read(authorization, TdFunctionKind::GetMe,
+                         runtime_->make_auth_function(TdAuthRequest{TdFunctionKind::GetMe}));
+    }
+
+    std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    const TdRequestOwner& owner, TdAuthRequest request) {
+        if (!authorization) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        const auto function = request.function;
+        return send(TdSendDescriptor{.function = function,
+                                     .tier = DescriptorKind::AuthBootstrap,
+                                     .owner = owner,
+                                     .client_generation = authorization->client_generation,
+                                     .auth_sequence = authorization->auth_sequence,
+                                     .auth_state = authorization->data.state},
+                    runtime_->make_auth_function(std::move(request)));
+    }
+
+    bool restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard<std::mutex> lock(state_mutex_);
+            generation = current_;
+        }
+        if (!authorization || !generation ||
+            generation->number != authorization->client_generation) {
+            return false;
+        }
+        return generation->lifecycle.begin_close([this, generation] {
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            generation->close_requested = true;
+            if (generation->initial_state_installed && !generation->final) {
+                send_close_locked(generation);
+            }
+        });
+    }
+
     TdSendLease acquire_send_lease(TdSendDescriptor descriptor) {
         std::shared_ptr<Generation> generation;
         {
@@ -458,9 +500,11 @@ class TdClient::Impl {
             event.client_generation != generation->number) {
             return;
         }
+        const auto receive_event_sequence = next_receive_event_sequence_++;
+        event.object.set_receive_event_sequence(receive_event_sequence);
 
         if (event.query_id == 0) {
-            handle_update(generation, std::move(event));
+            handle_update(generation, std::move(event), receive_event_sequence);
             return;
         }
 
@@ -472,7 +516,8 @@ class TdClient::Impl {
                     !generation->accepted_auth_update && !generation->initial_state_installed;
             }
             if (install_response) {
-                install_auth_state(generation, *event.authorization_state, false);
+                install_auth_state(generation, *event.authorization_state, false,
+                                   receive_event_sequence);
                 if (event.authorization_state->state == AuthState::Closed) {
                     handle_closed(generation);
                 }
@@ -481,10 +526,12 @@ class TdClient::Impl {
         static_cast<void>(generation->queries.fulfill(event.query_id, std::move(event.object)));
     }
 
-    void handle_update(const std::shared_ptr<Generation>& generation, TdRuntimeEvent event) {
+    void handle_update(const std::shared_ptr<Generation>& generation, TdRuntimeEvent event,
+                       std::uint64_t receive_event_sequence) {
         if (event.authorization_state.has_value()) {
             const auto closed = event.authorization_state->state == AuthState::Closed;
-            install_auth_state(generation, *event.authorization_state, true);
+            install_auth_state(generation, *event.authorization_state, true,
+                               receive_event_sequence);
             updates_.publish(event.object);
             if (closed) {
                 handle_closed(generation);
@@ -503,7 +550,8 @@ class TdClient::Impl {
     }
 
     void install_auth_state(const std::shared_ptr<Generation>& generation,
-                            const AuthStateData& state, bool from_update) {
+                            const AuthStateData& state, bool from_update,
+                            std::uint64_t receive_event_sequence) {
         if (state.state == AuthState::Closed) {
             close_generation_admission(generation);
         }
@@ -522,6 +570,7 @@ class TdClient::Impl {
                 AuthStateSnapshot{.client_id = generation->client_id,
                                   .client_generation = generation->number,
                                   .auth_sequence = sequence,
+                                  .receive_event_sequence = receive_event_sequence,
                                   .data = state});
             auth_state_.store(snapshot, std::memory_order_release);
             generation->initial_state_installed = true;
@@ -587,6 +636,7 @@ class TdClient::Impl {
     mutable std::mutex state_mutex_;
     std::shared_ptr<Generation> current_;
     std::uint64_t next_generation_ = 1;
+    std::uint64_t next_receive_event_sequence_ = 1;
     std::atomic<std::uint64_t> next_owner_id_{1};
     bool shutting_down_ = false;
     std::uint64_t shutdown_generation_ = 0;
@@ -668,6 +718,21 @@ std::future<TdValue>
 TdClient::send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                     TdFunctionKind function, TdValue request) {
     return impl_->send_read(authorization, function, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+    return impl_->get_me(authorization);
+}
+
+std::future<TdValue>
+TdClient::send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     const TdRequestOwner& owner, TdAuthRequest request) {
+    return impl_->send_login(authorization, owner, std::move(request));
+}
+
+bool TdClient::restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+    return impl_->restart_generation(authorization);
 }
 
 TdRequestOwner TdClient::internal_auth_owner() const {

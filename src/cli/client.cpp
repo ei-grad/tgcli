@@ -421,13 +421,13 @@ HandshakeOutcome handshake(int fd, proto::FrameReader& reader, Deadline deadline
         return HandshakeOutcome::Failed;
     }
     std::string io_error;
-    const auto line = reader.read_line_until(deadline, io_error);
+    auto line = reader.read_line_until(deadline, io_error);
     if (!line) {
         error = io_error.empty() ? "daemon closed the connection during handshake" : io_error;
         return HandshakeOutcome::Failed;
     }
     std::string parse_error;
-    const auto frame = proto::parse(*line, parse_error);
+    const auto frame = proto::parse(std::move(*line), parse_error);
     if (!frame) {
         error = "malformed handshake frame: " + parse_error;
         return HandshakeOutcome::IncompatibleHello;
@@ -747,14 +747,14 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
     FrameRenderer renderer(command_key(request.command), options.json);
     while (!renderer.done()) {
         std::string io_error;
-        const auto line = reader.read_line(io_error);
+        auto line = reader.read_line(io_error);
         if (!line) {
             print_error("GENERIC", io_error.empty() ? "daemon closed the connection" : io_error,
                         json::object());
             return kGeneric;
         }
         std::string parse_error;
-        const auto frame = proto::parse(*line, parse_error);
+        const auto frame = proto::parse(std::move(*line), parse_error);
         if (!frame) {
             print_error("GENERIC", "malformed frame from daemon: " + parse_error, json::object());
             return kGeneric;

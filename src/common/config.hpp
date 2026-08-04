@@ -132,6 +132,10 @@ class Store {
     materialize_implicit_main(std::string_view expected_identity,
                               const PromptedAppCredentials& prompted,
                               const MutationControl& control = {}) const;
+    [[nodiscard]] MutationResult replace_app_credentials(std::string_view expected_identity,
+                                                         std::string_view account,
+                                                         const PromptedAppCredentials& prompted,
+                                                         const MutationControl& control = {}) const;
 
     [[nodiscard]] const std::string& path() const {
         return config_path_;
@@ -139,7 +143,7 @@ class Store {
 
     // Internal typed mutation representation is public only so the translation
     // unit can keep the policy transform separate from filesystem mechanics.
-    enum class MutationKind { Add, Use, Remove, MaterializeMain };
+    enum class MutationKind { Add, Use, Remove, MaterializeMain, ReplaceAppCredentials };
     struct Mutation {
         MutationKind kind;
         std::string account;

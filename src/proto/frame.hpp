@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/secure_wipe.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -114,23 +116,41 @@ struct Challenge {
 };
 
 struct Answer {
-    std::uint64_t id = 0;
-    nlohmann::json answer;
+    Answer();
+    Answer(std::uint64_t id_value, nlohmann::json&& answer_value,
+           secure::WipeObserver wipe_observer_value = {});
+    ~Answer();
+    Answer(const Answer&) = delete;
+    Answer& operator=(const Answer&) = delete;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    Answer(Answer&& other);
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    Answer& operator=(Answer&& other);
+    [[nodiscard]] const secure::WipeObserver& wipe_observer() const;
+
+    std::uint64_t id = 0;  // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+    nlohmann::json answer; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+
+  private:
+    secure::WipeObserver wipe_observer_;
 };
 
 using Frame = std::variant<Hello, Request, Result, Item, Progress, Error, Challenge, Answer>;
 
 // Single-line JSON without a trailing newline; the transport appends '\n'.
-std::string serialize(const Frame& frame);
+std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_observer = {});
 
 // Parses one line. Returns std::nullopt and sets `error` on malformed input:
 // invalid JSON, unknown/missing type, missing or mistyped required fields.
-std::optional<Frame> parse(std::string_view line, std::string& error);
+std::optional<Frame> parse(std::string line, std::string& error,
+                           const secure::WipeObserver& wipe_observer = {},
+                           std::optional<Answer>* invalid_answer = nullptr);
 
 // Recovers only an answer frame's request id and raw payload after strict
 // parsing failed. The server uses this to return the specified
 // PROTOCOL_ANSWER_INVALID terminal instead of treating a malformed answer as
 // an unrelated connection error.
-std::optional<Answer> parse_answer_candidate(std::string_view line);
+std::optional<Answer> parse_answer_candidate(std::string line,
+                                             const secure::WipeObserver& wipe_observer = {});
 
 } // namespace tgcli::proto

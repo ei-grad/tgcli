@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <unistd.h>
@@ -30,6 +31,49 @@ void report_invalid_test_dc() noexcept {
         "{\"error\":{\"code\":\"USAGE\",\"message\":\"TGCLI_TEST_DC must be exactly 1 when "
         "set\",\"details\":{\"argument\":\"TGCLI_TEST_DC\",\"reason\":\"invalid_environment\"}}}\n",
         stderr);
+}
+
+void wipe_argument(char* value) noexcept {
+    if (value == nullptr) {
+        return;
+    }
+    const auto length = std::strlen(value);
+    volatile char* bytes = value;
+    for (std::size_t index = 0; index < length; ++index) {
+        bytes[index] = '\0';
+    }
+}
+
+bool consume_legacy_bot_token(int argc, char** argv) noexcept {
+    constexpr std::string_view option = "--bot-token";
+    bool found = false;
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) {
+            continue;
+        }
+        const std::string_view argument(argv[index]);
+        if (argument == option) {
+            found = true;
+            if (index + 1 < argc) {
+                wipe_argument(argv[index + 1]);
+                ++index;
+            }
+        } else if (argument.starts_with("--bot-token=")) {
+            found = true;
+            wipe_argument(argv[index] + option.size() + 1);
+        }
+    }
+    return found;
+}
+
+int report_insecure_bot_token() {
+    const nlohmann::json rendered{
+        {"error",
+         {{"code", "INSECURE_SECRET_INPUT"},
+          {"message", "bot tokens are not accepted on the command line"},
+          {"details", {{"argument", "--bot-token"}, {"replacement", "--bot"}}}}}};
+    std::fputs((rendered.dump() + "\n").c_str(), stderr);
+    return tgcli::kUsage;
 }
 
 tgcli::proto::RequestContext make_request_context(bool json_output) {
@@ -158,6 +202,9 @@ resolve_request_account(const std::vector<std::string>& command, bool explicit_a
 }
 
 int run(int argc, char** argv) {
+    if (consume_legacy_bot_token(argc, argv)) {
+        return report_insecure_bot_token();
+    }
     CLI::App app{"tgcli — Telegram CLI"};
     app.require_subcommand(1);
     app.fallthrough();
@@ -176,6 +223,15 @@ int run(int argc, char** argv) {
 
     app.add_subcommand("version", "print tgcli version");
     app.add_subcommand("doctor", "health/auth probe");
+    bool login_qr = false;
+    bool login_bot = false;
+    std::string rejected_bot_token;
+    CLI::App* login_cmd = app.add_subcommand("login", "authenticate the selected account");
+    login_cmd->add_flag("--qr", login_qr, "authenticate by QR code");
+    login_cmd->add_flag("--bot", login_bot, "authenticate a bot using a secure token source");
+    CLI::Option* rejected_bot_token_option =
+        login_cmd->add_option("--bot-token", rejected_bot_token, "rejected insecure legacy input");
+    app.add_subcommand("me", "show the authenticated account identity");
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -201,6 +257,12 @@ int run(int argc, char** argv) {
         return parse_exit.value();
     }
 
+    if (rejected_bot_token_option->count() != 0) {
+        rejected_bot_token.assign(rejected_bot_token.size(), '\0');
+        rejected_bot_token.clear();
+        return report_insecure_bot_token();
+    }
+
     const auto command = selected_command(app);
     if (no_daemon && is_daemon_lifecycle(command)) {
         const nlohmann::json rendered{
@@ -216,6 +278,9 @@ int run(int argc, char** argv) {
     request.id = 1;
     request.command = command;
     request.context = make_request_context(json_output);
+    if (command == std::vector<std::string>{"login"}) {
+        request.args = {{"qr", login_qr}, {"bot", login_bot}};
+    }
     if (timeout_option->count() != 0) {
         request.context.timeout_seconds = timeout_seconds;
     }

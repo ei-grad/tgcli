@@ -374,7 +374,7 @@ bool Server::consume_control_request() {
 void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection) {
     connection->send(proto::Hello{options_.binary_version, options_.protocol_version});
 
-    proto::FrameReader reader(connection->fd());
+    proto::FrameReader reader(connection->fd(), options_.wipe_observer);
     bool hello_seen = false;
     std::shared_ptr<RequestSession> active_session;
     std::shared_ptr<std::atomic<bool>> active_terminal_visible;
@@ -406,28 +406,28 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
     try {
         while (!stop_requested_.load(std::memory_order_acquire)) {
             std::string io_error;
-            const auto line = reader.read_line(io_error);
+            auto line = reader.read_line(io_error);
             if (!line) {
                 break; // EOF or broken connection; nothing sensible to send back
             }
             release_terminal_admission();
             std::string parse_error;
-            auto frame = proto::parse(*line, parse_error);
+            std::optional<proto::Answer> answer_candidate;
+            auto frame = proto::parse(std::move(*line), parse_error, options_.wipe_observer,
+                                      hello_seen ? &answer_candidate : nullptr);
             if (!frame) {
-                if (hello_seen) {
-                    if (auto malformed_answer = proto::parse_answer_candidate(*line)) {
-                        if (active_session) {
-                            active_session->receive_answer(*malformed_answer);
-                        } else {
-                            connection->send(proto::Error{malformed_answer->id,
-                                                          "PROTOCOL_ANSWER_INVALID",
-                                                          "invalid challenge answer",
-                                                          {{"request_id", malformed_answer->id},
-                                                           {"reason", "unknown_request"}},
-                                                          kUsage});
-                        }
-                        continue;
+                if (answer_candidate) {
+                    if (active_session) {
+                        active_session->receive_answer(std::move(*answer_candidate));
+                    } else {
+                        connection->send(proto::Error{
+                            answer_candidate->id,
+                            "PROTOCOL_ANSWER_INVALID",
+                            "invalid challenge answer",
+                            {{"request_id", answer_candidate->id}, {"reason", "unknown_request"}},
+                            kUsage});
                     }
+                    continue;
                 }
                 connection->send(proto::Error{0, "USAGE", "malformed frame: " + parse_error,
                                               nlohmann::json::object(), kUsage});
@@ -445,14 +445,14 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                 }
                 continue;
             }
-            if (const auto* answer = std::get_if<proto::Answer>(&*frame)) {
+            if (auto* answer = std::get_if<proto::Answer>(&*frame)) {
                 if (!hello_seen) {
                     connection->send(proto::Error{0, "USAGE", "expected a hello frame first",
                                                   nlohmann::json::object(), kUsage});
                     break;
                 }
                 if (active_session) {
-                    active_session->receive_answer(*answer);
+                    active_session->receive_answer(std::move(*answer));
                 } else {
                     connection->send(
                         proto::Error{answer->id,

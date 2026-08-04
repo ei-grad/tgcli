@@ -14,7 +14,13 @@ using IoDeadline = std::chrono::steady_clock::time_point;
 // connection side.
 class FrameReader {
   public:
-    explicit FrameReader(int fd) : fd_(fd) {}
+    explicit FrameReader(int fd, secure::WipeObserver wipe_observer = {})
+        : fd_(fd), wipe_observer_(std::move(wipe_observer)) {}
+    ~FrameReader();
+    FrameReader(const FrameReader&) = delete;
+    FrameReader& operator=(const FrameReader&) = delete;
+    FrameReader(FrameReader&&) = delete;
+    FrameReader& operator=(FrameReader&&) = delete;
 
     // Next complete line (without the '\n'). Empty optional on EOF (error
     // stays empty) or on a read error / oversized line (error says why).
@@ -29,14 +35,17 @@ class FrameReader {
     int fd_;
     std::string buffer_;
     bool eof_ = false;
+    secure::WipeObserver wipe_observer_;
 };
 
 // Serializes and writes one frame plus '\n', handling partial writes and
 // EINTR. Callers serialize concurrent writers with their own lock. Returns
 // false on a write error.
-bool write_frame(int fd, const Frame& frame, std::string& error);
+bool write_frame(int fd, const Frame& frame, std::string& error,
+                 const secure::WipeObserver& wipe_observer = {});
 
 // Deadline-bounded counterpart used during daemon bootstrap/restart.
-bool write_frame_until(int fd, const Frame& frame, IoDeadline deadline, std::string& error);
+bool write_frame_until(int fd, const Frame& frame, IoDeadline deadline, std::string& error,
+                       const secure::WipeObserver& wipe_observer = {});
 
 } // namespace tgcli::proto

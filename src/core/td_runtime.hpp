@@ -181,6 +181,14 @@ class TdValue {
         return function_;
     }
 
+    void set_receive_event_sequence(std::uint64_t sequence) {
+        receive_event_sequence_ = sequence;
+    }
+
+    [[nodiscard]] std::uint64_t receive_event_sequence() const {
+        return receive_event_sequence_;
+    }
+
   private:
     struct ValueBase {
         ValueBase() = default;
@@ -198,6 +206,7 @@ class TdValue {
 
     std::unique_ptr<ValueBase> value_;
     std::optional<TdFunctionData> function_;
+    std::uint64_t receive_event_sequence_ = 0;
 };
 
 enum class AuthState {
@@ -357,6 +366,7 @@ struct AuthStateSnapshot {
     std::int32_t client_id = 0;
     std::uint64_t client_generation = 0;
     std::uint64_t auth_sequence = 0;
+    std::uint64_t receive_event_sequence = 0;
     AuthStateData data;
 };
 
@@ -419,6 +429,15 @@ constexpr std::string_view authorization_failure_name(TdAuthorizationFailure fai
 }
 
 struct TdlibParameters {
+    TdlibParameters() = default;
+    ~TdlibParameters();
+    TdlibParameters(const TdlibParameters&) = delete;
+    TdlibParameters& operator=(const TdlibParameters&) = delete;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    TdlibParameters(TdlibParameters&& other);
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    TdlibParameters& operator=(TdlibParameters&& other);
+
     bool use_test_dc = false;
     std::string database_directory;
     std::string files_directory;
@@ -436,6 +455,41 @@ struct TdlibParameters {
 };
 
 TdFunctionData describe_tdlib_parameters(const TdlibParameters& parameters);
+
+struct TdAuthRequest {
+    explicit TdAuthRequest(TdFunctionKind function_value);
+    TdAuthRequest(TdFunctionKind function_value, std::string&& value_value);
+    TdAuthRequest(TdFunctionKind function_value, std::string&& value_value,
+                  std::string&& secondary_value);
+    ~TdAuthRequest();
+    TdAuthRequest(const TdAuthRequest&) = delete;
+    TdAuthRequest& operator=(const TdAuthRequest&) = delete;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    TdAuthRequest(TdAuthRequest&& other);
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    TdAuthRequest& operator=(TdAuthRequest&& other);
+
+    TdFunctionKind function;
+    std::string value;
+    std::string secondary;
+};
+
+struct TdOk {};
+
+struct TdError {
+    std::int32_t code = 0;
+    std::string message;
+};
+
+struct TdUserSummary {
+    std::int64_t id = 0;
+    std::string first_name;
+    std::string last_name;
+    std::vector<std::string> usernames;
+    std::string phone_number;
+    bool is_bot = false;
+    bool is_premium = false;
+};
 
 enum class TdBuiltinFunction { GetAuthorizationState, Close };
 
@@ -465,6 +519,7 @@ class TdRuntime {
     virtual std::int32_t create_client(std::uint64_t client_generation) = 0;
     virtual TdValue make_function(TdBuiltinFunction function) = 0;
     virtual TdValue make_set_tdlib_parameters(TdlibParameters parameters) = 0;
+    virtual TdValue make_auth_function(TdAuthRequest request) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
                       std::uint64_t query_id, TdValue function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;

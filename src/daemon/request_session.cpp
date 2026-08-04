@@ -49,6 +49,80 @@ IdentityOrder compare_identity(std::optional<std::uint64_t> current_generation,
 
 } // namespace
 
+ChallengeOutcome::ChallengeOutcome(ChallengeStatus status_value, std::monostate value)
+    : status_(status_value), value_(value) {}
+
+ChallengeOutcome::ChallengeOutcome(ChallengeStatus status_value, bool value)
+    : status_(status_value), value_(value) {}
+
+ChallengeOutcome::ChallengeOutcome(ChallengeStatus status_value, std::string& value,
+                                   secure::WipeObserver wipe_observer)
+    : status_(status_value), wipe_observer_(std::move(wipe_observer)) {
+    value_.emplace<std::string>(value);
+    secure::wipe(value, wipe_observer_, "challenge_value_source");
+}
+
+ChallengeOutcome::~ChallengeOutcome() {
+    if (auto* retained = std::get_if<std::string>(&value_)) {
+        secure::wipe(*retained, wipe_observer_, "challenge_outcome");
+    }
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,cppcoreguidelines-prefer-member-initializer,performance-noexcept-move-constructor)
+ChallengeOutcome::ChallengeOutcome(ChallengeOutcome&& other) : status_(other.status_) {
+    if (auto* retained = std::get_if<std::string>(&other.value_)) {
+        value_.emplace<std::string>(*retained);
+        secure::wipe(*retained, other.wipe_observer_, "challenge_outcome_move_source");
+        other.value_ = std::monostate{};
+    } else {
+        value_ = other.value_;
+    }
+    wipe_observer_ = std::move(other.wipe_observer_);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+ChallengeOutcome& ChallengeOutcome::operator=(ChallengeOutcome&& other) {
+    if (this != &other) {
+        if (auto* retained = std::get_if<std::string>(&value_)) {
+            secure::wipe(*retained, wipe_observer_, "challenge_outcome");
+        }
+        status_ = other.status_;
+        if (auto* retained = std::get_if<std::string>(&other.value_)) {
+            value_.emplace<std::string>(*retained);
+            secure::wipe(*retained, other.wipe_observer_, "challenge_outcome_move_source");
+            other.value_ = std::monostate{};
+        } else {
+            value_ = other.value_;
+        }
+        wipe_observer_ = std::move(other.wipe_observer_);
+    }
+    return *this;
+}
+
+bool ChallengeOutcome::take_string(std::string& output) {
+    auto* retained = std::get_if<std::string>(&value_);
+    if (retained == nullptr) {
+        return false;
+    }
+    secure::transfer(*retained, output, wipe_observer_, "challenge_take_source");
+    value_ = std::monostate{};
+    return true;
+}
+
+std::optional<bool> ChallengeOutcome::take_boolean() {
+    const auto* retained = std::get_if<bool>(&value_);
+    if (retained == nullptr) {
+        return std::nullopt;
+    }
+    const bool result = *retained;
+    value_ = std::monostate{};
+    return result;
+}
+
+ChallengeStatus ChallengeOutcome::status() const {
+    return status_;
+}
+
 RequestSession::RequestSession(proto::Request request, ResponseSink& transport,
                                std::uint64_t connection_id, NonceGenerator nonce_generator)
     : request_(std::move(request)), transport_(&transport), connection_id_(connection_id),
@@ -86,6 +160,7 @@ bool RequestSession::cancellation_requested() const {
     return cancellation_source_.stop_requested();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
     if (!request_.context.tty) {
         return {ChallengeStatus::NoTty, std::monostate{}};
@@ -116,11 +191,21 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
         if (current_) {
             throw std::logic_error("request already has an active challenge");
         }
-        if (answer_reserved_) {
-            throw std::logic_error("accepted challenge answer has not been claimed");
-        }
         if (spec.client_generation.has_value() != spec.auth_sequence.has_value()) {
             throw std::invalid_argument("challenge generation fields must have matching nullness");
+        }
+        if (spec.client_generation && latest_auth_identity_ &&
+            *latest_auth_identity_ > std::pair{*spec.client_generation, *spec.auth_sequence}) {
+            return {ChallengeStatus::Superseded, std::monostate{}};
+        }
+        if (answer_reserved_) {
+            if (!reserved_identity_ ||
+                reserved_identity_->client_generation != spec.client_generation ||
+                reserved_identity_->auth_sequence != spec.auth_sequence) {
+                throw std::logic_error("reserved answer identity does not match continuation");
+            }
+            answer_reserved_ = false;
+            reserved_identity_.reset();
         }
         sequence = next_sequence_++;
         Identity identity{request_.id, nonce_generator_(), sequence, spec.client_generation,
@@ -162,13 +247,20 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
             }
         }
     }
-    return resolution_->outcome;
+    auto outcome = std::move(resolution_->outcome);
+    resolution_.reset();
+    const auto return_hook = challenge_return_hook_;
+    lock.unlock();
+    if (return_hook) {
+        return_hook(outcome.status());
+    }
+    return outcome;
 }
 
 // Identity classification, deadline choice, challenge consumption and terminal
 // claim must remain one mutex-serialized decision tree.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-AnswerDisposition RequestSession::receive_answer(const proto::Answer& answer) {
+AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
     std::string rejection;
     {
         const std::lock_guard lock(session_mutex_);
@@ -178,6 +270,7 @@ AnswerDisposition RequestSession::receive_answer(const proto::Answer& answer) {
         if (Clock::now() >= deadline_) {
             state_ = State::TimedOut;
             if (current_) {
+                secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
                 resolve_current({ChallengeStatus::TimedOut, std::monostate{}});
             }
             return AnswerDisposition::RequestTerminated;
@@ -219,6 +312,7 @@ AnswerDisposition RequestSession::receive_answer(const proto::Answer& answer) {
             } else {
                 remember_consumed(current_->identity);
                 if (answer.answer.contains("cancelled")) {
+                    secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
                     resolve_current({ChallengeStatus::Cancelled, std::monostate{}});
                     return AnswerDisposition::Cancelled;
                 }
@@ -228,15 +322,20 @@ AnswerDisposition RequestSession::receive_answer(const proto::Answer& answer) {
                 }
                 ChallengeOutcome outcome{ChallengeStatus::Answered, std::monostate{}};
                 if (answer.answer["value"].is_boolean()) {
-                    outcome.value = answer.answer["value"].get<bool>();
+                    outcome = ChallengeOutcome{ChallengeStatus::Answered,
+                                               answer.answer["value"].get<bool>()};
                 } else {
-                    outcome.value = answer.answer["value"].get<std::string>();
+                    auto& value = answer.answer["value"].get_ref<std::string&>();
+                    outcome =
+                        ChallengeOutcome{ChallengeStatus::Answered, value, answer.wipe_observer()};
                 }
+                secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
                 resolve_current(std::move(outcome));
                 return AnswerDisposition::Accepted;
             }
         }
         state_ = State::ProtocolError;
+        secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
         error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
               {{"request_id", answer.id}, {"reason", rejection}}, kUsage);
         if (current_) {
@@ -250,6 +349,10 @@ bool RequestSession::supersede(std::uint64_t client_generation, std::uint64_t au
     const std::lock_guard lock(session_mutex_);
     if (state_ != State::Running) {
         return false;
+    }
+    const auto observed = std::pair{client_generation, auth_sequence};
+    if (!latest_auth_identity_ || observed > *latest_auth_identity_) {
+        latest_auth_identity_ = observed;
     }
     const Identity* identity = nullptr;
     if (current_) {
@@ -328,6 +431,21 @@ bool RequestSession::reserve_in_flight() {
     return true;
 }
 
+bool RequestSession::reserve_direct_in_flight() {
+    InFlightHook hook;
+    {
+        const std::lock_guard lock(session_mutex_);
+        if (state_ != State::Running || current_ || answer_reserved_ ||
+            in_flight_state_ != InFlightState::None) {
+            return false;
+        }
+        in_flight_state_ = InFlightState::InFlight;
+        hook = in_flight_hook_;
+    }
+    notify_in_flight(InFlightState::InFlight, hook);
+    return true;
+}
+
 void RequestSession::settle_in_flight() {
     InFlightHook hook;
     {
@@ -349,6 +467,11 @@ InFlightState RequestSession::in_flight_state() const {
 void RequestSession::set_in_flight_hook(InFlightHook hook) {
     const std::lock_guard lock(session_mutex_);
     in_flight_hook_ = std::move(hook);
+}
+
+void RequestSession::set_challenge_return_hook(ChallengeReturnHook hook) {
+    const std::lock_guard lock(session_mutex_);
+    challenge_return_hook_ = std::move(hook);
 }
 
 std::string RequestSession::secure_nonce() {

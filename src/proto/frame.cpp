@@ -349,7 +349,9 @@ struct FrameWriter {
 
 class Parser {
   public:
-    explicit Parser(const json& doc) : doc_(&doc) {}
+    Parser(json& doc, secure::WipeObserver wipe_observer,
+           std::optional<Answer>* invalid_answer = nullptr)
+        : doc_(&doc), wipe_observer_(std::move(wipe_observer)), invalid_answer_(invalid_answer) {}
 
     std::optional<Frame> run(std::string& error) {
         error_ = &error;
@@ -389,7 +391,7 @@ class Parser {
     }
 
   private:
-    const json* field(const char* name) const {
+    json* field(const char* name) const {
         auto it = doc_->find(name);
         return it == doc_->end() ? nullptr : &*it;
     }
@@ -552,15 +554,18 @@ class Parser {
         if (!id) {
             return std::nullopt;
         }
-        const json* payload = field("answer");
+        json* payload = field("answer");
         if (payload == nullptr) {
             return fail("missing 'answer'");
         }
         std::string validation_error;
         if (!validate_answer_payload(*payload, validation_error)) {
+            if (invalid_answer_ != nullptr) {
+                invalid_answer_->emplace(*id, std::move(*payload), wipe_observer_);
+            }
             return fail(std::move(validation_error));
         }
-        return Answer{*id, *payload};
+        return Answer{*id, std::move(*payload), wipe_observer_};
     }
 
     std::optional<Frame> parse_error() {
@@ -598,11 +603,48 @@ class Parser {
                      exit_code->get<int>()};
     }
 
-    const json* doc_;
+    json* doc_;
     std::string* error_ = nullptr;
+    secure::WipeObserver wipe_observer_;
+    std::optional<Answer>* invalid_answer_ = nullptr;
 };
 
 } // namespace
+
+Answer::Answer() = default;
+
+// NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
+Answer::Answer(std::uint64_t id_value, nlohmann::json&& answer_value,
+               secure::WipeObserver wipe_observer_value)
+    : id(id_value), wipe_observer_(std::move(wipe_observer_value)) {
+    secure::transfer(answer_value, answer, wipe_observer_, "answer_source");
+}
+
+Answer::~Answer() {
+    secure::wipe(answer, wipe_observer_, "answer_payload");
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,cppcoreguidelines-prefer-member-initializer,performance-noexcept-move-constructor)
+Answer::Answer(Answer&& other) : id(other.id) {
+    secure::transfer(other.answer, answer, other.wipe_observer_, "answer_move_source");
+    // NOLINTNEXTLINE(cppcoreguidelines-prefer-member-initializer)
+    wipe_observer_ = std::move(other.wipe_observer_);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+Answer& Answer::operator=(Answer&& other) {
+    if (this != &other) {
+        secure::wipe(answer, wipe_observer_, "answer_payload");
+        id = other.id;
+        secure::transfer(other.answer, answer, other.wipe_observer_, "answer_move_source");
+        wipe_observer_ = std::move(other.wipe_observer_);
+    }
+    return *this;
+}
+
+const secure::WipeObserver& Answer::wipe_observer() const {
+    return wipe_observer_;
+}
 
 std::string_view challenge_kind_name(ChallengeKind kind) {
     const auto* const it =
@@ -746,29 +788,38 @@ bool validate_answer_payload(const json& payload, std::string& error) {
     return true;
 }
 
-std::string serialize(const Frame& frame) {
-    return std::visit(FrameWriter{}, frame).dump();
+std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_observer) {
+    auto document = std::visit(FrameWriter{}, frame);
+    const secure::JsonWiper document_wiper(document, wipe_observer, "serialized_json");
+    return document.dump();
 }
 
-std::optional<Frame> parse(std::string_view line, std::string& error) {
-    const json doc = json::parse(line, /*cb=*/nullptr, /*allow_exceptions=*/false);
+std::optional<Frame> parse(std::string line, std::string& error,
+                           const secure::WipeObserver& wipe_observer,
+                           std::optional<Answer>* invalid_answer) {
+    const secure::StringWiper line_wiper(line, wipe_observer, "parsed_line");
+    auto doc = json::parse(line, /*cb=*/nullptr, /*allow_exceptions=*/false);
     if (doc.is_discarded()) {
         error = "invalid JSON";
         return std::nullopt;
     }
+    const secure::JsonWiper document_wiper(doc, wipe_observer, "parsed_json");
     try {
-        return Parser(doc).run(error);
-    } catch (const std::exception& exception) {
-        error = std::string("invalid frame value: ") + exception.what();
+        return Parser(doc, wipe_observer, invalid_answer).run(error);
+    } catch (const std::exception&) {
+        error = "invalid frame value";
         return std::nullopt;
     }
 }
 
-std::optional<Answer> parse_answer_candidate(std::string_view line) {
-    const json doc = json::parse(line, /*cb=*/nullptr, /*allow_exceptions=*/false);
+std::optional<Answer> parse_answer_candidate(std::string line,
+                                             const secure::WipeObserver& wipe_observer) {
+    const secure::StringWiper line_wiper(line, wipe_observer, "candidate_line");
+    auto doc = json::parse(line, /*cb=*/nullptr, /*allow_exceptions=*/false);
     if (!doc.is_object()) {
         return std::nullopt;
     }
+    const secure::JsonWiper document_wiper(doc, wipe_observer, "candidate_json");
     const auto type = doc.find("type");
     const auto id = doc.find("id");
     const auto answer = doc.find("answer");
@@ -778,7 +829,7 @@ std::optional<Answer> parse_answer_candidate(std::string_view line) {
         return std::nullopt;
     }
     try {
-        return Answer{id->get<std::uint64_t>(), *answer};
+        return Answer{id->get<std::uint64_t>(), std::move(*answer), wipe_observer};
     } catch (const std::exception&) {
         return std::nullopt;
     }

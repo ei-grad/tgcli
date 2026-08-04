@@ -50,3 +50,17 @@ TEST_CASE("account human renderers match reviewed goldens", "[account][render][g
                                    {{"default_account", "work"}, {"previous_default", "main"}}) ==
           golden("account-use.txt"));
 }
+
+TEST_CASE("login and me human renderers match reviewed goldens", "[auth][render][golden]") {
+    const json user{{"id", 123456},
+                    {"first_name", "Ada"},
+                    {"last_name", "Lovelace"},
+                    {"usernames", json::array({"ada", "analytical_engine"})},
+                    {"phone_number", "12025550123"},
+                    {"is_bot", false},
+                    {"is_premium", true}};
+    CHECK(tgcli::cli::render_human("me", user) == golden("me.txt"));
+    CHECK(tgcli::cli::render_human(
+              "login", {{"account", "main"}, {"auth_state", "ready"}, {"user", user}}) ==
+          golden("login.txt"));
+}

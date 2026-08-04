@@ -13,6 +13,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <utility>
 #include <variant>
 
 namespace tgcli::daemon {
@@ -38,8 +39,26 @@ enum class ChallengeStatus {
 };
 
 struct ChallengeOutcome {
-    ChallengeStatus status;
-    std::variant<std::monostate, std::string, bool> value;
+    ChallengeOutcome(ChallengeStatus status_value, std::monostate value);
+    ChallengeOutcome(ChallengeStatus status_value, bool value);
+    ChallengeOutcome(ChallengeStatus status_value, std::string& value,
+                     secure::WipeObserver wipe_observer = {});
+    ~ChallengeOutcome();
+    ChallengeOutcome(const ChallengeOutcome&) = delete;
+    ChallengeOutcome& operator=(const ChallengeOutcome&) = delete;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    ChallengeOutcome(ChallengeOutcome&& other);
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    ChallengeOutcome& operator=(ChallengeOutcome&& other);
+
+    [[nodiscard]] bool take_string(std::string& output);
+    [[nodiscard]] std::optional<bool> take_boolean();
+    [[nodiscard]] ChallengeStatus status() const;
+
+  private:
+    ChallengeStatus status_;
+    std::variant<std::monostate, std::string, bool> value_;
+    secure::WipeObserver wipe_observer_;
 };
 
 enum class AnswerDisposition {
@@ -58,6 +77,7 @@ class RequestSession final : public ResponseSink {
     using Clock = std::chrono::steady_clock;
     using NonceGenerator = std::function<std::string()>;
     using InFlightHook = std::function<void(InFlightState)>;
+    using ChallengeReturnHook = std::function<void(ChallengeStatus)>;
 
     RequestSession(proto::Request request, ResponseSink& transport, std::uint64_t connection_id = 0,
                    NonceGenerator nonce_generator = {});
@@ -71,16 +91,18 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] bool cancellation_requested() const;
 
     ChallengeOutcome challenge(ChallengeSpec spec);
-    AnswerDisposition receive_answer(const proto::Answer& answer);
+    AnswerDisposition receive_answer(proto::Answer answer);
     bool supersede(std::uint64_t client_generation, std::uint64_t auth_sequence);
 
     void disconnect();
     void shutdown();
 
     bool reserve_in_flight();
+    bool reserve_direct_in_flight();
     void settle_in_flight();
     [[nodiscard]] InFlightState in_flight_state() const;
     void set_in_flight_hook(InFlightHook hook);
+    void set_challenge_return_hook(ChallengeReturnHook hook);
 
   private:
     enum class State { Running, Disconnected, Shutdown, TimedOut, ProtocolError };
@@ -100,7 +122,7 @@ class RequestSession final : public ResponseSink {
         bool reserves_query = true;
     };
 
-    struct Resolution {
+    struct Resolution { // NOLINT(bugprone-exception-escape)
         std::uint64_t sequence = 0;
         ChallengeOutcome outcome{ChallengeStatus::ProtocolError, std::monostate{}};
     };
@@ -135,8 +157,10 @@ class RequestSession final : public ResponseSink {
     std::deque<Identity> consumed_;
     bool answer_reserved_ = false;
     std::optional<Identity> reserved_identity_;
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> latest_auth_identity_;
     InFlightState in_flight_state_ = InFlightState::None;
     InFlightHook in_flight_hook_;
+    ChallengeReturnHook challenge_return_hook_;
     std::stop_source cancellation_source_;
 };
 

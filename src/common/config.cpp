@@ -1066,6 +1066,23 @@ bool apply_mutation(toml::table& document, const Store::Mutation& mutation, Conf
         }
         return true;
     }
+    case Store::MutationKind::ReplaceAppCredentials: {
+        if (!exists || !mutation.prompted.api_id || !mutation.prompted.api_hash) {
+            error = make_error(ConfigReason::TypeError,
+                               "credential replacement requires an existing account and tuple");
+            return false;
+        }
+        auto* account = (*accounts)[mutation.account].as_table();
+        if (account == nullptr) {
+            error = make_error(ConfigReason::TypeError, "account must be a table");
+            return false;
+        }
+        account->erase("api_id_cmd");
+        account->erase("api_hash_cmd");
+        account->insert_or_assign("api_id", *mutation.prompted.api_id);
+        account->insert_or_assign("api_hash", *mutation.prompted.api_hash);
+        return true;
+    }
     }
     throw std::logic_error("unhandled config mutation");
 }
@@ -1195,6 +1212,15 @@ MutationResult Store::materialize_implicit_main(std::string_view expected_identi
                                                 const PromptedAppCredentials& prompted,
                                                 const MutationControl& control) const {
     return mutate(expected_identity, Mutation{MutationKind::MaterializeMain, "main", {}, prompted},
+                  control);
+}
+
+MutationResult Store::replace_app_credentials(std::string_view expected_identity,
+                                              std::string_view account,
+                                              const PromptedAppCredentials& prompted,
+                                              const MutationControl& control) const {
+    return mutate(expected_identity,
+                  Mutation{MutationKind::ReplaceAppCredentials, std::string(account), {}, prompted},
                   control);
 }
 

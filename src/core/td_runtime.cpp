@@ -28,6 +28,134 @@ void wipe(std::string& value) {
     value.clear();
 }
 
+void transfer(std::string& source, std::string& destination) {
+    class SourceWiper {
+      public:
+        explicit SourceWiper(std::string* value) : value_(value) {}
+        ~SourceWiper() {
+            wipe(*value_);
+        }
+        SourceWiper(const SourceWiper&) = delete;
+        SourceWiper& operator=(const SourceWiper&) = delete;
+        SourceWiper(SourceWiper&&) = delete;
+        SourceWiper& operator=(SourceWiper&&) = delete;
+
+      private:
+        std::string* value_;
+    };
+    const SourceWiper source_wiper{&source};
+    wipe(destination);
+    destination.assign(source);
+}
+
+TdValue make_native_auth_function(TdAuthRequest request) {
+    NativeFunctionPtr native;
+    std::vector<TdFunctionField> fields;
+    switch (request.function) {
+    case TdFunctionKind::SetAuthenticationPhoneNumber: {
+        auto settings = td_api::make_object<td_api::phoneNumberAuthenticationSettings>();
+        settings->allow_flash_call_ = false;
+        settings->allow_missed_call_ = false;
+        settings->is_current_phone_number_ = false;
+        settings->has_unknown_phone_number_ = false;
+        settings->allow_sms_retriever_api_ = false;
+        settings->firebase_authentication_settings_ = nullptr;
+        settings->authentication_tokens_.clear();
+        native = td_api::make_object<td_api::setAuthenticationPhoneNumber>(request.value,
+                                                                           std::move(settings));
+        wipe(request.value);
+        fields = {{"phone_number", TdRedactedValue::Credential},
+                  {"settings_allow_flash_call", false},
+                  {"settings_allow_missed_call", false},
+                  {"settings_is_current_phone_number", false},
+                  {"settings_has_unknown_phone_number", false},
+                  {"settings_allow_sms_retriever_api", false},
+                  {"settings_has_firebase", false},
+                  {"settings_token_count", std::int64_t{0}}};
+        break;
+    }
+    case TdFunctionKind::RequestQrCodeAuthentication:
+        native =
+            td_api::make_object<td_api::requestQrCodeAuthentication>(std::vector<std::int64_t>{});
+        fields = {{"other_user_ids", std::vector<std::int64_t>{}}};
+        break;
+    case TdFunctionKind::CheckAuthenticationBotToken:
+        native = td_api::make_object<td_api::checkAuthenticationBotToken>(request.value);
+        wipe(request.value);
+        fields = {{"credential", TdRedactedValue::Credential}};
+        break;
+    case TdFunctionKind::SetAuthenticationEmailAddress:
+        native = td_api::make_object<td_api::setAuthenticationEmailAddress>(request.value);
+        wipe(request.value);
+        fields = {{"credential", TdRedactedValue::Credential}};
+        break;
+    case TdFunctionKind::CheckAuthenticationEmailCode: {
+        auto code = td_api::make_object<td_api::emailAddressAuthenticationCode>();
+        code->code_ = request.value;
+        wipe(request.value);
+        native = td_api::make_object<td_api::checkAuthenticationEmailCode>(std::move(code));
+        fields = {{"credential", TdRedactedValue::Credential}};
+        break;
+    }
+    case TdFunctionKind::CheckAuthenticationCode:
+        native = td_api::make_object<td_api::checkAuthenticationCode>(request.value);
+        wipe(request.value);
+        fields = {{"credential", TdRedactedValue::Credential}};
+        break;
+    case TdFunctionKind::RegisterUser:
+        native = td_api::make_object<td_api::registerUser>(request.value, request.secondary, false);
+        wipe(request.value);
+        wipe(request.secondary);
+        fields = {{"first_name", TdRedactedValue::Credential},
+                  {"last_name", TdRedactedValue::Credential},
+                  {"disable_notification", false}};
+        break;
+    case TdFunctionKind::CheckAuthenticationPassword:
+        native = td_api::make_object<td_api::checkAuthenticationPassword>(request.value);
+        wipe(request.value);
+        fields = {{"credential", TdRedactedValue::Credential}};
+        break;
+    case TdFunctionKind::GetMe:
+        native = td_api::make_object<td_api::getMe>();
+        break;
+    default:
+        throw std::invalid_argument("unsupported authentication function factory request");
+    }
+    return TdValue::function(std::move(native),
+                             TdFunctionData{request.function, std::move(fields)});
+}
+
+TdValue convert_response(NativeObjectPtr object) {
+    if (object == nullptr) {
+        return {};
+    }
+    switch (object->get_id()) {
+    case td_api::ok::ID:
+        return TdValue::from(TdOk{});
+    case td_api::error::ID: {
+        auto& error = static_cast<td_api::error&>(*object);
+        return TdValue::from(TdError{error.code_, std::move(error.message_)});
+    }
+    case td_api::user::ID: {
+        auto& user = static_cast<td_api::user&>(*object);
+        TdUserSummary summary{.id = user.id_,
+                              .first_name = std::move(user.first_name_),
+                              .last_name = std::move(user.last_name_),
+                              .usernames = {},
+                              .phone_number = std::move(user.phone_number_),
+                              .is_bot = user.type_ != nullptr &&
+                                        user.type_->get_id() == td_api::userTypeBot::ID,
+                              .is_premium = user.is_premium_};
+        if (user.usernames_ != nullptr) {
+            summary.usernames = std::move(user.usernames_->active_usernames_);
+        }
+        return TdValue::from(std::move(summary));
+    }
+    default:
+        return TdValue::from(std::move(object));
+    }
+}
+
 bool native_function_matches(const td_api::Function& function, TdFunctionKind kind) {
     switch (kind) {
     case TdFunctionKind::GetAuthorizationState:
@@ -281,6 +409,10 @@ class ProductionTdRuntime final : public TdRuntime {
         return TdValue::function(std::move(native), std::move(description));
     }
 
+    TdValue make_auth_function(TdAuthRequest request) override {
+        return make_native_auth_function(std::move(request));
+    }
+
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               TdValue function) override {
         static_cast<void>(client_generation);
@@ -337,7 +469,7 @@ class ProductionTdRuntime final : public TdRuntime {
         return TdRuntimeEvent{.client_id = response.client_id,
                               .client_generation = generation,
                               .query_id = response.request_id,
-                              .object = TdValue::from(std::move(response.object)),
+                              .object = convert_response(std::move(response.object)),
                               .authorization_state = std::move(authorization_state)};
     }
 
@@ -363,6 +495,87 @@ convert_production_authorization_state_for_test(const TdValue& object,
 }
 
 } // namespace detail
+
+TdlibParameters::~TdlibParameters() {
+    wipe(database_encryption_key);
+    wipe(api_hash);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+TdlibParameters::TdlibParameters(TdlibParameters&& other)
+    : use_test_dc(other.use_test_dc), database_directory(std::move(other.database_directory)),
+      files_directory(std::move(other.files_directory)), use_file_database(other.use_file_database),
+      use_chat_info_database(other.use_chat_info_database),
+      use_message_database(other.use_message_database), use_secret_chats(other.use_secret_chats),
+      api_id(other.api_id), system_language_code(std::move(other.system_language_code)),
+      device_model(std::move(other.device_model)), system_version(std::move(other.system_version)),
+      application_version(std::move(other.application_version)) {
+    transfer(other.database_encryption_key, database_encryption_key);
+    transfer(other.api_hash, api_hash);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+TdlibParameters& TdlibParameters::operator=(TdlibParameters&& other) {
+    if (this != &other) {
+        wipe(database_encryption_key);
+        wipe(api_hash);
+        use_test_dc = other.use_test_dc;
+        database_directory = std::move(other.database_directory);
+        files_directory = std::move(other.files_directory);
+        use_file_database = other.use_file_database;
+        use_chat_info_database = other.use_chat_info_database;
+        use_message_database = other.use_message_database;
+        use_secret_chats = other.use_secret_chats;
+        api_id = other.api_id;
+        system_language_code = std::move(other.system_language_code);
+        device_model = std::move(other.device_model);
+        system_version = std::move(other.system_version);
+        application_version = std::move(other.application_version);
+        transfer(other.database_encryption_key, database_encryption_key);
+        transfer(other.api_hash, api_hash);
+    }
+    return *this;
+}
+
+TdAuthRequest::TdAuthRequest(TdFunctionKind function_value) : function(function_value) {}
+
+// NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
+TdAuthRequest::TdAuthRequest(TdFunctionKind function_value, std::string&& value_value)
+    : function(function_value) {
+    transfer(value_value, value);
+}
+
+// NOLINTBEGIN(cppcoreguidelines-rvalue-reference-param-not-moved)
+TdAuthRequest::TdAuthRequest(TdFunctionKind function_value, std::string&& value_value,
+                             std::string&& secondary_value)
+    : function(function_value) {
+    transfer(value_value, value);
+    transfer(secondary_value, secondary);
+}
+// NOLINTEND(cppcoreguidelines-rvalue-reference-param-not-moved)
+
+TdAuthRequest::~TdAuthRequest() {
+    wipe(value);
+    wipe(secondary);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+TdAuthRequest::TdAuthRequest(TdAuthRequest&& other) : function(other.function) {
+    transfer(other.value, value);
+    transfer(other.secondary, secondary);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape,cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+TdAuthRequest& TdAuthRequest::operator=(TdAuthRequest&& other) {
+    if (this != &other) {
+        wipe(value);
+        wipe(secondary);
+        function = other.function;
+        transfer(other.value, value);
+        transfer(other.secondary, secondary);
+    }
+    return *this;
+}
 
 TdFunctionData describe_tdlib_parameters(const TdlibParameters& parameters) {
     return TdFunctionData{TdFunctionKind::SetTdlibParameters,

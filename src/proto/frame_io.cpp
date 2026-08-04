@@ -55,10 +55,13 @@ bool wait_for_io(int fd, short events, const IoDeadline& deadline, std::string_v
     }
 }
 
-bool write_line(int fd, std::string line, const IoDeadline* deadline, std::string& error) {
-    line.push_back('\n');
+bool write_line(int fd, std::string line, const IoDeadline* deadline, std::string& error,
+                const secure::WipeObserver& wipe_observer) {
+    const secure::StringWiper line_wiper(line, wipe_observer, "write_line");
+    constexpr char newline = '\n';
+    const auto total_size = line.size() + 1;
     std::size_t written = 0;
-    while (written < line.size()) {
+    while (written < total_size) {
         if (deadline != nullptr && !wait_for_io(fd, POLLOUT, *deadline, "writing frame", error)) {
             return false;
         }
@@ -71,7 +74,10 @@ bool write_line(int fd, std::string line, const IoDeadline* deadline, std::strin
             flags |= MSG_DONTWAIT;
         }
 #endif
-        const ssize_t count = ::send(fd, line.data() + written, line.size() - written, flags);
+        const bool writing_newline = written == line.size();
+        const char* bytes = writing_newline ? &newline : line.data() + written;
+        const auto remaining = writing_newline ? std::size_t{1} : line.size() - written;
+        const ssize_t count = ::send(fd, bytes, remaining, flags);
         if (count < 0 && errno == EINTR) {
             continue;
         }
@@ -115,6 +121,10 @@ ReadChunkStatus read_chunk(int fd, const IoDeadline* deadline, std::array<char, 
 
 } // namespace
 
+FrameReader::~FrameReader() {
+    secure::wipe(buffer_, wipe_observer_, "frame_reader_buffer");
+}
+
 std::optional<std::string> FrameReader::read_line(std::string& error) {
     return read_line_impl(nullptr, error);
 }
@@ -129,23 +139,28 @@ std::optional<std::string> FrameReader::read_line_impl(const IoDeadline* deadlin
     while (true) {
         if (const auto pos = buffer_.find('\n'); pos != std::string::npos) {
             std::string line = buffer_.substr(0, pos);
-            buffer_.erase(0, pos + 1);
+            std::string remainder = buffer_.substr(pos + 1);
+            secure::wipe(buffer_, wipe_observer_, "frame_reader_buffer");
+            buffer_ = std::move(remainder);
             return line;
         }
         if (eof_) {
             if (!buffer_.empty()) {
                 error = "connection closed mid-frame";
+                secure::wipe(buffer_, wipe_observer_, "frame_reader_error");
             }
             return std::nullopt;
         }
         if (buffer_.size() > kMaxLineBytes) {
             error = "frame exceeds " + std::to_string(kMaxLineBytes) + " bytes";
+            secure::wipe(buffer_, wipe_observer_, "frame_reader_error");
             return std::nullopt;
         }
         std::array<char, 65536> chunk{};
         std::size_t count = 0;
         const auto status = read_chunk(fd_, deadline, chunk, count, error);
         if (status == ReadChunkStatus::Failed) {
+            secure::wipe(buffer_, wipe_observer_, "frame_reader_error");
             return std::nullopt;
         }
         if (status == ReadChunkStatus::Retry) {
@@ -156,15 +171,18 @@ std::optional<std::string> FrameReader::read_line_impl(const IoDeadline* deadlin
             continue;
         }
         buffer_.append(chunk.data(), count);
+        secure::wipe(chunk.data(), count, wipe_observer_, "frame_reader_chunk");
     }
 }
 
-bool write_frame(int fd, const Frame& frame, std::string& error) {
-    return write_line(fd, serialize(frame), nullptr, error);
+bool write_frame(int fd, const Frame& frame, std::string& error,
+                 const secure::WipeObserver& wipe_observer) {
+    return write_line(fd, serialize(frame, wipe_observer), nullptr, error, wipe_observer);
 }
 
-bool write_frame_until(int fd, const Frame& frame, IoDeadline deadline, std::string& error) {
-    return write_line(fd, serialize(frame), &deadline, error);
+bool write_frame_until(int fd, const Frame& frame, IoDeadline deadline, std::string& error,
+                       const secure::WipeObserver& wipe_observer) {
+    return write_line(fd, serialize(frame, wipe_observer), &deadline, error, wipe_observer);
 }
 
 } // namespace tgcli::proto
