@@ -1,8 +1,10 @@
 #include "cli/client.hpp"
 
+#include "cli/control_stop.hpp"
 #include "cli/prompt.hpp"
 #include "cli/render.hpp"
 #include "cli/routing.hpp"
+#include "cli/surface_safety.hpp"
 #include "common/config.hpp"
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
@@ -22,11 +24,13 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <tgcli/version.hpp>
@@ -58,6 +62,11 @@ std::string command_key(const std::vector<std::string>& command) {
         key += part;
     }
     return key;
+}
+
+bool is_daemon_control_command(const std::vector<std::string>& command) {
+    const auto key = command_key(command);
+    return key == "daemon status" || key == "daemon stop" || key == "daemon restart";
 }
 
 // Renders response frames and remembers the terminal outcome.
@@ -413,37 +422,44 @@ struct Session {
 
 enum class HandshakeOutcome { Ok, BinaryMismatch, ProtocolMismatch, IncompatibleHello, Failed };
 
-HandshakeOutcome handshake(int fd, proto::FrameReader& reader, Deadline deadline,
-                           std::string& error) {
+struct HandshakeResult {
+    HandshakeOutcome outcome = HandshakeOutcome::Failed;
+    std::optional<proto::Hello> hello;
+    bool clean_eof = false;
+};
+
+HandshakeResult handshake(int fd, proto::FrameReader& reader, Deadline deadline,
+                          std::string& error) {
     if (std::string io_error; !proto::write_frame_until(
             fd, proto::Hello{kVersion, proto::kProtocolVersion}, deadline, io_error)) {
         error = io_error;
-        return HandshakeOutcome::Failed;
+        return {HandshakeOutcome::Failed, std::nullopt, false};
     }
     std::string io_error;
     auto line = reader.read_line_until(deadline, io_error);
     if (!line) {
         error = io_error.empty() ? "daemon closed the connection during handshake" : io_error;
-        return HandshakeOutcome::Failed;
+        return {HandshakeOutcome::Failed, std::nullopt, io_error.empty()};
     }
     std::string parse_error;
     const auto frame = proto::parse(std::move(*line), parse_error);
     if (!frame) {
         error = "malformed handshake frame: " + parse_error;
-        return HandshakeOutcome::IncompatibleHello;
+        return {HandshakeOutcome::IncompatibleHello, std::nullopt, false};
     }
     const auto* hello = std::get_if<proto::Hello>(&*frame);
     if (hello == nullptr) {
         error = "daemon did not open with a hello frame";
-        return HandshakeOutcome::IncompatibleHello;
+        return {HandshakeOutcome::IncompatibleHello, std::nullopt, false};
     }
+    proto::Hello observed = *hello;
     if (hello->protocol_version != proto::kProtocolVersion) {
-        return HandshakeOutcome::ProtocolMismatch;
+        return {HandshakeOutcome::ProtocolMismatch, std::move(observed), false};
     }
     if (hello->binary_version != kVersion) {
-        return HandshakeOutcome::BinaryMismatch;
+        return {HandshakeOutcome::BinaryMismatch, std::move(observed), false};
     }
-    return HandshakeOutcome::Ok;
+    return {HandshakeOutcome::Ok, std::move(observed), false};
 }
 
 struct RestartTarget {
@@ -455,13 +471,16 @@ struct RestartTarget {
 
 enum class RestartVerification { Verified, Transition, Invalid };
 
-RestartVerification verify_restart_target(const std::string& account, const paths::Environment& env,
+RestartVerification verify_control_target(const std::string& account, const paths::Environment& env,
                                           const std::string& socket_path, const Session& session,
                                           std::optional<RestartTarget>& target,
                                           std::string& error) {
     target.reset();
     const std::string state_dir = paths::account_state_dir(account, env);
     if (!paths::validate_private_dir(state_dir, env.uid, error)) {
+        return RestartVerification::Invalid;
+    }
+    if (!paths::validate_private_dir(paths::runtime_dir(env), env.uid, error)) {
         return RestartVerification::Invalid;
     }
     const auto control_path = paths::control_socket_path(account, env, error);
@@ -508,6 +527,244 @@ RestartVerification verify_restart_target(const std::string& account, const path
     target =
         RestartTarget{std::move(owner), session.socket_identity, *control_path, control_identity};
     return RestartVerification::Verified;
+}
+
+enum class SurfaceState {
+    Absent,
+    Starting,
+    Running,
+    Transition,
+    Incomplete,
+    Invalid,
+    HandshakeFailed
+};
+
+struct SurfaceProbe {
+    SurfaceState state = SurfaceState::Invalid;
+    HandshakeResult handshake;
+    std::unique_ptr<RestartTarget> target;
+    daemon_lock::Identity owner_identity;
+    std::string error;
+    std::string failure_reason = "surface_invalid";
+};
+
+bool path_present(const std::string& candidate, bool& present, std::string& error) {
+    struct stat metadata {};
+    if (::lstat(candidate.c_str(), &metadata) == 0) {
+        present = true;
+        return true;
+    }
+    if (errno == ENOENT) {
+        present = false;
+        return true;
+    }
+    error = "cannot inspect " + candidate + ": " + std::strerror(errno);
+    return false;
+}
+
+SurfaceState inspect_surface_files(const std::string& account, const paths::Environment& env,
+                                   const std::string& socket_path,
+                                   std::optional<RestartTarget>& frozen_target,
+                                   std::string& failure_reason, std::string& error) {
+    frozen_target.reset();
+    const std::string state_dir = paths::account_state_dir(account, env);
+    const std::string lock_path = state_dir + "/daemon.lock";
+    bool lock_present = false;
+    if (!path_present(lock_path, lock_present, error)) {
+        return SurfaceState::Invalid;
+    }
+    if (lock_present && !paths::validate_private_dir(state_dir, env.uid, error)) {
+        return SurfaceState::Invalid;
+    }
+
+    std::optional<daemon_lock::OwnerWatch> owner;
+    const auto owner_status = daemon_lock::inspect_owner(lock_path, env.uid, owner, error);
+    if (owner_status == daemon_lock::OwnerStatus::Invalid) {
+        return SurfaceState::Invalid;
+    }
+
+    const auto control_path = paths::control_socket_path(account, env, error);
+    if (!control_path) {
+        return SurfaceState::Invalid;
+    }
+    std::optional<paths::SocketIdentity> main_identity;
+    if (!paths::find_socket_endpoint(socket_path, env.uid, main_identity, error)) {
+        return SurfaceState::Invalid;
+    }
+    std::optional<paths::SocketIdentity> control_identity;
+    if (!paths::find_socket_endpoint(*control_path, env.uid, control_identity, error)) {
+        return SurfaceState::Invalid;
+    }
+    if ((main_identity || control_identity) &&
+        !paths::validate_private_dir(paths::runtime_dir(env), env.uid, error)) {
+        return SurfaceState::Invalid;
+    }
+
+    if (owner_status == daemon_lock::OwnerStatus::Released && !main_identity && !control_identity) {
+        return SurfaceState::Absent;
+    }
+    if (owner_status == daemon_lock::OwnerStatus::Transition) {
+        if (!main_identity && !control_identity) {
+            if (detail::inspect_runtime_directory(paths::runtime_dir(env), env.uid, error) ==
+                detail::RuntimeDirectoryState::Invalid) {
+                return SurfaceState::Invalid;
+            }
+            error = "daemon startup is publishing its identity";
+            return SurfaceState::Starting;
+        }
+        error = "daemon ownership changed while inspecting the control surface";
+        failure_reason = "identity_changed";
+        return SurfaceState::Incomplete;
+    }
+    if (owner_status == daemon_lock::OwnerStatus::Held && owner && !main_identity &&
+        !control_identity) {
+        if (detail::inspect_runtime_directory(paths::runtime_dir(env), env.uid, error) ==
+            detail::RuntimeDirectoryState::Invalid) {
+            return SurfaceState::Invalid;
+        }
+        error = "daemon startup has not published its endpoints";
+        return SurfaceState::Starting;
+    }
+    if (owner_status != daemon_lock::OwnerStatus::Held || !owner || !main_identity ||
+        !control_identity) {
+        error = "daemon control surface is incomplete";
+        return SurfaceState::Incomplete;
+    }
+    frozen_target =
+        RestartTarget{std::move(owner), *main_identity, *control_path, control_identity};
+    return SurfaceState::Running;
+}
+
+enum class FrozenTargetObservation { Unchanged, Changed, Invalid };
+
+FrozenTargetObservation observe_frozen_target(RestartTarget& target, const std::string& socket_path,
+                                              uid_t uid, std::string& error) {
+    if (!target.owner || !target.control_identity) {
+        error = "frozen daemon target is incomplete";
+        return FrozenTargetObservation::Invalid;
+    }
+    bool owner_released = false;
+    bool main_changed = false;
+    bool control_changed = false;
+    if (!target.owner->owner_released(owner_released, error) ||
+        !paths::socket_endpoint_changed(socket_path, uid, target.main_identity, main_changed,
+                                        error) ||
+        !paths::socket_endpoint_changed(target.control_path, uid, *target.control_identity,
+                                        control_changed, error)) {
+        return FrozenTargetObservation::Invalid;
+    }
+    return owner_released || main_changed || control_changed ? FrozenTargetObservation::Changed
+                                                             : FrozenTargetObservation::Unchanged;
+}
+
+bool open_frozen_session(const paths::Environment& env, const std::string& socket_path,
+                         Deadline deadline, RestartTarget& frozen_target, SurfaceProbe& probe,
+                         Session& session, std::unique_ptr<proto::FrameReader>& reader) {
+    std::string error;
+    ConnectedSocket connected;
+    const auto connect_status = connect_socket(socket_path, env.uid, deadline, connected, error);
+    if (connect_status != ConnectStatus::Connected) {
+        probe.state = SurfaceState::Invalid;
+        if (connect_status == ConnectStatus::Unavailable) {
+            const auto observation =
+                observe_frozen_target(frozen_target, socket_path, env.uid, probe.error);
+            if (observation == FrozenTargetObservation::Changed) {
+                probe.state = SurfaceState::Transition;
+                probe.failure_reason = "identity_changed";
+            } else if (observation == FrozenTargetObservation::Unchanged) {
+                probe.state = SurfaceState::Incomplete;
+            }
+        }
+        if (probe.error.empty()) {
+            probe.error = std::move(error);
+        }
+        return false;
+    }
+    if (connected.identity != frozen_target.main_identity) {
+        ::close(connected.fd);
+        probe.state = SurfaceState::Transition;
+        probe.error = "daemon main endpoint changed while inspecting the control surface";
+        probe.failure_reason = "identity_changed";
+        return false;
+    }
+    session.fd = connected.fd;
+    session.socket_identity = connected.identity;
+    reader = std::make_unique<proto::FrameReader>(session.fd);
+    probe.handshake = handshake(session.fd, *reader, deadline, error);
+    if (probe.handshake.outcome != HandshakeOutcome::Failed) {
+        return true;
+    }
+    probe.state =
+        probe.handshake.clean_eof ? SurfaceState::Transition : SurfaceState::HandshakeFailed;
+    probe.error = std::move(error);
+    probe.failure_reason = probe.handshake.clean_eof ? "identity_changed" : "handshake_failed";
+    return false;
+}
+
+void verify_frozen_session(const std::string& account, const paths::Environment& env,
+                           const std::string& socket_path, const Session& session,
+                           const paths::SocketIdentity& frozen_control_identity,
+                           const daemon_lock::Identity& initial_owner, SurfaceProbe& probe) {
+    std::string error;
+    std::optional<RestartTarget> verified_target;
+    const auto verification =
+        verify_control_target(account, env, socket_path, session, verified_target, error);
+    if (verification != RestartVerification::Verified || !verified_target) {
+        probe.state = verification == RestartVerification::Transition ? SurfaceState::Transition
+                                                                      : SurfaceState::Invalid;
+        probe.error = std::move(error);
+        if (verification == RestartVerification::Transition) {
+            probe.failure_reason = "identity_changed";
+        }
+        return;
+    }
+    if (!verified_target->control_identity ||
+        *verified_target->control_identity != frozen_control_identity) {
+        probe.state = SurfaceState::Transition;
+        probe.error = "daemon control endpoint changed while inspecting the control surface";
+        probe.failure_reason = "identity_changed";
+        return;
+    }
+    if (!verified_target->owner || verified_target->owner->identity() != initial_owner) {
+        probe.state = SurfaceState::Transition;
+        probe.error = "daemon owner identity changed while inspecting the control surface";
+        probe.failure_reason = "identity_changed";
+        return;
+    }
+    probe.state = SurfaceState::Running;
+    probe.target = std::make_unique<RestartTarget>(std::move(*verified_target));
+}
+
+SurfaceProbe probe_daemon_surface(const std::string& account, const paths::Environment& env,
+                                  const std::string& socket_path, Deadline deadline,
+                                  Session& session, std::unique_ptr<proto::FrameReader>& reader) {
+    SurfaceProbe probe;
+    std::optional<RestartTarget> frozen_target;
+    probe.state = inspect_surface_files(account, env, socket_path, frozen_target,
+                                        probe.failure_reason, probe.error);
+    if (probe.state != SurfaceState::Running) {
+        return probe;
+    }
+    if (!frozen_target) {
+        probe.state = SurfaceState::Invalid;
+        probe.error = "frozen daemon control surface is incomplete";
+        return probe;
+    }
+    if (!frozen_target->owner || !frozen_target->control_identity) {
+        probe.state = SurfaceState::Invalid;
+        probe.error = "frozen daemon control surface is incomplete";
+        return probe;
+    }
+    const daemon_lock::Identity initial_owner = frozen_target->owner->identity();
+    const paths::SocketIdentity frozen_control_identity = *frozen_target->control_identity;
+    probe.owner_identity = initial_owner;
+    probe.target = std::make_unique<RestartTarget>(std::move(*frozen_target));
+    RestartTarget& frozen = *probe.target;
+    if (open_frozen_session(env, socket_path, deadline, frozen, probe, session, reader)) {
+        verify_frozen_session(account, env, socket_path, session, frozen_control_identity,
+                              initial_owner, probe);
+    }
+    return probe;
 }
 
 bool wait_for_socket_change(const std::string& socket_path, uid_t uid,
@@ -560,9 +817,9 @@ bool wait_for_old_daemon_shutdown(RestartTarget& target, const std::string& sock
     return false;
 }
 
-bool restart_binary_mismatched_daemon(int fd, proto::FrameReader& reader, RestartTarget& target,
-                                      const std::string& socket_path, uid_t uid, Deadline deadline,
-                                      std::string& error) {
+bool request_binary_mismatched_stop(int fd, proto::FrameReader& reader, RestartTarget& target,
+                                    const std::string& socket_path, uid_t uid, Deadline deadline,
+                                    std::string& error) {
     proto::Request stop_request;
     stop_request.id = 1;
     stop_request.command = {"daemon", "stop"};
@@ -583,84 +840,111 @@ bool restart_binary_mismatched_daemon(int fd, proto::FrameReader& reader, Restar
     return false;
 }
 
-enum class ControlStopOutcome { Sent, AlreadyGone, Failed };
+enum class CompatibleStopResponse { Confirmed, ConcurrentShutdown, Lost, Failed };
 
-ControlStopOutcome send_control_stop(const std::string& control_socket_path,
-                                     std::string_view control_token, Deadline deadline,
-                                     std::string& error) {
-    const int fd = net::socket_cloexec(AF_UNIX, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        error = "cannot create daemon control socket: " + std::string(std::strerror(errno));
-        return ControlStopOutcome::Failed;
-    }
-    const int flags = ::fcntl(fd, F_GETFL);
-    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        error =
-            "cannot make daemon control socket non-blocking: " + std::string(std::strerror(errno));
-        ::close(fd);
-        return ControlStopOutcome::Failed;
-    }
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    if (control_socket_path.size() >= sizeof(addr.sun_path)) {
-        error = "control socket path too long: " + control_socket_path;
-        ::close(fd);
-        return ControlStopOutcome::Failed;
-    }
-    std::strncpy(addr.sun_path, control_socket_path.c_str(), sizeof(addr.sun_path) - 1);
+CompatibleStopResponse read_compatible_stop_response(proto::FrameReader& reader,
+                                                     std::uint64_t request_id, Deadline deadline,
+                                                     std::string& error) {
     for (;;) {
-        int send_flags = 0;
-#if defined(MSG_NOSIGNAL)
-        send_flags |= MSG_NOSIGNAL;
-#endif
-#if defined(MSG_DONTWAIT)
-        send_flags |= MSG_DONTWAIT;
-#endif
-        const ssize_t count = ::sendto(fd, control_token.data(), control_token.size(), send_flags,
-                                       reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
-        if (count == static_cast<ssize_t>(control_token.size())) {
-            ::close(fd);
-            return ControlStopOutcome::Sent;
+        std::string io_error;
+        auto line = reader.read_line_until(deadline, io_error);
+        if (!line) {
+            error = io_error.empty() ? "daemon closed before confirming shutdown" : io_error;
+            return CompatibleStopResponse::Lost;
         }
-        if (count >= 0) {
-            error = "short daemon control datagram";
-            ::close(fd);
-            return ControlStopOutcome::Failed;
+        std::string parse_error;
+        const auto frame = proto::parse(std::move(*line), parse_error);
+        if (!frame) {
+            error = "malformed daemon stop response: " + parse_error;
+            return CompatibleStopResponse::Failed;
         }
-        const int send_error = errno;
-        if (send_error == EINTR) {
-            continue;
-        }
-        if (send_error == ENOENT || send_error == ECONNREFUSED) {
-            ::close(fd);
-            return ControlStopOutcome::AlreadyGone;
-        }
-        if (send_error == EAGAIN || send_error == EWOULDBLOCK || send_error == ENOBUFS) {
-            if (!sleep_until_retry(deadline)) {
-                error = "timed out sending daemon control datagram";
-                ::close(fd);
-                return ControlStopOutcome::Failed;
+        if (const auto* result = std::get_if<proto::Result>(&*frame)) {
+            if (result->id != request_id || result->data != json{{"stopping", true}}) {
+                error = "daemon returned an unexpected stop result";
+                return CompatibleStopResponse::Failed;
             }
-            continue;
+            return CompatibleStopResponse::Confirmed;
         }
-        error = "cannot request daemon shutdown through " + control_socket_path + ": " +
-                std::strerror(send_error);
-        ::close(fd);
-        return ControlStopOutcome::Failed;
+        if (const auto* terminal_error = std::get_if<proto::Error>(&*frame)) {
+            if (terminal_error->id == request_id && terminal_error->code == "DAEMON_SHUTDOWN") {
+                return CompatibleStopResponse::ConcurrentShutdown;
+            }
+            error = "daemon rejected the stop request: " + terminal_error->code;
+            return CompatibleStopResponse::Failed;
+        }
     }
 }
 
-bool restart_out_of_band(RestartTarget& target, const std::string& socket_path, uid_t uid,
-                         Deadline deadline, std::string& error) {
-    if (!target.owner) {
-        error = "verified restart target has no lock owner";
+bool join_shutdown_after_exchange_failure(RestartTarget& target, const std::string& socket_path,
+                                          uid_t uid, Deadline deadline, std::string exchange_error,
+                                          std::string& error) {
+    std::string shutdown_error;
+    if (wait_for_old_daemon_shutdown(target, socket_path, uid, deadline, shutdown_error)) {
+        error.clear();
+        return true;
+    }
+    error = std::move(exchange_error) + "; " + shutdown_error;
+    return false;
+}
+
+bool request_compatible_stop(int fd, proto::FrameReader& reader, RestartTarget& target,
+                             const std::string& socket_path, uid_t uid, Deadline deadline,
+                             std::string& error) {
+    proto::Request stop_request;
+    stop_request.id = 1;
+    stop_request.command = {"daemon", "stop"};
+    stop_request.context.cwd = "/";
+    std::string io_error;
+    if (!proto::write_frame_until(fd, stop_request, deadline, io_error)) {
+        return join_shutdown_after_exchange_failure(target, socket_path, uid, deadline,
+                                                    "cannot send daemon stop request: " + io_error,
+                                                    error);
+    }
+    const auto response = read_compatible_stop_response(reader, stop_request.id, deadline, error);
+    if (response == CompatibleStopResponse::Failed) {
         return false;
     }
-    if (send_control_stop(target.control_path, target.owner->identity().control_token, deadline,
-                          error) == ControlStopOutcome::Failed) {
+    if (response == CompatibleStopResponse::Lost) {
+        std::string exchange_error = std::move(error);
+        return join_shutdown_after_exchange_failure(target, socket_path, uid, deadline,
+                                                    std::move(exchange_error), error);
+    }
+    return wait_for_old_daemon_shutdown(target, socket_path, uid, deadline, error);
+}
+
+bool request_out_of_band_stop(RestartTarget& target, const std::string& socket_path, uid_t uid,
+                              Deadline deadline, std::string& error) {
+    if (!target.owner || !target.control_identity) {
+        error = "verified restart target has no lock owner or control endpoint";
+        return false;
+    }
+    if (detail::send_verified_control_stop(target.control_path, *target.control_identity, uid,
+                                           target.owner->identity().control_token, deadline,
+                                           error) == detail::ControlStopOutcome::Failed) {
         return false;
     }
     return wait_for_old_daemon_shutdown(target, socket_path, uid, deadline, error);
+}
+
+bool stop_verified_daemon(HandshakeOutcome outcome, Session& session, proto::FrameReader& reader,
+                          RestartTarget& target, const std::string& socket_path, uid_t uid,
+                          Deadline deadline, std::string& error) {
+    switch (outcome) {
+    case HandshakeOutcome::Ok:
+        return request_compatible_stop(session.fd, reader, target, socket_path, uid, deadline,
+                                       error);
+    case HandshakeOutcome::BinaryMismatch:
+        return request_binary_mismatched_stop(session.fd, reader, target, socket_path, uid,
+                                              deadline, error);
+    case HandshakeOutcome::ProtocolMismatch:
+    case HandshakeOutcome::IncompatibleHello:
+        return request_out_of_band_stop(target, socket_path, uid, deadline, error);
+    case HandshakeOutcome::Failed:
+        error = "daemon handshake did not identify a controllable target";
+        return false;
+    }
+    error = "daemon handshake outcome is invalid";
+    return false;
 }
 
 bool recover_mismatched_daemon(HandshakeOutcome outcome, const std::string& account,
@@ -669,7 +953,7 @@ bool recover_mismatched_daemon(HandshakeOutcome outcome, const std::string& acco
                                std::string& error) {
     std::optional<RestartTarget> target;
     const auto verification =
-        verify_restart_target(account, env, socket_path, session, target, error);
+        verify_control_target(account, env, socket_path, session, target, error);
     if (verification == RestartVerification::Transition && target) {
         const std::string transition_error = error;
         if (wait_for_old_daemon_shutdown(*target, socket_path, env.uid, deadline, error)) {
@@ -682,18 +966,11 @@ bool recover_mismatched_daemon(HandshakeOutcome outcome, const std::string& acco
         error = "cannot verify mismatched daemon for restart: " + error;
         return false;
     }
-    if (outcome == HandshakeOutcome::BinaryMismatch) {
-        if (restart_binary_mismatched_daemon(session.fd, reader, *target, socket_path, env.uid,
-                                             deadline, error)) {
-            return true;
-        }
-        error = "cannot restart binary-mismatched daemon: " + error;
-        return false;
-    }
-    if (restart_out_of_band(*target, socket_path, env.uid, deadline, error)) {
+    if (stop_verified_daemon(outcome, session, reader, *target, socket_path, env.uid, deadline,
+                             error)) {
         return true;
     }
-    error = "cannot restart protocol-incompatible daemon: " + error;
+    error = "cannot stop mismatched daemon: " + error;
     return false;
 }
 
@@ -812,6 +1089,288 @@ int run_config_global(const proto::Request& request, const RunOptions& options,
     return renderer.exit_code();
 }
 
+std::optional<Deadline> daemon_control_deadline(const proto::Request& request,
+                                                const RunOptions& options) {
+    const auto now = std::chrono::steady_clock::now();
+    if (request.context.timeout_seconds) {
+        return proto::request_deadline(request.context.timeout_seconds, now);
+    }
+    if (options.restart_timeout <= std::chrono::milliseconds::zero()) {
+        return std::nullopt;
+    }
+    return now + options.restart_timeout;
+}
+
+int daemon_control_failure(std::string_view operation, std::string_view reason,
+                           const RunOptions& options, const std::string& message) {
+    print_error("DAEMON_CONTROL_FAILED", message,
+                {{"account", options.account}, {"operation", operation}, {"reason", reason}});
+    return kGeneric;
+}
+
+int daemon_not_running(const RunOptions& options, const std::string& socket_path) {
+    print_error("DAEMON_NOT_RUNNING", "daemon is not running",
+                {{"account", options.account}, {"socket", socket_path}});
+    return kNotFound;
+}
+
+struct ReplacementFacts {
+    daemon_lock::Identity owner;
+    proto::Hello hello;
+};
+
+bool spawn_replacement_once(const RunOptions& options, Deadline deadline, bool& spawn_attempted,
+                            std::string& error) {
+    if (spawn_attempted) {
+        return true;
+    }
+    if (!spawn_daemon(options.account, options.daemon_executable, deadline, error)) {
+        return false;
+    }
+    spawn_attempted = true;
+    return true;
+}
+
+bool accept_replacement(const SurfaceProbe& probe,
+                        const std::optional<daemon_lock::Identity>& old_owner,
+                        ReplacementFacts& replacement, std::string& error) {
+    if (probe.handshake.outcome != HandshakeOutcome::Ok || !probe.handshake.hello ||
+        !probe.target) {
+        error = "replacement daemon did not complete the current Hello handshake";
+        return false;
+    }
+    if (!probe.target->owner) {
+        error = "replacement daemon did not complete the current Hello handshake";
+        return false;
+    }
+    const auto& new_owner = probe.owner_identity;
+    if (old_owner && old_owner->pid == new_owner.pid &&
+        old_owner->process_start == new_owner.process_start) {
+        error = "replacement daemon retained the old owner identity";
+        return false;
+    }
+    replacement = {new_owner, *probe.handshake.hello};
+    return true;
+}
+
+enum class ReplacementStep { Ready, Retry, Failed };
+
+ReplacementStep advance_replacement(SurfaceProbe& probe, const RunOptions& options,
+                                    const paths::Environment& env, const std::string& socket_path,
+                                    const std::optional<daemon_lock::Identity>& old_owner,
+                                    Deadline deadline, bool& spawn_attempted,
+                                    ReplacementFacts& replacement, std::string& error) {
+    if (probe.state == SurfaceState::Running) {
+        return accept_replacement(probe, old_owner, replacement, error) ? ReplacementStep::Ready
+                                                                        : ReplacementStep::Failed;
+    }
+    if (probe.state == SurfaceState::Transition) {
+        if (!probe.target) {
+            error = "replacement transition has no frozen target";
+            return ReplacementStep::Failed;
+        }
+        if (!wait_for_old_daemon_shutdown(*probe.target, socket_path, env.uid, deadline, error) ||
+            !spawn_replacement_once(options, deadline, spawn_attempted, error)) {
+            return ReplacementStep::Failed;
+        }
+        return ReplacementStep::Retry;
+    }
+    if (probe.state == SurfaceState::Absent && !spawn_attempted) {
+        return spawn_replacement_once(options, deadline, spawn_attempted, error)
+                   ? ReplacementStep::Retry
+                   : ReplacementStep::Failed;
+    }
+    if (probe.state == SurfaceState::Invalid || probe.state == SurfaceState::HandshakeFailed ||
+        probe.state == SurfaceState::Incomplete) {
+        error = probe.error;
+        return ReplacementStep::Failed;
+    }
+    return ReplacementStep::Retry;
+}
+
+bool wait_for_replacement(const RunOptions& options, const paths::Environment& env,
+                          const std::string& socket_path,
+                          const std::optional<daemon_lock::Identity>& old_owner, Deadline deadline,
+                          bool spawn_immediately, ReplacementFacts& replacement,
+                          std::string& error) {
+    bool spawn_attempted = false;
+    if (spawn_immediately && !spawn_replacement_once(options, deadline, spawn_attempted, error)) {
+        return false;
+    }
+    for (;;) {
+        Session session;
+        std::unique_ptr<proto::FrameReader> reader;
+        auto probe =
+            probe_daemon_surface(options.account, env, socket_path, deadline, session, reader);
+        const auto step = advance_replacement(probe, options, env, socket_path, old_owner, deadline,
+                                              spawn_attempted, replacement, error);
+        if (step == ReplacementStep::Ready) {
+            return true;
+        }
+        if (step == ReplacementStep::Failed) {
+            return false;
+        }
+        if (!sleep_until_retry(deadline)) {
+            error = "timed out waiting for replacement daemon readiness";
+            return false;
+        }
+    }
+}
+
+int surface_probe_failure(std::string_view operation, const RunOptions& options,
+                          const SurfaceProbe& probe) {
+    return daemon_control_failure(operation, probe.failure_reason, options,
+                                  "cannot " + std::string(operation) + " daemon: " + probe.error);
+}
+
+int run_daemon_status(const RunOptions& options, const paths::Environment& env,
+                      const std::string& socket_path, Deadline deadline) {
+    Session session;
+    std::unique_ptr<proto::FrameReader> reader;
+    auto probe = probe_daemon_surface(options.account, env, socket_path, deadline, session, reader);
+    if (probe.state == SurfaceState::Absent) {
+        FrameRenderer renderer("daemon status", options.json);
+        renderer.on_result(
+            {{"account", options.account}, {"running", false}, {"socket", socket_path}});
+        return renderer.exit_code();
+    }
+    if (probe.state != SurfaceState::Running) {
+        return surface_probe_failure("status", options, probe);
+    }
+    if (!probe.handshake.hello || !probe.target) {
+        return daemon_control_failure("status", "handshake_failed", options,
+                                      "cannot status daemon: daemon Hello is not parseable");
+    }
+    if (!probe.target->owner) {
+        return daemon_control_failure("status", "handshake_failed", options,
+                                      "cannot status daemon: daemon Hello is not parseable");
+    }
+    const auto& hello = *probe.handshake.hello;
+    const auto& owner = probe.owner_identity;
+    FrameRenderer renderer("daemon status", options.json);
+    renderer.on_result({{"account", options.account},
+                        {"running", true},
+                        {"pid", static_cast<std::int64_t>(owner.pid)},
+                        {"version", hello.binary_version},
+                        {"protocol", hello.protocol_version},
+                        {"socket", socket_path}});
+    return renderer.exit_code();
+}
+
+int run_daemon_stop(const RunOptions& options, const paths::Environment& env,
+                    const std::string& socket_path, Deadline deadline) {
+    Session session;
+    std::unique_ptr<proto::FrameReader> reader;
+    auto probe = probe_daemon_surface(options.account, env, socket_path, deadline, session, reader);
+    if (probe.state == SurfaceState::Absent) {
+        return daemon_not_running(options, socket_path);
+    }
+    if (probe.state != SurfaceState::Running) {
+        return surface_probe_failure("stop", options, probe);
+    }
+    if (!probe.target || !probe.target->owner || !reader) {
+        return daemon_control_failure("stop", "surface_invalid", options,
+                                      "cannot stop daemon: verified target is incomplete");
+    }
+    std::string stop_error;
+    if (!stop_verified_daemon(probe.handshake.outcome, session, *reader, *probe.target, socket_path,
+                              env.uid, deadline, stop_error)) {
+        return daemon_control_failure("stop", "shutdown_failed", options,
+                                      "cannot stop daemon: " + stop_error);
+    }
+    FrameRenderer renderer("daemon stop", options.json);
+    renderer.on_result({{"stopping", true}});
+    return renderer.exit_code();
+}
+
+int render_daemon_restart(const RunOptions& options, const std::string& socket_path,
+                          const ReplacementFacts& replacement) {
+    FrameRenderer renderer("daemon restart", options.json);
+    renderer.on_result({{"account", options.account},
+                        {"restarted", true},
+                        {"pid", static_cast<std::int64_t>(replacement.owner.pid)},
+                        {"version", replacement.hello.binary_version},
+                        {"protocol", replacement.hello.protocol_version},
+                        {"socket", socket_path}});
+    return renderer.exit_code();
+}
+
+int run_daemon_restart(const RunOptions& options, const paths::Environment& env,
+                       const std::string& socket_path, Deadline deadline) {
+    Session session;
+    std::unique_ptr<proto::FrameReader> reader;
+    auto probe = probe_daemon_surface(options.account, env, socket_path, deadline, session, reader);
+    std::optional<daemon_lock::Identity> old_owner;
+    bool spawn_replacement = true;
+    if (probe.state == SurfaceState::Starting) {
+        spawn_replacement = false;
+    } else if (probe.state == SurfaceState::Transition) {
+        if (!probe.target) {
+            return surface_probe_failure("restart", options, probe);
+        }
+        if (!probe.target->owner) {
+            return surface_probe_failure("restart", options, probe);
+        }
+        old_owner = probe.owner_identity;
+        std::string shutdown_error;
+        if (!wait_for_old_daemon_shutdown(*probe.target, socket_path, env.uid, deadline,
+                                          shutdown_error)) {
+            return daemon_control_failure("restart", "shutdown_failed", options,
+                                          "cannot restart daemon: " + shutdown_error);
+        }
+    } else if (probe.state == SurfaceState::Running) {
+        if (!probe.target || !reader) {
+            return daemon_control_failure("restart", "surface_invalid", options,
+                                          "cannot restart daemon: verified target is incomplete");
+        }
+        if (!probe.target->owner) {
+            return daemon_control_failure("restart", "surface_invalid", options,
+                                          "cannot restart daemon: verified target is incomplete");
+        }
+        old_owner = probe.owner_identity;
+        std::string stop_error;
+        if (!stop_verified_daemon(probe.handshake.outcome, session, *reader, *probe.target,
+                                  socket_path, env.uid, deadline, stop_error)) {
+            return daemon_control_failure("restart", "shutdown_failed", options,
+                                          "cannot restart daemon: " + stop_error);
+        }
+    } else if (probe.state != SurfaceState::Absent) {
+        return surface_probe_failure("restart", options, probe);
+    }
+    ReplacementFacts replacement;
+    std::string replacement_error;
+    if (!wait_for_replacement(options, env, socket_path, old_owner, deadline, spawn_replacement,
+                              replacement, replacement_error)) {
+        return daemon_control_failure("restart", "replacement_failed", options,
+                                      "cannot restart daemon: " + replacement_error);
+    }
+    return render_daemon_restart(options, socket_path, replacement);
+}
+
+int run_daemon_control(const proto::Request& request, const RunOptions& options) {
+    const auto deadline = daemon_control_deadline(request, options);
+    if (!deadline) {
+        print_error("USAGE", "invalid request timeout",
+                    {{"argument", "--timeout"}, {"reason", "invalid_argument"}});
+        return kUsage;
+    }
+    const auto env = paths::real_environment();
+    std::string path_error;
+    const auto socket_path = paths::socket_path(options.account, env, path_error);
+    if (!socket_path) {
+        print_error("USAGE", path_error, json::object());
+        return kUsage;
+    }
+    const std::string& operation = request.command.back();
+    if (operation == "status") {
+        return run_daemon_status(options, env, *socket_path, *deadline);
+    }
+    if (operation == "stop") {
+        return run_daemon_stop(options, env, *socket_path, *deadline);
+    }
+    return run_daemon_restart(options, env, *socket_path, *deadline);
+}
+
 } // namespace
 
 int run_command(const proto::Request& request, const RunOptions& options) {
@@ -820,8 +1379,18 @@ int run_command(const proto::Request& request, const RunOptions& options) {
     if (is_config_global_command(request.command)) {
         return run_config_global(request, options, prompt);
     }
+    const bool daemon_control = is_daemon_control_command(request.command);
+    if (daemon_control && options.no_daemon) {
+        print_error("USAGE", "daemon lifecycle commands do not support --no-daemon",
+                    json::object());
+        return kUsage;
+    }
     if (options.no_daemon) {
         return run_in_process(request, options, prompt);
+    }
+
+    if (daemon_control) {
+        return run_daemon_control(request, options);
     }
 
     const auto env = paths::real_environment();
@@ -840,7 +1409,6 @@ int run_command(const proto::Request& request, const RunOptions& options) {
     }
     const std::string requested_command = command_key(request.command);
     const bool is_doctor = requested_command == "doctor";
-    const bool is_daemon_stop = requested_command == "daemon stop";
     const Deadline deadline = std::chrono::steady_clock::now() + options.restart_timeout;
 
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -860,8 +1428,8 @@ int run_command(const proto::Request& request, const RunOptions& options) {
             session.socket_identity = connected->identity;
         }
         proto::FrameReader reader(session.fd);
-        const auto outcome = handshake(session.fd, reader, deadline, error);
-        switch (outcome) {
+        const auto handshake_result = handshake(session.fd, reader, deadline, error);
+        switch (handshake_result.outcome) {
         case HandshakeOutcome::Failed: {
             const std::string handshake_error = error;
             if (attempt == 0 &&
@@ -887,15 +1455,10 @@ int run_command(const proto::Request& request, const RunOptions& options) {
             break;
         }
 
-        if (!recover_mismatched_daemon(outcome, options.account, env, *socket_path, session, reader,
-                                       deadline, error)) {
+        if (!recover_mismatched_daemon(handshake_result.outcome, options.account, env, *socket_path,
+                                       session, reader, deadline, error)) {
             print_error("GENERIC", error, json::object());
             return kGeneric;
-        }
-        if (is_daemon_stop) {
-            FrameRenderer renderer(requested_command, options.json);
-            renderer.on_result({{"stopping", true}});
-            return renderer.exit_code();
         }
     }
     print_error("GENERIC", "daemon restart loop; giving up", json::object());

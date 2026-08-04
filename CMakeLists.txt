@@ -141,9 +141,11 @@ target_link_libraries(tgcli_daemon
 
 add_library(tgcli_cli STATIC
     src/cli/client.cpp
+    src/cli/control_stop.cpp
     src/cli/prompt.cpp
     src/cli/render.cpp
-    src/cli/routing.cpp)
+    src/cli/routing.cpp
+    src/cli/surface_safety.cpp)
 target_link_libraries(tgcli_cli
     PUBLIC tgcli_proto tgcli_util tgcli_daemon
     PRIVATE fmt::fmt)

@@ -87,6 +87,25 @@ std::vector<SchemaCase> schema_cases() {
          {{"version", "0.1.0"}, {"protocol", 1}, {"tdlib", "1.8.65"}},
          "version"},
         {"daemon-stop.result.schema.json", {{"stopping", true}}, "stopping"},
+        {"daemon-status.result.schema.json",
+         {{"account", "main"}, {"running", false}, {"socket", "/tmp/tgcli.sock"}},
+         "account"},
+        {"daemon-status.result.schema.json",
+         {{"account", "main"},
+          {"running", true},
+          {"pid", 123},
+          {"version", "0.1.0"},
+          {"protocol", 1},
+          {"socket", "/tmp/tgcli.sock"}},
+         "account"},
+        {"daemon-restart.result.schema.json",
+         {{"account", "main"},
+          {"restarted", true},
+          {"pid", 124},
+          {"version", "0.1.0"},
+          {"protocol", 1},
+          {"socket", "/tmp/tgcli.sock"}},
+         "account"},
         {"login.result.schema.json",
          {{"account", "main"},
           {"auth_state", "ready"},
@@ -148,13 +167,15 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                           {"account list", {{"result", "account-list.result.schema.json"}}},
                           {"account show", {{"result", "account-show.result.schema.json"}}},
                           {"account use", {{"result", "account-use.result.schema.json"}}},
+                          {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
+                          {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
                           {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
                           {"doctor", {{"result", "doctor.result.schema.json"}}},
                           {"login", {{"result", "login.result.schema.json"}}},
                           {"me", {{"result", "me.result.schema.json"}}},
                           {"version", {{"result", "version.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 9);
+    CHECK(manifest["commands"].size() == 11);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -199,6 +220,33 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(account_error);
     const auto auth_error = tgcli::test::load_schema_document("auth.error.schema.json");
     check_schema_node(auth_error);
+    const auto daemon_error = tgcli::test::load_schema_document("daemon.error.schema.json");
+    check_schema_node(daemon_error);
+}
+
+TEST_CASE("daemon control errors match their closed schema", "[schema][daemon-control]") {
+    const std::vector<json> errors{
+        {{"error", {{"code", "USAGE"}, {"message", "unsupported"}, {"details", json::object()}}}},
+        {{"error",
+          {{"code", "USAGE"},
+           {"message", "invalid timeout"},
+           {"details", {{"argument", "--timeout"}, {"reason", "invalid_argument"}}}}}},
+        {{"error",
+          {{"code", "DAEMON_NOT_RUNNING"},
+           {"message", "daemon is not running"},
+           {"details", {{"account", "main"}, {"socket", "/tmp/main.sock"}}}}}},
+        {{"error",
+          {{"code", "DAEMON_CONTROL_FAILED"},
+           {"message", "cannot stop daemon"},
+           {"details",
+            {{"account", "main"}, {"operation", "stop"}, {"reason", "surface_invalid"}}}}}}};
+    for (const auto& error : errors) {
+        CHECK_THAT(error, tgcli::test::matches_json_schema("daemon.error.schema.json"));
+    }
+
+    auto unknown_reason = errors.back();
+    unknown_reason["error"]["details"]["reason"] = "unsafe_guess";
+    CHECK_THAT(unknown_reason, !tgcli::test::matches_json_schema("daemon.error.schema.json"));
 }
 
 TEST_CASE("result schemas reject missing required and unknown properties", "[schema]") {

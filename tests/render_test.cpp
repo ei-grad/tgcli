@@ -64,3 +64,27 @@ TEST_CASE("login and me human renderers match reviewed goldens", "[auth][render]
               "login", {{"account", "main"}, {"auth_state", "ready"}, {"user", user}}) ==
           golden("login.txt"));
 }
+
+TEST_CASE("daemon control human renderers match reviewed goldens",
+          "[daemon-control][render][golden]") {
+    CHECK(tgcli::cli::render_human("daemon status", {{"account", "main"},
+                                                     {"running", true},
+                                                     {"pid", 123},
+                                                     {"version", "0.1.0"},
+                                                     {"protocol", 1},
+                                                     {"socket", "/run/tgcli/main.sock"}}) ==
+          golden("daemon-status-running.txt"));
+    CHECK(tgcli::cli::render_human(
+              "daemon status",
+              {{"account", "main"}, {"running", false}, {"socket", "/run/tgcli/main.sock"}}) ==
+          golden("daemon-status-absent.txt"));
+    CHECK(tgcli::cli::render_human("daemon stop", {{"stopping", true}}) ==
+          golden("daemon-stop.txt"));
+    CHECK(tgcli::cli::render_human("daemon restart", {{"account", "main"},
+                                                      {"restarted", true},
+                                                      {"pid", 124},
+                                                      {"version", "0.1.0"},
+                                                      {"protocol", 1},
+                                                      {"socket", "/run/tgcli/main.sock"}}) ==
+          golden("daemon-restart.txt"));
+}

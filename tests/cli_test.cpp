@@ -3,7 +3,9 @@
 // discipline — the observables DESIGN.md §5 pins.
 
 #include "cli/client.hpp"
+#include "cli/control_stop.hpp"
 #include "cli/prompt.hpp"
+#include "cli/surface_safety.hpp"
 #include "common/config.hpp"
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
@@ -28,6 +30,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <poll.h>
 #include <sstream>
 #include <string>
@@ -175,6 +178,46 @@ RunOutcome run_request_captured(const proto::Request& request, const cli::RunOpt
     return outcome;
 }
 
+RunOutcome run_binary_captured(const std::vector<std::string>& arguments, const IsolatedEnv& env,
+                               const std::string& stem) {
+    const std::string output_path = env.root() + "/" + stem + ".out";
+    const std::string error_path = env.root() + "/" + stem + ".err";
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        const int output = ::open(output_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        const int errors = ::open(error_path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        if (output < 0 || errors < 0) {
+            ::_exit(126);
+        }
+        ::dup2(output, STDOUT_FILENO);
+        ::dup2(errors, STDERR_FILENO);
+        ::close(output);
+        ::close(errors);
+        std::vector<std::string> argument_storage{"tgcli"};
+        argument_storage.insert(argument_storage.end(), arguments.begin(), arguments.end());
+        std::vector<char*> argv;
+        argv.reserve(argument_storage.size() + 1);
+        for (auto& argument : argument_storage) {
+            argv.push_back(argument.data());
+        }
+        argv.push_back(nullptr);
+        ::execv(TGCLI_TEST_BINARY, argv.data());
+        ::_exit(127);
+    }
+
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    const auto read_file = [](const std::string& filename) {
+        const std::ifstream input(filename);
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        return contents.str();
+    };
+    return {WEXITSTATUS(status), read_file(output_path), read_file(error_path)};
+}
+
 class InjectedPrompt final : public cli::ChallengePrompt {
   public:
     explicit InjectedPrompt(cli::PromptResultKind result) : result_(result) {}
@@ -269,6 +312,35 @@ void prepare_account_layout() {
     REQUIRE(paths::ensure_private_dir(state_dir, env.uid, error));
 }
 
+std::string prepare_state_layout() {
+    const auto env = paths::real_environment();
+    const std::string state_dir = paths::account_state_dir("main", env);
+    std::filesystem::create_directories(state_dir);
+    std::filesystem::permissions(state_dir, std::filesystem::perms::owner_all);
+    return state_dir;
+}
+
+void write_private_file(const std::string& filename, std::string_view bytes, mode_t mode = 0600) {
+    const int fd = ::open(filename.c_str(), O_CREAT | O_TRUNC | O_WRONLY, mode);
+    REQUIRE(fd >= 0);
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const ssize_t count = ::write(fd, bytes.data() + offset, bytes.size() - offset);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        REQUIRE(count > 0);
+        offset += static_cast<std::size_t>(count);
+    }
+    REQUIRE(::close(fd) == 0);
+    REQUIRE(::chmod(filename.c_str(), mode) == 0);
+}
+
+std::string read_file_bytes(const std::string& filename) {
+    std::ifstream input(filename, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
 void configure_main_account() {
     const auto env = paths::real_environment();
     const config::Store store(paths::config_file(env), env.uid);
@@ -330,7 +402,10 @@ struct ChildDaemonOptions {
     bool malformed_identity = false;
     bool ignore_control_token = false;
     bool protocol_mismatch = true;
+    bool current_binary = false;
+    bool report_ready_before_endpoints = false;
     ShutdownOrder shutdown_order = ShutdownOrder::EndpointsThenLock;
+    std::chrono::milliseconds startup_delay{0};
     std::chrono::milliseconds shutdown_gap{0};
 };
 
@@ -408,6 +483,10 @@ class ChildProtocolDaemon {
         return pid_ > 0 && (::kill(pid_, 0) == 0 || errno == EPERM);
     }
 
+    [[nodiscard]] pid_t pid() const {
+        return pid_;
+    }
+
     int wait_for_exit(std::chrono::milliseconds timeout) {
         if (pid_ <= 0) {
             return -1;
@@ -455,10 +534,18 @@ class ChildProtocolDaemon {
                 ::_exit(3);
             }
         }
+        bool ready_reported = false;
+        if (options.report_ready_before_endpoints) {
+            const char ready = '1';
+            static_cast<void>(::write(ready_fd, &ready, 1));
+            ::close(ready_fd);
+            ready_reported = true;
+            std::this_thread::sleep_for(options.startup_delay);
+        }
 
         daemon::DaemonContext context;
         context.account = "main";
-        context.binary_version = "old-test-binary";
+        context.binary_version = options.current_binary ? std::string(kVersion) : "old-test-binary";
         context.protocol_version = proto::kProtocolVersion + (options.protocol_mismatch ? 1 : 0);
         context.tdlib_version = "test";
         context.socket_path = *socket_path;
@@ -473,13 +560,17 @@ class ChildProtocolDaemon {
         context.request_shutdown = [&server] { server.request_stop(); };
         daemon::register_commands(dispatcher, context);
         if (!server.start(error)) {
-            const char failed = '0';
-            static_cast<void>(::write(ready_fd, &failed, 1));
+            if (!ready_reported) {
+                const char failed = '0';
+                static_cast<void>(::write(ready_fd, &failed, 1));
+            }
             ::_exit(4);
         }
-        const char ready = '1';
-        static_cast<void>(::write(ready_fd, &ready, 1));
-        ::close(ready_fd);
+        if (!ready_reported) {
+            const char ready = '1';
+            static_cast<void>(::write(ready_fd, &ready, 1));
+            ::close(ready_fd);
+        }
         server.wait_for_stop();
         if (options.shutdown_order == ChildDaemonOptions::ShutdownOrder::LockThenEndpoints) {
             ::close(lock_fd);
@@ -667,6 +758,180 @@ class ChildBinaryRaceDaemon {
     pid_t pid_ = -1;
 };
 
+class ChildCompatibleStopRaceDaemon {
+  public:
+    ChildCompatibleStopRaceDaemon() {
+        prepare_account_layout();
+        std::array<int, 2> ready_fds{-1, -1};
+        REQUIRE(::pipe(ready_fds.data()) == 0);
+        pid_ = ::fork();
+        REQUIRE(pid_ >= 0);
+        if (pid_ == 0) {
+            ::signal(SIGTERM, SIG_DFL);
+            ::signal(SIGPIPE, SIG_IGN);
+            ::close(ready_fds[0]);
+            run_child(ready_fds[1]);
+        }
+        ::close(ready_fds[1]);
+        char ready = 0;
+        ssize_t count = -1;
+        do {
+            count = ::read(ready_fds[0], &ready, 1);
+        } while (count < 0 && errno == EINTR);
+        ::close(ready_fds[0]);
+        if (count != 1 || ready != '1') {
+            reap_blocking();
+        }
+        REQUIRE(pid_ > 0);
+    }
+
+    ChildCompatibleStopRaceDaemon(const ChildCompatibleStopRaceDaemon&) = delete;
+    ChildCompatibleStopRaceDaemon& operator=(const ChildCompatibleStopRaceDaemon&) = delete;
+    ChildCompatibleStopRaceDaemon(ChildCompatibleStopRaceDaemon&&) = delete;
+    ChildCompatibleStopRaceDaemon& operator=(ChildCompatibleStopRaceDaemon&&) = delete;
+
+    ~ChildCompatibleStopRaceDaemon() {
+        terminate();
+    }
+
+    int wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return -1;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        int status = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
+            if (waited == pid_) {
+                pid_ = -1;
+                return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            if (waited < 0 && errno != EINTR) {
+                pid_ = -1;
+                return -1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return -1;
+    }
+
+  private:
+    static std::optional<proto::Request> read_stop_request(int fd, proto::IoDeadline deadline) {
+        proto::FrameReader reader(fd);
+        std::string error;
+        const auto hello_line = reader.read_line_until(deadline, error);
+        if (!hello_line) {
+            return std::nullopt;
+        }
+        std::string parse_error;
+        const auto hello = proto::parse(*hello_line, parse_error);
+        if (!hello || std::get_if<proto::Hello>(&*hello) == nullptr) {
+            return std::nullopt;
+        }
+        const auto request_line = reader.read_line_until(deadline, error);
+        if (!request_line) {
+            return std::nullopt;
+        }
+        const auto frame = proto::parse(*request_line, parse_error);
+        const auto* request = frame ? std::get_if<proto::Request>(&*frame) : nullptr;
+        if (request == nullptr || request->command != std::vector<std::string>{"daemon", "stop"}) {
+            return std::nullopt;
+        }
+        return *request;
+    }
+
+    [[noreturn]] static void run_child(int ready_fd) {
+        const auto env = paths::real_environment();
+        std::string error;
+        const auto socket_path = paths::socket_path("main", env, error);
+        const auto control_path = paths::control_socket_path("main", env, error);
+        const std::string state_dir = paths::account_state_dir("main", env);
+        daemon_lock::Identity identity;
+        const int lock_fd = daemon_lock::acquire(state_dir + "/daemon.lock", identity, error);
+        if (lock_fd < 0 || !socket_path || !control_path) {
+            report_ready(ready_fd, false);
+            ::_exit(2);
+        }
+        auto main = bind_private_endpoint(*socket_path, SOCK_STREAM, error);
+        auto control = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
+        if (!main || !control) {
+            report_ready(ready_fd, false);
+            ::_exit(3);
+        }
+        report_ready(ready_fd, true);
+        ::close(ready_fd);
+
+        std::array<int, 2> connections{-1, -1};
+        for (int& connection : connections) {
+            do {
+                connection = net::accept_cloexec(main->fd);
+            } while (connection < 0 && errno == EINTR);
+            if (connection < 0 ||
+                !proto::write_frame(connection, proto::Hello{kVersion, proto::kProtocolVersion},
+                                    error)) {
+                ::_exit(4);
+            }
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto winner = read_stop_request(connections[0], deadline);
+        const auto loser = read_stop_request(connections[1], deadline);
+        if (!winner || !loser ||
+            !proto::write_frame(connections[0], proto::Result{winner->id, json{{"stopping", true}}},
+                                error) ||
+            !proto::write_frame(connections[1],
+                                proto::Error{loser->id,
+                                             "DAEMON_SHUTDOWN",
+                                             "daemon is shutting down",
+                                             {{"reason", "daemon_shutdown"}},
+                                             kGeneric},
+                                error)) {
+            ::_exit(5);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        for (const int connection : connections) {
+            ::shutdown(connection, SHUT_RDWR);
+            ::close(connection);
+        }
+        ::close(main->fd);
+        ::close(control->fd);
+        paths::unlink_socket_endpoint_if_same(*socket_path, main->identity);
+        paths::unlink_socket_endpoint_if_same(*control_path, control->identity);
+        ::close(lock_fd);
+        ::_exit(0);
+    }
+
+    static void report_ready(int fd, bool ready) {
+        const char value = ready ? '1' : '0';
+        static_cast<void>(::write(fd, &value, 1));
+    }
+
+    void reap_blocking() {
+        if (pid_ <= 0) {
+            return;
+        }
+        int status = 0;
+        while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+        }
+        pid_ = -1;
+    }
+
+    void terminate() {
+        if (pid_ <= 0) {
+            return;
+        }
+        int status = 0;
+        if (::waitpid(pid_, &status, WNOHANG) == 0) {
+            ::kill(pid_, SIGTERM);
+            while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+            }
+        }
+        pid_ = -1;
+    }
+
+    pid_t pid_ = -1;
+};
+
 constexpr std::string_view kFrozenControlToken = "0123456789abcdef0123456789abcdef";
 
 bool frozen_fixture_process_start(std::string& process_start) {
@@ -737,6 +1002,11 @@ int acquire_frozen_fixture_lock(const std::string& lock_path, daemon_lock::Ident
         ::close(fd);
         return -1;
     }
+    if (::flock(fd, LOCK_UN) != 0) {
+        error = "cannot publish frozen fixture identity";
+        ::close(fd);
+        return -1;
+    }
     return fd;
 }
 
@@ -748,7 +1018,7 @@ extern "C" void bootstrap_signal_handler(int /*signal*/) {
     bootstrap_signal_stop = 1;
 }
 
-enum class BootstrapHelloMode { Incompatible, Stall };
+enum class BootstrapHelloMode { Incompatible, Stall, Shutdown };
 
 struct BootstrapDaemonOptions {
     BootstrapHelloMode hello_mode = BootstrapHelloMode::Incompatible;
@@ -799,6 +1069,10 @@ class ChildBootstrapDaemon {
 
     [[nodiscard]] bool running() const {
         return pid_ > 0 && (::kill(pid_, 0) == 0 || errno == EPERM);
+    }
+
+    [[nodiscard]] pid_t pid() const {
+        return pid_;
     }
 
     [[nodiscard]] bool try_request_external_stop() const {
@@ -941,6 +1215,13 @@ class ChildBootstrapDaemon {
 #endif
                         static_cast<void>(
                             ::send(connection, old_hello.data(), old_hello.size(), send_flags));
+                    } else if (options.hello_mode == BootstrapHelloMode::Shutdown) {
+                        proto::FrameReader reader(connection);
+                        std::string read_error;
+                        static_cast<void>(reader.read_line_until(std::chrono::steady_clock::now() +
+                                                                     std::chrono::seconds(1),
+                                                                 read_error));
+                        stopping = true;
                     }
                 }
             }
@@ -1133,8 +1414,10 @@ bool wait_until_missing(const std::string& first, const std::string& second) {
 
 class AsyncCliProcess {
   public:
-    AsyncCliProcess(std::string output_path, std::string error_path)
-        : output_path_(std::move(output_path)), error_path_(std::move(error_path)), pid_(::fork()) {
+    AsyncCliProcess(std::string output_path, std::string error_path,
+                    std::string daemon_operation = {})
+        : output_path_(std::move(output_path)), error_path_(std::move(error_path)),
+          daemon_operation_(std::move(daemon_operation)), pid_(::fork()) {
         REQUIRE(pid_ >= 0);
         if (pid_ == 0) {
             const int output = ::open(output_path_.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
@@ -1146,7 +1429,13 @@ class AsyncCliProcess {
             ::dup2(errors, STDERR_FILENO);
             ::close(output);
             ::close(errors);
-            ::execl(TGCLI_TEST_BINARY, "tgcli", "--json", "version", static_cast<char*>(nullptr));
+            if (daemon_operation_.empty()) {
+                ::execl(TGCLI_TEST_BINARY, "tgcli", "--json", "version",
+                        static_cast<char*>(nullptr));
+            } else {
+                ::execl(TGCLI_TEST_BINARY, "tgcli", "--json", "--timeout", "5", "daemon",
+                        daemon_operation_.c_str(), static_cast<char*>(nullptr));
+            }
             ::_exit(127);
         }
     }
@@ -1210,6 +1499,7 @@ class AsyncCliProcess {
 
     std::string output_path_;
     std::string error_path_;
+    std::string daemon_operation_;
     pid_t pid_ = -1;
 };
 
@@ -1312,6 +1602,32 @@ TEST_CASE("legacy bot token argv is rejected without echoing or routing it", "[c
                 {{"code", "INSECURE_SECRET_INPUT"},
                  {"message", "bot tokens are not accepted on the command line"},
                  {"details", {{"argument", "--bot-token"}, {"replacement", "--bot"}}}}}});
+}
+
+TEST_CASE("daemon lifecycle parser exposes status stop restart and rejects no-daemon",
+          "[cli][daemon-control][process]") {
+    const IsolatedEnv env;
+    const auto help = run_binary_captured({"daemon", "--help"}, env, "daemon-help");
+    REQUIRE(help.exit_code == kOk);
+    const std::string help_text = help.out + help.err;
+    CHECK(help_text.find("status") != std::string::npos);
+    CHECK(help_text.find("stop") != std::string::npos);
+    CHECK(help_text.find("restart") != std::string::npos);
+    CHECK(help_text.find("run") != std::string::npos);
+
+    for (const auto* operation : {"status", "stop", "restart"}) {
+        const auto outcome = run_binary_captured({"--json", "--no-daemon", "daemon", operation},
+                                                 env, std::string("no-daemon-") + operation);
+        INFO(operation);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err) ==
+              json{{"error",
+                    {{"code", "USAGE"},
+                     {"message", "daemon lifecycle commands do not support --no-daemon"},
+                     {"details", json::object()}}}});
+        CHECK_THAT(json::parse(outcome.err), test::matches_json_schema("daemon.error.schema.json"));
+    }
 }
 
 TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli][tdlib]") {
@@ -1489,6 +1805,375 @@ TEST_CASE("reachable daemon JSON results match result schemas without envelopes"
     CHECK(wait_until_missing(*socket_path, *control_path));
 }
 
+TEST_CASE("absent daemon status and stop are read-only and never spawn",
+          "[cli][daemon-control][schema]") {
+    const IsolatedEnv env;
+    const auto real_env = paths::real_environment();
+    const std::string runtime_dir = paths::runtime_dir(real_env);
+    const std::string state_dir = paths::account_state_dir("main", real_env);
+
+    cli::RunOptions options;
+    options.json = true;
+    options.auto_spawn = false;
+    const auto status = run_captured({"daemon", "status"}, options, env);
+    REQUIRE(status.exit_code == kOk);
+    CHECK(status.err.empty());
+    const auto status_data = json::parse(status.out);
+    CHECK(status_data["running"] == false);
+    CHECK_THAT(status_data, test::matches_json_schema("daemon-status.result.schema.json"));
+    CHECK_FALSE(std::filesystem::exists(runtime_dir));
+    CHECK_FALSE(std::filesystem::exists(state_dir));
+
+    const auto stop = run_captured({"daemon", "stop"}, options, env);
+    CHECK(stop.exit_code == kNotFound);
+    CHECK(stop.out.empty());
+    const auto stop_error = json::parse(stop.err);
+    CHECK(stop_error["error"]["code"] == "DAEMON_NOT_RUNNING");
+    CHECK(stop_error["error"]["details"] ==
+          json{{"account", "main"}, {"socket", runtime_dir + "/main.sock"}});
+    CHECK_THAT(stop_error, test::matches_json_schema("daemon.error.schema.json"));
+    CHECK_FALSE(std::filesystem::exists(runtime_dir));
+    CHECK_FALSE(std::filesystem::exists(state_dir));
+}
+
+TEST_CASE("unlocked daemon identity records are validated before absent classification",
+          "[cli][daemon-control][lock-safety]") {
+    SECTION("valid stale identity remains an absent read-only surface") {
+        const IsolatedEnv env;
+        const std::string lock_path = prepare_state_layout() + "/daemon.lock";
+        daemon_lock::Identity identity;
+        std::string error;
+        const int lock_fd = daemon_lock::acquire(lock_path, identity, error);
+        REQUIRE(lock_fd >= 0);
+        REQUIRE(::close(lock_fd) == 0);
+        const std::string frozen_record = read_file_bytes(lock_path);
+
+        cli::RunOptions options;
+        options.json = true;
+        options.auto_spawn = false;
+        const auto status = run_captured({"daemon", "status"}, options, env);
+
+        REQUIRE(status.exit_code == kOk);
+        CHECK(json::parse(status.out)["running"] == false);
+        CHECK(read_file_bytes(lock_path) == frozen_record);
+        CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/main.sock"));
+        CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/main.ctl"));
+    }
+
+    SECTION("malformed grammar fails every lifecycle operation without mutation or spawn") {
+        for (const auto* operation : {"status", "stop", "restart"}) {
+            const IsolatedEnv env;
+            const std::string lock_path = prepare_state_layout() + "/daemon.lock";
+            constexpr std::string_view malformed = "malformed\n";
+            write_private_file(lock_path, malformed);
+
+            cli::RunOptions options;
+            options.json = true;
+            options.daemon_executable = TGCLI_TEST_BINARY;
+            options.restart_timeout = std::chrono::milliseconds(300);
+            const auto result = run_captured({"daemon", operation}, options, env);
+
+            INFO(operation);
+            REQUIRE(result.exit_code == kGeneric);
+            CHECK(result.out.empty());
+            const auto rendered = json::parse(result.err);
+            CHECK(rendered["error"]["details"] == json{{"account", "main"},
+                                                       {"operation", operation},
+                                                       {"reason", "surface_invalid"}});
+            CHECK(read_file_bytes(lock_path) == malformed);
+            CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/main.sock"));
+            CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/main.ctl"));
+        }
+    }
+
+    SECTION("unsafe mode and symlink lock fail closed") {
+        for (const bool symlink : {false, true}) {
+            const IsolatedEnv env;
+            const std::string state_dir = prepare_state_layout();
+            const std::string lock_path = state_dir + "/daemon.lock";
+            constexpr std::string_view malformed = "malformed\n";
+            if (symlink) {
+                const std::string target = state_dir + "/target.lock";
+                write_private_file(target, malformed);
+                REQUIRE(::symlink(target.c_str(), lock_path.c_str()) == 0);
+            } else {
+                write_private_file(lock_path, malformed, 0640);
+            }
+
+            cli::RunOptions options;
+            options.json = true;
+            options.daemon_executable = TGCLI_TEST_BINARY;
+            const auto result = run_captured({"daemon", "restart"}, options, env);
+
+            INFO(symlink);
+            REQUIRE(result.exit_code == kGeneric);
+            CHECK(json::parse(result.err)["error"]["details"]["reason"] == "surface_invalid");
+            CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/main.sock"));
+            CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/main.ctl"));
+        }
+    }
+}
+
+TEST_CASE("daemon status reports compatible and parseable mismatched frozen owner facts",
+          "[cli][daemon-control][schema]") {
+    const IsolatedEnv env;
+    const ChildProtocolDaemon old_daemon;
+
+    cli::RunOptions options;
+    options.json = true;
+    options.auto_spawn = false;
+    options.restart_timeout = std::chrono::seconds(2);
+    const auto status = run_captured({"daemon", "status"}, options, env);
+
+    REQUIRE(status.exit_code == kOk);
+    CHECK(status.err.empty());
+    const auto data = json::parse(status.out);
+    CHECK(data["running"] == true);
+    CHECK(data["pid"] == old_daemon.pid());
+    CHECK(data["version"] == "old-test-binary");
+    CHECK(data["protocol"] == proto::kProtocolVersion + 1);
+    CHECK_THAT(data, test::matches_json_schema("daemon-status.result.schema.json"));
+    CHECK(old_daemon.running());
+}
+
+TEST_CASE("daemon status fails closed on an unparseable Hello without stopping the owner",
+          "[cli][daemon-control][schema]") {
+    const IsolatedEnv env;
+    const ChildBootstrapDaemon old_daemon;
+
+    cli::RunOptions options;
+    options.json = true;
+    options.auto_spawn = false;
+    options.restart_timeout = std::chrono::seconds(2);
+    const auto status = run_captured({"daemon", "status"}, options, env);
+
+    CHECK(status.exit_code == kGeneric);
+    CHECK(status.out.empty());
+    const auto error = json::parse(status.err);
+    CHECK(error["error"]["code"] == "DAEMON_CONTROL_FAILED");
+    CHECK(error["error"]["details"] ==
+          json{{"account", "main"}, {"operation", "status"}, {"reason", "handshake_failed"}});
+    CHECK_THAT(error, test::matches_json_schema("daemon.error.schema.json"));
+    CHECK(old_daemon.running());
+}
+
+TEST_CASE("partial daemon surfaces fail closed without mutation",
+          "[cli][daemon-control][socket-safety]") {
+    const IsolatedEnv env;
+    prepare_account_layout();
+    const auto real_env = paths::real_environment();
+    std::string error;
+    const auto socket_path = paths::socket_path("main", real_env, error);
+    REQUIRE(socket_path.has_value());
+    const auto main = bind_private_endpoint(*socket_path, SOCK_STREAM, error);
+    REQUIRE(main.has_value());
+
+    cli::RunOptions options;
+    options.json = true;
+    options.auto_spawn = false;
+    for (const auto* operation : {"status", "stop", "restart"}) {
+        const auto result = run_captured({"daemon", operation}, options, env);
+        INFO(operation);
+        CHECK(result.exit_code == kGeneric);
+        CHECK(result.out.empty());
+        const auto rendered = json::parse(result.err);
+        CHECK(rendered["error"]["details"] ==
+              json{{"account", "main"}, {"operation", operation}, {"reason", "surface_invalid"}});
+        const auto unchanged = paths::inspect_socket_endpoint(*socket_path, real_env.uid, error);
+        REQUIRE(unchanged.has_value());
+        CHECK(*unchanged == main->identity);
+    }
+    ::close(main->fd);
+}
+
+TEST_CASE("starting runtime directory validation rejects unsafe existing paths",
+          "[cli][daemon-control][socket-safety]") {
+    const IsolatedEnv env;
+    const std::string runtime_dir = env.root() + "/runtime-matrix";
+    std::string error;
+    CHECK(cli::detail::inspect_runtime_directory(runtime_dir, getuid(), error) ==
+          cli::detail::RuntimeDirectoryState::Absent);
+
+    std::filesystem::create_directory(runtime_dir);
+    std::filesystem::permissions(runtime_dir, std::filesystem::perms::owner_all);
+    CHECK(cli::detail::inspect_runtime_directory(runtime_dir, getuid(), error) ==
+          cli::detail::RuntimeDirectoryState::Valid);
+    CHECK(cli::detail::inspect_runtime_directory(runtime_dir, getuid() + 1, error) ==
+          cli::detail::RuntimeDirectoryState::Invalid);
+    CHECK(error.find("owned by uid") != std::string::npos);
+
+    std::filesystem::permissions(runtime_dir, std::filesystem::perms::owner_all |
+                                                  std::filesystem::perms::group_read);
+    CHECK(cli::detail::inspect_runtime_directory(runtime_dir, getuid(), error) ==
+          cli::detail::RuntimeDirectoryState::Invalid);
+    CHECK(error.find("group/other") != std::string::npos);
+
+    std::filesystem::remove(runtime_dir);
+    const std::string target = env.root() + "/runtime-target";
+    std::filesystem::create_directory(target);
+    std::filesystem::permissions(target, std::filesystem::perms::owner_all);
+    REQUIRE(::symlink(target.c_str(), runtime_dir.c_str()) == 0);
+    CHECK(cli::detail::inspect_runtime_directory(runtime_dir, getuid(), error) ==
+          cli::detail::RuntimeDirectoryState::Invalid);
+    CHECK(error.find("not a directory") != std::string::npos);
+}
+
+TEST_CASE("held owner without endpoints rejects unsafe runtime instead of joining startup",
+          "[cli][daemon-control][socket-safety][process]") {
+    for (const bool symlink : {false, true}) {
+        const IsolatedEnv env;
+        const std::string state_base = env.root() + "/state";
+        const std::string runtime_base = env.root() + "/runtime";
+        std::filesystem::create_directory(state_base);
+        std::filesystem::create_directory(runtime_base);
+        std::filesystem::permissions(state_base, std::filesystem::perms::owner_all);
+        std::filesystem::permissions(runtime_base, std::filesystem::perms::owner_all);
+        REQUIRE(::setenv("XDG_STATE_HOME", state_base.c_str(), 1) == 0);
+        REQUIRE(::setenv("XDG_RUNTIME_DIR", runtime_base.c_str(), 1) == 0);
+
+        ChildDaemonOptions child_options;
+        child_options.protocol_mismatch = false;
+        child_options.current_binary = true;
+        child_options.report_ready_before_endpoints = true;
+        child_options.startup_delay = std::chrono::seconds(2);
+        const ChildProtocolDaemon starting_daemon(child_options);
+        const std::string runtime_dir = paths::runtime_dir(paths::real_environment());
+        if (symlink) {
+            std::filesystem::remove(runtime_dir);
+            const std::string target = env.root() + "/unsafe-runtime-target";
+            std::filesystem::create_directory(target);
+            std::filesystem::permissions(target, std::filesystem::perms::owner_all);
+            REQUIRE(::symlink(target.c_str(), runtime_dir.c_str()) == 0);
+        } else {
+            std::filesystem::permissions(runtime_dir, std::filesystem::perms::owner_all |
+                                                          std::filesystem::perms::group_read);
+        }
+
+        cli::RunOptions options;
+        options.json = true;
+        options.daemon_executable = TGCLI_TEST_BINARY;
+        options.restart_timeout = std::chrono::milliseconds(500);
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = run_captured({"daemon", "restart"}, options, env);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        INFO(symlink);
+        REQUIRE(result.exit_code == kGeneric);
+        CHECK(elapsed < std::chrono::milliseconds(250));
+        const auto rendered = json::parse(result.err);
+        CHECK(rendered["error"]["details"] ==
+              json{{"account", "main"}, {"operation", "restart"}, {"reason", "surface_invalid"}});
+        CHECK(starting_daemon.running());
+    }
+}
+
+#if defined(__linux__)
+TEST_CASE("control token retries remain connected to the frozen datagram endpoint",
+          "[cli][daemon-control][socket-safety]") {
+    const IsolatedEnv env;
+    prepare_account_layout();
+    const auto real_env = paths::real_environment();
+    std::string error;
+    const auto control_path = paths::control_socket_path("main", real_env, error);
+    REQUIRE(control_path.has_value());
+    auto frozen = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
+    REQUIRE(frozen.has_value());
+    const int receive_flags = ::fcntl(frozen->fd, F_GETFL);
+    REQUIRE(receive_flags >= 0);
+    REQUIRE(::fcntl(frozen->fd, F_SETFL, receive_flags | O_NONBLOCK) == 0);
+
+    int sender_fd = -1;
+    REQUIRE(cli::detail::connect_verified_control_endpoint(*control_path, frozen->identity,
+                                                           real_env.uid, sender_fd, error) ==
+            cli::detail::ControlConnectOutcome::Connected);
+    constexpr char filler = 'x';
+    for (;;) {
+        const ssize_t count = ::send(sender_fd, &filler, 1, MSG_DONTWAIT);
+        if (count == 1 || (count < 0 && errno == EINTR)) {
+            continue;
+        }
+        REQUIRE(count < 0);
+        REQUIRE((errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS));
+        break;
+    }
+
+    std::optional<BoundEndpoint> replacement;
+    bool retried = false;
+    const auto on_retry = [&] {
+        if (retried) {
+            return;
+        }
+        retried = true;
+        paths::unlink_socket_endpoint_if_same(*control_path, frozen->identity);
+        REQUIRE_FALSE(std::filesystem::exists(*control_path));
+        replacement = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
+        REQUIRE(replacement.has_value());
+        std::array<char, 256> discarded{};
+        while (::recv(frozen->fd, discarded.data(), discarded.size(), MSG_DONTWAIT) >= 0) {
+        }
+        REQUIRE((errno == EAGAIN || errno == EWOULDBLOCK));
+    };
+
+    constexpr std::string_view token = "0123456789abcdef0123456789abcdef";
+    const auto outcome = cli::detail::send_connected_control_stop(
+        sender_fd, token, std::chrono::steady_clock::now() + std::chrono::seconds(1), on_retry,
+        error);
+
+    INFO(error);
+    REQUIRE(outcome == cli::detail::ControlStopOutcome::Sent);
+    REQUIRE(retried);
+    std::array<char, 64> received{};
+    const ssize_t frozen_count = ::recv(frozen->fd, received.data(), received.size(), MSG_DONTWAIT);
+    REQUIRE(frozen_count == static_cast<ssize_t>(token.size()));
+    CHECK(std::string_view(received.data(), static_cast<std::size_t>(frozen_count)) == token);
+    const int replacement_flags = ::fcntl(replacement->fd, F_GETFL);
+    REQUIRE(replacement_flags >= 0);
+    REQUIRE(::fcntl(replacement->fd, F_SETFL, replacement_flags | O_NONBLOCK) == 0);
+    CHECK(::recv(replacement->fd, received.data(), received.size(), MSG_DONTWAIT) < 0);
+    CHECK((errno == EAGAIN || errno == EWOULDBLOCK));
+
+    int replaced_fd = -1;
+    CHECK(cli::detail::connect_verified_control_endpoint(*control_path, frozen->identity,
+                                                         real_env.uid, replaced_fd, error) ==
+          cli::detail::ControlConnectOutcome::Failed);
+    CHECK(replaced_fd == -1);
+    CHECK(error == "daemon control endpoint changed while connecting");
+    CHECK(::recv(replacement->fd, received.data(), received.size(), MSG_DONTWAIT) < 0);
+    CHECK((errno == EAGAIN || errno == EWOULDBLOCK));
+
+    ::close(sender_fd);
+    ::close(frozen->fd);
+    ::close(replacement->fd);
+}
+#endif
+
+TEST_CASE("daemon status uses the request deadline for a stalled Hello",
+          "[cli][daemon-control][deadline]") {
+    const IsolatedEnv env;
+    const ChildBootstrapDaemon old_daemon({.hello_mode = BootstrapHelloMode::Stall});
+    proto::Request request;
+    request.id = 1;
+    request.command = {"daemon", "status"};
+    request.context.json = true;
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 0.1;
+    cli::RunOptions options;
+    options.json = true;
+    options.auto_spawn = false;
+    options.restart_timeout = std::chrono::seconds(3);
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto status = run_request_captured(request, options, env);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(status.exit_code == kGeneric);
+    CHECK(elapsed < std::chrono::seconds(1));
+    const auto rendered = json::parse(status.err);
+    CHECK(rendered["error"]["details"] ==
+          json{{"account", "main"}, {"operation", "status"}, {"reason", "handshake_failed"}});
+    CHECK(old_daemon.running());
+}
+
 TEST_CASE("client rejects a group-accessible socket directory", "[cli][paths]") {
     const IsolatedEnv env;
     const std::string socket_dir = env.root() + "/tgcli";
@@ -1636,6 +2321,229 @@ TEST_CASE("daemon stop succeeds after verified protocol-incompatible shutdown",
     const auto socket_path = paths::socket_path("main", real_env, path_error);
     REQUIRE(socket_path.has_value());
     CHECK(::access(socket_path->c_str(), F_OK) != 0);
+}
+
+TEST_CASE("daemon stop uses the frozen control surface for an unparseable Hello",
+          "[cli][daemon-control][schema]") {
+    const IsolatedEnv env;
+    ChildBootstrapDaemon old_daemon;
+
+    cli::RunOptions options;
+    options.json = true;
+    options.auto_spawn = false;
+    options.restart_timeout = std::chrono::seconds(3);
+    const auto result = run_captured({"daemon", "stop"}, options, env);
+
+    INFO(result.err);
+    REQUIRE(result.exit_code == kOk);
+    CHECK(result.err.empty());
+    CHECK(json::parse(result.out) == json{{"stopping", true}});
+    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+}
+
+TEST_CASE("daemon restart starts absent and replaces compatible or unparseable owners",
+          "[cli][daemon-control][schema][tdlib]") {
+    SECTION("absent") {
+        const IsolatedEnv env;
+        cli::RunOptions options;
+        options.json = true;
+        options.daemon_executable = TGCLI_TEST_BINARY;
+        options.restart_timeout = std::chrono::seconds(5);
+        const auto result = run_captured({"daemon", "restart"}, options, env);
+
+        INFO(result.err);
+        REQUIRE(result.exit_code == kOk);
+        CHECK(result.err.empty());
+        const auto data = json::parse(result.out);
+        CHECK(data["restarted"] == true);
+        CHECK(data["version"] == kVersion);
+        CHECK(data["protocol"] == proto::kProtocolVersion);
+        CHECK_THAT(data, test::matches_json_schema("daemon-restart.result.schema.json"));
+        stop_current_daemon(env);
+    }
+
+    SECTION("compatible") {
+        const IsolatedEnv env;
+        cli::RunOptions options;
+        options.json = true;
+        options.daemon_executable = TGCLI_TEST_BINARY;
+        options.restart_timeout = std::chrono::seconds(5);
+        REQUIRE(run_captured({"version"}, options, env).exit_code == kOk);
+        options.auto_spawn = false;
+        const auto before = run_captured({"daemon", "status"}, options, env);
+        REQUIRE(before.exit_code == kOk);
+        const auto old_pid = json::parse(before.out)["pid"].get<pid_t>();
+
+        const auto result = run_captured({"daemon", "restart"}, options, env);
+        INFO(result.err);
+        REQUIRE(result.exit_code == kOk);
+        const auto data = json::parse(result.out);
+        CHECK(data["pid"].get<pid_t>() != old_pid);
+        CHECK_THAT(data, test::matches_json_schema("daemon-restart.result.schema.json"));
+        stop_current_daemon(env);
+    }
+
+    SECTION("unparseable Hello") {
+        const IsolatedEnv env;
+        ChildBootstrapDaemon old_daemon;
+        const pid_t old_pid = old_daemon.pid();
+        cli::RunOptions options;
+        options.json = true;
+        options.daemon_executable = TGCLI_TEST_BINARY;
+        options.restart_timeout = std::chrono::seconds(5);
+        const auto result = run_captured({"daemon", "restart"}, options, env);
+
+        INFO(result.err);
+        REQUIRE(result.exit_code == kOk);
+        const auto data = json::parse(result.out);
+        CHECK(data["pid"].get<pid_t>() != old_pid);
+        CHECK(data["version"] == kVersion);
+        CHECK_THAT(data, test::matches_json_schema("daemon-restart.result.schema.json"));
+        CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+        stop_current_daemon(env);
+    }
+}
+
+TEST_CASE("daemon restart joins teardown when the frozen owner closes during Hello",
+          "[cli][daemon-control][process][tdlib]") {
+    const IsolatedEnv env;
+    ChildBootstrapDaemon old_daemon({.hello_mode = BootstrapHelloMode::Shutdown});
+
+    cli::RunOptions options;
+    options.json = true;
+    options.daemon_executable = TGCLI_TEST_BINARY;
+    options.restart_timeout = std::chrono::seconds(5);
+    const auto result = run_captured({"daemon", "restart"}, options, env);
+
+    INFO(result.err);
+    REQUIRE(result.exit_code == kOk);
+    CHECK(result.err.empty());
+    const auto data = json::parse(result.out);
+    CHECK(data["restarted"] == true);
+    CHECK(data["pid"].get<pid_t>() != old_daemon.pid());
+    CHECK(data["version"] == kVersion);
+    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+    stop_current_daemon(env);
+}
+
+TEST_CASE("daemon restart joins a proofable owner that binds its endpoints late",
+          "[cli][daemon-control][process]") {
+    const IsolatedEnv env;
+    ChildDaemonOptions child_options;
+    child_options.protocol_mismatch = false;
+    child_options.current_binary = true;
+    child_options.report_ready_before_endpoints = true;
+    child_options.startup_delay = std::chrono::milliseconds(300);
+    ChildProtocolDaemon starting_daemon(child_options);
+
+    cli::RunOptions options;
+    options.json = true;
+    options.daemon_executable = TGCLI_TEST_BINARY;
+    options.restart_timeout = std::chrono::seconds(3);
+    const auto result = run_captured({"daemon", "restart"}, options, env);
+
+    INFO(result.err);
+    REQUIRE(result.exit_code == kOk);
+    CHECK(result.err.empty());
+    const auto data = json::parse(result.out);
+    CHECK(data["restarted"] == true);
+    CHECK(data["pid"] == starting_daemon.pid());
+    CHECK(data["version"] == kVersion);
+    CHECK(starting_daemon.running());
+    const auto stopped = run_captured({"daemon", "stop"}, options, env);
+    CHECK(stopped.exit_code == kOk);
+    CHECK(starting_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+}
+
+TEST_CASE("concurrent daemon restarts converge on one replacement owner",
+          "[cli][daemon-control][process][tdlib]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    ChildBootstrapDaemon old_daemon({.control_stop_delay = std::chrono::milliseconds(300)});
+    AsyncCliProcess first(env.root() + "/restart-first.out", env.root() + "/restart-first.err",
+                          "restart");
+    AsyncCliProcess second(env.root() + "/restart-second.out", env.root() + "/restart-second.err",
+                           "restart");
+
+    const int first_exit = first.wait_for_exit(std::chrono::seconds(12));
+    const int second_exit = second.wait_for_exit(std::chrono::seconds(12));
+    INFO(first.errors());
+    INFO(second.errors());
+    REQUIRE(first_exit == kOk);
+    REQUIRE(second_exit == kOk);
+    const auto first_result = json::parse(first.output());
+    const auto second_result = json::parse(second.output());
+    CHECK(first_result["pid"] == second_result["pid"]);
+    CHECK(first_result["version"] == kVersion);
+    CHECK(second_result["protocol"] == proto::kProtocolVersion);
+    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+    stop_current_daemon(env);
+}
+
+TEST_CASE("concurrent daemon stops converge after one frozen-owner shutdown",
+          "[cli][daemon-control][process]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    ChildBootstrapDaemon old_daemon({.control_stop_delay = std::chrono::milliseconds(300)});
+    AsyncCliProcess first(env.root() + "/stop-first.out", env.root() + "/stop-first.err", "stop");
+    AsyncCliProcess second(env.root() + "/stop-second.out", env.root() + "/stop-second.err",
+                           "stop");
+
+    const int first_exit = first.wait_for_exit(std::chrono::seconds(8));
+    const int second_exit = second.wait_for_exit(std::chrono::seconds(8));
+    INFO(first.errors());
+    INFO(second.errors());
+    REQUIRE(first_exit == kOk);
+    REQUIRE(second_exit == kOk);
+    CHECK(json::parse(first.output()) == json{{"stopping", true}});
+    CHECK(json::parse(second.output()) == json{{"stopping", true}});
+    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+}
+
+TEST_CASE("compatible concurrent stop joins an exact-id shutdown loser",
+          "[cli][daemon-control][process]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    ChildCompatibleStopRaceDaemon old_daemon;
+    AsyncCliProcess first(env.root() + "/compatible-stop-first.out",
+                          env.root() + "/compatible-stop-first.err", "stop");
+    AsyncCliProcess second(env.root() + "/compatible-stop-second.out",
+                           env.root() + "/compatible-stop-second.err", "stop");
+
+    const int first_exit = first.wait_for_exit(std::chrono::seconds(8));
+    const int second_exit = second.wait_for_exit(std::chrono::seconds(8));
+    INFO(first.errors());
+    INFO(second.errors());
+    REQUIRE(first_exit == kOk);
+    REQUIRE(second_exit == kOk);
+    CHECK(json::parse(first.output()) == json{{"stopping", true}});
+    CHECK(json::parse(second.output()) == json{{"stopping", true}});
+    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+}
+
+TEST_CASE("compatible concurrent restart joins an exact-id shutdown loser",
+          "[cli][daemon-control][process][tdlib]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    ChildCompatibleStopRaceDaemon old_daemon;
+    AsyncCliProcess first(env.root() + "/compatible-restart-first.out",
+                          env.root() + "/compatible-restart-first.err", "restart");
+    AsyncCliProcess second(env.root() + "/compatible-restart-second.out",
+                           env.root() + "/compatible-restart-second.err", "restart");
+
+    const int first_exit = first.wait_for_exit(std::chrono::seconds(12));
+    const int second_exit = second.wait_for_exit(std::chrono::seconds(12));
+    INFO(first.errors());
+    INFO(second.errors());
+    REQUIRE(first_exit == kOk);
+    REQUIRE(second_exit == kOk);
+    const auto first_result = json::parse(first.output());
+    const auto second_result = json::parse(second.output());
+    CHECK(first_result["pid"] == second_result["pid"]);
+    CHECK(first_result["version"] == kVersion);
+    CHECK(second_result["protocol"] == proto::kProtocolVersion);
+    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+    stop_current_daemon(env);
 }
 
 TEST_CASE("frozen bootstrap stops a daemon with an incompatible non-JSON Hello",
@@ -1897,7 +2805,7 @@ TEST_CASE("unlocked recorded PID is never signalled on protocol mismatch", "[cli
     CHECK(result.out.empty());
     const auto error_json = json::parse(result.err);
     INFO(error_json.dump());
-    CHECK(error_json["error"]["message"].get<std::string>().find("lock is not held") !=
+    CHECK(error_json["error"]["message"].get<std::string>().find("identity is malformed") !=
           std::string::npos);
     CHECK(unrelated.running());
     server.stop();

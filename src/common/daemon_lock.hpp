@@ -25,6 +25,13 @@ struct Identity {
 namespace detail {
 
 enum class ObservationStatus { Stable, Transition, Invalid };
+enum class AcquireStage { BootstrapLocked, OwnerLocked, RecordTruncated, RecordPublished };
+using AcquireObserver = void (*)(AcquireStage stage, void* context);
+
+struct AcquireHooks {
+    AcquireObserver observer = nullptr;
+    void* context = nullptr;
+};
 
 // Pure decision seam for the two kernel-owner samples and the record/live
 // snapshots gathered between them.
@@ -77,7 +84,8 @@ class OwnerWatch {
 // Acquires the per-account lifetime lock, generates a control token and writes
 // a strict identity record. The returned fd must remain open for the owner's
 // lifetime.
-int acquire(const std::string& lock_path, Identity& identity, std::string& error);
+int acquire(const std::string& lock_path, Identity& identity, std::string& error,
+            const detail::AcquireHooks* hooks = nullptr);
 
 // Frozen bootstrap-record parser. Kept public so compatibility fixtures can
 // pin the record independently from the main JSONL protocol.

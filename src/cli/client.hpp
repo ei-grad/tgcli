@@ -21,8 +21,8 @@ struct RunOptions {
     std::string account = "main";
     bool json = false;
     bool no_daemon = false;
-    bool auto_spawn = true; // `daemon stop` must not resurrect the daemon
-    std::chrono::milliseconds restart_timeout{10000};
+    bool auto_spawn = true;
+    std::chrono::milliseconds restart_timeout{60000};
     // Empty uses the running executable. Tests may supply the built tgcli
     // binary because their process image is the unit-test runner.
     std::string daemon_executable;

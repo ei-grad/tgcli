@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli daemon status result",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "running", "socket"],
+      "properties": {
+        "account": { "type": "string" },
+        "running": { "const": false },
+        "socket": { "type": "string", "pattern": "^/" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "running", "pid", "version", "protocol", "socket"],
+      "properties": {
+        "account": { "type": "string" },
+        "running": { "const": true },
+        "pid": { "type": "integer", "minimum": 1 },
+        "version": { "type": "string" },
+        "protocol": { "type": "integer" },
+        "socket": { "type": "string", "pattern": "^/" }
+      }
+    }
+  ]
+}

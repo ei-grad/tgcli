@@ -282,6 +282,52 @@ bool query_kernel_owner(int fd, bool& held, pid_t& owner_pid, std::string& error
     return true;
 }
 
+OwnerStatus inspect_released_record(int fd, Identity& identity, pid_t& observed_pid,
+                                    std::string& error) {
+    std::string initial_record;
+    std::string initial_error;
+    const bool initial_read = read_record(fd, initial_record, initial_error);
+    Identity parsed_identity;
+    std::string parse_error;
+    const bool parsed = initial_read && parse_record(initial_record, parsed_identity, parse_error);
+
+    bool final_held = false;
+    pid_t final_owner = -1;
+    if (!query_kernel_owner(fd, final_held, final_owner, error)) {
+        return OwnerStatus::Invalid;
+    }
+    if (final_held) {
+        observed_pid = final_owner;
+        error.clear();
+        return OwnerStatus::Transition;
+    }
+
+    std::string final_record;
+    std::string final_error;
+    const bool final_read = read_record(fd, final_record, final_error);
+    if (initial_read != final_read || (initial_read && initial_record != final_record)) {
+        observed_pid = -1;
+        error.clear();
+        return OwnerStatus::Transition;
+    }
+    if (!initial_read) {
+        error = initial_error;
+        return OwnerStatus::Invalid;
+    }
+    if (!parsed) {
+        error = parse_error;
+        return OwnerStatus::Invalid;
+    }
+    if (!final_read) {
+        error = final_error;
+        return OwnerStatus::Invalid;
+    }
+    identity = std::move(parsed_identity);
+    observed_pid = -1;
+    error.clear();
+    return OwnerStatus::Released;
+}
+
 OwnerStatus query_owner(int fd, Identity& identity, pid_t& observed_pid, std::string& error) {
     bool initial_held = false;
     pid_t initial_owner = -1;
@@ -289,9 +335,7 @@ OwnerStatus query_owner(int fd, Identity& identity, pid_t& observed_pid, std::st
         return OwnerStatus::Invalid;
     }
     if (!initial_held) {
-        observed_pid = -1;
-        error.clear();
-        return OwnerStatus::Released;
+        return inspect_released_record(fd, identity, observed_pid, error);
     }
     observed_pid = initial_owner;
 
@@ -368,11 +412,19 @@ OwnerStatus query_owner(int fd, Identity& identity, pid_t& observed_pid, std::st
     return OwnerStatus::Held;
 }
 
-bool write_all_at_start(int fd, std::string_view data, std::string& error) {
+void observe_acquire_stage(const detail::AcquireHooks* hooks, detail::AcquireStage stage) {
+    if (hooks != nullptr && hooks->observer != nullptr) {
+        hooks->observer(stage, hooks->context);
+    }
+}
+
+bool write_all_at_start(int fd, std::string_view data, const detail::AcquireHooks* hooks,
+                        std::string& error) {
     if (::ftruncate(fd, 0) != 0) {
         error = std::string("cannot truncate daemon lock identity: ") + std::strerror(errno);
         return false;
     }
+    observe_acquire_stage(hooks, detail::AcquireStage::RecordTruncated);
     std::size_t offset = 0;
     while (offset < data.size()) {
         const ssize_t count =
@@ -387,6 +439,7 @@ bool write_all_at_start(int fd, std::string_view data, std::string& error) {
         }
         offset += static_cast<std::size_t>(count);
     }
+    observe_acquire_stage(hooks, detail::AcquireStage::RecordPublished);
     return true;
 }
 
@@ -486,7 +539,8 @@ bool OwnerWatch::owner_released(bool& released, std::string& error) const {
     return true;
 }
 
-int acquire(const std::string& lock_path, Identity& identity, std::string& error) {
+int acquire(const std::string& lock_path, Identity& identity, std::string& error,
+            const detail::AcquireHooks* hooks) {
     const int fd = ::open(lock_path.c_str(), open_flags(O_RDWR | O_CREAT), 0600);
     if (fd < 0) {
         error = "cannot open " + lock_path + ": " + std::strerror(errno);
@@ -501,6 +555,7 @@ int acquire(const std::string& lock_path, Identity& identity, std::string& error
         ::close(fd);
         return -1;
     }
+    observe_acquire_stage(hooks, detail::AcquireStage::BootstrapLocked);
 
     struct flock owner_lock {};
     owner_lock.l_type = F_WRLCK;
@@ -512,6 +567,7 @@ int acquire(const std::string& lock_path, Identity& identity, std::string& error
         ::close(fd);
         return -1;
     }
+    observe_acquire_stage(hooks, detail::AcquireStage::OwnerLocked);
 
     identity.pid = getpid();
     if (!process_start_token(identity.pid, identity.process_start, error) ||
@@ -522,7 +578,12 @@ int acquire(const std::string& lock_path, Identity& identity, std::string& error
     const std::string record = std::string(kIdentityRecordTag) + " " +
                                std::to_string(identity.pid) + " " + identity.process_start + " " +
                                identity.control_token + "\n";
-    if (!write_all_at_start(fd, record, error)) {
+    if (!write_all_at_start(fd, record, hooks, error)) {
+        ::close(fd);
+        return -1;
+    }
+    if (::flock(fd, LOCK_UN) != 0) {
+        error = std::string("cannot publish daemon identity: ") + std::strerror(errno);
         ::close(fd);
         return -1;
     }
@@ -572,9 +633,33 @@ OwnerStatus inspect_owner(const std::string& lock_path, uid_t expected_uid,
         return OwnerStatus::Invalid;
     }
 
+    if (::flock(fd, LOCK_SH | LOCK_NB) != 0) {
+        if (errno != EWOULDBLOCK && errno != EAGAIN) {
+            error =
+                std::string("cannot synchronize daemon lock inspection: ") + std::strerror(errno);
+            ::close(fd);
+            return OwnerStatus::Invalid;
+        }
+        bool held = false;
+        pid_t owner_pid = -1;
+        if (!query_kernel_owner(fd, held, owner_pid, error)) {
+            ::close(fd);
+            return OwnerStatus::Invalid;
+        }
+        owner = OwnerWatch(fd, Identity{}, held ? owner_pid : -1);
+        error.clear();
+        return OwnerStatus::Transition;
+    }
+
     Identity identity;
     pid_t observed_pid = -1;
     const auto status = query_owner(fd, identity, observed_pid, error);
+    const int unlock_result = ::flock(fd, LOCK_UN);
+    if (unlock_result != 0 && status != OwnerStatus::Invalid) {
+        error = std::string("cannot finish daemon lock inspection: ") + std::strerror(errno);
+        ::close(fd);
+        return OwnerStatus::Invalid;
+    }
     if (status == OwnerStatus::Invalid) {
         ::close(fd);
         return OwnerStatus::Invalid;

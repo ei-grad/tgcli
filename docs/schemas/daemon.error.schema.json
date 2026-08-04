@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli daemon control error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "USAGE" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "USAGE" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["argument", "reason"],
+              "properties": {
+                "argument": { "type": ["string", "null"] },
+                "reason": { "enum": ["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "invalid_environment", "unsupported_mode"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "DAEMON_NOT_RUNNING" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "socket"],
+              "properties": {
+                "account": { "type": "string" },
+                "socket": { "type": "string", "pattern": "^/" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "DAEMON_CONTROL_FAILED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "operation", "reason"],
+              "properties": {
+                "account": { "type": "string" },
+                "operation": { "enum": ["status", "stop", "restart"] },
+                "reason": { "enum": ["surface_invalid", "identity_changed", "handshake_failed", "shutdown_failed", "replacement_failed"] }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

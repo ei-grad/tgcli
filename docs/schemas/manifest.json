@@ -16,6 +16,12 @@
     "daemon stop": {
       "result": "daemon-stop.result.schema.json"
     },
+    "daemon restart": {
+      "result": "daemon-restart.result.schema.json"
+    },
+    "daemon status": {
+      "result": "daemon-status.result.schema.json"
+    },
     "doctor": {
       "result": "doctor.result.schema.json"
     },

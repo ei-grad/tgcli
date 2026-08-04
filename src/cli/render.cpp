@@ -102,6 +102,28 @@ std::string render_account_use(const nlohmann::json& data) {
                        data.value("default_account", std::string("?")), previous);
 }
 
+std::string render_daemon_status(const nlohmann::json& data) {
+    std::string out =
+        fmt::format("account: {}\nrunning: {}\n", data.value("account", std::string("?")),
+                    yes_no(data.value("running", false)));
+    if (data.value("running", false)) {
+        out +=
+            fmt::format("pid: {}\nversion: {}\nprotocol: {}\n", data.value("pid", std::int64_t{0}),
+                        data.value("version", std::string("?")), data.value("protocol", 0));
+    }
+    out += fmt::format("socket: {}\n", data.value("socket", std::string("?")));
+    return out;
+}
+
+std::string render_daemon_restart(const nlohmann::json& data) {
+    return fmt::format("account: {}\nrestarted: {}\npid: {}\nversion: {}\nprotocol: {}\n"
+                       "socket: {}\n",
+                       data.value("account", std::string("?")),
+                       yes_no(data.value("restarted", false)), data.value("pid", std::int64_t{0}),
+                       data.value("version", std::string("?")), data.value("protocol", 0),
+                       data.value("socket", std::string("?")));
+}
+
 std::string render_user(const nlohmann::json& data) {
     std::string usernames;
     for (const auto& username : data.at("usernames")) {
@@ -144,6 +166,15 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "account use") {
         return render_account_use(data);
+    }
+    if (command_key == "daemon status") {
+        return render_daemon_status(data);
+    }
+    if (command_key == "daemon stop") {
+        return fmt::format("stopping: {}\n", yes_no(data.value("stopping", false)));
+    }
+    if (command_key == "daemon restart") {
+        return render_daemon_restart(data);
     }
     if (command_key == "login") {
         return render_login(data);

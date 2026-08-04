@@ -1,0 +1,3 @@
+account: main
+running: no
+socket: /run/tgcli/main.sock

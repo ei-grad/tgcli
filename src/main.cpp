@@ -235,7 +235,9 @@ int run(int argc, char** argv) {
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
+    daemon_cmd->add_subcommand("status", "show the account daemon status");
     daemon_cmd->add_subcommand("stop", "stop the account daemon");
+    daemon_cmd->add_subcommand("restart", "restart the account daemon");
 
     CLI::App* account_cmd = app.add_subcommand("account", "account configuration");
     account_cmd->require_subcommand(1);
@@ -302,7 +304,8 @@ int run(int argc, char** argv) {
     options.account = account.empty() ? "main" : account;
     options.json = json_output;
     options.no_daemon = no_daemon;
-    options.auto_spawn = command != std::vector<std::string>{"daemon", "stop"} &&
+    options.auto_spawn = command != std::vector<std::string>{"daemon", "status"} &&
+                         command != std::vector<std::string>{"daemon", "stop"} &&
                          !tgcli::cli::is_config_global_command(command) &&
                          (command != std::vector<std::string>{"doctor"} || current_config_valid);
     return tgcli::cli::run_command(request, options);
