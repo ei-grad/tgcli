@@ -94,6 +94,13 @@ verify_source_tree() {
         fail "$component_id source tree differs from dependency lock"
 }
 
+normalize_source_timestamps() {
+    local source_directory="$1"
+
+    find "$source_directory" \
+        -exec touch -h -d "@$SOURCE_DATE_EPOCH" -- {} +
+}
+
 verify_sha256() {
     local expected="$1"
     local checked_file="$2"
@@ -117,6 +124,7 @@ prepare_sources() {
         extract_archive "$INPUT_DIRECTORY/$component_id$suffix" "$extraction_directory"
         source_directory="$(single_source_root "$extraction_directory")"
         verify_source_tree "$component_id" "$source_directory"
+        normalize_source_timestamps "$source_directory"
         printf -v "SOURCE_${component_id^^}" '%s' "$source_directory"
     done
 }
@@ -373,6 +381,9 @@ build_release() {
         fail "release test invocation failed"
     fi
     sed -n '1,240p' "$WORK_DIRECTORY/ctest.log"
+    python3 "$PROVENANCE_TOOL" source-identity \
+        --repo-root "$REPO_ROOT" \
+        --expected-commit "$TGCLI_SOURCE_SHA" >/dev/null
     python3 - "$WORK_DIRECTORY/test-evidence.json" <<'PY'
 import json
 import pathlib
@@ -412,6 +423,7 @@ PY
 }
 
 export LC_ALL=C
+export PYTHONDONTWRITEBYTECODE=1
 export TZ=UTC
 export ZERO_AR_DATE=1
 umask 022

@@ -64,3 +64,6 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/release_toolchain_helpers_test.py"
         "${CMAKE_SOURCE_DIR}")
+set_tests_properties(
+    release-toolchain-helpers
+    PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")

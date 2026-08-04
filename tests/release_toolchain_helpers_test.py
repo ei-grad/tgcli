@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -11,10 +12,29 @@ import tarfile
 import tempfile
 from unittest import mock
 
+sys.dont_write_bytecode = True
+
 REPO_ROOT = pathlib.Path(sys.argv[1]).resolve()
 ARCHIVE_TOOL = REPO_ROOT / "scripts/release/archive_tool.py"
 INSPECTOR = REPO_ROOT / "scripts/release/inspect_linux_artifact.py"
 PROVENANCE = REPO_ROOT / "scripts/release/build_provenance.py"
+LOCAL_CACHE_ROOTS = (
+    REPO_ROOT / "scripts/__pycache__",
+    REPO_ROOT / "scripts/release/__pycache__",
+    REPO_ROOT / "tests/__pycache__",
+)
+
+
+def local_cache_entries() -> set[str]:
+    return {
+        str(entry.relative_to(REPO_ROOT))
+        for root in LOCAL_CACHE_ROOTS
+        if root.exists()
+        for entry in (root, *root.rglob("*"))
+    }
+
+
+INITIAL_LOCAL_CACHE_ENTRIES = local_cache_entries()
 
 
 def run(arguments: list[str], *, expected: int = 0) -> subprocess.CompletedProcess:
@@ -469,6 +489,8 @@ def swapped_artifact_test(base: pathlib.Path) -> None:
 
 
 def main() -> int:
+    if os.environ.get("PYTHONDONTWRITEBYTECODE") != "1":
+        raise AssertionError("release helper requires bytecode writes to be disabled")
     with tempfile.TemporaryDirectory(
         prefix="tgcli-release-toolchain-test-"
     ) as temporary:
@@ -479,6 +501,10 @@ def main() -> int:
         partial_cleanup_test(base)
         runtime_decoy_test(base)
         swapped_artifact_test(base)
+    final_cache_entries = local_cache_entries()
+    if final_cache_entries != INITIAL_LOCAL_CACHE_ENTRIES:
+        created = sorted(final_cache_entries - INITIAL_LOCAL_CACHE_ENTRIES)
+        raise AssertionError(f"release helper created local bytecode caches: {created}")
     print("release toolchain helper tests passed")
     return 0
 
