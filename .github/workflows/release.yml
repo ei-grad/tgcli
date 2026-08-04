@@ -1,0 +1,1299 @@
+---
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DEPENDENCY_LOCK: release/dependencies.lock.json
+  DEPENDENCY_LOCK_SCHEMA: release/dependencies.lock.schema.json
+  DEPENDENCY_LOCK_VERIFIER: scripts/verify_dependency_lock.py
+  LINUX_BUILD_PROVENANCE: build/release-static/release-build-provenance.json
+  LINUX_BUILD_RECIPE: scripts/release/build-linux-musl.sh
+  LINUX_TOOLCHAIN_CONTRACT: release/linux-musl-toolchain.json
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      dependency_lock_sha256: ${{ steps.metadata.outputs.dependency_lock_sha256 }}
+      dependency_verifier_sha256: ${{ steps.metadata.outputs.dependency_verifier_sha256 }}
+      linux_build_recipe: ${{ steps.metadata.outputs.linux_build_recipe }}
+      linux_toolchain_contract_sha256: ${{ steps.metadata.outputs.linux_toolchain_contract_sha256 }}
+      linux_toolchain_image: ${{ steps.metadata.outputs.linux_toolchain_image }}
+      source_epoch: ${{ steps.metadata.outputs.source_epoch }}
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      source_tree: ${{ steps.metadata.outputs.source_tree }}
+      tdlib_repository: ${{ steps.metadata.outputs.tdlib_repository }}
+      tdlib_revision: ${{ steps.metadata.outputs.tdlib_revision }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the tag source and version
+        id: source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF" != "refs/tags/$TAG_NAME" ]]; then
+            echo "release workflow accepts tag refs only" >&2
+            exit 1
+          fi
+          if [[ ! "$TAG_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "release tag must be an exact vMAJOR.MINOR.PATCH value" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          source_sha="$(git rev-parse 'HEAD^{commit}')"
+          tag_source_sha="$(git rev-parse "$GITHUB_REF^{commit}")"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          if [[ "$source_sha" != "$tag_source_sha" || \
+                ! "$source_sha" =~ ^[0-9a-f]{40}$ || \
+                ! "$source_tree" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release tag did not resolve to the checked-out Git source" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$source_sha" "origin/$DEFAULT_BRANCH"; then
+            echo "release tag source is not reachable from the default branch" >&2
+            exit 1
+          fi
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$source_sha"
+
+          mapfile -t project_versions < <(
+            sed -nE \
+              's/^[[:space:]]*project\(tgcli VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES CXX\)[[:space:]]*$/\1/p' \
+              CMakeLists.txt
+          )
+          if [[ "${#project_versions[@]}" -ne 1 || \
+                "${project_versions[0]}" != "$version" ]]; then
+            echo "release tag does not match one canonical CMake project version" >&2
+            exit 1
+          fi
+          source_epoch="$(git show -s --format=%ct HEAD)"
+          if [[ ! "$source_epoch" =~ ^[1-9][0-9]*$ ]]; then
+            echo "commit timestamp is not a canonical positive integer" >&2
+            exit 1
+          fi
+          {
+            printf 'source_epoch=%s\n' "$source_epoch"
+            printf 'source_sha=%s\n' "$source_sha"
+            printf 'source_tree=%s\n' "$source_tree"
+            printf 'version=%s\n' "$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release artifact inspector
+        run: bash tests/release_artifact_check_test.sh
+
+      - name: Verify the canonical dependency source lock
+        run: |
+          set -euo pipefail
+          for contract_file in \
+            "$DEPENDENCY_LOCK" \
+            "$DEPENDENCY_LOCK_SCHEMA" \
+            "$DEPENDENCY_LOCK_VERIFIER" \
+            THIRD_PARTY_NOTICES.md; do
+            if [[ ! -f "$contract_file" || -L "$contract_file" ]]; then
+              echo "missing or unsafe dependency contract file: $contract_file" >&2
+              exit 1
+            fi
+          done
+          python3 "$DEPENDENCY_LOCK_VERIFIER" --repo-root "$GITHUB_WORKSPACE"
+
+      - name: Validate the locked release contract
+        id: metadata
+        env:
+          SOURCE_EPOCH: ${{ steps.source.outputs.source_epoch }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SOURCE_TREE: ${{ steps.source.outputs.source_tree }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null; then
+            echo "the release preflight requires jq from the pinned runner image" >&2
+            exit 1
+          fi
+
+          if ! tdlib_revision="$(
+            jq -er '
+              [.components[] | select(.id == "tdlib" and .lock_state == "locked")] |
+              if length == 1 then .[0].immutable_ref else error("invalid TDLib lock entry") end
+            ' "$DEPENDENCY_LOCK"
+          )" || [[ ! "$tdlib_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "the canonical dependency lock has no exact TDLib revision" >&2
+            exit 1
+          fi
+          tdlib_repository="$(
+            jq -er '
+              [.components[] | select(.id == "tdlib" and .lock_state == "locked")] |
+              if length == 1 then .[0].source_repository else error("invalid TDLib lock entry") end
+            ' "$DEPENDENCY_LOCK"
+          )"
+
+          release_blockers="$(
+            jq -r '
+              [.components[] |
+                select(
+                  (.scope == "planned-runtime" and .lock_state != "locked") or
+                  (.scope == "release-runtime" and
+                    .integration == "release-toolchain-pending")
+                ) |
+                .id] |
+              sort |
+              join(",")
+            ' "$DEPENDENCY_LOCK"
+          )"
+          if [[ -n "$release_blockers" ]]; then
+            echo "release toolchain components remain unresolved in $DEPENDENCY_LOCK: $release_blockers" >&2
+            exit 1
+          fi
+
+          if [[ ! -f "$LINUX_TOOLCHAIN_CONTRACT" || -L "$LINUX_TOOLCHAIN_CONTRACT" ]]; then
+            echo "missing M7 pinned musl toolchain contract: $LINUX_TOOLCHAIN_CONTRACT" >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --arg dependency_lock_sha256 \
+              "$(sha256sum "$DEPENDENCY_LOCK" | awk '{print $1}')" \
+            --arg recipe "$LINUX_BUILD_RECIPE" \
+            --arg tdlib "$tdlib_revision" \
+            --slurpfile dependency_lock "$DEPENDENCY_LOCK" '
+              type == "object" and
+              keys == ["dependency_lock_sha256", "image", "openssl", "recipe", "schema_version", "target", "tdlib_revision", "zlib"] and
+              .schema_version == 1 and
+              .dependency_lock_sha256 == $dependency_lock_sha256 and
+              (.image | type == "string" and test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$")) and
+              .target == "x86_64-linux-musl" and
+              .tdlib_revision == $tdlib and
+              (.recipe | type == "object" and keys == ["path", "sha256"]) and
+              .recipe.path == $recipe and
+              (.recipe.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+              ([
+                {contract: .openssl, lock_id: "openssl"},
+                {contract: .zlib, lock_id: "zlib"}
+              ] | all(.[];
+                (.lock_id as $lock_id |
+                  [$dependency_lock[0].components[] |
+                    select(.id == $lock_id and .lock_state == "locked")] as $locked |
+                  ($locked | length) == 1 and
+                  (.contract | type == "object" and
+                    keys == ["source_sha256", "source_url", "version"]) and
+                  .contract.version == $locked[0].version and
+                  .contract.source_url == $locked[0].source_archive and
+                  .contract.source_sha256 == $locked[0].archive_sha256
+                )
+              ))
+            ' "$LINUX_TOOLCHAIN_CONTRACT" >/dev/null; then
+            echo "invalid M7 pinned musl toolchain contract: $LINUX_TOOLCHAIN_CONTRACT" >&2
+            exit 1
+          fi
+
+          recipe_path="$(jq -r '.recipe.path' "$LINUX_TOOLCHAIN_CONTRACT")"
+          recipe_sha256="$(jq -r '.recipe.sha256' "$LINUX_TOOLCHAIN_CONTRACT")"
+          if [[ ! -f "$recipe_path" || -L "$recipe_path" ]]; then
+            echo "missing pinned musl build recipe: $recipe_path" >&2
+            exit 1
+          fi
+          if [[ "$(sha256sum "$recipe_path" | awk '{print $1}')" != "$recipe_sha256" ]]; then
+            echo "pinned musl build recipe digest does not match its contract" >&2
+            exit 1
+          fi
+
+          {
+            printf 'dependency_lock_sha256=%s\n' \
+              "$(sha256sum "$DEPENDENCY_LOCK" | awk '{print $1}')"
+            printf 'dependency_verifier_sha256=%s\n' \
+              "$(sha256sum "$DEPENDENCY_LOCK_VERIFIER" | awk '{print $1}')"
+            printf 'linux_build_recipe=%s\n' "$recipe_path"
+            printf 'linux_toolchain_contract_sha256=%s\n' \
+              "$(sha256sum "$LINUX_TOOLCHAIN_CONTRACT" | awk '{print $1}')"
+            printf 'linux_toolchain_image=%s\n' \
+              "$(jq -r '.image' "$LINUX_TOOLCHAIN_CONTRACT")"
+            printf 'source_epoch=%s\n' "$SOURCE_EPOCH"
+            printf 'source_sha=%s\n' "$SOURCE_SHA"
+            printf 'source_tree=%s\n' "$SOURCE_TREE"
+            printf 'tdlib_repository=%s\n' "$tdlib_repository"
+            printf 'tdlib_revision=%s\n' "$tdlib_revision"
+            printf 'version=%s\n' "$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+  linux-musl:
+    name: Linux x86_64 musl
+    needs: metadata
+    runs-on: ubuntu-24.04
+    env:
+      TDLIB_REV: ${{ needs.metadata.outputs.tdlib_revision }}
+    steps:
+      - name: Check out the validated revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify the release source identity
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$SOURCE_SHA"
+
+      - name: Revalidate the pinned build contract
+        env:
+          BUILD_RECIPE: ${{ needs.metadata.outputs.linux_build_recipe }}
+          CONTRACT_SHA256: ${{ needs.metadata.outputs.linux_toolchain_contract_sha256 }}
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          DEPENDENCY_VERIFIER_SHA256: ${{ needs.metadata.outputs.dependency_verifier_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ "$(sha256sum "$DEPENDENCY_LOCK" | awk '{print $1}')" \
+                != "$DEPENDENCY_LOCK_SHA256" || \
+                "$(sha256sum "$DEPENDENCY_LOCK_VERIFIER" | awk '{print $1}')" \
+                != "$DEPENDENCY_VERIFIER_SHA256" ]]; then
+            echo "canonical dependency contract changed after preflight" >&2
+            exit 1
+          fi
+          python3 "$DEPENDENCY_LOCK_VERIFIER" --repo-root "$GITHUB_WORKSPACE"
+          if [[ "$(sha256sum "$LINUX_TOOLCHAIN_CONTRACT" | awk '{print $1}')" \
+                != "$CONTRACT_SHA256" ]]; then
+            echo "pinned musl toolchain contract changed after preflight" >&2
+            exit 1
+          fi
+          if [[ "$(sha256sum "$BUILD_RECIPE" | awk '{print $1}')" \
+                != "$(jq -r '.recipe.sha256' "$LINUX_TOOLCHAIN_CONTRACT")" ]]; then
+            echo "pinned musl build recipe changed after preflight" >&2
+            exit 1
+          fi
+
+      - name: Prefetch locked Linux build inputs
+        env:
+          BUILD_RECIPE: ${{ needs.metadata.outputs.linux_build_recipe }}
+        run: bash "$BUILD_RECIPE" fetch
+
+      - name: Pull the pinned toolchain image
+        env:
+          TOOLCHAIN_IMAGE: ${{ needs.metadata.outputs.linux_toolchain_image }}
+        run: docker pull "$TOOLCHAIN_IMAGE"
+
+      - name: Build and test without dependency network access
+        env:
+          BUILD_RECIPE: ${{ needs.metadata.outputs.linux_build_recipe }}
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          TOOLCHAIN_IMAGE: ${{ needs.metadata.outputs.linux_toolchain_image }}
+        run: |
+          set -euo pipefail
+          docker run \
+            --init \
+            --rm \
+            --pull=never \
+            --network=none \
+            --user "$(id -u):$(id -g)" \
+            --env SOURCE_DATE_EPOCH="$SOURCE_EPOCH" \
+            --env TGCLI_SOURCE_SHA="$SOURCE_SHA" \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --entrypoint /bin/bash \
+            "$TOOLCHAIN_IMAGE" \
+            "$BUILD_RECIPE" build
+
+      - name: Verify the Linux artifact and build provenance
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.metadata.outputs.source_tree }}
+          TOOLCHAIN_IMAGE: ${{ needs.metadata.outputs.linux_toolchain_image }}
+        run: |
+          set -euo pipefail
+          bash scripts/check-release-artifact.sh inspect-linux \
+            build/release-static/tgcli
+          bash scripts/check-release-artifact.sh verify-linux-build \
+            build/release-static/tgcli \
+            "$LINUX_BUILD_PROVENANCE" \
+            "$SOURCE_SHA" \
+            "$SOURCE_TREE" \
+            "$TOOLCHAIN_IMAGE"
+
+      - name: Package the Linux artifact
+        env:
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          package="tgcli-$VERSION-linux-x86_64-musl"
+          install -d "dist/$package"
+          install -m 0755 build/release-static/tgcli "dist/$package/tgcli"
+          install -m 0644 LICENSE README.md THIRD_PARTY_NOTICES.md "dist/$package/"
+          install -m 0644 "$LINUX_BUILD_PROVENANCE" "dist/$package/PROVENANCE.json"
+          install -Dm0644 "$DEPENDENCY_LOCK" "dist/$package/$DEPENDENCY_LOCK"
+          install -Dm0644 "$DEPENDENCY_LOCK_SCHEMA" \
+            "dist/$package/$DEPENDENCY_LOCK_SCHEMA"
+          runtime_license_files=()
+          while IFS= read -r license_file; do
+            runtime_license_files+=("$license_file")
+          done < <(
+            jq -r '
+              [.components[] |
+                select(
+                  .scope == "runtime" or
+                  .scope == "release-runtime" or
+                  .scope == "planned-runtime"
+                ) |
+                (.license_files[]?.path),
+                (.embedded_components[]?.license_files[]?.path)] |
+              unique[]
+            ' "$DEPENDENCY_LOCK"
+          )
+          for license_file in "${runtime_license_files[@]}"; do
+            install -Dm0644 "$license_file" "dist/$package/$license_file"
+          done
+
+          expected_files=(
+            LICENSE
+            PROVENANCE.json
+            README.md
+            THIRD_PARTY_NOTICES.md
+            "$DEPENDENCY_LOCK"
+            "$DEPENDENCY_LOCK_SCHEMA"
+            tgcli
+            "${runtime_license_files[@]}"
+          )
+          expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)"
+          actual_listing="$(
+            find "dist/$package" -type f -print \
+              | sed "s|^dist/$package/||" \
+              | LC_ALL=C sort
+          )"
+          if [[ "$actual_listing" != "$expected_listing" ]] || \
+             [[ -n "$(find "dist/$package" ! -type d ! -type f -print -quit)" ]] || \
+             [[ "$(sha256sum "dist/$package/$DEPENDENCY_LOCK" | awk '{print $1}')" \
+                != "$DEPENDENCY_LOCK_SHA256" ]]; then
+            echo "Linux release package has an unexpected or unverifiable file set" >&2
+            exit 1
+          fi
+          find "dist/$package" -exec touch -d "@$SOURCE_EPOCH" {} +
+          tar \
+            --sort=name \
+            --mtime="@$SOURCE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf "dist/$package.tar.gz" \
+            -C dist "$package"
+
+      - name: Upload the Linux candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: linux-musl-candidate
+          path: dist/tgcli-${{ needs.metadata.outputs.version }}-linux-x86_64-musl.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  macos-arch:
+    name: macOS ${{ matrix.arch }}
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-15
+          - arch: x86_64
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    env:
+      TDLIB_REV: ${{ needs.metadata.outputs.tdlib_revision }}
+    steps:
+      - name: Check out the validated revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify the release source identity
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$SOURCE_SHA"
+
+      - name: Revalidate the canonical dependency source lock
+        env:
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          DEPENDENCY_VERIFIER_SHA256: ${{ needs.metadata.outputs.dependency_verifier_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ "$(shasum -a 256 "$DEPENDENCY_LOCK" | awk '{print $1}')" \
+                != "$DEPENDENCY_LOCK_SHA256" || \
+                "$(shasum -a 256 "$DEPENDENCY_LOCK_VERIFIER" | awk '{print $1}')" \
+                != "$DEPENDENCY_VERIFIER_SHA256" ]]; then
+            echo "canonical dependency contract changed after preflight" >&2
+            exit 1
+          fi
+          python3 "$DEPENDENCY_LOCK_VERIFIER" --repo-root "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: brew install ccache coreutils gperf jq ninja
+
+      - name: Build the locked static OpenSSL input
+        id: openssl
+        env:
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+        run: |
+          set -euo pipefail
+          input_directory="$GITHUB_WORKSPACE/build/macos-inputs"
+          extraction_directory="$GITHUB_WORKSPACE/build/macos-openssl-source"
+          prefix="$GITHUB_WORKSPACE/build/macos-openssl-prefix"
+          openssl_source_archive="$(
+            jq -er '
+              [.components[] | select(.id == "openssl")] |
+              if length == 1 then
+                .[0].source_archive
+              else
+                error("invalid OpenSSL lock")
+              end
+            ' "$DEPENDENCY_LOCK"
+          )"
+          openssl_archive_name="$(
+            bash scripts/check-release-artifact.sh staged-archive-name \
+              openssl "$openssl_source_archive"
+          )"
+          python3 "$DEPENDENCY_LOCK_VERIFIER" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --network \
+            --component openssl \
+            --download-directory "$input_directory"
+          python3 scripts/release/archive_tool.py extract \
+            --archive "$input_directory/$openssl_archive_name" \
+            --destination "$extraction_directory" \
+            --max-members "$(jq -r '.archive_policy.max_member_count' "$DEPENDENCY_LOCK")" \
+            --max-member-size "$(jq -r '.archive_policy.max_member_size' "$DEPENDENCY_LOCK")" \
+            --max-expanded-size "$(jq -r '.archive_policy.max_expanded_size' "$DEPENDENCY_LOCK")"
+          source_directory="$(find "$extraction_directory" -mindepth 1 -maxdepth 1 -type d -print)"
+          if [[ -z "$source_directory" || \
+                "$(find "$extraction_directory" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]')" != 1 ]]; then
+            echo "locked OpenSSL archive has an unexpected source root" >&2
+            exit 1
+          fi
+          expected_tree="$(jq -er '.components[] | select(.id == "openssl") | .source_tree_sha256' "$DEPENDENCY_LOCK")"
+          actual_tree="$(python3 scripts/release/archive_tool.py tree-sha256 --root "$source_directory")"
+          if [[ "$actual_tree" != "$expected_tree" ]]; then
+            echo "extracted OpenSSL tree differs from the dependency lock" >&2
+            exit 1
+          fi
+          find "$source_directory" -exec gtouch -d "@$SOURCE_EPOCH" {} +
+          case "${{ matrix.arch }}" in
+            arm64) openssl_target=darwin64-arm64-cc ;;
+            x86_64) openssl_target=darwin64-x86_64-cc ;;
+            *) echo "unsupported macOS OpenSSL architecture" >&2; exit 1 ;;
+          esac
+          (
+            cd "$source_directory"
+            ./Configure "$openssl_target" \
+              --prefix="$prefix" \
+              --openssldir="$prefix/etc/ssl" \
+              --libdir=lib \
+              no-apps no-docs no-module no-shared no-tests no-zlib no-pinshared
+            make -j"$(sysctl -n hw.ncpu)"
+            make install_sw
+          )
+          if [[ ! -f "$prefix/lib/libssl.a" || -L "$prefix/lib/libssl.a" || \
+                ! -f "$prefix/lib/libcrypto.a" || -L "$prefix/lib/libcrypto.a" ]]; then
+            echo "locked OpenSSL build did not produce static libraries" >&2
+            exit 1
+          fi
+          printf 'prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the TDLib prefix
+        id: tdlib
+        run: echo "prefix=$HOME/.cache/tgcli-dev/tdlib-${TDLIB_REV:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build TDLib
+        env:
+          OPENSSL_PREFIX: ${{ steps.openssl.outputs.prefix }}
+          TDLIB_PREFIX: ${{ steps.tdlib.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          coreutils_prefix="$(brew --prefix)"
+          real_brew="$(command -v brew)"
+          tool_directory="$GITHUB_WORKSPACE/build/macos-tools"
+          install -d "$tool_directory"
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'set -euo pipefail' \
+            'if [[ "$#" -eq 2 && "$1" == --prefix && "$2" == openssl@3 ]]; then' \
+            '    printf "%s\\n" "$TGCLI_LOCKED_OPENSSL_PREFIX"' \
+            'else' \
+            '    exec "$TGCLI_REAL_BREW" "$@"' \
+            'fi' > "$tool_directory/brew"
+          chmod 0755 "$tool_directory/brew"
+          env \
+            PATH="$tool_directory:$coreutils_prefix/opt/coreutils/libexec/gnubin:$PATH" \
+            TGCLI_LOCKED_OPENSSL_PREFIX="$OPENSSL_PREFIX" \
+            TGCLI_REAL_BREW="$real_brew" \
+            ./scripts/build-tdlib.sh "$TDLIB_PREFIX"
+
+      - name: Configure
+        env:
+          OPENSSL_PREFIX: ${{ steps.openssl.outputs.prefix }}
+          TGCLI_TDLIB_PREFIX: ${{ steps.tdlib.outputs.prefix }}
+        run: |
+          cmake --preset release \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
+            -DOPENSSL_USE_STATIC_LIBS=TRUE
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure
+
+      - name: Reverify source identity after the macOS build
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$SOURCE_SHA"
+
+      - name: Verify the architecture and runtime dependencies
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary=build/release/tgcli
+          if ! actual_arch="$(lipo -archs "$binary" 2>&1)"; then
+            echo "lipo failed while inspecting the macOS architecture" >&2
+            exit 1
+          fi
+          if [[ "$actual_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "macOS binary architecture does not match its runner" >&2
+            exit 1
+          fi
+          bash scripts/check-release-artifact.sh inspect-macos "$binary"
+
+      - name: Record the architecture provenance
+        env:
+          ARCH: ${{ matrix.arch }}
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          DEPENDENCY_VERIFIER_SHA256: ${{ needs.metadata.outputs.dependency_verifier_sha256 }}
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.metadata.outputs.source_tree }}
+          TDLIB_REPOSITORY: ${{ needs.metadata.outputs.tdlib_repository }}
+        run: |
+          set -euo pipefail
+          tdlib_source="$HOME/.cache/tgcli-dev/td"
+          if ! tdlib_revision="$(git -C "$tdlib_source" rev-parse HEAD)"; then
+            echo "cannot resolve the TDLib source revision" >&2
+            exit 1
+          fi
+          if [[ "$tdlib_revision" != "$TDLIB_REV" ]]; then
+            echo "built TDLib revision differs from the canonical pin" >&2
+            exit 1
+          fi
+
+          shopt -s nullglob
+          dependency_lines=()
+          for dependency_dir in build/release/_deps/*-src; do
+            if [[ ! -d "$dependency_dir/.git" ]]; then
+              echo "FetchContent dependency is not a resolvable Git checkout: $dependency_dir" >&2
+              exit 1
+            fi
+            dependency_name="$(basename "$dependency_dir" -src)"
+            if ! dependency_revision="$(git -C "$dependency_dir" rev-parse HEAD)"; then
+              echo "cannot resolve dependency revision: $dependency_name" >&2
+              exit 1
+            fi
+            if ! dependency_source="$(git -C "$dependency_dir" remote get-url origin)"; then
+              echo "cannot resolve dependency source: $dependency_name" >&2
+              exit 1
+            fi
+            dependency_lines+=("$dependency_name"$'\t'"$dependency_source"$'\t'"$dependency_revision")
+          done
+          if [[ "${#dependency_lines[@]}" -eq 0 ]]; then
+            echo "no resolved FetchContent dependencies were found" >&2
+            exit 1
+          fi
+          dependency_lines+=("tdlib"$'\t'"$TDLIB_REPOSITORY"$'\t'"$tdlib_revision")
+          resolved_dependencies="$(
+            printf '%s\n' "${dependency_lines[@]}" \
+              | jq -Rsc '
+                  split("\n") |
+                  map(select(length > 0) | split("\t")) |
+                  if all(.[]; length == 3) then
+                    map({id: .[0], source_repository: .[1], immutable_ref: .[2]}) |
+                    sort_by(.id)
+                  else
+                    error("invalid dependency record")
+                  end
+                '
+          )"
+          expected_dependencies="$(
+            jq -c '
+              [.components[] |
+                select(
+                  .integration == "fetchcontent" or
+                  .integration == "fetchcontent-or-pinned-prefix" or
+                  .integration == "test-fetchcontent"
+                ) |
+                {id, source_repository, immutable_ref}] |
+              sort_by(.id)
+            ' "$DEPENDENCY_LOCK"
+          )"
+          if ! jq -e \
+            --argjson expected "$expected_dependencies" '
+              type == "array" and length > 0 and . == $expected and
+              all(.[];
+                type == "object" and
+                keys == ["id", "immutable_ref", "source_repository"] and
+                (.id | test("^[a-z0-9][a-z0-9_-]*$")) and
+                (.source_repository | test("^https://[^[:space:]]+$")) and
+                (.immutable_ref | test("^[0-9a-f]{40}$")))
+            ' <<< "$resolved_dependencies" >/dev/null; then
+            echo "resolved dependency provenance differs from the canonical lock" >&2
+            exit 1
+          fi
+
+          compiler="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' build/release/CMakeCache.txt)"
+          if [[ -z "$compiler" || ! -x "$compiler" ]]; then
+            echo "cannot resolve the configured macOS compiler" >&2
+            exit 1
+          fi
+          if ! compiler_version="$("$compiler" --version 2>&1)" || \
+             ! cmake_version="$(cmake --version 2>&1)" || \
+             ! ninja_version="$(ninja --version 2>&1)" || \
+             ! xcode_version="$(xcodebuild -version 2>&1)" || \
+             ! brew_version="$(brew --version 2>&1)" || \
+             ! brew_formulae="$(brew list --versions ccache coreutils gperf jq ninja 2>&1)"; then
+            echo "cannot resolve macOS build tool versions" >&2
+            exit 1
+          fi
+
+          jq -S -n \
+            --arg arch "$ARCH" \
+            --arg artifact_sha256 "$(shasum -a 256 build/release/tgcli | awk '{print $1}')" \
+            --arg artifact_size "$(stat -f '%z' build/release/tgcli)" \
+            --arg brew "$brew_version" \
+            --arg brew_formulae "$brew_formulae" \
+            --arg cmake "$cmake_version" \
+            --arg compiler "$compiler_version" \
+            --arg dependency_lock_path "$DEPENDENCY_LOCK" \
+            --arg dependency_lock_sha256 "$DEPENDENCY_LOCK_SHA256" \
+            --arg dependency_verifier_path "$DEPENDENCY_LOCK_VERIFIER" \
+            --arg dependency_verifier_sha256 "$DEPENDENCY_VERIFIER_SHA256" \
+            --arg ninja "$ninja_version" \
+            --arg runner_arch "$RUNNER_ARCH" \
+            --arg runner_image_os "${ImageOS:-unknown}" \
+            --arg runner_image_version "${ImageVersion:-unknown}" \
+            --arg runner_os "$RUNNER_OS" \
+            --arg source_epoch "$SOURCE_EPOCH" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg source_tree "$SOURCE_TREE" \
+            --arg release_workflow_sha256 \
+              "$(shasum -a 256 .github/workflows/release.yml | awk '{print $1}')" \
+            --arg tdlib_build_script_sha256 "$(shasum -a 256 scripts/build-tdlib.sh | awk '{print $1}')" \
+            --arg xcode "$xcode_version" \
+            --argjson dependencies "$resolved_dependencies" \
+            --argjson locked_openssl "$(
+              jq -c '
+                .components[] |
+                select(.id == "openssl") |
+                {
+                  id,
+                  version,
+                  source_url: .source_archive,
+                  archive_sha256,
+                  archive_size,
+                  source_tree_sha256
+                }
+              ' "$DEPENDENCY_LOCK"
+            )" \
+            --slurpfile dependency_lock "$DEPENDENCY_LOCK" '
+              {
+                schema_version: 1,
+                artifact: {
+                  path: "tgcli",
+                  sha256: $artifact_sha256,
+                  size: ($artifact_size | tonumber)
+                },
+                source: {
+                  sha: $source_sha,
+                  tree: $source_tree,
+                  epoch: ($source_epoch | tonumber)
+                },
+                platform: ("macos-" + $arch),
+                runner: {
+                  os: $runner_os,
+                  arch: $runner_arch,
+                  image_os: $runner_image_os,
+                  image_version: $runner_image_version
+                },
+                tools: {
+                  compiler: $compiler,
+                  cmake: $cmake,
+                  ninja: $ninja,
+                  xcode: $xcode,
+                  homebrew: $brew,
+                  homebrew_formulae: $brew_formulae
+                },
+                dependency_lock: {
+                  path: $dependency_lock_path,
+                  sha256: $dependency_lock_sha256,
+                  verifier: {
+                    path: $dependency_verifier_path,
+                    sha256: $dependency_verifier_sha256
+                  },
+                  value: $dependency_lock[0]
+                },
+                recipes: {
+                  build_tdlib_sha256: $tdlib_build_script_sha256,
+                  release_workflow_sha256: $release_workflow_sha256
+                },
+                locked_openssl: $locked_openssl,
+                resolved_dependencies: $dependencies
+              }
+            ' > build/release/PROVENANCE.json
+          bash scripts/check-release-artifact.sh verify-macos-build \
+            build/release/tgcli \
+            build/release/PROVENANCE.json \
+            "macos-$ARCH" \
+            "$SOURCE_SHA" \
+            "$SOURCE_TREE" \
+            "$DEPENDENCY_LOCK"
+
+      - name: Stage the architecture slice
+        env:
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+        run: |
+          set -euo pipefail
+          install -d dist
+          install -m 0755 build/release/tgcli dist/tgcli
+          install -m 0644 build/release/PROVENANCE.json dist/PROVENANCE.json
+          gtouch -d "@$SOURCE_EPOCH" dist/tgcli dist/PROVENANCE.json
+
+      - name: Upload the architecture slice
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: macos-${{ matrix.arch }}-slice
+          path: |
+            dist/PROVENANCE.json
+            dist/tgcli
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  macos-universal:
+    name: macOS universal
+    needs: [metadata, macos-arch]
+    runs-on: macos-15
+    steps:
+      - name: Check out release metadata files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify the release source identity
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$SOURCE_SHA"
+
+      - name: Install packaging tools
+        run: brew install coreutils gnu-tar jq
+
+      - name: Revalidate the canonical dependency source lock
+        env:
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          DEPENDENCY_VERIFIER_SHA256: ${{ needs.metadata.outputs.dependency_verifier_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ "$(shasum -a 256 "$DEPENDENCY_LOCK" | awk '{print $1}')" \
+                != "$DEPENDENCY_LOCK_SHA256" || \
+                "$(shasum -a 256 "$DEPENDENCY_LOCK_VERIFIER" | awk '{print $1}')" \
+                != "$DEPENDENCY_VERIFIER_SHA256" ]]; then
+            echo "canonical dependency contract changed after preflight" >&2
+            exit 1
+          fi
+          python3 "$DEPENDENCY_LOCK_VERIFIER" --repo-root "$GITHUB_WORKSPACE"
+
+      - name: Download the arm64 slice
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: macos-arm64-slice
+          path: components/arm64
+
+      - name: Download the x86_64 slice
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: macos-x86_64-slice
+          path: components/x86_64
+
+      - name: Assemble and verify the universal binary
+        env:
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          DEPENDENCY_VERIFIER_SHA256: ${{ needs.metadata.outputs.dependency_verifier_sha256 }}
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.metadata.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          expected_listing=$'PROVENANCE.json\ntgcli'
+          arm64_listing="$(find components/arm64 -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
+          x86_64_listing="$(find components/x86_64 -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
+          if [[ "$arm64_listing" != "$expected_listing" || \
+                "$x86_64_listing" != "$expected_listing" || \
+                -n "$(find components/arm64 components/x86_64 -mindepth 1 ! -type f -print -quit)" ]]; then
+            echo "macOS architecture slice archive has unexpected members" >&2
+            exit 1
+          fi
+
+          chmod 0755 components/arm64/tgcli components/x86_64/tgcli
+          mkdir -p dist
+          bash scripts/check-release-artifact.sh verify-macos-build \
+            components/arm64/tgcli \
+            components/arm64/PROVENANCE.json \
+            macos-arm64 \
+            "$SOURCE_SHA" \
+            "$SOURCE_TREE" \
+            "$DEPENDENCY_LOCK"
+          bash scripts/check-release-artifact.sh verify-macos-build \
+            components/x86_64/tgcli \
+            components/x86_64/PROVENANCE.json \
+            macos-x86_64 \
+            "$SOURCE_SHA" \
+            "$SOURCE_TREE" \
+            "$DEPENDENCY_LOCK"
+          lipo -create \
+            components/arm64/tgcli \
+            components/x86_64/tgcli \
+            -output dist/tgcli
+          chmod 0755 dist/tgcli
+          bash scripts/check-release-artifact.sh inspect-macos-universal dist/tgcli
+
+          if ! lipo_version="$(lipo -version 2>&1)" || \
+             ! gtar_version="$(gtar --version 2>&1)"; then
+            echo "cannot resolve universal packaging tool versions" >&2
+            exit 1
+          fi
+          jq -S -n \
+            --arg artifact_sha256 "$(shasum -a 256 dist/tgcli | awk '{print $1}')" \
+            --arg artifact_size "$(stat -f '%z' dist/tgcli)" \
+            --arg gtar "$gtar_version" \
+            --arg dependency_lock_path "$DEPENDENCY_LOCK" \
+            --arg dependency_lock_sha256 "$DEPENDENCY_LOCK_SHA256" \
+            --arg dependency_verifier_path "$DEPENDENCY_LOCK_VERIFIER" \
+            --arg dependency_verifier_sha256 "$DEPENDENCY_VERIFIER_SHA256" \
+            --arg lipo "$lipo_version" \
+            --arg runner_arch "$RUNNER_ARCH" \
+            --arg runner_image_os "${ImageOS:-unknown}" \
+            --arg runner_image_version "${ImageVersion:-unknown}" \
+            --arg runner_os "$RUNNER_OS" \
+            --arg source_epoch "$SOURCE_EPOCH" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg source_tree "$SOURCE_TREE" \
+            --arg arm64_binary_sha256 "$(shasum -a 256 components/arm64/tgcli | awk '{print $1}')" \
+            --arg arm64_provenance_sha256 \
+              "$(shasum -a 256 components/arm64/PROVENANCE.json | awk '{print $1}')" \
+            --arg x86_64_binary_sha256 \
+              "$(shasum -a 256 components/x86_64/tgcli | awk '{print $1}')" \
+            --arg x86_64_provenance_sha256 \
+              "$(shasum -a 256 components/x86_64/PROVENANCE.json | awk '{print $1}')" \
+            --slurpfile dependency_lock "$DEPENDENCY_LOCK" '
+              {
+                schema_version: 1,
+                artifact: {
+                  path: "tgcli",
+                  sha256: $artifact_sha256,
+                  size: ($artifact_size | tonumber)
+                },
+                source: {
+                  sha: $source_sha,
+                  tree: $source_tree,
+                  epoch: ($source_epoch | tonumber)
+                },
+                platform: "macos-universal",
+                runner: {
+                  os: $runner_os,
+                  arch: $runner_arch,
+                  image_os: $runner_image_os,
+                  image_version: $runner_image_version
+                },
+                tools: {lipo: $lipo, gtar: $gtar},
+                dependency_lock: {
+                  path: $dependency_lock_path,
+                  sha256: $dependency_lock_sha256,
+                  verifier: {
+                    path: $dependency_verifier_path,
+                    sha256: $dependency_verifier_sha256
+                  },
+                  value: $dependency_lock[0]
+                },
+                slices: {
+                  arm64: {
+                    binary_sha256: $arm64_binary_sha256,
+                    provenance_sha256: $arm64_provenance_sha256
+                  },
+                  x86_64: {
+                    binary_sha256: $x86_64_binary_sha256,
+                    provenance_sha256: $x86_64_provenance_sha256
+                  }
+                }
+              }
+            ' > dist/PROVENANCE.json
+          bash scripts/check-release-artifact.sh verify-macos-build \
+            dist/tgcli \
+            dist/PROVENANCE.json \
+            macos-universal \
+            "$SOURCE_SHA" \
+            "$SOURCE_TREE" \
+            "$DEPENDENCY_LOCK" \
+            components/arm64/tgcli \
+            components/arm64/PROVENANCE.json \
+            components/x86_64/tgcli \
+            components/x86_64/PROVENANCE.json
+
+      - name: Package the universal binary
+        env:
+          DEPENDENCY_LOCK_SHA256: ${{ needs.metadata.outputs.dependency_lock_sha256 }}
+          SOURCE_EPOCH: ${{ needs.metadata.outputs.source_epoch }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          SOURCE_TREE: ${{ needs.metadata.outputs.source_tree }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          package="tgcli-$VERSION-macos-universal"
+          install -d "package/$package"
+          install -m 0755 dist/tgcli "package/$package/tgcli"
+          install -m 0644 LICENSE README.md THIRD_PARTY_NOTICES.md "package/$package/"
+          install -m 0644 dist/PROVENANCE.json "package/$package/"
+          install -m 0644 components/arm64/PROVENANCE.json \
+            "package/$package/PROVENANCE-arm64.json"
+          install -m 0644 components/x86_64/PROVENANCE.json \
+            "package/$package/PROVENANCE-x86_64.json"
+          install -d "package/$package/release"
+          install -m 0644 "$DEPENDENCY_LOCK" "package/$package/$DEPENDENCY_LOCK"
+          install -m 0644 "$DEPENDENCY_LOCK_SCHEMA" \
+            "package/$package/$DEPENDENCY_LOCK_SCHEMA"
+          runtime_license_files=()
+          while IFS= read -r license_file; do
+            runtime_license_files+=("$license_file")
+          done < <(
+            jq -r '
+              [.components[] |
+                select(
+                  .scope == "runtime" or
+                  .scope == "release-runtime" or
+                  .scope == "planned-runtime"
+                ) |
+                (.license_files[]?.path),
+                (.embedded_components[]?.license_files[]?.path)] |
+              unique[]
+            ' "$DEPENDENCY_LOCK"
+          )
+          for license_file in "${runtime_license_files[@]}"; do
+            destination="package/$package/$license_file"
+            install -d "$(dirname "$destination")"
+            install -m 0644 "$license_file" "$destination"
+          done
+
+          expected_files=(
+            LICENSE
+            PROVENANCE-arm64.json
+            PROVENANCE-x86_64.json
+            PROVENANCE.json
+            README.md
+            THIRD_PARTY_NOTICES.md
+            "$DEPENDENCY_LOCK"
+            "$DEPENDENCY_LOCK_SCHEMA"
+            tgcli
+            "${runtime_license_files[@]}"
+          )
+          expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)"
+          actual_listing="$(
+            find "package/$package" -type f -print \
+              | sed "s|^package/$package/||" \
+              | LC_ALL=C sort
+          )"
+          if [[ "$actual_listing" != "$expected_listing" ]] || \
+             [[ -n "$(find "package/$package" ! -type d ! -type f -print -quit)" ]] || \
+             [[ "$(shasum -a 256 "package/$package/$DEPENDENCY_LOCK" | awk '{print $1}')" \
+                != "$DEPENDENCY_LOCK_SHA256" ]]; then
+            echo "macOS release package has an unexpected or unverifiable file set" >&2
+            exit 1
+          fi
+          bash scripts/check-release-artifact.sh verify-macos-build \
+            "package/$package/tgcli" \
+            "package/$package/PROVENANCE.json" \
+            macos-universal \
+            "$SOURCE_SHA" \
+            "$SOURCE_TREE" \
+            "$DEPENDENCY_LOCK" \
+            components/arm64/tgcli \
+            components/arm64/PROVENANCE.json \
+            components/x86_64/tgcli \
+            components/x86_64/PROVENANCE.json
+          find "package/$package" -exec gtouch -d "@$SOURCE_EPOCH" {} +
+          gtar \
+            --sort=name \
+            --mtime="@$SOURCE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -czf "dist/$package.tar.gz" \
+            -C package "$package"
+
+      - name: Upload the macOS candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: macos-universal-candidate
+          path: dist/tgcli-${{ needs.metadata.outputs.version }}-macos-universal.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  sign:
+    name: Sign release assets
+    needs: [metadata, linux-musl, macos-universal]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out release verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify the release source identity
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$SOURCE_SHA"
+
+      - name: Download the Linux candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: linux-musl-candidate
+          path: candidates/linux
+
+      - name: Download the macOS candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: macos-universal-candidate
+          path: candidates/macos
+
+      - name: Assemble and verify release checksums
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          linux="tgcli-$VERSION-linux-x86_64-musl.tar.gz"
+          macos="tgcli-$VERSION-macos-universal.tar.gz"
+          expected_candidates="$(printf '%s\n' "linux/$linux" "macos/$macos" | LC_ALL=C sort)"
+          actual_candidates="$(find candidates -mindepth 2 -maxdepth 2 -type f -printf '%P\n' | LC_ALL=C sort)"
+          if [[ "$actual_candidates" != "$expected_candidates" || \
+                -n "$(find candidates -mindepth 1 ! -type d ! -type f -print -quit)" ]]; then
+            echo "downloaded release candidate has an unexpected file set" >&2
+            exit 1
+          fi
+
+          install -d release-assets
+          install -m 0644 "candidates/linux/$linux" "release-assets/$linux"
+          install -m 0644 "candidates/macos/$macos" "release-assets/$macos"
+          (
+            cd release-assets
+            sha256sum "$linux" "$macos" | LC_ALL=C sort -k2 > SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          bash scripts/check-release-artifact.sh verify-release-bundle \
+            "$VERSION" release-assets
+
+      - name: Install the pinned Sigstore client
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62  # v3.10.0
+        with:
+          cosign-release: v2.6.0
+
+      - name: Sign and verify the release assets
+        env:
+          CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets=(
+            release-assets/SHA256SUMS
+            "release-assets/tgcli-$VERSION-linux-x86_64-musl.tar.gz"
+            "release-assets/tgcli-$VERSION-macos-universal.tar.gz"
+          )
+          for asset in "${assets[@]}"; do
+            cosign sign-blob \
+              --yes \
+              --bundle "$asset.sigstore.json" \
+              "$asset"
+            cosign verify-blob \
+              --bundle "$asset.sigstore.json" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+              --certificate-github-workflow-ref "$GITHUB_REF" \
+              --certificate-github-workflow-trigger push \
+              "$asset"
+          done
+          bash scripts/check-release-artifact.sh verify-signed-layout \
+            "$VERSION" release-assets
+
+      - name: Upload the signed release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: signed-release-${{ needs.metadata.outputs.version }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  release:
+    name: Publish signed release
+    needs: [metadata, sign]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify the release source identity
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          python3 scripts/release/build_provenance.py source-identity \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --expected-commit "$SOURCE_SHA"
+
+      - name: Download the signed release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: signed-release-${{ needs.metadata.outputs.version }}
+          path: release-assets
+
+      - name: Install the pinned Sigstore client
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62  # v3.10.0
+        with:
+          cosign-release: v2.6.0
+
+      - name: Reverify the signed release assets
+        env:
+          CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash scripts/check-release-artifact.sh verify-signed-layout \
+            "$VERSION" release-assets
+          assets=(
+            release-assets/SHA256SUMS
+            "release-assets/tgcli-$VERSION-linux-x86_64-musl.tar.gz"
+            "release-assets/tgcli-$VERSION-macos-universal.tar.gz"
+          )
+          for asset in "${assets[@]}"; do
+            cosign verify-blob \
+              --bundle "$asset.sigstore.json" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+              --certificate-github-workflow-ref "$GITHUB_REF" \
+              --certificate-github-workflow-trigger push \
+              "$asset"
+          done
+
+      - name: Publish the signed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          verify_remote_tag() {
+            bash scripts/check-release-artifact.sh verify-remote-tag \
+              "$SOURCE_SHA" "$GITHUB_REPOSITORY" "$TAG_NAME"
+          }
+          verify_remote_tag
+          mkdir -p build
+          state_file=build/github-release-state.json
+          release_exists=false
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" \
+              > "$state_file" 2>/dev/null; then
+            release_exists=true
+            mapfile -t state < <(
+              bash scripts/check-release-artifact.sh classify-release-state \
+                "$VERSION" release-assets "$TAG_NAME" "$SOURCE_SHA" "$state_file"
+            )
+            if [[ "${state[0]}" == published ]]; then
+              exit 0
+            fi
+            missing_assets=()
+            for asset_name in "${state[@]:1}"; do
+              missing_assets+=("release-assets/$asset_name")
+            done
+            if [[ "${#missing_assets[@]}" -gt 0 ]]; then
+              gh release upload "$TAG_NAME" "${missing_assets[@]}"
+            fi
+          fi
+          if [[ "$release_exists" == false ]]; then
+            gh release create "$TAG_NAME" \
+              release-assets/* \
+              --draft \
+              --generate-notes \
+              --target "$SOURCE_SHA" \
+              --title "$TAG_NAME" \
+              --verify-tag
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" > "$state_file"
+          mapfile -t state < <(
+            bash scripts/check-release-artifact.sh classify-release-state \
+              "$VERSION" release-assets "$TAG_NAME" "$SOURCE_SHA" "$state_file"
+          )
+          if [[ "${#state[@]}" -ne 1 || "${state[0]}" != draft ]]; then
+            echo "release draft is not complete after asset upload" >&2
+            exit 1
+          fi
+          verify_remote_tag
+          gh release edit "$TAG_NAME" --verify-tag --draft=false
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" > "$state_file"
+          mapfile -t state < <(
+            bash scripts/check-release-artifact.sh classify-release-state \
+              "$VERSION" release-assets "$TAG_NAME" "$SOURCE_SHA" "$state_file"
+          )
+          if [[ "${#state[@]}" -ne 1 || "${state[0]}" != published ]]; then
+            echo "published release state is incomplete" >&2
+            exit 1
+          fi
