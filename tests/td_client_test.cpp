@@ -44,6 +44,11 @@ class PrivateTdLog {
         directory_ = created;
     }
 
+    PrivateTdLog(const PrivateTdLog&) = delete;
+    PrivateTdLog& operator=(const PrivateTdLog&) = delete;
+    PrivateTdLog(PrivateTdLog&&) = delete;
+    PrivateTdLog& operator=(PrivateTdLog&&) = delete;
+
     ~PrivateTdLog() {
         std::filesystem::remove_all(directory_);
     }
