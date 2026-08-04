@@ -102,7 +102,8 @@ class ConnectionSink final : public ResponseSink {
 } // namespace
 
 Server::Server(ServerOptions options, const Dispatcher& dispatcher)
-    : options_(std::move(options)), dispatcher_(dispatcher) {}
+    : options_(std::move(options)), dispatcher_(dispatcher),
+      activity_([this] { request_stop(); }, options_.activity_hooks) {}
 
 Server::~Server() {
     stop();
@@ -189,8 +190,36 @@ bool Server::start(std::string& error) {
             return false;
         }
     }
+    start_runtime_lifecycle();
     accept_thread_ = std::thread([this] { accept_loop(); });
     return true;
+}
+
+void Server::start_runtime_lifecycle() {
+    const auto idle_exit = options_.config_runtime != nullptr
+                               ? options_.config_runtime->current(options_.account()).idle_exit
+                               : ActivityTracker::IdleExit{};
+    if (!activity_.daemon_ready(idle_exit)) {
+        throw std::logic_error("server activity lifecycle was already started");
+    }
+    if (options_.config_runtime != nullptr) {
+        options_.config_runtime->set_publication_observer([this] {
+            const auto current = options_.config_runtime->current(options_.account());
+            static_cast<void>(activity_.update_idle_exit(current.idle_exit));
+        });
+    }
+    activity_watcher_ =
+        std::jthread([this](const std::stop_token& stop) { activity_.watch(stop); });
+}
+
+void Server::stop_runtime_lifecycle() {
+    if (options_.config_runtime != nullptr) {
+        options_.config_runtime->set_publication_observer({});
+    }
+    activity_watcher_.request_stop();
+    if (activity_watcher_.joinable()) {
+        activity_watcher_.join();
+    }
 }
 
 void Server::request_stop() {
@@ -201,6 +230,7 @@ void Server::request_stop() {
             idle_cv_.wait(lock, [this] { return shutdown_terminals_sent_; });
             return;
         }
+        admission_cancellation_.request_stop();
         for (const auto& active : active_requests_) {
             if (!active.shutdown_request) {
                 active_requests.push_back(active.session);
@@ -239,6 +269,7 @@ void Server::stop() {
     if (stopping_.exchange(true)) {
         return;
     }
+    stop_runtime_lifecycle();
     // request_stop() wakes the accept loop before active sessions are closed,
     // so no new connection can appear after the sweep below.
     if (accept_thread_.joinable()) {
@@ -491,11 +522,85 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                                               kNotFound});
                 break;
             }
+            std::shared_ptr<const AdmittedAccountConfig> admitted_config;
+            std::optional<RequestSession::Clock::time_point> admission_deadline;
+            if (options_.config_runtime != nullptr) {
+                if (options_.request_observer) {
+                    options_.request_observer(testing::RequestObservationStage::ConfigRead);
+                }
+                const auto deadline = proto::request_deadline(request->context.timeout_seconds);
+                if (!deadline) {
+                    connection->send(proto::Error{request->id, "USAGE", "invalid request timeout",
+                                                  nlohmann::json::object(), kUsage});
+                    break;
+                }
+                admission_deadline = *deadline;
+                const auto admission = options_.config_runtime->admit(
+                    request->account, *deadline, admission_cancellation_.get_token());
+                if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
+                    connection->send(
+                        proto::Error{request->id,
+                                     "TIMEOUT",
+                                     "config admission timed out",
+                                     {{"operation", "config_admission"}, {"state", nullptr}},
+                                     kTimeout});
+                    continue;
+                }
+                if (admission.refresh_status != ConfigRefreshStatus::Completed ||
+                    !admission.decision) {
+                    connection->send(proto::Error{request->id,
+                                                  "DAEMON_SHUTDOWN",
+                                                  "daemon is shutting down",
+                                                  {{"reason", "daemon_shutdown"}},
+                                                  kGeneric});
+                    break;
+                }
+                if (const auto* accepted =
+                        std::get_if<std::shared_ptr<const AdmittedAccountConfig>>(
+                            &*admission.decision)) {
+                    admitted_config = *accepted;
+                } else {
+                    const auto& denied = std::get<ConfigAdmissionDenied>(*admission.decision);
+                    if (denied.state == ConfigAdmissionState::AccountMissing) {
+                        connection->send(proto::Error{request->id,
+                                                      "ACCOUNT_NOT_FOUND",
+                                                      "account is not configured",
+                                                      {{"account", denied.account}},
+                                                      kNotFound});
+                    } else {
+                        const auto reason =
+                            denied.reload_diagnostic
+                                ? config::reason_name(denied.reload_diagnostic->reason)
+                                : std::string_view{"io_error"};
+                        connection->send(proto::Error{
+                            request->id,
+                            "CONFIG_INVALID",
+                            "cannot use current config.toml",
+                            {{"path", options_.config_runtime->config_path()}, {"reason", reason}},
+                            kGeneric});
+                    }
+                    continue;
+                }
+            }
             if (options_.request_admission_probe) {
                 options_.request_admission_probe();
             }
+            auto activity = activity_.try_request();
+            if (!activity) {
+                connection->send(proto::Error{request->id,
+                                              "DAEMON_SHUTDOWN",
+                                              "daemon is shutting down",
+                                              {{"reason", "daemon_shutdown"}},
+                                              kGeneric});
+                break;
+            }
+            if (options_.request_observer) {
+                options_.request_observer(testing::RequestObservationStage::ActivityAdmission);
+            }
             auto sink = std::make_shared<ConnectionSink>(connection, request->id);
-            active_session = std::make_shared<RequestSession>(*request, sink, connection->id());
+            active_session = std::make_shared<RequestSession>(
+                *request, sink, connection->id(), RequestSession::NonceGenerator{},
+                std::move(*activity), std::move(admitted_config), admission_deadline);
             if (options_.request_observer) {
                 options_.request_observer(testing::RequestObservationStage::SessionConstruction);
             }

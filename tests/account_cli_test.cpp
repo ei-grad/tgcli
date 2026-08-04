@@ -122,6 +122,28 @@ class ProcessEnvironment {
         REQUIRE(::close(descriptor) == 0);
     }
 
+    void set_idle_exit(bool test_dc, int seconds) const {
+        const auto config = test_dc ? test_config() : production_config();
+        const std::ifstream input(config, std::ios::binary);
+        REQUIRE(input.good());
+        std::ostringstream captured;
+        captured << input.rdbuf();
+        auto bytes = captured.str();
+        const auto grant = bytes.find("allow_write = false");
+        REQUIRE(grant != std::string::npos);
+        const auto line_end = bytes.find('\n', grant);
+        REQUIRE(line_end != std::string::npos);
+        bytes.insert(line_end + 1, "idle_exit = " + std::to_string(seconds) + "\n");
+        const auto replacement = config + ".idle-replacement";
+        {
+            std::ofstream output(replacement, std::ios::binary | std::ios::trunc);
+            REQUIRE(output.good());
+            output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        }
+        REQUIRE(::chmod(replacement.c_str(), 0600) == 0);
+        REQUIRE(::rename(replacement.c_str(), config.c_str()) == 0);
+    }
+
   private:
     static constexpr std::array<const char*, 10> kManagedVariables{
         "HOME",          "XDG_CONFIG_HOME",   "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
@@ -283,6 +305,23 @@ class ChildGuard {
         }
         pid_ = -1;
         return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    int wait_for(std::chrono::steady_clock::duration timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            int status = 0;
+            const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
+            if (waited == pid_) {
+                pid_ = -1;
+                return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            if (waited < 0 && errno != EINTR) {
+                return -1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return -1;
     }
 
   private:
@@ -931,4 +970,47 @@ TEST_CASE("config-global CLI stays local while the selected daemon is running",
 
     REQUIRE(::kill(daemon_pid, SIGTERM) == 0);
     CHECK(daemon_guard.wait() == kOk);
+}
+
+TEST_CASE("real test-DC daemon observes only its config and exits after idle reload",
+          "[account][daemon][config-runtime][idle][process][tdlib]") {
+    const ProcessEnvironment environment;
+    REQUIRE(run_cli(environment, {"account", "add", "main"}).exit_code == kOk);
+    environment.set_idle_exit(false, 1);
+
+    ProcessEnvironment::set_test_dc(true);
+    REQUIRE(run_cli(environment, {"account", "add", "main"}).exit_code == kOk);
+    const auto current_environment = paths::real_environment();
+    REQUIRE(current_environment.test_dc);
+    std::string socket_error;
+    const auto socket = paths::socket_path("main", current_environment, socket_error);
+    const auto control = paths::control_socket_path("main", current_environment, socket_error);
+    REQUIRE(socket.has_value());
+    REQUIRE(control.has_value());
+
+    const pid_t daemon_pid = ::fork();
+    REQUIRE(daemon_pid >= 0);
+    if (daemon_pid == 0) {
+        const int null_fd = ::open("/dev/null", O_RDWR);
+        if (null_fd >= 0) {
+            ::dup2(null_fd, STDIN_FILENO);
+            ::dup2(null_fd, STDOUT_FILENO);
+            ::dup2(null_fd, STDERR_FILENO);
+            ::close(null_fd);
+        }
+        ::execl(TGCLI_TEST_BINARY, "tgcli", "--account", "main", "daemon", "run",
+                static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    ChildGuard daemon_guard(daemon_pid);
+    REQUIRE(wait_for_exists(*socket));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    CHECK(::kill(daemon_pid, 0) == 0);
+
+    const auto replaced_at = std::chrono::steady_clock::now();
+    environment.set_idle_exit(true, 1);
+    CHECK(daemon_guard.wait_for(std::chrono::milliseconds(2200)) == kOk);
+    CHECK(std::chrono::steady_clock::now() - replaced_at < std::chrono::seconds(2));
+    CHECK(wait_for_missing(*socket, *control));
 }

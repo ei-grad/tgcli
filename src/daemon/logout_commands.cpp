@@ -486,11 +486,17 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
                       kGeneric);
         return;
     }
-    if (denied && !denied->last_good_account_present) {
+    const bool invalid_last_good_account_missing =
+        (admitted && admitted->state == ConfigAdmissionState::ConfigInvalidWithLastGood &&
+         !admitted->last_good_account_present) ||
+        (denied && denied->state == ConfigAdmissionState::ConfigInvalidWithLastGood &&
+         !denied->last_good_account_present);
+    if (invalid_last_good_account_missing) {
+        const auto diagnostic = admitted ? admitted->reload_diagnostic : denied->reload_diagnostic;
         session.error("CONFIG_INVALID", "cannot validate logout account",
                       {{"path", config_path_},
-                       {"reason", denied->reload_diagnostic
-                                      ? config::reason_name(denied->reload_diagnostic->reason)
+                       {"reason", diagnostic
+                                      ? config::reason_name(diagnostic->reason)
                                       : "io_error"}},
                       kGeneric);
         return;

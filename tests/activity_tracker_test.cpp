@@ -370,3 +370,24 @@ TEST_CASE("non-positive idle policy is rejected", "[daemon][activity]") {
     REQUIRE(tracker.daemon_ready(std::nullopt));
     CHECK_THROWS_AS(tracker.update_idle_exit(-1s), std::invalid_argument);
 }
+
+TEST_CASE("watcher contains an expiry callback failure and remains destructible",
+          "[daemon][activity]") {
+    ManualClock clock;
+    std::atomic<int> callbacks = 0;
+    ActivityTracker tracker(
+        [&] {
+            callbacks.fetch_add(1, std::memory_order_relaxed);
+            throw std::runtime_error("expiry callback failed");
+        },
+        clock.hooks());
+    REQUIRE(tracker.daemon_ready(1s));
+    clock.advance(1s);
+
+    std::jthread watcher([&](const std::stop_token& stop) { tracker.watch(stop); });
+    watcher.join();
+
+    CHECK(tracker.snapshot().expired);
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+    CHECK_FALSE(tracker.try_request());
+}

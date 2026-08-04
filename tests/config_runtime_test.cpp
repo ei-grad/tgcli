@@ -242,7 +242,7 @@ class ReloadGate {
 static_assert(!ExposesCredential<AdmittedAccountSettings>);
 static_assert(!ExposesAdmittedSettings<ConfigAdmissionDenied>);
 
-TEST_CASE("config runtime admits only immutable account-local safe settings",
+TEST_CASE("config runtime admits one immutable account-local snapshot",
           "[daemon][config-runtime]") {
     const TempConfig temp;
     temp.write_initial(two_accounts());
@@ -256,6 +256,11 @@ TEST_CASE("config runtime admits only immutable account-local safe settings",
     CHECK(main.standing_write_grants_valid);
     CHECK(main.settings.allow_write);
     CHECK(main.settings.idle_exit == 5s);
+    REQUIRE(main.account_snapshot);
+    CHECK(main.account_snapshot->accounts.size() == 1);
+    CHECK(main.account_snapshot->accounts.contains("main"));
+    CHECK(main.account_snapshot->accounts.at("main").password_cmd == "secret-provider");
+    CHECK(main.account_snapshot->raw_bytes.empty());
 
     temp.replace(two_accounts("work", "7", "11"));
     const auto later_result = runtime.admit("main");
@@ -274,6 +279,11 @@ TEST_CASE("config runtime admits only immutable account-local safe settings",
     CHECK(work.is_default);
     CHECK_FALSE(work.settings.allow_write);
     CHECK(work.settings.idle_exit == 11s);
+    REQUIRE(work.account_snapshot);
+    CHECK(work.account_snapshot->accounts.size() == 1);
+    CHECK(work.account_snapshot->accounts.contains("work"));
+    CHECK_FALSE(work.account_snapshot->accounts.contains("main"));
+    CHECK(work.account_snapshot->accounts.at("work").bot_token_cmd == "bot-provider");
 }
 
 TEST_CASE("config runtime classifies implicit main and missing accounts",
@@ -297,7 +307,7 @@ TEST_CASE("config runtime classifies implicit main and missing accounts",
         *work_result.decision));
 }
 
-TEST_CASE("invalid reload denies admission while retaining last-good non-safety settings",
+TEST_CASE("invalid reload admits last-good settings with standing grants invalid",
           "[daemon][config-runtime]") {
     const TempConfig temp;
     temp.write_initial(one_account("main", true, "5"));
@@ -311,10 +321,15 @@ TEST_CASE("invalid reload denies admission while retaining last-good non-safety 
 
     temp.replace("[accounts.main\n");
     const auto invalid_result = runtime.admit("main");
-    const auto& invalid = denied(invalid_result);
+    const auto& invalid = admitted(invalid_result);
     CHECK(invalid.state == ConfigAdmissionState::ConfigInvalidWithLastGood);
-    CHECK_FALSE(std::holds_alternative<std::shared_ptr<const tgcli::daemon::AdmittedAccountConfig>>(
-        *invalid_result.decision));
+    CHECK(invalid.settings.allow_write);
+    CHECK(invalid.settings.idle_exit == 5s);
+    CHECK_FALSE(invalid.standing_write_grants_valid);
+    CHECK(invalid.last_good_account_present);
+    REQUIRE(invalid.account_snapshot);
+    CHECK(invalid.account_snapshot->accounts.size() == 1);
+    CHECK(invalid.account_snapshot->accounts.at("main").allow_write);
     REQUIRE(invalid.reload_diagnostic);
     CHECK(invalid.reload_diagnostic->reason == tgcli::config::ConfigReason::ParseError);
 
@@ -553,4 +568,70 @@ TEST_CASE("config runtime stop interrupts a reload blocked by an active transact
     const auto started = ConfigRuntime::Clock::now();
     runtime.reset();
     CHECK(ConfigRuntime::Clock::now() - started < 500ms);
+}
+
+TEST_CASE("throwing publication observer is detached without terminating the runtime",
+          "[daemon][config-runtime]") {
+    const TempConfig temp;
+    temp.write_initial(one_account("main", false, "5"));
+    ConfigRuntime runtime(temp.file());
+    std::mutex mutex;
+    std::condition_variable condition;
+    int callbacks = 0;
+    runtime.set_publication_observer([&] {
+        const std::lock_guard lock(mutex);
+        ++callbacks;
+        condition.notify_all();
+        if (callbacks == 2) {
+            throw std::runtime_error("publication observer failed");
+        }
+    });
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 1s, [&] { return callbacks == 1; }));
+    }
+
+    static_cast<void>(runtime.admit("main"));
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 1s, [&] { return callbacks == 2; }));
+    }
+    static_cast<void>(runtime.admit("main"));
+    std::this_thread::sleep_for(20ms);
+    CHECK(callbacks == 2);
+    runtime.set_publication_observer({});
+}
+
+TEST_CASE("publication observer can replace itself without blocking teardown",
+          "[daemon][config-runtime]") {
+    const TempConfig temp;
+    temp.write_initial(one_account("main", false, "5"));
+    ConfigRuntime runtime(temp.file());
+    std::mutex mutex;
+    std::condition_variable condition;
+    int first_callbacks = 0;
+    int replacement_callbacks = 0;
+    runtime.set_publication_observer([&] {
+        {
+            const std::lock_guard lock(mutex);
+            ++first_callbacks;
+        }
+        runtime.set_publication_observer([&] {
+            const std::lock_guard lock(mutex);
+            ++replacement_callbacks;
+            condition.notify_all();
+        });
+    });
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 1s, [&] { return replacement_callbacks == 1; }));
+    }
+    CHECK(first_callbacks == 1);
+
+    static_cast<void>(runtime.admit("main"));
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 1s, [&] { return replacement_callbacks == 2; }));
+    }
+    runtime.set_publication_observer({});
 }

@@ -1,11 +1,14 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 
 namespace tgcli::daemon {
 
@@ -74,6 +77,9 @@ class ActivityTracker {
     [[nodiscard]] bool update_idle_exit(IdleExit idle_exit);
     [[nodiscard]] bool expire_if_due();
     [[nodiscard]] Snapshot snapshot() const;
+    // Callback failures are contained after expiry is claimed. Expiry remains
+    // final and the callback is never retried.
+    void watch(const std::stop_token& stop);
 
   private:
     [[nodiscard]] std::optional<Token> try_admit(Kind kind);

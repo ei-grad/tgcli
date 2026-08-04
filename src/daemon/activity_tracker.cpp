@@ -5,6 +5,23 @@
 
 namespace tgcli::daemon {
 
+namespace {
+
+void invoke_expiry_callback(const std::function<void()>& callback) noexcept {
+    if (!callback) {
+        return;
+    }
+    try {
+        callback();
+    } catch (...) {
+        // Callback callables are unconstrained std::functions, so their exception
+        // types cannot be enumerated. Expiry is already final and is not retried.
+        return;
+    }
+}
+
+} // namespace
+
 struct ActivityTracker::State {
     explicit State(std::function<void()> callback,
                    std::shared_ptr<const testing::ActivityTrackerHooks> test_hooks)
@@ -53,31 +70,41 @@ struct ActivityTracker::State {
     }
 
     void release(Kind kind) {
-        const std::lock_guard lock(mutex);
-        if (kind == Kind::Request) {
-            if (requests != 0) {
-                --requests;
+        {
+            const std::lock_guard lock(mutex);
+            if (kind == Kind::Request) {
+                if (requests != 0) {
+                    --requests;
+                }
+            } else if (subscriptions != 0) {
+                --subscriptions;
             }
-        } else if (subscriptions != 0) {
-            --subscriptions;
+            if (ready && requests == 0 && subscriptions == 0 && !expired) {
+                zero_since = now();
+                recompute_deadline_locked();
+            }
+            ++revision;
         }
-        if (ready && requests == 0 && subscriptions == 0 && !expired) {
-            zero_since = now();
-            recompute_deadline_locked();
-        }
+        condition.notify_all();
     }
 
     [[nodiscard]] bool promote_request() {
-        const std::lock_guard lock(mutex);
-        if (requests == 0) {
-            return false;
+        {
+            const std::lock_guard lock(mutex);
+            if (requests == 0) {
+                return false;
+            }
+            --requests;
+            ++subscriptions;
+            ++revision;
         }
-        --requests;
-        ++subscriptions;
+        condition.notify_all();
         return true;
     }
 
     mutable std::mutex mutex;
+    std::condition_variable condition;
+    std::uint64_t revision = 0;
     bool ready = false;
     bool expired = false;
     bool callback_claimed = false;
@@ -133,16 +160,20 @@ bool ActivityTracker::daemon_ready(IdleExit idle_exit) {
         throw std::invalid_argument("idle exit must be positive");
     }
 
-    const std::lock_guard lock(state_->mutex);
-    if (state_->ready) {
-        return false;
+    {
+        const std::lock_guard lock(state_->mutex);
+        if (state_->ready) {
+            return false;
+        }
+        state_->ready = true;
+        state_->idle_exit = idle_exit;
+        if (state_->requests == 0 && state_->subscriptions == 0) {
+            state_->zero_since = state_->now();
+            state_->recompute_deadline_locked();
+        }
+        ++state_->revision;
     }
-    state_->ready = true;
-    state_->idle_exit = idle_exit;
-    if (state_->requests == 0 && state_->subscriptions == 0) {
-        state_->zero_since = state_->now();
-        state_->recompute_deadline_locked();
-    }
+    state_->condition.notify_all();
     return true;
 }
 
@@ -166,10 +197,10 @@ bool ActivityTracker::update_idle_exit(IdleExit idle_exit) {
         state_->idle_exit = idle_exit;
         state_->recompute_deadline_locked();
         expired = state_->claim_expiry_locked(state_->now(), callback);
+        ++state_->revision;
     }
-    if (callback) {
-        callback();
-    }
+    state_->condition.notify_all();
+    invoke_expiry_callback(callback);
     return expired;
 }
 
@@ -182,10 +213,14 @@ bool ActivityTracker::expire_if_due() {
             state_->hooks->before_expire_locked();
         }
         expired = state_->claim_expiry_locked(state_->now(), callback);
+        if (expired) {
+            ++state_->revision;
+        }
     }
-    if (callback) {
-        callback();
+    if (expired) {
+        state_->condition.notify_all();
     }
+    invoke_expiry_callback(callback);
     return expired;
 }
 
@@ -202,21 +237,51 @@ ActivityTracker::Snapshot ActivityTracker::snapshot() const {
     };
 }
 
+void ActivityTracker::watch(const std::stop_token& stop) {
+    const auto state = state_;
+    const std::stop_callback stop_wakeup(stop, [&state] { state->condition.notify_all(); });
+    std::unique_lock lock(state->mutex);
+    while (!stop.stop_requested() && !state->expired) {
+        std::function<void()> callback;
+        if (state->claim_expiry_locked(state->now(), callback)) {
+            ++state->revision;
+            lock.unlock();
+            state->condition.notify_all();
+            invoke_expiry_callback(callback);
+            return;
+        }
+        const auto revision = state->revision;
+        const auto changed = [&] {
+            return stop.stop_requested() || state->expired || state->revision != revision;
+        };
+        if (state->deadline) {
+            const auto deadline = state->deadline.value_or(Clock::time_point::max());
+            static_cast<void>(state->condition.wait_until(lock, deadline, changed));
+        } else {
+            state->condition.wait(lock, changed);
+        }
+    }
+}
+
 std::optional<ActivityTracker::Token> ActivityTracker::try_admit(Kind kind) {
-    const std::lock_guard lock(state_->mutex);
-    if (state_->hooks && state_->hooks->before_admit_locked) {
-        state_->hooks->before_admit_locked();
+    {
+        const std::lock_guard lock(state_->mutex);
+        if (state_->hooks && state_->hooks->before_admit_locked) {
+            state_->hooks->before_admit_locked();
+        }
+        if (!state_->ready || state_->expired) {
+            return std::nullopt;
+        }
+        if (kind == Kind::Request) {
+            ++state_->requests;
+        } else {
+            ++state_->subscriptions;
+        }
+        state_->zero_since.reset();
+        state_->deadline.reset();
+        ++state_->revision;
     }
-    if (!state_->ready || state_->expired) {
-        return std::nullopt;
-    }
-    if (kind == Kind::Request) {
-        ++state_->requests;
-    } else {
-        ++state_->subscriptions;
-    }
-    state_->zero_since.reset();
-    state_->deadline.reset();
+    state_->condition.notify_all();
     return Token(state_, kind);
 }
 

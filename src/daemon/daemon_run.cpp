@@ -162,8 +162,16 @@ int run_daemon(const std::string& account) {
     Dispatcher dispatcher;
     register_commands(dispatcher, context);
 
-    Server server({account, account_paths.socket, kVersion, proto::kProtocolVersion,
-                   account_paths.control_socket, lock_identity.control_token},
+    Server server({account,
+                   account_paths.socket,
+                   kVersion,
+                   proto::kProtocolVersion,
+                   account_paths.control_socket,
+                   lock_identity.control_token,
+                   {},
+                   {},
+                   {},
+                   &config_runtime},
                   dispatcher);
     server_pointer = &server;
     context.request_shutdown = [&server] { server.request_stop(); };

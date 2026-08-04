@@ -425,14 +425,26 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
         return;
     }
     auto owner = owner_lease.owner();
-    const auto admitted_config = store_.load({session.deadline(), session.cancellation_token()});
+    config::LoadResult fallback_admission;
     std::shared_ptr<const config::ConfigSnapshot> active_config_snapshot;
     std::optional<config::AccountConfig> admission_account_config;
-    if (admitted_config && admitted_config.snapshot) {
-        active_config_snapshot = admitted_config.snapshot;
-        const auto found = admitted_config.snapshot->accounts.find(account_);
-        if (found != admitted_config.snapshot->accounts.end()) {
-            admission_account_config = found->second;
+    if (const auto& runtime_admission = session.admitted_config();
+        runtime_admission && runtime_admission->account == account_) {
+        active_config_snapshot = runtime_admission->account_snapshot;
+        if (active_config_snapshot) {
+            const auto found = active_config_snapshot->accounts.find(account_);
+            if (found != active_config_snapshot->accounts.end()) {
+                admission_account_config = found->second;
+            }
+        }
+    } else {
+        fallback_admission = store_.load({session.deadline(), session.cancellation_token()});
+        if (fallback_admission && fallback_admission.snapshot) {
+            active_config_snapshot = fallback_admission.snapshot;
+            const auto found = fallback_admission.snapshot->accounts.find(account_);
+            if (found != fallback_admission.snapshot->accounts.end()) {
+                admission_account_config = found->second;
+            }
         }
     }
     std::map<Occurrence, bool> force_prompt;
@@ -561,12 +573,13 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
              function == TdFunctionKind::CheckAuthenticationBotToken) &&
             !app_config_identity.contains(occurrence)) {
             if (!active_config_snapshot) {
-                session.error("CONFIG_INVALID", "cannot capture app credential admission",
-                              {{"path", store_.path()},
-                               {"reason", admitted_config.error
-                                              ? config::reason_name(admitted_config.error->reason)
-                                              : "io_error"}},
-                              kGeneric);
+                session.error(
+                    "CONFIG_INVALID", "cannot capture app credential admission",
+                    {{"path", store_.path()},
+                     {"reason", fallback_admission.error
+                                    ? config::reason_name(fallback_admission.error->reason)
+                                    : "io_error"}},
+                    kGeneric);
                 return true;
             }
             app_config_identity.emplace(occurrence, active_config_snapshot->identity);
@@ -714,14 +727,14 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
         case AuthState::WaitTdlibParameters: {
             if (!bootstrap || bootstrap_occurrence != occurrence) {
                 if (!active_config_snapshot) {
-                    if (admitted_config.timed_out) {
+                    if (fallback_admission.timed_out) {
                         timeout(session, "login", snapshot);
                     } else {
                         session.error(
                             "CONFIG_INVALID", "cannot load authentication config",
                             {{"path", store_.path()},
-                             {"reason", admitted_config.error
-                                            ? config::reason_name(admitted_config.error->reason)
+                             {"reason", fallback_admission.error
+                                            ? config::reason_name(fallback_admission.error->reason)
                                             : "io_error"}},
                             kGeneric);
                     }

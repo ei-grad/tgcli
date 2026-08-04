@@ -1,6 +1,7 @@
 #pragma once
 
 #include "daemon/activity_tracker.hpp"
+#include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
 #include "proto/frame.hpp"
 
@@ -84,10 +85,14 @@ class RequestSession final : public ResponseSink {
 
     RequestSession(proto::Request request, ResponseSink& transport, std::uint64_t connection_id = 0,
                    NonceGenerator nonce_generator = {},
-                   ActivityTracker::Token request_activity = {});
+                   ActivityTracker::Token request_activity = {},
+                   std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
+                   std::optional<Clock::time_point> admission_deadline = {});
     RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
                    std::uint64_t connection_id = 0, NonceGenerator nonce_generator = {},
-                   ActivityTracker::Token request_activity = {});
+                   ActivityTracker::Token request_activity = {},
+                   std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
+                   std::optional<Clock::time_point> admission_deadline = {});
 
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t connection_id() const;
@@ -95,6 +100,7 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] std::stop_token cancellation_token() const;
     [[nodiscard]] bool cancellation_requested() const;
     [[nodiscard]] bool shutdown_requested() const;
+    [[nodiscard]] const std::shared_ptr<const AdmittedAccountConfig>& admitted_config() const;
 
     ChallengeOutcome challenge(ChallengeSpec spec);
     AnswerDisposition receive_answer(proto::Answer answer);
@@ -162,6 +168,7 @@ class RequestSession final : public ResponseSink {
     std::uint64_t connection_id_;
     Clock::time_point deadline_;
     NonceGenerator nonce_generator_;
+    std::shared_ptr<const AdmittedAccountConfig> admitted_config_;
 
     mutable std::mutex session_mutex_;
     std::condition_variable challenge_cv_;

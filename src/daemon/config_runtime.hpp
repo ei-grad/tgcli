@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -35,16 +36,20 @@ struct AdmittedAccountSettings {
     std::optional<std::chrono::seconds> idle_exit;
 };
 
-// A request receives only account-local, non-secret settings. The complete
-// multi-account snapshot and credential/hook sources stay inside ConfigRuntime.
+// A request receives only the selected account, including its credential and
+// hook sources. Other accounts and the raw multi-account config stay inside
+// ConfigRuntime.
 struct AdmittedAccountConfig {
     ConfigAdmissionState state = ConfigAdmissionState::Ready;
     std::string account;
     AdmittedAccountSettings settings;
+    std::shared_ptr<const config::ConfigSnapshot> account_snapshot;
     std::string snapshot_identity;
     std::uint64_t generation = 0;
     bool is_default = false;
     bool standing_write_grants_valid = true;
+    bool last_good_account_present = true;
+    std::optional<ReloadDiagnostic> reload_diagnostic;
 };
 
 struct ConfigAdmissionDenied {
@@ -95,6 +100,7 @@ struct ConfigRuntimeHooks {
 class ConfigRuntime {
   public:
     using Clock = std::chrono::steady_clock;
+    using PublicationObserver = std::function<void()>;
     static constexpr auto kPollInterval = std::chrono::seconds(1);
 
     explicit ConfigRuntime(std::string config_path,
@@ -111,6 +117,13 @@ class ConfigRuntime {
                                               Clock::time_point deadline = Clock::time_point::max(),
                                               const std::stop_token& cancellation = {});
     [[nodiscard]] ConfigRuntimeSnapshot current(std::string_view account) const;
+    // Publication callbacks are serialized on the runtime worker. A callback
+    // failure detaches that observer; replacement from inside a callback is
+    // queued for delivery after the current callback returns.
+    void set_publication_observer(PublicationObserver observer);
+    [[nodiscard]] const std::string& config_path() const {
+        return store_.path();
+    }
 
   private:
     struct RuntimePublication {
@@ -121,6 +134,7 @@ class ConfigRuntime {
     [[nodiscard]] Clock::time_point now() const;
     void wait_for_work(std::unique_lock<std::mutex>& lock, Clock::time_point deadline,
                        const testing::ConfigRuntimeHooks::Predicate& predicate);
+    void dispatch_publication_observer(std::unique_lock<std::mutex>& lock);
     void run(std::stop_token stop);
     [[nodiscard]] ConfigAdmissionDecision admission_decision(std::string_view account) const;
     [[nodiscard]] ConfigRuntimeSnapshot current_locked(std::string_view account) const;
@@ -133,6 +147,11 @@ class ConfigRuntime {
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     bool stopped_ = false;
+    PublicationObserver publication_observer_;
+    bool publication_notification_pending_ = false;
+    std::size_t publication_callbacks_ = 0;
+    std::uint64_t publication_observer_revision_ = 0;
+    std::thread::id publication_callback_thread_;
     std::uint64_t requested_refresh_ = 0;
     std::uint64_t completed_refresh_ = 0;
     std::uint64_t generation_ = 1;

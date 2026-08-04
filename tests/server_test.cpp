@@ -7,6 +7,7 @@
 #include "daemon/activity_tracker.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
+#include "daemon/destructive_contract.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
@@ -19,6 +20,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <latch>
 #include <mutex>
@@ -27,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <variant>
@@ -34,6 +38,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 using namespace tgcli;
+using namespace std::chrono_literals;
 using nlohmann::json;
 
 namespace {
@@ -134,15 +139,9 @@ struct RequestObservationCounters {
 struct RoutedAccountProbe {
     std::string account;
     RequestObservationCounters* observations;
-    daemon::ActivityTracker activity;
 
     RoutedAccountProbe(std::string account_value, RequestObservationCounters& observations_value)
-        : account(std::move(account_value)), observations(&observations_value),
-          activity([] {}, activity_hooks(*observations)) {
-        if (!activity.daemon_ready(std::nullopt)) {
-            throw std::runtime_error("request observation activity tracker did not become ready");
-        }
-    }
+        : account(std::move(account_value)), observations(&observations_value) {}
 
     void install(daemon::Dispatcher& dispatcher) {
         dispatcher.register_command(
@@ -158,23 +157,10 @@ struct RoutedAccountProbe {
             execute_hook();
             read_auth_state();
             static_cast<void>(resolve_data_root());
-            auto activity_token = activity.try_request();
-            if (!activity_token) {
-                throw std::runtime_error("request observation activity admission failed");
-            }
         };
     }
 
   private:
-    static std::shared_ptr<const daemon::testing::ActivityTrackerHooks>
-    activity_hooks(RequestObservationCounters& observations) {
-        auto hooks = std::make_shared<daemon::testing::ActivityTrackerHooks>();
-        hooks->before_admit_locked = [&observations] {
-            observations.observe(daemon::testing::RequestObservationStage::ActivityAdmission);
-        };
-        return hooks;
-    }
-
     void read_config() const {
         observations->observe(daemon::testing::RequestObservationStage::ConfigRead);
     }
@@ -203,6 +189,81 @@ void check_request_observations(const RequestObservationCounters& observations, 
     }
 }
 
+class RuntimeConfig {
+  public:
+    RuntimeConfig() {
+        std::string pattern = "/tmp/tgcli-server-runtime-XXXXXX";
+        pattern.push_back('\0');
+        const char* created = ::mkdtemp(pattern.data());
+        REQUIRE(created != nullptr);
+        root_ = created;
+        directory_ = root_ / "tgcli";
+        REQUIRE(std::filesystem::create_directory(directory_));
+        REQUIRE(::chmod(directory_.c_str(), 0700) == 0);
+    }
+
+    ~RuntimeConfig() {
+        std::error_code ignored;
+        std::filesystem::remove_all(root_, ignored);
+    }
+
+    RuntimeConfig(const RuntimeConfig&) = delete;
+    RuntimeConfig& operator=(const RuntimeConfig&) = delete;
+    RuntimeConfig(RuntimeConfig&&) = delete;
+    RuntimeConfig& operator=(RuntimeConfig&&) = delete;
+
+    [[nodiscard]] std::string file() const {
+        return (directory_ / "config.toml").string();
+    }
+
+    void write_initial(std::string_view bytes) const {
+        write_file(file(), bytes);
+    }
+
+    void replace(std::string_view bytes) const {
+        const auto replacement = directory_ / "replacement.toml";
+        write_file(replacement, bytes);
+        REQUIRE(::rename(replacement.c_str(), file().c_str()) == 0);
+    }
+
+  private:
+    static void write_file(const std::filesystem::path& file, std::string_view bytes) {
+        std::ofstream output(file, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        REQUIRE(::chmod(file.c_str(), 0600) == 0);
+    }
+
+    std::filesystem::path root_;
+    std::filesystem::path directory_;
+};
+
+std::string runtime_account_config(std::string_view idle_exit, bool allow_write = false,
+                                   std::string_view password_hook = {}) {
+    std::string result = "default_account = \"main\"\n[accounts.main]\nallow_write = ";
+    result += allow_write ? "true\n" : "false\n";
+    if (!idle_exit.empty()) {
+        result += "idle_exit = " + std::string(idle_exit) + "\n";
+    }
+    if (!password_hook.empty()) {
+        result += "password_cmd = \"" + std::string(password_hook) + "\"\n";
+    }
+    return result;
+}
+
+template <typename Predicate>
+bool wait_for_condition(std::chrono::steady_clock::duration timeout, Predicate predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+}
+
 struct TestDaemon {
     daemon::DaemonContext context;
     daemon::Dispatcher dispatcher;
@@ -215,11 +276,14 @@ struct TestDaemon {
     TestDaemon(TestDaemon&&) = delete;
     TestDaemon& operator=(TestDaemon&&) = delete;
 
-    explicit TestDaemon(const std::function<void(daemon::Dispatcher&)>& configure = {},
-                        bool register_default_commands = true,
-                        secure::WipeObserver wipe_observer = {}, std::string account_value = "test",
-                        const daemon::testing::RequestObservationObserver& request_observer = {},
-                        daemon::testing::RequestAdmissionProbe request_admission_probe = {})
+    explicit TestDaemon(
+        const std::function<void(daemon::Dispatcher&)>& configure = {},
+        bool register_default_commands = true, secure::WipeObserver wipe_observer = {},
+        std::string account_value = "test",
+        const daemon::testing::RequestObservationObserver& request_observer = {},
+        daemon::testing::RequestAdmissionProbe request_admission_probe = {},
+        daemon::ConfigRuntime* config_runtime = nullptr,
+        std::shared_ptr<const daemon::testing::ActivityTrackerHooks> activity_hooks = {})
         : dispatcher(request_observer), account(std::move(account_value)),
           socket(test_socket_path(account)), server({account,
                                                      socket,
@@ -229,7 +293,9 @@ struct TestDaemon {
                                                      {},
                                                      std::move(wipe_observer),
                                                      request_observer,
-                                                     std::move(request_admission_probe)},
+                                                     std::move(request_admission_probe),
+                                                     config_runtime,
+                                                     std::move(activity_hooks)},
                                                     dispatcher) {
         std::string error;
         const auto separator = socket.rfind('/');
@@ -259,6 +325,17 @@ struct TestDaemon {
         }
     }
 };
+
+proto::Frame send_request(const TestDaemon& daemon, proto::Request request) {
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, std::move(request));
+    auto terminal = read_frame(reader);
+    ::close(fd);
+    return terminal;
+}
 
 struct BlockingCommand {
     std::mutex mutex;
@@ -300,6 +377,121 @@ struct BlockingCommand {
         std::unique_lock<std::mutex> lock(mutex);
         REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [this] { return finished; }));
     }
+};
+
+struct AdmissionInspector {
+    static void install(daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "inspect admission",
+            {daemon::Tier::Read,
+             [](const proto::Request& request, daemon::RequestSession& session) {
+                 const auto& admission = session.admitted_config();
+                 if (!admission || !admission->account_snapshot) {
+                     session.error("INTERNAL", "config admission is missing", json::object(),
+                                   kGeneric);
+                     return;
+                 }
+                 const auto authority = daemon::evaluate_destructive_authority(
+                     request.context, {.grant_valid = admission->standing_write_grants_valid,
+                                       .allow_write = admission->settings.allow_write});
+                 std::string authority_value;
+                 if (const auto* granted = std::get_if<daemon::GrantedAuthority>(&authority)) {
+                     authority_value = std::string(daemon::authority_source_name(granted->source));
+                 } else if (const auto* denied = std::get_if<daemon::DeniedAuthority>(&authority)) {
+                     authority_value =
+                         std::string(daemon::write_denial_reason_name(denied->reason));
+                 } else {
+                     authority_value = "dry_run";
+                 }
+                 const auto& account = admission->account_snapshot->accounts.at("main");
+                 session.result({{"state", static_cast<int>(admission->state)},
+                                 {"generation", admission->generation},
+                                 {"authority", authority_value},
+                                 {"allow_write", admission->settings.allow_write},
+                                 {"standing_grant_valid", admission->standing_write_grants_valid},
+                                 {"password_cmd", account.password_cmd.value_or("")},
+                                 {"account_count", admission->account_snapshot->accounts.size()},
+                                 {"reload_reason", admission->reload_diagnostic
+                                                       ? json(config::reason_name(
+                                                             admission->reload_diagnostic->reason))
+                                                       : json(nullptr)}});
+             }});
+    }
+};
+
+struct BlockingAdmissionCommand {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool release = false;
+
+    void install(daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "block admission",
+            {daemon::Tier::Read, [this](const proto::Request&, daemon::RequestSession& session) {
+                 const auto admission = session.admitted_config();
+                 {
+                     std::unique_lock lock(mutex);
+                     entered = true;
+                     cv.notify_all();
+                     cv.wait(lock, [this] { return release; });
+                 }
+                 if (!admission) {
+                     session.error("INTERNAL", "config admission is missing", json::object(),
+                                   kGeneric);
+                     return;
+                 }
+                 session.result({{"generation", admission->generation},
+                                 {"idle_exit", admission->settings.idle_exit
+                                                   ? json(admission->settings.idle_exit->count())
+                                                   : json(nullptr)}});
+             }});
+    }
+
+    void wait_until_entered() {
+        std::unique_lock lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [this] { return entered; }));
+    }
+
+    void unblock() {
+        {
+            const std::lock_guard lock(mutex);
+            release = true;
+        }
+        cv.notify_all();
+    }
+};
+
+class ForcedReloadGate {
+  public:
+    void before_reload(bool forced) {
+        if (!forced) {
+            return;
+        }
+        std::unique_lock lock(mutex_);
+        entered_ = true;
+        condition_.notify_all();
+        condition_.wait(lock, [this] { return released_; });
+    }
+
+    void wait_until_entered() {
+        std::unique_lock lock(mutex_);
+        REQUIRE(condition_.wait_for(lock, std::chrono::seconds(5), [this] { return entered_; }));
+    }
+
+    void release() {
+        {
+            const std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        condition_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool entered_ = false;
+    bool released_ = false;
 };
 
 struct BlockingStopCommand {
@@ -998,6 +1190,154 @@ TEST_CASE("crossed account requests leave both daemons isolated and healthy",
     send_correct_request(work_daemon);
     check_request_observations(main_observations, 1);
     check_request_observations(work_observations, 1);
+}
+
+TEST_CASE("real server admission retains last-good settings and rejects only standing grants",
+          "[server][config-runtime][admission][destructive]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30", true, "old-password-hook"));
+    daemon::ConfigRuntime runtime(config.file());
+    const TestDaemon daemon(
+        [](daemon::Dispatcher& dispatcher) { AdmissionInspector::install(dispatcher); }, false, {},
+        "main", {}, {}, &runtime);
+
+    auto request = make_request({"inspect", "admission"}, 80, "main");
+    auto first = std::get<proto::Result>(send_request(daemon, request));
+    CHECK(first.data["authority"] == "config");
+    CHECK(first.data["standing_grant_valid"] == true);
+    CHECK(first.data["password_cmd"] == "old-password-hook");
+    CHECK(first.data["account_count"] == 1);
+
+    config.replace("[accounts.main\n");
+    request.id = 81;
+    auto invalid_standing = std::get<proto::Result>(send_request(daemon, request));
+    CHECK(invalid_standing.data["authority"] == "invalid_config_grant");
+    CHECK(invalid_standing.data["allow_write"] == true);
+    CHECK(invalid_standing.data["standing_grant_valid"] == false);
+    CHECK(invalid_standing.data["password_cmd"] == "old-password-hook");
+    CHECK(invalid_standing.data["account_count"] == 1);
+    CHECK(invalid_standing.data["reload_reason"] == "parse_error");
+
+    request.id = 82;
+    request.context.write_authority = proto::WriteAuthority::Grant;
+    auto explicit_grant = std::get<proto::Result>(send_request(daemon, request));
+    CHECK(explicit_grant.data["authority"] == "request");
+    CHECK(explicit_grant.data["standing_grant_valid"] == false);
+
+    request.id = 83;
+    request.context.write_authority = proto::WriteAuthority::Deny;
+    auto explicit_deny = std::get<proto::Result>(send_request(daemon, request));
+    CHECK(explicit_deny.data["authority"] == "explicit_deny");
+}
+
+TEST_CASE("config and activity rejection boundaries precede session construction",
+          "[server][config-runtime][admission][ordering]") {
+    const RuntimeConfig config;
+    config.write_initial("[accounts.main\n");
+    daemon::ConfigRuntime runtime(config.file());
+    RequestObservationCounters observations;
+    const TestDaemon daemon({}, false, {}, "main", observations.observer(), {}, &runtime);
+    observations.reset();
+
+    const auto terminal =
+        std::get<proto::Error>(send_request(daemon, make_request({"never"}, 84, "main")));
+    CHECK(terminal.code == "CONFIG_INVALID");
+    CHECK(observations.get(daemon::testing::RequestObservationStage::ConfigRead) == 1);
+    CHECK(observations.get(daemon::testing::RequestObservationStage::ActivityAdmission) == 0);
+    CHECK(observations.get(daemon::testing::RequestObservationStage::SessionConstruction) == 0);
+    CHECK(observations.get(daemon::testing::RequestObservationStage::DispatcherLookup) == 0);
+}
+
+TEST_CASE("active request keeps its immutable snapshot and prevents shortened idle expiry",
+          "[server][config-runtime][activity][idle][race]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    daemon::ConfigRuntime runtime(config.file());
+    const auto initial = runtime.current("main");
+    BlockingAdmissionCommand blocking;
+    TestDaemon daemon([&blocking](daemon::Dispatcher& dispatcher) { blocking.install(dispatcher); },
+                      false, {}, "main", {}, {}, &runtime);
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"block", "admission"}, 85, "main"));
+    blocking.wait_until_entered();
+
+    const auto replaced_at = std::chrono::steady_clock::now();
+    config.replace(runtime_account_config("1"));
+    REQUIRE(wait_for_condition(1900ms, [&] {
+        const auto current = runtime.current("main");
+        return current.generation > initial.generation && current.idle_exit == 1s;
+    }));
+    CHECK(std::chrono::steady_clock::now() - replaced_at < 2s);
+    std::this_thread::sleep_for(1100ms);
+    CHECK_FALSE(daemon.server.stop_requested());
+
+    blocking.unblock();
+    const auto old_terminal = std::get<proto::Result>(read_frame(reader));
+    CHECK(old_terminal.data["idle_exit"] == 30);
+    ::close(fd);
+    REQUIRE(wait_for_condition(1500ms, [&] { return daemon.server.stop_requested(); }));
+}
+
+TEST_CASE("idle config reload shortens the original zero transition and stops without traffic",
+          "[server][config-runtime][activity][idle][integration]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    daemon::ConfigRuntime runtime(config.file());
+    TestDaemon daemon({}, false, {}, "main", {}, {}, &runtime);
+
+    std::this_thread::sleep_for(1100ms);
+    const auto replaced_at = std::chrono::steady_clock::now();
+    config.replace(runtime_account_config("1"));
+    REQUIRE(wait_for_condition(1900ms, [&] { return daemon.server.stop_requested(); }));
+    CHECK(std::chrono::steady_clock::now() - replaced_at < 2s);
+}
+
+TEST_CASE("an open connection without an admitted request is not idle activity",
+          "[server][config-runtime][activity][idle]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("1"));
+    daemon::ConfigRuntime runtime(config.file());
+    TestDaemon daemon({}, false, {}, "main", {}, {}, &runtime);
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    REQUIRE(wait_for_condition(1500ms, [&] { return daemon.server.stop_requested(); }));
+    daemon.server.stop();
+    check_eof(reader);
+    ::close(fd);
+}
+
+TEST_CASE("daemon stop cancels a forced config admission without waiting for reload",
+          "[server][config-runtime][activity][cancel][race]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    ForcedReloadGate gate;
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->before_reload = [&gate](bool forced) { gate.before_reload(forced); };
+    daemon::ConfigRuntime runtime(config.file(), hooks);
+    TestDaemon daemon({}, false, {}, "main", {}, {}, &runtime);
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"never"}, 86, "main"));
+    gate.wait_until_entered();
+
+    const auto stopped_at = std::chrono::steady_clock::now();
+    daemon.server.request_stop();
+    const auto terminal = std::get<proto::Error>(read_frame(reader));
+    CHECK(terminal.code == "DAEMON_SHUTDOWN");
+    CHECK(std::chrono::steady_clock::now() - stopped_at < 500ms);
+    daemon.server.stop();
+    CHECK(std::chrono::steady_clock::now() - stopped_at < 500ms);
+    gate.release();
+    ::close(fd);
 }
 
 TEST_CASE("malformed frame gets a USAGE error and a closed connection", "[server]") {

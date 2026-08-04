@@ -1,6 +1,8 @@
 #pragma once
 
 #include "common/paths.hpp"
+#include "daemon/activity_tracker.hpp"
+#include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/request_observer.hpp"
 
@@ -30,6 +32,8 @@ class ServerOptions {
     secure::WipeObserver wipe_observer;
     testing::RequestObservationObserver request_observer;
     testing::RequestAdmissionProbe request_admission_probe;
+    ConfigRuntime* config_runtime = nullptr;
+    std::shared_ptr<const testing::ActivityTrackerHooks> activity_hooks;
 
     friend class Server;
 
@@ -39,14 +43,17 @@ class ServerOptions {
                   std::string control_socket_path_value, std::string control_token_value,
                   secure::WipeObserver wipe_observer_value = {},
                   testing::RequestObservationObserver request_observer_value = {},
-                  testing::RequestAdmissionProbe request_admission_probe_value = {})
+                  testing::RequestAdmissionProbe request_admission_probe_value = {},
+                  ConfigRuntime* config_runtime_value = nullptr,
+                  std::shared_ptr<const testing::ActivityTrackerHooks> activity_hooks_value = {})
         : account_(std::move(account_value)), socket_path(std::move(socket_path_value)),
           binary_version(std::move(binary_version_value)), protocol_version(protocol_version_value),
           control_socket_path(std::move(control_socket_path_value)),
           control_token(std::move(control_token_value)),
           wipe_observer(std::move(wipe_observer_value)),
           request_observer(std::move(request_observer_value)),
-          request_admission_probe(std::move(request_admission_probe_value)) {
+          request_admission_probe(std::move(request_admission_probe_value)),
+          config_runtime(config_runtime_value), activity_hooks(std::move(activity_hooks_value)) {
         if (!paths::valid_account_name(account_)) {
             throw std::invalid_argument("server account is invalid");
         }
@@ -99,10 +106,15 @@ class Server {
     void accept_loop();
     bool consume_control_request();
     void serve_connection(const std::shared_ptr<ConnectionState>& connection);
+    void start_runtime_lifecycle();
+    void stop_runtime_lifecycle();
     static bool peer_uid_ok(int fd);
 
     ServerOptions options_;
     const Dispatcher& dispatcher_;
+    ActivityTracker activity_;
+    std::jthread activity_watcher_;
+    std::stop_source admission_cancellation_;
     int listen_fd_ = -1;
     int control_fd_ = -1;
     std::optional<paths::SocketIdentity> socket_identity_;
