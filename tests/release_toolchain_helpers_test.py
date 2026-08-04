@@ -491,8 +491,12 @@ def swapped_artifact_test(base: pathlib.Path) -> None:
 def main() -> int:
     if os.environ.get("PYTHONDONTWRITEBYTECODE") != "1":
         raise AssertionError("release helper requires bytecode writes to be disabled")
+    temporary_parent = REPO_ROOT / "build"
+    temporary_parent.mkdir(exist_ok=True)
+    if temporary_parent.is_symlink() or not temporary_parent.is_dir():
+        raise AssertionError("release helper temporary parent is unsafe")
     with tempfile.TemporaryDirectory(
-        prefix="tgcli-release-toolchain-test-"
+        prefix="tgcli-release-toolchain-test-", dir=temporary_parent
     ) as temporary:
         base = pathlib.Path(temporary)
         source_identity_tests(base)
