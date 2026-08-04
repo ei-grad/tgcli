@@ -2,7 +2,9 @@
 #include "common/config_test_support.hpp"
 #include "common/exit_codes.hpp"
 #include "daemon/account_commands.hpp"
+#include "daemon/destructive_contract.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/logout_audit.hpp"
 #include "daemon/request_session.hpp"
 #include "schema_matcher.hpp"
 
@@ -171,6 +173,54 @@ json list_args(bool global_account = false) {
     return {{"global_account_supplied", global_account}};
 }
 
+void create_account_state(const paths::Environment& environment) {
+    const auto account_state = paths::account_state_dir("main", environment);
+    for (const auto& directory :
+         {environment.xdg_state_home.value(), environment.xdg_state_home.value() + "/tgcli",
+          environment.xdg_state_home.value() + "/tgcli/accounts", account_state}) {
+        std::error_code error;
+        std::filesystem::create_directory(directory, error);
+        REQUIRE_FALSE(error);
+        REQUIRE(::chmod(directory.c_str(), 0700) == 0);
+    }
+}
+
+void append_logout_prefix(const ConfigTree& tree, const std::vector<daemon::AuditStage>& stages) {
+    const auto environment = tree.environment();
+    create_account_state(environment);
+    const config::Store store(tree.config_path());
+    const auto loaded = store.load();
+    REQUIRE(loaded.snapshot);
+    std::string error;
+    const auto plan = proto::make_logout_plan("main", error);
+    REQUIRE(plan);
+    const daemon::LogoutAuditLog audit(paths::account_state_dir("main", environment), "main",
+                                       environment.uid);
+    const daemon::AuditRecordIdentity identity{"0123456789abcdef0123456789abcdef",
+                                               "2026-08-04T12:00:00Z"};
+    auto intent = daemon::make_logout_audit_intent(identity, *plan, loaded.snapshot->identity,
+                                                   daemon::AuthoritySource::Config,
+                                                   daemon::ConfirmationSource::Yes, error);
+    REQUIRE(intent);
+    daemon::LogoutAuditFailure failure;
+    REQUIRE(audit.append(daemon::serialize(*intent), failure, true));
+    for (const auto stage : stages) {
+        auto checkpoint = daemon::make_logout_audit_checkpoint(identity, *plan, stage, error);
+        REQUIRE(checkpoint);
+        REQUIRE(audit.append(daemon::serialize(*checkpoint), failure));
+    }
+}
+
+std::vector<json> read_audit(const paths::Environment& environment) {
+    std::ifstream input(paths::account_state_dir("main", environment) + "/audit.log");
+    std::vector<json> records;
+    std::string line;
+    while (std::getline(input, line)) {
+        records.push_back(json::parse(line));
+    }
+    return records;
+}
+
 } // namespace
 
 TEST_CASE("account commands preserve the exact empty and add/list/use results",
@@ -246,6 +296,61 @@ TEST_CASE("account show reports only credential sources and isolated derived pat
     const auto serialized = shown.result->dump();
     CHECK(serialized.find("secret-tool") == std::string::npos);
     CHECK(serialized.find("12345") == std::string::npos);
+}
+
+TEST_CASE("account show reconciles definite logout audit states and reports uncertain dispatch",
+          "[account][logout][audit][dispatch]") {
+    SECTION("intent without send gets a durable failure outcome") {
+        const ConfigTree tree;
+        tree.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n");
+        append_logout_prefix(tree, {});
+        const config::Store store(tree.config_path());
+        const daemon::ConfigGlobalContext context{store, tree.environment()};
+
+        const auto shown = dispatch(context, {"account", "show"}, target_args("main"));
+        REQUIRE(shown.result);
+        const auto records = read_audit(tree.environment());
+        REQUIRE(records.size() == 2);
+        CHECK(records.back()["phase"] == "outcome");
+        CHECK(records.back()["success"] == false);
+        CHECK(records.back()["mutation_state"] == "none");
+        CHECK(records.back()["error"]["code"] == "INTERNAL");
+    }
+
+    SECTION("confirmed Closed gets a durable success outcome") {
+        const ConfigTree tree;
+        tree.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n");
+        append_logout_prefix(tree, {daemon::AuditStage::LogoutSendStarted,
+                                    daemon::AuditStage::LogoutClosedConfirmed});
+        const config::Store store(tree.config_path());
+        const daemon::ConfigGlobalContext context{store, tree.environment()};
+
+        const auto shown = dispatch(context, {"account", "show"}, target_args("main"));
+        REQUIRE(shown.result);
+        const auto records = read_audit(tree.environment());
+        REQUIRE(records.size() == 4);
+        CHECK(records.back()["success"] == true);
+        CHECK(records.back()["mutation_state"] == "confirmed");
+        CHECK(records.back()["result"] == json{{"account", "main"}, {"logged_out", true}});
+    }
+
+    SECTION("send without Closed is reported from synced checkpoints") {
+        const ConfigTree tree;
+        tree.write("default_account = \"main\"\n[accounts.main]\nallow_write = false\n");
+        append_logout_prefix(tree, {daemon::AuditStage::LogoutSendStarted});
+        const config::Store store(tree.config_path());
+        const daemon::ConfigGlobalContext context{store, tree.environment()};
+
+        const auto shown = dispatch(context, {"account", "show"}, target_args("main"));
+        REQUIRE(shown.error);
+        CHECK((*shown.error)["error"]["code"] == "AUDIT_INCOMPLETE");
+        CHECK((*shown.error)["error"]["details"] ==
+              json{{"account", "main"},
+                   {"path", paths::account_state_dir("main", tree.environment()) + "/audit.log"},
+                   {"mutation_state", "possible"},
+                   {"completed_stages", json::array({"intent_synced", "logout_send_started"})}});
+        CHECK(read_audit(tree.environment()).size() == 2);
+    }
 }
 
 TEST_CASE("account command failures use exact structured details", "[account][dispatch][schema]") {

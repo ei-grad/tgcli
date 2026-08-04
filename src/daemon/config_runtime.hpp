@@ -53,6 +53,8 @@ struct ConfigAdmissionDenied {
     std::optional<std::string> snapshot_identity;
     std::uint64_t generation = 0;
     std::optional<ReloadDiagnostic> reload_diagnostic;
+    std::optional<AdmittedAccountSettings> last_good_settings;
+    bool last_good_account_present = false;
 };
 
 using ConfigAdmissionDecision =

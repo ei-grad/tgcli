@@ -5,6 +5,7 @@
 #include "core/td_authorization.hpp"
 #include "core/update_bus.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -17,6 +18,7 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace tgcli::core {
 
@@ -39,6 +41,22 @@ std::future<TdValue> failed_future(TdAuthorizationFailure failure) {
     return future;
 }
 
+TdClosedDecisionStatus terminal_decision(TdLifecycleClaimStatus claim) {
+    switch (claim) {
+    case TdLifecycleClaimStatus::Active:
+        return TdClosedDecisionStatus::Pending;
+    case TdLifecycleClaimStatus::Disconnected:
+        return TdClosedDecisionStatus::Disconnected;
+    case TdLifecycleClaimStatus::Shutdown:
+        return TdClosedDecisionStatus::Shutdown;
+    case TdLifecycleClaimStatus::TimedOut:
+        return TdClosedDecisionStatus::TimedOut;
+    case TdLifecycleClaimStatus::Rejected:
+        return TdClosedDecisionStatus::Rejected;
+    }
+    return TdClosedDecisionStatus::Rejected;
+}
+
 } // namespace
 
 struct TdSendLease::State {
@@ -48,6 +66,18 @@ struct TdSendLease::State {
 struct TdOwnerLease::State {
     TdRequestOwner owner;
     std::function<void()> revoke;
+};
+
+struct TdClosedDecision::State {
+    std::mutex mutex;
+    TdClosedDecisionStatus status = TdClosedDecisionStatus::Pending;
+    std::uint64_t query_id = 0;
+    bool expected_transition = false;
+    bool released = false;
+    std::size_t callbacks_in_flight = 0;
+    std::condition_variable callbacks_done;
+    std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim;
+    std::function<void()> release;
 };
 
 class TdClient::Impl {
@@ -136,6 +166,117 @@ class TdClient::Impl {
                                      .auth_sequence = authorization->auth_sequence,
                                      .auth_state = authorization->data.state},
                     runtime_->make_auth_function(std::move(request)));
+    }
+
+    std::future<TdValue> send_logout(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                     TdClosedDecision& decision) {
+        if (!authorization || !decision.state_) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        auto owner = issue_owner(TdOwnerKind::Request);
+        if (!owner) {
+            return failed_future(TdAuthorizationFailure::GenerationClosed);
+        }
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard lock(state_mutex_);
+            generation = current_;
+        }
+        if (!generation || generation->number != authorization->client_generation) {
+            return failed_future(TdAuthorizationFailure::GenerationMismatch);
+        }
+        const TdSendDescriptor descriptor{.function = TdFunctionKind::LogOut,
+                                          .tier = DescriptorKind::Destructive,
+                                          .owner = owner.owner(),
+                                          .client_generation = authorization->client_generation,
+                                          .auth_sequence = authorization->auth_sequence,
+                                          .auth_state = authorization->data.state};
+        auto function = runtime_->make_function(TdBuiltinFunction::LogOut);
+        auto decision_state = decision.state_;
+        return generation->lifecycle.send([this, generation, descriptor,
+                                           function = std::move(function),
+                                           decision_state = std::move(decision_state)]() mutable {
+            const std::lock_guard lock(generation->outbound_mutex);
+            if (!generation->initial_state_installed) {
+                return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+            }
+            const auto& function_data = function.function_data();
+            if (const auto failure = authorization_failure_locked(
+                    generation, descriptor, function_data ? &*function_data : nullptr)) {
+                return failed_future(*failure);
+            }
+            auto [query_id, future] = generation->queries.reserve();
+            {
+                const std::lock_guard decision_lock(decision_state->mutex);
+                if (decision_state->status != TdClosedDecisionStatus::Pending ||
+                    decision_state->query_id != 0) {
+                    static_cast<void>(generation->queries.fail(
+                        query_id, std::make_exception_ptr(TdAuthorizationError(
+                                      TdAuthorizationFailure::GenerationClosed))));
+                    return std::move(future);
+                }
+                decision_state->query_id = query_id;
+            }
+            try {
+                runtime_->send(generation->client_id, generation->number, query_id,
+                               std::move(function));
+            } catch (const std::exception&) {
+                {
+                    const std::lock_guard decision_lock(decision_state->mutex);
+                    if (decision_state->status == TdClosedDecisionStatus::Pending) {
+                        decision_state->status = TdClosedDecisionStatus::Rejected;
+                    }
+                }
+                static_cast<void>(generation->queries.fail(query_id, std::current_exception()));
+            }
+            return std::move(future);
+        });
+    }
+
+    TdClosedDecision begin_logout_decision(
+        const std::shared_ptr<const AuthStateSnapshot>& authorization,
+        std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim) {
+        if (!authorization || authorization->data.state != AuthState::Ready || !claim) {
+            return {};
+        }
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard lock(state_mutex_);
+            generation = current_;
+        }
+        if (!generation || generation->number != authorization->client_generation ||
+            generation->client_id != authorization->client_id) {
+            return {};
+        }
+        auto state = std::make_shared<TdClosedDecision::State>();
+        state->claim = std::move(claim);
+        state->release = [generation] {
+            {
+                const std::lock_guard lock(generation->closed_decision_mutex);
+                if (generation->pending_closed_decisions > 0) {
+                    --generation->pending_closed_decisions;
+                }
+            }
+            generation->closed_decision_cv.notify_all();
+        };
+        {
+            const std::lock_guard commit_lock(generation->auth_commit_mutex);
+            const auto current = auth_state_.load(std::memory_order_acquire);
+            if (!current || current->client_generation != authorization->client_generation ||
+                current->auth_sequence != authorization->auth_sequence ||
+                current->data.state != AuthState::Ready) {
+                return {};
+            }
+            const std::lock_guard decision_lock(generation->closed_decision_mutex);
+            if (generation->closed_committed) {
+                return {};
+            }
+            std::erase_if(generation->closed_decisions,
+                          [](const auto& entry) { return entry.expired(); });
+            ++generation->pending_closed_decisions;
+            generation->closed_decisions.emplace_back(state);
+        }
+        return TdClosedDecision(std::move(state));
     }
 
     bool restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
@@ -343,6 +484,11 @@ class TdClient::Impl {
         detail::RequestLifecycle<TdValue> lifecycle{"tdlib client generation closed"};
         std::mutex auth_commit_mutex;
         std::mutex outbound_mutex;
+        std::mutex closed_decision_mutex;
+        std::condition_variable closed_decision_cv;
+        std::size_t pending_closed_decisions = 0;
+        bool closed_committed = false;
+        std::vector<std::weak_ptr<TdClosedDecision::State>> closed_decisions;
         std::uint64_t internal_auth_owner_id = 0;
         std::uint64_t lifecycle_owner_id = 0;
         std::shared_ptr<const void> internal_auth_owner_capability;
@@ -481,6 +627,78 @@ class TdClient::Impl {
                                         runtime_->make_function(TdBuiltinFunction::Close)));
     }
 
+    static std::vector<std::shared_ptr<TdClosedDecision::State>>
+    active_closed_decisions(const std::shared_ptr<Generation>& generation) {
+        std::vector<std::shared_ptr<TdClosedDecision::State>> result;
+        const std::lock_guard lock(generation->closed_decision_mutex);
+        std::erase_if(generation->closed_decisions,
+                      [](const auto& entry) { return entry.expired(); });
+        result.reserve(generation->closed_decisions.size());
+        for (const auto& entry : generation->closed_decisions) {
+            if (auto state = entry.lock()) {
+                result.push_back(std::move(state));
+            }
+        }
+        return result;
+    }
+
+    static void claim_lifecycle_event(const std::shared_ptr<TdClosedDecision::State>& state,
+                                      TdClosedDecisionStatus accepted_status,
+                                      std::uint64_t query_id = 0) {
+        std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim;
+        std::chrono::steady_clock::time_point committed_at;
+        {
+            std::unique_lock lock(state->mutex);
+            state->callbacks_done.wait(lock, [&] { return state->callbacks_in_flight == 0; });
+            if (state->released || state->status != TdClosedDecisionStatus::Pending ||
+                (accepted_status == TdClosedDecisionStatus::Error &&
+                 (state->query_id != query_id || state->expected_transition))) {
+                return;
+            }
+            committed_at = std::chrono::steady_clock::now();
+            ++state->callbacks_in_flight;
+            claim = state->claim;
+        }
+        const auto claimed = claim ? claim(committed_at) : TdLifecycleClaimStatus::Rejected;
+        {
+            const std::lock_guard lock(state->mutex);
+            if (!state->released && state->status == TdClosedDecisionStatus::Pending) {
+                if (claimed == TdLifecycleClaimStatus::Active) {
+                    if (accepted_status == TdClosedDecisionStatus::Pending) {
+                        state->expected_transition = true;
+                    } else if (accepted_status == TdClosedDecisionStatus::Closed &&
+                               state->query_id == 0) {
+                        state->status = TdClosedDecisionStatus::Rejected;
+                    } else {
+                        state->status = accepted_status;
+                    }
+                } else {
+                    state->status = terminal_decision(claimed);
+                }
+            }
+            --state->callbacks_in_flight;
+        }
+        state->callbacks_done.notify_all();
+    }
+
+    static void note_expected_transition(const std::shared_ptr<Generation>& generation) {
+        for (const auto& state : active_closed_decisions(generation)) {
+            claim_lifecycle_event(state, TdClosedDecisionStatus::Pending);
+        }
+    }
+
+    static void resolve_lifecycle_event(const std::shared_ptr<Generation>& generation,
+                                        TdClosedDecisionStatus accepted_status,
+                                        std::uint64_t query_id = 0) {
+        if (accepted_status == TdClosedDecisionStatus::Closed) {
+            const std::lock_guard lock(generation->closed_decision_mutex);
+            generation->closed_committed = true;
+        }
+        for (const auto& state : active_closed_decisions(generation)) {
+            claim_lifecycle_event(state, accepted_status, query_id);
+        }
+    }
+
     void receive_loop() {
         while (!stop_.load(std::memory_order_acquire)) {
             auto event = runtime_->receive(kReceiveTimeout);
@@ -501,8 +719,25 @@ class TdClient::Impl {
             event.client_generation != generation->number) {
             return;
         }
+        const bool closes_generation =
+            event.authorization_state && event.authorization_state->state == AuthState::Closed;
+        if (closes_generation) {
+            close_generation_admission(generation);
+        }
         const auto receive_event_sequence = next_receive_event_sequence_++;
         event.object.set_receive_event_sequence(receive_event_sequence);
+
+        if (event.authorization_state) {
+            if (event.authorization_state->state == AuthState::LoggingOut ||
+                event.authorization_state->state == AuthState::Closing) {
+                note_expected_transition(generation);
+            } else if (closes_generation) {
+                resolve_lifecycle_event(generation, TdClosedDecisionStatus::Closed);
+            }
+        }
+        if (event.query_id != 0 && event.object.get_if<TdError>() != nullptr) {
+            resolve_lifecycle_event(generation, TdClosedDecisionStatus::Error, event.query_id);
+        }
 
         if (event.query_id == 0) {
             handle_update(generation, std::move(event), receive_event_sequence);
@@ -604,6 +839,11 @@ class TdClient::Impl {
     }
 
     void handle_closed(const std::shared_ptr<Generation>& generation) {
+        {
+            std::unique_lock lock(generation->closed_decision_mutex);
+            generation->closed_decision_cv.wait(
+                lock, [&] { return generation->pending_closed_decisions == 0; });
+        }
         generation->queries.fail_all("tdlib client generation closed");
 
         bool notify_shutdown = false;
@@ -664,6 +904,84 @@ TdSendLease& TdSendLease::operator=(TdSendLease&& other) noexcept = default;
 
 TdSendLease::operator bool() const noexcept {
     return state_ != nullptr;
+}
+
+TdClosedDecision::TdClosedDecision() = default;
+TdClosedDecision::~TdClosedDecision() {
+    if (state_) {
+        std::function<void()> release;
+        {
+            std::unique_lock lock(state_->mutex);
+            state_->released = true;
+            state_->claim = {};
+            state_->callbacks_done.wait(lock, [this] { return state_->callbacks_in_flight == 0; });
+            release = std::move(state_->release);
+        }
+        if (release) {
+            release();
+        }
+    }
+}
+TdClosedDecision::TdClosedDecision(std::shared_ptr<State> state) : state_(std::move(state)) {}
+TdClosedDecision::TdClosedDecision(TdClosedDecision&&) noexcept = default;
+TdClosedDecision& TdClosedDecision::operator=(TdClosedDecision&& other) noexcept {
+    if (this != &other) {
+        if (state_) {
+            std::function<void()> release;
+            {
+                std::unique_lock lock(state_->mutex);
+                state_->released = true;
+                state_->claim = {};
+                state_->callbacks_done.wait(lock,
+                                            [this] { return state_->callbacks_in_flight == 0; });
+                release = std::move(state_->release);
+            }
+            if (release) {
+                release();
+            }
+        }
+        state_ = std::move(other.state_);
+    }
+    return *this;
+}
+
+TdClosedDecision::operator bool() const noexcept {
+    return state_ != nullptr;
+}
+
+TdClosedDecisionStatus TdClosedDecision::status() const {
+    if (!state_) {
+        return TdClosedDecisionStatus::Rejected;
+    }
+    const std::lock_guard lock(state_->mutex);
+    return state_->status;
+}
+
+TdClosedDecisionStatus TdClosedDecision::settle_terminal() {
+    if (!state_) {
+        return TdClosedDecisionStatus::Rejected;
+    }
+    std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim;
+    {
+        std::unique_lock lock(state_->mutex);
+        state_->callbacks_done.wait(lock, [this] { return state_->callbacks_in_flight == 0; });
+        if (state_->released || state_->status != TdClosedDecisionStatus::Pending) {
+            return state_->status;
+        }
+        ++state_->callbacks_in_flight;
+        claim = state_->claim;
+    }
+    const auto claimed =
+        claim ? claim(std::chrono::steady_clock::now()) : TdLifecycleClaimStatus::Rejected;
+    {
+        const std::lock_guard lock(state_->mutex);
+        if (!state_->released && state_->status == TdClosedDecisionStatus::Pending) {
+            state_->status = terminal_decision(claimed);
+        }
+        --state_->callbacks_in_flight;
+    }
+    state_->callbacks_done.notify_all();
+    return status();
 }
 
 TdOwnerLease::TdOwnerLease() = default;
@@ -734,6 +1052,18 @@ std::future<TdValue>
 TdClient::send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                      const TdRequestOwner& owner, TdAuthRequest request) {
     return impl_->send_login(authorization, owner, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::send_logout(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                      TdClosedDecision& decision) {
+    return impl_->send_logout(authorization, decision);
+}
+
+TdClosedDecision TdClient::begin_logout_decision(
+    const std::shared_ptr<const AuthStateSnapshot>& authorization,
+    std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim) {
+    return impl_->begin_logout_decision(authorization, std::move(claim));
 }
 
 bool TdClient::restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization) {

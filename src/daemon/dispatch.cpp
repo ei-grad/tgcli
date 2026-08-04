@@ -80,6 +80,11 @@ void Dispatcher::register_command(const std::string& path, CommandDescriptor des
     commands_.emplace(path, std::move(descriptor));
 }
 
+void Dispatcher::set_request_preflight(
+    std::function<bool(const std::string&, RequestSession&)> request_preflight) {
+    request_preflight_ = std::move(request_preflight);
+}
+
 void Dispatcher::dispatch(RequestSession& session) const {
     const auto& request = session.request();
     const auto key = command_key(request.command);
@@ -91,10 +96,14 @@ void Dispatcher::dispatch(RequestSession& session) const {
         session.error("USAGE", "unknown command '" + key + "'", nlohmann::json::object(), kUsage);
         return;
     }
-    // The write gate (DESIGN.md §6) is evaluated here and nowhere else. Its
-    // full semantics (grants, explicit deny, confirmation challenges) land
-    // with M3; until then every non-Read command is denied — fail closed.
-    if (it->second.tier != Tier::Read) {
+    if (request_preflight_ && !request_preflight_(key, session)) {
+        return;
+    }
+    // M1 opens only the audited destructive kernel used by logout and account
+    // removal. Every other non-read descriptor remains denied until M3.
+    const bool m1_destructive =
+        it->second.tier == Tier::Destructive && it->second.m1_destructive_kernel;
+    if (it->second.tier != Tier::Read && !m1_destructive) {
         session.error("DENIED", "write-tier commands are not implemented yet (fail-closed gate)",
                       nlohmann::json::object(), kDenied);
         return;

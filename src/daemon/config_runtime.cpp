@@ -146,6 +146,16 @@ ConfigAdmissionDecision ConfigRuntime::admission_decision(std::string_view accou
     const auto generation = runtime ? runtime->generation : 0;
     if (published && published->error.has_value()) {
         const auto reason = published->error.value_or(config::ConfigError{}).reason;
+        std::optional<AdmittedAccountSettings> settings;
+        bool account_present = false;
+        if (published->snapshot) {
+            const auto found = published->snapshot->accounts.find(account);
+            if (found != published->snapshot->accounts.end()) {
+                account_present = true;
+                settings = AdmittedAccountSettings{.allow_write = found->second.allow_write,
+                                                   .idle_exit = found->second.idle_exit};
+            }
+        }
         return ConfigAdmissionDenied{
             .state = published->snapshot ? ConfigAdmissionState::ConfigInvalidWithLastGood
                                          : ConfigAdmissionState::ConfigInvalidWithoutLastGood,
@@ -155,6 +165,8 @@ ConfigAdmissionDecision ConfigRuntime::admission_decision(std::string_view accou
                                      : std::nullopt,
             .generation = generation,
             .reload_diagnostic = ReloadDiagnostic{reason},
+            .last_good_settings = settings,
+            .last_good_account_present = account_present,
         };
     }
     if (!published || !published->snapshot) {
@@ -164,6 +176,8 @@ ConfigAdmissionDecision ConfigRuntime::admission_decision(std::string_view accou
             .snapshot_identity = std::nullopt,
             .generation = generation,
             .reload_diagnostic = std::nullopt,
+            .last_good_settings = std::nullopt,
+            .last_good_account_present = false,
         };
     }
 
@@ -201,6 +215,8 @@ ConfigAdmissionDecision ConfigRuntime::admission_decision(std::string_view accou
         .snapshot_identity = snapshot.identity,
         .generation = generation,
         .reload_diagnostic = std::nullopt,
+        .last_good_settings = std::nullopt,
+        .last_good_account_present = false,
     };
 }
 

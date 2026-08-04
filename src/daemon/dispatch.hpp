@@ -110,6 +110,7 @@ class CallbackSink final : public ResponseSink {
 struct CommandDescriptor {
     Tier tier = Tier::Read;
     std::function<void(const proto::Request&, RequestSession&)> handler;
+    bool m1_destructive_kernel = false;
 };
 
 // The daemon-side dispatch table and the single safety chokepoint (DESIGN.md
@@ -120,11 +121,14 @@ class Dispatcher {
         : request_observer_(std::move(request_observer)) {}
 
     void register_command(const std::string& path, CommandDescriptor descriptor);
+    void set_request_preflight(
+        std::function<bool(const std::string&, RequestSession&)> request_preflight);
     void dispatch(RequestSession& session) const;
     void dispatch(const proto::Request& request, ResponseSink& sink) const;
 
   private:
     std::map<std::string, CommandDescriptor> commands_;
+    std::function<bool(const std::string&, RequestSession&)> request_preflight_;
     testing::RequestObservationObserver request_observer_;
 };
 

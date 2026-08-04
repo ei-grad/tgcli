@@ -2,6 +2,7 @@
 
 #include "common/exit_codes.hpp"
 #include "daemon/login_commands.hpp"
+#include "daemon/logout_commands.hpp"
 #include "daemon/request_session.hpp"
 
 #include <cstdint>
@@ -38,6 +39,20 @@ json doctor_payload(const DaemonContext& context) {
 void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     if (context.login != nullptr) {
         register_login_commands(dispatcher, *context.login);
+    }
+    if (context.logout != nullptr) {
+        register_logout_command(dispatcher, *context.logout);
+        dispatcher.set_request_preflight(
+            [&context](const std::string& command, RequestSession& session) {
+                if (command == "logout" && session.request().context.dry_run) {
+                    return true;
+                }
+                if (command == "login" || command == "logout" || command == "me" ||
+                    command == "doctor") {
+                    return context.logout->preflight(session);
+                }
+                return true;
+            });
     }
     dispatcher.register_command(
         "version", {Tier::Read, [&context](const proto::Request&, RequestSession& sink) {

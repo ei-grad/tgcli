@@ -1,0 +1,83 @@
+#pragma once
+
+#include "common/config.hpp"
+#include "common/paths.hpp"
+#include "core/td_client.hpp"
+#include "daemon/config_runtime.hpp"
+#include "daemon/logout_audit.hpp"
+#include "daemon/request_session.hpp"
+#include "proto/frame.hpp"
+
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+
+namespace tgcli::daemon {
+
+class Dispatcher;
+
+namespace testing {
+
+struct LogoutHooks {
+    std::function<ChallengeOutcome(ChallengeSpec)> challenge_provider;
+    std::function<std::string()> invocation_id;
+    std::function<std::string()> timestamp;
+    std::function<void()> before_intent;
+    std::function<void()> before_send;
+    std::function<void()> after_send;
+    std::function<void()> during_terminal_claim;
+    std::shared_ptr<const LogoutAuditHooks> audit;
+};
+
+} // namespace testing
+
+class LogoutCoordinator final {
+  public:
+    LogoutCoordinator(core::TdClient& client, ConfigRuntime& config_runtime,
+                      paths::Environment environment, std::string account, std::string config_path,
+                      std::function<void()> audit_fatal_shutdown = {},
+                      std::shared_ptr<const testing::LogoutHooks> hooks = {});
+
+    void logout(const proto::Request& request, RequestSession& session);
+    bool preflight(RequestSession& session);
+
+  private:
+    enum class PreflightStep : std::uint8_t { Retry, Complete, Failed };
+
+    static bool request_active(RequestSession& session);
+    static bool acquire_operation_lock(RequestSession& session,
+                                       std::unique_lock<std::mutex>& operation_lock);
+    [[nodiscard]] ChallengeOutcome request_challenge(RequestSession& session,
+                                                     ChallengeSpec spec) const;
+    PreflightStep reconcile_preflight(RequestSession& session);
+    void report_audit_incomplete(RequestSession& session, const IncompleteLogoutAudit& incomplete,
+                                 std::string_view message);
+    void report_audit_unavailable(RequestSession& session, std::string reason = "path_invalid");
+    bool append_unconfirmed_recovery(const IncompleteLogoutAudit& incomplete,
+                                     core::AuthState observed);
+    std::optional<core::AuthState> observe_recovery_state(RequestSession& session);
+    std::optional<core::AuthState>
+    wait_for_bootstrap_observation(RequestSession& session,
+                                   const std::shared_ptr<const core::AuthStateSnapshot>& starting,
+                                   std::future<core::TdValue>& response);
+
+    core::TdClient& client_;
+    ConfigRuntime& config_runtime_;
+    paths::Environment environment_;
+    std::string account_;
+    std::string config_path_;
+    config::Store config_store_;
+    std::function<void()> audit_fatal_shutdown_;
+    std::shared_ptr<const testing::LogoutHooks> hooks_;
+    LogoutAuditLog audit_;
+    std::mutex operation_mutex_;
+};
+
+void register_logout_command(Dispatcher& dispatcher, LogoutCoordinator& coordinator);
+
+} // namespace tgcli::daemon

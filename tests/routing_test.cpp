@@ -164,4 +164,20 @@ TEST_CASE("routing keeps doctor available when the current config is invalid",
     CHECK(version.error->code == "CONFIG_INVALID");
     CHECK(version.error->details ==
           nlohmann::json{{"path", paths::config_file(environment)}, {"reason", "parse_error"}});
+
+    const auto explicit_logout =
+        cli::resolve_account_route({"logout"}, environment, "main", std::nullopt);
+    REQUIRE(explicit_logout.selection.has_value());
+    REQUIRE(explicit_logout.error.has_value());
+    CHECK(explicit_logout.selection->name == "main");
+    CHECK_FALSE(explicit_logout.current_config_valid);
+    CHECK(explicit_logout.error->code == "CONFIG_INVALID");
+    CHECK(explicit_logout.error->details ==
+          nlohmann::json{{"path", paths::config_file(environment)}, {"reason", "parse_error"}});
+
+    const auto explicit_daemon =
+        cli::resolve_account_route({"daemon", "run"}, environment, "main", std::nullopt);
+    CHECK_FALSE(explicit_daemon.selection.has_value());
+    REQUIRE(explicit_daemon.error.has_value());
+    CHECK(explicit_daemon.error->code == "CONFIG_INVALID");
 }

@@ -37,7 +37,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetMe:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::LogOut:
-        return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request, false, false};
+        return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::Close:
         return {DescriptorKind::Lifecycle, AuthState::Unknown, TdOwnerKind::Lifecycle};
     }

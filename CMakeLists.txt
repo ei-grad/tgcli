@@ -129,6 +129,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/activity_tracker.cpp
     src/daemon/config_runtime.cpp
     src/daemon/destructive_contract.cpp
+    src/daemon/logout_audit.cpp
+    src/daemon/logout_commands.cpp
     src/daemon/dispatch.cpp
     src/daemon/request_session.cpp
     src/daemon/account_commands.cpp

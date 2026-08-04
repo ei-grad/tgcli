@@ -72,6 +72,8 @@ enum class AnswerDisposition {
 };
 
 enum class InFlightState { None, InFlight, Orphaned };
+enum class AuditedDispatchStatus { Dispatched, Disconnected, Shutdown, TimedOut, ProtocolError };
+enum class AuditedTerminalStatus { Designated, Disconnected, Shutdown, TimedOut, ProtocolError };
 
 class RequestSession final : public ResponseSink {
   public:
@@ -92,6 +94,7 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] Clock::time_point deadline() const;
     [[nodiscard]] std::stop_token cancellation_token() const;
     [[nodiscard]] bool cancellation_requested() const;
+    [[nodiscard]] bool shutdown_requested() const;
 
     ChallengeOutcome challenge(ChallengeSpec spec);
     AnswerDisposition receive_answer(proto::Answer answer);
@@ -99,6 +102,10 @@ class RequestSession final : public ResponseSink {
 
     void disconnect();
     void shutdown();
+    AuditedTerminalStatus begin_audited_terminal();
+    AuditedTerminalStatus claim_audited_terminal_event(Clock::time_point committed_at);
+    void audit_fatal();
+    AuditedDispatchStatus dispatch_audited(const std::function<void()>& dispatch);
     [[nodiscard]] bool promote_to_subscription();
 
     bool reserve_in_flight();
@@ -109,7 +116,7 @@ class RequestSession final : public ResponseSink {
     void set_challenge_return_hook(ChallengeReturnHook hook);
 
   private:
-    enum class State { Running, Disconnected, Shutdown, TimedOut, ProtocolError };
+    enum class State { Running, Disconnected, Shutdown, TimedOut, ProtocolError, AuditFatal };
     enum class ActivityState { Active, TerminalForwarding, Released };
 
     struct Identity {
@@ -170,6 +177,11 @@ class RequestSession final : public ResponseSink {
     InFlightHook in_flight_hook_;
     ChallengeReturnHook challenge_return_hook_;
     std::stop_source cancellation_source_;
+    bool audited_terminal_ = false;
+    std::optional<AuditedTerminalStatus> audited_terminal_event_;
+    std::optional<Clock::time_point> disconnected_at_;
+    std::optional<Clock::time_point> shutdown_at_;
+    bool shutdown_requested_ = false;
 
     std::mutex activity_mutex_;
     ActivityTracker::Token activity_;

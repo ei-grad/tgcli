@@ -119,6 +119,16 @@ std::vector<SchemaCase> schema_cases() {
             {"is_premium", true}}}},
          "account",
          true},
+        {"logout.result.schema.json", {{"account", "main"}, {"logged_out", true}}, "account"},
+        {"logout.result.schema.json",
+         {{"dry_run", true},
+          {"plan",
+           {{"operation", "logout"},
+            {"account", "main"},
+            {"remote_logout", true},
+            {"tdlib_request", "logOut"}}}},
+         "dry_run",
+         true},
         {"me.result.schema.json",
          {{"id", 123456},
           {"first_name", "Ada"},
@@ -172,10 +182,11 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                           {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
                           {"doctor", {{"result", "doctor.result.schema.json"}}},
                           {"login", {{"result", "login.result.schema.json"}}},
+                          {"logout", {{"result", "logout.result.schema.json"}}},
                           {"me", {{"result", "me.result.schema.json"}}},
                           {"version", {{"result", "version.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 11);
+    CHECK(manifest["commands"].size() == 12);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

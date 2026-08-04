@@ -77,25 +77,33 @@ int report_insecure_bot_token() {
     return tgcli::kUsage;
 }
 
-tgcli::proto::RequestContext make_request_context(bool json_output) {
+std::optional<tgcli::proto::WriteAuthority> write_authority(bool allow_write) {
+    if (const char* allow = std::getenv("TGCLI_ALLOW_WRITE"); allow != nullptr && *allow != '\0') {
+        if (std::string_view(allow) == "0") {
+            return tgcli::proto::WriteAuthority::Deny;
+        }
+        if (std::string_view(allow) == "1") {
+            return tgcli::proto::WriteAuthority::Grant;
+        }
+        return std::nullopt;
+    }
+    return allow_write ? tgcli::proto::WriteAuthority::Grant : tgcli::proto::WriteAuthority::Unset;
+}
+
+tgcli::proto::RequestContext make_request_context(bool json_output, bool yes, bool dry_run,
+                                                  tgcli::proto::WriteAuthority authority) {
     tgcli::proto::RequestContext context;
     context.tty = ::isatty(STDIN_FILENO) != 0;
     context.json = json_output;
+    context.yes = yes;
+    context.dry_run = dry_run;
+    context.write_authority = authority;
     if (std::array<char, 4096> cwd{}; ::getcwd(cwd.data(), cwd.size()) != nullptr) {
         context.cwd = cwd.data();
     }
     if (const char* media_dir = std::getenv("TGCLI_MEDIA_DIR");
         media_dir != nullptr && *media_dir != '\0') {
         context.media_dir = media_dir;
-    }
-    // Fold the environment's write authority into the frame (DESIGN.md §10);
-    // --allow-write joins in M3.
-    if (const char* allow = std::getenv("TGCLI_ALLOW_WRITE"); allow != nullptr) {
-        if (std::string_view(allow) == "0") {
-            context.write_authority = tgcli::proto::WriteAuthority::Deny;
-        } else if (std::string_view(allow) == "1") {
-            context.write_authority = tgcli::proto::WriteAuthority::Grant;
-        }
     }
     return context;
 }
@@ -187,6 +195,7 @@ void populate_config_global_args(nlohmann::json& args, const std::vector<std::st
 std::optional<int> resolve_request_account(const std::vector<std::string>& command,
                                            bool explicit_account, std::string& account,
                                            nlohmann::json& args, bool& current_config_valid,
+                                           std::optional<tgcli::cli::RoutingError>& route_error,
                                            const std::string& add_account,
                                            const std::string& show_account,
                                            const std::string& use_account) {
@@ -220,6 +229,7 @@ std::optional<int> resolve_request_account(const std::vector<std::string>& comma
     }
     account = routed.selection->name;
     current_config_valid = routed.current_config_valid;
+    route_error = routed.error;
     return std::nullopt;
 }
 
@@ -235,11 +245,17 @@ int run(int argc, char** argv) {
     bool json_output = false;
     bool no_daemon = false;
     bool verbose = false;
+    bool allow_write = false;
+    bool yes = false;
+    bool dry_run = false;
     double timeout_seconds = 0.0;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
     app.add_flag("-v,--verbose", verbose, "show tgcli diagnostics on stderr");
+    app.add_flag("--allow-write", allow_write, "grant writes for this invocation");
+    app.add_flag("--yes", yes, "approve destructive actions non-interactively");
+    app.add_flag("--dry-run", dry_run, "validate and print a plan without mutation");
     app.add_flag("--no-daemon", no_daemon,
                  "run in-process without the daemon (debugging escape hatch)");
     CLI::Option* timeout_option =
@@ -256,6 +272,7 @@ int run(int argc, char** argv) {
     CLI::Option* rejected_bot_token_option =
         login_cmd->add_option("--bot-token", rejected_bot_token, "rejected insecure legacy input");
     app.add_subcommand("me", "show the authenticated account identity");
+    app.add_subcommand("logout", "log out the selected account");
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -300,8 +317,32 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
+    const auto folded_authority = write_authority(allow_write);
+    if (!folded_authority) {
+        const nlohmann::json rendered{
+            {"error",
+             {{"code", "USAGE"},
+              {"message", "TGCLI_ALLOW_WRITE must be exactly 0 or 1 when set"},
+              {"details",
+               {{"argument", "TGCLI_ALLOW_WRITE"}, {"reason", "invalid_environment"}}}}}};
+        std::fputs((rendered.dump() + "\n").c_str(), stderr);
+        return tgcli::kUsage;
+    }
+
+    const bool supports_dry_run = command == std::vector<std::string>{"logout"} ||
+                                  command == std::vector<std::string>{"account", "remove"};
+    if (dry_run && !supports_dry_run) {
+        const nlohmann::json rendered{
+            {"error",
+             {{"code", "USAGE"},
+              {"message", "--dry-run is not supported for this command"},
+              {"details", {{"argument", "--dry-run"}, {"reason", "unsupported_mode"}}}}}};
+        std::fputs((rendered.dump() + "\n").c_str(), stderr);
+        return tgcli::kUsage;
+    }
+
     nlohmann::json request_args = nlohmann::json::object();
-    auto request_context = make_request_context(json_output);
+    auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (command == std::vector<std::string>{"login"}) {
         request_args = {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -311,9 +352,10 @@ int run(int argc, char** argv) {
 
     const bool explicit_account = account_option->count() != 0;
     bool current_config_valid = true;
-    if (const auto route_exit =
-            resolve_request_account(command, explicit_account, account, request_args,
-                                    current_config_valid, add_account, show_account, use_account);
+    std::optional<tgcli::cli::RoutingError> unavailable_route_error;
+    if (const auto route_exit = resolve_request_account(
+            command, explicit_account, account, request_args, current_config_valid,
+            unavailable_route_error, add_account, show_account, use_account);
         route_exit.has_value()) {
         return route_exit.value();
     }
@@ -336,10 +378,10 @@ int run(int argc, char** argv) {
     options.account = resolved_account;
     options.json = json_output;
     options.no_daemon = no_daemon;
+    options.unavailable_route_error = std::move(unavailable_route_error);
     options.auto_spawn = command != std::vector<std::string>{"daemon", "status"} &&
-                         command != std::vector<std::string>{"daemon", "stop"} &&
-                         !tgcli::cli::is_config_global_command(command) &&
-                         (command != std::vector<std::string>{"doctor"} || current_config_valid);
+                         command != std::vector<std::string>{"daemon", "stop"} && !dry_run &&
+                         current_config_valid && !tgcli::cli::is_config_global_command(command);
     return tgcli::cli::run_command(request, options);
 }
 

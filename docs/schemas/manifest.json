@@ -28,6 +28,9 @@
     "login": {
       "result": "login.result.schema.json"
     },
+    "logout": {
+      "result": "logout.result.schema.json"
+    },
     "me": {
       "result": "me.result.schema.json"
     },

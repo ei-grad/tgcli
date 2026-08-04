@@ -146,6 +146,18 @@ std::string render_login(const nlohmann::json& data) {
                        data.value("auth_state", std::string("?")), render_user(data.at("user")));
 }
 
+std::string render_logout(const nlohmann::json& data) {
+    if (data.value("dry_run", false)) {
+        const auto& plan = data.at("plan");
+        return fmt::format("dry run: yes\noperation: logout\naccount: {}\nremote logout: yes\n"
+                           "tdlib request: {}\n",
+                           plan.value("account", std::string("?")),
+                           plan.value("tdlib_request", std::string("?")));
+    }
+    return fmt::format("account: {}\nlogged out: {}\n", data.value("account", std::string("?")),
+                       yes_no(data.value("logged_out", false)));
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -178,6 +190,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "login") {
         return render_login(data);
+    }
+    if (command_key == "logout") {
+        return render_logout(data);
     }
     if (command_key == "me") {
         return render_user(data);

@@ -33,6 +33,8 @@ core::TdValue ScriptedTdRuntime::make_function(core::TdBuiltinFunction function)
     case core::TdBuiltinFunction::GetAuthorizationState:
         return core::TdValue::scripted_function(
             core::TdFunctionData{core::TdFunctionKind::GetAuthorizationState});
+    case core::TdBuiltinFunction::LogOut:
+        return core::TdValue::scripted_function(core::TdFunctionData{core::TdFunctionKind::LogOut});
     case core::TdBuiltinFunction::Close:
         return core::TdValue::scripted_function(core::TdFunctionData{core::TdFunctionKind::Close});
     }

@@ -6,6 +6,7 @@
 namespace tgcli::daemon {
 
 class LoginCoordinator;
+class LogoutCoordinator;
 
 // Everything M0 command handlers need. Grows with the milestones (config,
 // resolver, safety state); td_api types never appear here — handlers that
@@ -18,6 +19,7 @@ struct DaemonContext {
     std::string socket_path; // empty in --no-daemon mode
     bool in_process = false; // true under --no-daemon
     LoginCoordinator* login = nullptr;
+    LogoutCoordinator* logout = nullptr;
     std::function<std::string()> auth_state = [] { return "unknown"; };
     // Wired by the daemon entrypoint; asks the server to shut down
     // gracefully (daemon stop). No-op in --no-daemon mode.

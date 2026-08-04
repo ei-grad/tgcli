@@ -5,14 +5,20 @@
 #include "common/paths.hpp"
 #include "core/td_client.hpp"
 #include "daemon/commands.hpp"
+#include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
 #include "daemon/login_commands.hpp"
+#include "daemon/logout_audit.hpp"
+#include "daemon/logout_commands.hpp"
+#include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
 
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <pthread.h>
 #include <string>
 #include <string_view>
@@ -123,6 +129,7 @@ int run_daemon(const std::string& account) {
         .file_path = paths::tdlib_log_file(account, environment),
     });
     const config::Store config_store(paths::config_file(environment), environment.uid);
+    ConfigRuntime config_runtime(config_store.path(), {}, environment.uid);
 
     const auto environment_value = [](const char* name) -> std::optional<std::string> {
         const char* value = std::getenv(name);
@@ -131,6 +138,13 @@ int run_daemon(const std::string& account) {
     };
     LoginCoordinator login(td, config_store, environment, account, kVersion,
                            environment_value("TGCLI_API_ID"), environment_value("TGCLI_API_HASH"));
+    Server* server_pointer = nullptr;
+    LogoutCoordinator logout(td, config_runtime, environment, account, config_store.path(),
+                             [&server_pointer] {
+                                 if (server_pointer != nullptr) {
+                                     server_pointer->request_stop();
+                                 }
+                             });
 
     DaemonContext context;
     context.account = account;
@@ -139,6 +153,7 @@ int run_daemon(const std::string& account) {
     context.tdlib_version = core::TdClient::tdlib_version();
     context.socket_path = account_paths.socket;
     context.login = &login;
+    context.logout = &logout;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -150,6 +165,7 @@ int run_daemon(const std::string& account) {
     Server server({account, account_paths.socket, kVersion, proto::kProtocolVersion,
                    account_paths.control_socket, lock_identity.control_token},
                   dispatcher);
+    server_pointer = &server;
     context.request_shutdown = [&server] { server.request_stop(); };
 
     if (!server.start(error)) {
@@ -203,6 +219,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         .json_diagnostics = request.context.json,
     });
     const config::Store config_store(paths::config_file(environment), environment.uid);
+    ConfigRuntime config_runtime(config_store.path(), {}, environment.uid);
     const auto environment_value = [](const char* name) -> std::optional<std::string> {
         const char* value = std::getenv(name);
         return value != nullptr && *value != '\0' ? std::optional<std::string>{value}
@@ -210,6 +227,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     };
     LoginCoordinator login(td, config_store, environment, account, kVersion,
                            environment_value("TGCLI_API_ID"), environment_value("TGCLI_API_HASH"));
+    LogoutCoordinator logout(td, config_runtime, environment, account, config_store.path());
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -217,6 +235,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.tdlib_version = core::TdClient::tdlib_version();
     context.in_process = true;
     context.login = &login;
+    context.logout = &logout;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -229,6 +248,71 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     td.close();
     ::close(lock_fd);
     return true;
+}
+
+bool reconcile_logout_audit_offline(const std::string& account,
+                                    std::chrono::steady_clock::time_point deadline) {
+    const auto environment = paths::real_environment();
+    const auto state_directory = paths::account_state_dir(account, environment);
+    std::string error;
+    if (!paths::validate_private_dir(state_directory, environment.uid, error)) {
+        return false;
+    }
+    daemon_lock::Identity lock_identity;
+    const int lock_fd =
+        daemon_lock::acquire(state_directory + "/daemon.lock", lock_identity, error);
+    if (lock_fd < 0) {
+        return false;
+    }
+
+    const LogoutAuditLog audit(state_directory, account, environment.uid);
+    auto definite = reconcile_definite_logout_audit(audit, [] {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+        std::tm utc{};
+#if defined(_WIN32)
+        gmtime_s(&utc, &seconds);
+#else
+        gmtime_r(&seconds, &utc);
+#endif
+        std::array<char, 21> rendered{};
+        if (std::strftime(rendered.data(), rendered.size(), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+            return std::string{};
+        }
+        return std::string(rendered.data());
+    });
+    if (definite.status != LogoutAuditReconcileStatus::ObservationRequired) {
+        ::close(lock_fd);
+        return definite.status == LogoutAuditReconcileStatus::Clean;
+    }
+
+    bool reconciled = false;
+    try {
+        core::TdClient td(core::TdLogConfiguration{
+            .file_path = paths::tdlib_log_file(account, environment),
+        });
+        const config::Store store(paths::config_file(environment), environment.uid);
+        ConfigRuntime config_runtime(store.path(), {}, environment.uid);
+        LogoutCoordinator logout(td, config_runtime, environment, account, store.path());
+        CallbackSink sink(
+            [](const nlohmann::json&) {}, [](const nlohmann::json&) {},
+            [](const nlohmann::json&) {},
+            [](const std::string&, const std::string&, const nlohmann::json&, int) {});
+        proto::Request request(account);
+        request.id = 1;
+        request.command = {"doctor"};
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining > std::chrono::steady_clock::duration::zero()) {
+            request.context.timeout_seconds = std::chrono::duration<double>(remaining).count();
+            RequestSession session(std::move(request), sink);
+            reconciled = logout.preflight(session);
+        }
+        td.close();
+    } catch (const std::exception&) {
+        reconciled = false;
+    }
+    ::close(lock_fd);
+    return reconciled;
 }
 
 } // namespace tgcli::daemon

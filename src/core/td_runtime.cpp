@@ -497,6 +497,10 @@ class ProductionTdRuntime final : public TdRuntime {
             return TdValue::function(std::move(native),
                                      TdFunctionData{TdFunctionKind::GetAuthorizationState});
         }
+        case TdBuiltinFunction::LogOut: {
+            NativeFunctionPtr native = td_api::make_object<td_api::logOut>();
+            return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::LogOut});
+        }
         case TdBuiltinFunction::Close: {
             NativeFunctionPtr native = td_api::make_object<td_api::close>();
             return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::Close});

@@ -1,12 +1,18 @@
 #include "daemon/account_commands.hpp"
 
+#include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
+#include "daemon/destructive_contract.hpp"
+#include "daemon/logout_audit.hpp"
 #include "daemon/request_session.hpp"
 
+#include <array>
 #include <chrono>
+#include <ctime>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace tgcli::daemon {
 
@@ -97,6 +103,103 @@ std::string credential_source(bool has_value, bool has_command) {
         return "value";
     }
     return has_command ? "command" : "missing";
+}
+
+std::string audit_timestamp() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &seconds);
+#else
+    gmtime_r(&seconds, &utc);
+#endif
+    std::array<char, 21> rendered{};
+    if (std::strftime(rendered.data(), rendered.size(), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return {};
+    }
+    return rendered.data();
+}
+
+json completed_stages_json(const std::vector<AuditStage>& completed) {
+    json result = json::array();
+    for (const auto stage : completed) {
+        result.push_back(audit_stage_name(stage));
+    }
+    return result;
+}
+
+void audit_incomplete(RequestSession& session, std::string_view account,
+                      const LogoutAuditLog& audit, const std::vector<AuditStage>& completed = {}) {
+    std::string error;
+    const auto mutation = derive_mutation_state(DestructiveCommand::Logout, completed, error);
+    session.error("AUDIT_INCOMPLETE", "logout audit reconciliation is incomplete",
+                  {{"account", account},
+                   {"path", audit.path()},
+                   {"mutation_state", mutation ? mutation_state_name(*mutation) : "none"},
+                   {"completed_stages", completed_stages_json(completed)}},
+                  kGeneric);
+}
+
+void audit_unavailable(RequestSession& session, std::string_view account,
+                       const LogoutAuditLog& audit, std::string reason = "path_invalid") {
+    session.error("AUDIT_UNAVAILABLE", "logout audit cannot be inspected",
+                  {{"account", account}, {"path", audit.path()}, {"reason", std::move(reason)}},
+                  kDenied);
+}
+
+bool account_show_audit_preflight(RequestSession& session, const ConfigGlobalContext& context,
+                                  const std::string& account) {
+    const LogoutAuditLog audit(paths::account_state_dir(account, context.environment), account,
+                               context.environment.uid);
+    const auto inspection = audit.inspect();
+    if (inspection.status == LogoutAuditInspectionStatus::Clean) {
+        return true;
+    }
+    if (inspection.status == LogoutAuditInspectionStatus::Invalid) {
+        if (inspection.incomplete) {
+            audit_incomplete(session, account, audit, inspection.incomplete->completed_stages);
+        } else {
+            audit_unavailable(session, account, audit,
+                              inspection.failure.reason.empty() ? "path_invalid"
+                                                                : inspection.failure.reason);
+        }
+        return false;
+    }
+    if (!inspection.incomplete) {
+        audit_unavailable(session, account, audit);
+        return false;
+    }
+    daemon_lock::Identity lock_identity;
+    std::string lock_error;
+    const int lock_descriptor = daemon_lock::acquire(
+        paths::account_state_dir(account, context.environment) + "/daemon.lock", lock_identity,
+        lock_error);
+    if (lock_descriptor < 0) {
+        audit_incomplete(session, account, audit, inspection.incomplete->completed_stages);
+        return false;
+    }
+    auto reconciled = reconcile_definite_logout_audit(audit, audit_timestamp);
+    ::close(lock_descriptor);
+    if (reconciled.status == LogoutAuditReconcileStatus::Clean) {
+        return true;
+    }
+    if (reconciled.status == LogoutAuditReconcileStatus::Invalid) {
+        if (reconciled.incomplete) {
+            audit_incomplete(session, account, audit, reconciled.incomplete->completed_stages);
+        } else {
+            audit_unavailable(session, account, audit,
+                              reconciled.failure.reason.empty() ? "path_invalid"
+                                                                : reconciled.failure.reason);
+        }
+        return false;
+    }
+    if (!reconciled.incomplete) {
+        audit_unavailable(session, account, audit);
+        return false;
+    }
+    audit_incomplete(session, account, audit, reconciled.incomplete->completed_stages);
+    return false;
 }
 
 void mutation_failure(RequestSession& session, const ConfigGlobalContext& context,
@@ -219,6 +322,9 @@ void account_show(const ConfigGlobalContext& context, const proto::Request& requ
         config_invalid(session, context,
                        {config::ConfigReason::PathInvalid,
                         "account paths must be absolute after XDG resolution"});
+        return;
+    }
+    if (!account_show_audit_preflight(session, context, account)) {
         return;
     }
     const auto& value = found->second;

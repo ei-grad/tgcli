@@ -1,8 +1,10 @@
 #pragma once
 
+#include "cli/routing.hpp"
 #include "proto/frame.hpp"
 
 #include <chrono>
+#include <optional>
 #include <string>
 
 namespace tgcli::cli {
@@ -22,6 +24,10 @@ struct RunOptions {
     bool json = false;
     bool no_daemon = false;
     bool auto_spawn = true;
+    // Preserved invalid-current-config error for an explicit route. A running
+    // daemon may still serve its last-good snapshot; an absent daemon cannot.
+    std::optional<RoutingError> unavailable_route_error;
+    bool restart_on_mismatch = true;
     std::chrono::milliseconds restart_timeout{60000};
     // Empty uses the running executable. Tests may supply the built tgcli
     // binary because their process image is the unit-test runner.

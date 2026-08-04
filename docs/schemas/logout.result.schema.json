@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli logout result",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "logged_out"],
+      "properties": {
+        "account": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"},
+        "logged_out": {"const": true}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dry_run", "plan"],
+      "properties": {
+        "dry_run": {"const": true},
+        "plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "account", "remote_logout", "tdlib_request"],
+          "properties": {
+            "operation": {"const": "logout"},
+            "account": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"},
+            "remote_logout": {"const": true},
+            "tdlib_request": {"const": "logOut"}
+          }
+        }
+      }
+    }
+  ]
+}

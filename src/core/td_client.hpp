@@ -2,6 +2,7 @@
 
 #include "core/td_runtime.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -11,7 +12,8 @@
 
 namespace tgcli::daemon {
 class LoginCoordinator;
-}
+class LogoutCoordinator;
+} // namespace tgcli::daemon
 
 namespace tgcli::core {
 
@@ -51,6 +53,40 @@ class TdSendLease {
   private:
     struct State;
     explicit TdSendLease(std::shared_ptr<State> state);
+
+    std::shared_ptr<State> state_;
+    friend class TdClient;
+};
+
+// Pins a matching client generation at authorizationStateClosed until the
+// destructive coordinator has durably settled its one-shot lifecycle result.
+enum class TdLifecycleClaimStatus { Active, Disconnected, Shutdown, TimedOut, Rejected };
+enum class TdClosedDecisionStatus {
+    Pending,
+    Closed,
+    Error,
+    Disconnected,
+    Shutdown,
+    TimedOut,
+    Rejected
+};
+
+class TdClosedDecision {
+  public:
+    TdClosedDecision();
+    ~TdClosedDecision();
+    TdClosedDecision(const TdClosedDecision&) = delete;
+    TdClosedDecision& operator=(const TdClosedDecision&) = delete;
+    TdClosedDecision(TdClosedDecision&&) noexcept;
+    TdClosedDecision& operator=(TdClosedDecision&& other) noexcept;
+
+    explicit operator bool() const noexcept;
+    [[nodiscard]] TdClosedDecisionStatus status() const;
+    TdClosedDecisionStatus settle_terminal();
+
+  private:
+    struct State;
+    explicit TdClosedDecision(std::shared_ptr<State> state);
 
     std::shared_ptr<State> state_;
     friend class TdClient;
@@ -131,10 +167,16 @@ class TdClient {
     [[nodiscard]] TdOwnerLease issue_login_owner();
     std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                     const TdRequestOwner& owner, TdAuthRequest request);
+    std::future<TdValue> send_logout(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                     TdClosedDecision& decision);
+    [[nodiscard]] TdClosedDecision begin_logout_decision(
+        const std::shared_ptr<const AuthStateSnapshot>& authorization,
+        std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim);
     bool restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization);
 
     friend class AuthBootstrap;
     friend class tgcli::daemon::LoginCoordinator;
+    friend class tgcli::daemon::LogoutCoordinator;
 
     class Impl;
     std::unique_ptr<Impl> impl_;

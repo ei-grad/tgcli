@@ -493,7 +493,7 @@ struct TdUserSummary {
     bool is_premium = false;
 };
 
-enum class TdBuiltinFunction { GetAuthorizationState, Close };
+enum class TdBuiltinFunction { GetAuthorizationState, LogOut, Close };
 
 struct TdRuntimeEvent {
     std::int32_t client_id = 0;

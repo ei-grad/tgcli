@@ -1,0 +1,5 @@
+dry run: yes
+operation: logout
+account: main
+remote logout: yes
+tdlib request: logOut

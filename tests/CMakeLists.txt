@@ -6,6 +6,7 @@ add_executable(tgcli_unit_tests
     account_commands_test.cpp
     auth_bootstrap_test.cpp
     login_commands_test.cpp
+    logout_commands_test.cpp
     config_test.cpp
     config_runtime_test.cpp
     daemon_lock_test.cpp

@@ -12,6 +12,9 @@
 #include "common/paths.hpp"
 #include "daemon/account_commands.hpp"
 #include "daemon/daemon_run.hpp"
+#include "daemon/logout_audit.hpp"
+#include "daemon/request_session.hpp"
+#include "proto/destructive_plan.hpp"
 #include "proto/frame_io.hpp"
 
 #include <algorithm>
@@ -370,13 +373,13 @@ bool spawn_daemon(const std::string& account, const std::string& executable, Dea
     return wait_for_spawn_handoff(child, deadline, error);
 }
 
-std::optional<ConnectedSocket> connect_with_spawn(const std::string& account,
-                                                  const std::string& socket_path, uid_t uid,
-                                                  bool auto_spawn,
-                                                  const std::string& daemon_executable,
-                                                  Deadline deadline, std::string& error) {
+std::optional<ConnectedSocket>
+connect_with_spawn(const std::string& account, const std::string& socket_path, uid_t uid,
+                   bool auto_spawn, const std::string& daemon_executable, Deadline deadline,
+                   ConnectStatus& final_status, std::string& error) {
     ConnectedSocket connected;
     const auto initial = connect_socket(socket_path, uid, deadline, connected, error);
+    final_status = initial;
     if (initial == ConnectStatus::Connected) {
         return connected;
     }
@@ -387,10 +390,12 @@ std::optional<ConnectedSocket> connect_with_spawn(const std::string& account,
         return std::nullopt;
     }
     if (!spawn_daemon(account, daemon_executable, deadline, error)) {
+        final_status = ConnectStatus::Failed;
         return std::nullopt;
     }
     while (std::chrono::steady_clock::now() < deadline) {
         const auto status = connect_socket(socket_path, uid, deadline, connected, error);
+        final_status = status;
         if (status == ConnectStatus::Connected) {
             return connected;
         }
@@ -1070,6 +1075,148 @@ int run_in_process(const proto::Request& request, const RunOptions& options,
     return renderer.exit_code();
 }
 
+enum class AccountShowPreflightChild { RunningDaemon, OfflineObserver };
+
+int run_routed_command(const proto::Request& request, const RunOptions& options,
+                       ChallengePrompt& prompt);
+
+bool wait_for_preflight_child(pid_t child, Deadline deadline) {
+    int status = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t waited = ::waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            return WIFEXITED(status) && WEXITSTATUS(status) == kOk;
+        }
+        if (waited < 0 && errno != EINTR) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ::kill(child, SIGTERM);
+    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    return false;
+}
+
+void run_account_show_preflight_child(AccountShowPreflightChild operation,
+                                      const proto::Request& request, const RunOptions& options,
+                                      Deadline deadline) {
+    const pid_t child = ::fork();
+    if (child < 0) {
+        return;
+    }
+    if (child == 0) {
+        const int null_descriptor = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (null_descriptor >= 0) {
+            ::dup2(null_descriptor, STDOUT_FILENO);
+            ::dup2(null_descriptor, STDERR_FILENO);
+            ::close(null_descriptor);
+        }
+        int exit_code = kGeneric;
+        if (operation == AccountShowPreflightChild::OfflineObserver) {
+            exit_code =
+                daemon::reconcile_logout_audit_offline(request.account, deadline) ? kOk : kGeneric;
+        } else {
+            proto::Request doctor(request.account);
+            doctor.id = request.id;
+            doctor.command = {"doctor"};
+            doctor.context.timeout_seconds =
+                std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count();
+            doctor.context.cwd = "/";
+            RunOptions child_options = options;
+            child_options.account = request.account;
+            child_options.json = true;
+            child_options.no_daemon = false;
+            child_options.auto_spawn = false;
+            child_options.restart_on_mismatch = false;
+            child_options.restart_timeout = std::max(
+                std::chrono::milliseconds(1), std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  deadline - std::chrono::steady_clock::now()));
+            TerminalPrompt child_prompt;
+            exit_code = run_routed_command(doctor, child_options, child_prompt);
+        }
+        ::_exit(exit_code);
+    }
+    static_cast<void>(wait_for_preflight_child(child, deadline));
+}
+
+bool logout_reconciliation_required(const daemon::LogoutAuditInspection& inspection) {
+    return inspection.status == daemon::LogoutAuditInspectionStatus::Incomplete &&
+           inspection.incomplete.has_value();
+}
+
+void reconcile_account_show_logout(const proto::Request& request, const RunOptions& options,
+                                   Deadline deadline) {
+    if (!request.args.is_object() || !request.args.contains("account") ||
+        !request.args["account"].is_string()) {
+        return;
+    }
+    const auto account = request.args["account"].get<std::string>();
+    if (!paths::valid_account_name(account)) {
+        return;
+    }
+    const auto environment = paths::real_environment();
+    const daemon::LogoutAuditLog audit(paths::account_state_dir(account, environment), account,
+                                       environment.uid);
+    auto inspection = audit.inspect();
+    if (!logout_reconciliation_required(inspection)) {
+        return;
+    }
+
+    std::string socket_error;
+    const auto socket_path = paths::socket_path(account, environment, socket_error);
+    std::optional<paths::SocketIdentity> socket_identity;
+    if (socket_path &&
+        paths::find_socket_endpoint(*socket_path, environment.uid, socket_identity, socket_error) &&
+        socket_identity) {
+        proto::Request routed = request;
+        routed.account = account;
+        run_account_show_preflight_child(AccountShowPreflightChild::RunningDaemon, routed, options,
+                                         deadline);
+        inspection = audit.inspect();
+        if (!logout_reconciliation_required(inspection)) {
+            return;
+        }
+    }
+    proto::Request routed = request;
+    routed.account = account;
+    run_account_show_preflight_child(AccountShowPreflightChild::OfflineObserver, routed, options,
+                                     deadline);
+}
+
+std::optional<json> account_show_incomplete_details(const proto::Request& request) {
+    if (!request.args.is_object() || !request.args.contains("account") ||
+        !request.args["account"].is_string()) {
+        return std::nullopt;
+    }
+    const auto account = request.args["account"].get<std::string>();
+    if (!paths::valid_account_name(account)) {
+        return std::nullopt;
+    }
+    const auto environment = paths::real_environment();
+    const daemon::LogoutAuditLog audit(paths::account_state_dir(account, environment), account,
+                                       environment.uid);
+    const auto inspection = audit.inspect();
+    if (inspection.status != daemon::LogoutAuditInspectionStatus::Incomplete ||
+        !inspection.incomplete) {
+        return std::nullopt;
+    }
+    json completed = json::array();
+    for (const auto stage : inspection.incomplete->completed_stages) {
+        completed.push_back(daemon::audit_stage_name(stage));
+    }
+    std::string error;
+    const auto mutation = daemon::derive_mutation_state(
+        daemon::DestructiveCommand::Logout, inspection.incomplete->completed_stages, error);
+    if (!mutation) {
+        return std::nullopt;
+    }
+    return json{{"account", account},
+                {"path", audit.path()},
+                {"mutation_state", daemon::mutation_state_name(*mutation)},
+                {"completed_stages", std::move(completed)}};
+}
+
 int run_config_global(const proto::Request& request, const RunOptions& options,
                       ChallengePrompt& prompt) {
     const auto env = paths::real_environment();
@@ -1081,12 +1228,56 @@ int run_config_global(const proto::Request& request, const RunOptions& options,
     FrameRenderer renderer(command_key(request.command), options.json);
     InProcessSink sink(renderer, prompt, request.context.tty);
     try {
-        dispatcher.dispatch(request, sink);
+        daemon::RequestSession session(request, sink);
+        if (request.command == std::vector<std::string>{"account", "show"}) {
+            reconcile_account_show_logout(request, options, session.deadline());
+            if (std::chrono::steady_clock::now() >= session.deadline()) {
+                if (auto details = account_show_incomplete_details(request)) {
+                    session.error("AUDIT_INCOMPLETE", "logout audit reconciliation is incomplete",
+                                  std::move(*details), kGeneric);
+                    return renderer.exit_code();
+                }
+            }
+        }
+        dispatcher.dispatch(session);
     } catch (const std::invalid_argument&) {
         print_error("USAGE", "invalid request timeout",
                     {{"argument", "--timeout"}, {"reason", "invalid_argument"}});
         return kUsage;
     }
+    return renderer.exit_code();
+}
+
+int run_logout_dry_run(const proto::Request& request, const RunOptions& options) {
+    const auto env = paths::real_environment();
+    const config::Store store(paths::config_file(env), env.uid);
+    auto loaded = store.load();
+    if (!loaded || !loaded.snapshot) {
+        print_error(
+            "CONFIG_INVALID", "cannot validate logout config",
+            {{"path", store.path()},
+             {"reason", loaded.error ? config::reason_name(loaded.error->reason) : "io_error"}});
+        return kGeneric;
+    }
+    if (!loaded.snapshot->accounts.contains(request.account)) {
+        print_error("ACCOUNT_NOT_FOUND", "account is not configured",
+                    {{"account", request.account}});
+        return kNotFound;
+    }
+    if (!request.args.empty()) {
+        print_error("USAGE", "logout takes no command arguments",
+                    {{"argument", nullptr}, {"reason", "invalid_argument"}});
+        return kUsage;
+    }
+    std::string error;
+    const auto plan = proto::make_logout_plan(request.account, error);
+    if (!plan) {
+        print_error("INTERNAL", "cannot build logout plan",
+                    {{"operation", "logout"}, {"reason", "internal_error"}});
+        return kGeneric;
+    }
+    FrameRenderer renderer("logout", options.json);
+    renderer.on_result({{"dry_run", true}, {"plan", proto::serialize(*plan)}});
     return renderer.exit_code();
 }
 
@@ -1372,45 +1563,22 @@ int run_daemon_control(const proto::Request& request, const RunOptions& options)
     return run_daemon_restart(options, env, *socket_path, *deadline);
 }
 
-std::optional<int> validate_request_route(const proto::Request& request,
-                                          const RunOptions& options) {
-    if (request.account != options.account) {
-        print_error("ACCOUNT_MISMATCH", "request account does not match the selected route",
-                    {{"requested_account", request.account}, {"daemon_account", options.account}});
-        return kNotFound;
+int report_connect_failure(const RunOptions& options, const std::string& socket_path,
+                           ConnectStatus connect_status, const std::string& error, bool is_doctor) {
+    if (is_doctor) {
+        return run_local_doctor(options.account, socket_path, options.json, error);
     }
-    if (!paths::valid_account_name(request.account)) {
-        print_error("USAGE", "invalid routed account", json::object());
-        return kUsage;
+    if (connect_status == ConnectStatus::Unavailable && options.unavailable_route_error) {
+        const auto& route_error = *options.unavailable_route_error;
+        print_error(route_error.code, route_error.message, route_error.details);
+        return route_error.exit_code;
     }
-    return std::nullopt;
+    print_error("GENERIC", error, json::object());
+    return kGeneric;
 }
 
-} // namespace
-
-int run_command(const proto::Request& request, const RunOptions& options) {
-    if (const auto route_error = validate_request_route(request, options); route_error) {
-        return *route_error;
-    }
-    TerminalPrompt terminal_prompt;
-    ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
-    if (is_config_global_command(request.command)) {
-        return run_config_global(request, options, prompt);
-    }
-    const bool daemon_control = is_daemon_control_command(request.command);
-    if (daemon_control && options.no_daemon) {
-        print_error("USAGE", "daemon lifecycle commands do not support --no-daemon",
-                    json::object());
-        return kUsage;
-    }
-    if (options.no_daemon) {
-        return run_in_process(request, options, prompt);
-    }
-
-    if (daemon_control) {
-        return run_daemon_control(request, options);
-    }
-
+int run_routed_command(const proto::Request& request, const RunOptions& options,
+                       ChallengePrompt& prompt) {
     const auto env = paths::real_environment();
     std::string error;
     const auto socket_path = paths::socket_path(options.account, env, error);
@@ -1418,9 +1586,6 @@ int run_command(const proto::Request& request, const RunOptions& options) {
         print_error("USAGE", error, json::object());
         return kUsage;
     }
-    // The client verifies the socket directory just like the daemon does
-    // (DESIGN.md §9): on the /tmp fallback a foreign-uid directory could
-    // otherwise plant an imposter socket the client would happily talk to.
     if (!paths::ensure_private_dir(paths::runtime_dir(env), env.uid, error)) {
         print_error("GENERIC", error, json::object());
         return kGeneric;
@@ -1432,15 +1597,13 @@ int run_command(const proto::Request& request, const RunOptions& options) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         Session session;
         {
+            ConnectStatus connect_status = ConnectStatus::Failed;
             auto connected =
                 connect_with_spawn(options.account, *socket_path, env.uid, options.auto_spawn,
-                                   options.daemon_executable, deadline, error);
+                                   options.daemon_executable, deadline, connect_status, error);
             if (!connected) {
-                if (is_doctor) {
-                    return run_local_doctor(options.account, *socket_path, options.json, error);
-                }
-                print_error("GENERIC", error, json::object());
-                return kGeneric;
+                return report_connect_failure(options, *socket_path, connect_status, error,
+                                              is_doctor);
             }
             session.fd = connected->fd;
             session.socket_identity = connected->identity;
@@ -1465,6 +1628,11 @@ int run_command(const proto::Request& request, const RunOptions& options) {
         case HandshakeOutcome::BinaryMismatch:
         case HandshakeOutcome::ProtocolMismatch:
         case HandshakeOutcome::IncompatibleHello:
+            if (!options.restart_on_mismatch) {
+                print_error("GENERIC", "daemon handshake mismatch during read-only preflight",
+                            json::object());
+                return kGeneric;
+            }
             if (attempt > 0) {
                 print_error("GENERIC", "daemon handshake mismatch persists after restart",
                             json::object());
@@ -1481,6 +1649,55 @@ int run_command(const proto::Request& request, const RunOptions& options) {
     }
     print_error("GENERIC", "daemon restart loop; giving up", json::object());
     return kGeneric;
+}
+
+std::optional<int> validate_request_route(const proto::Request& request,
+                                          const RunOptions& options) {
+    if (request.account != options.account) {
+        print_error("ACCOUNT_MISMATCH", "request account does not match the selected route",
+                    {{"requested_account", request.account}, {"daemon_account", options.account}});
+        return kNotFound;
+    }
+    if (!paths::valid_account_name(request.account)) {
+        print_error("USAGE", "invalid routed account", json::object());
+        return kUsage;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+int run_command(const proto::Request& request, const RunOptions& options) {
+    if (const auto route_error = validate_request_route(request, options); route_error) {
+        return *route_error;
+    }
+    TerminalPrompt terminal_prompt;
+    ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
+    if (request.command == std::vector<std::string>{"logout"} && request.context.dry_run) {
+        return run_logout_dry_run(request, options);
+    }
+    if (is_config_global_command(request.command)) {
+        return run_config_global(request, options, prompt);
+    }
+    const bool daemon_control = is_daemon_control_command(request.command);
+    if (daemon_control && options.no_daemon) {
+        print_error("USAGE", "daemon lifecycle commands do not support --no-daemon",
+                    json::object());
+        return kUsage;
+    }
+    if (options.no_daemon) {
+        if (options.unavailable_route_error) {
+            const auto& route_error = *options.unavailable_route_error;
+            print_error(route_error.code, route_error.message, route_error.details);
+            return route_error.exit_code;
+        }
+        return run_in_process(request, options, prompt);
+    }
+
+    if (daemon_control) {
+        return run_daemon_control(request, options);
+    }
+    return run_routed_command(request, options, prompt);
 }
 
 } // namespace tgcli::cli

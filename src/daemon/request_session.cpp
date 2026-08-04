@@ -164,6 +164,11 @@ bool RequestSession::cancellation_requested() const {
     return cancellation_source_.stop_requested();
 }
 
+bool RequestSession::shutdown_requested() const {
+    const std::lock_guard lock(session_mutex_);
+    return shutdown_requested_;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
     if (!request_.context.tty) {
@@ -183,6 +188,7 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
             case State::TimedOut:
                 return {ChallengeStatus::TimedOut, std::monostate{}};
             case State::ProtocolError:
+            case State::AuditFatal:
                 return {ChallengeStatus::ProtocolError, std::monostate{}};
             case State::Running:
                 break;
@@ -388,6 +394,7 @@ void RequestSession::disconnect() {
         if (state_ != State::Running && state_ != State::TimedOut) {
             return;
         }
+        disconnected_at_ = Clock::now();
         state_ = State::Disconnected;
         cancellation_source_.request_stop();
         release_activity();
@@ -410,6 +417,19 @@ void RequestSession::shutdown() {
     if (state_ != State::Running) {
         return;
     }
+    if (!shutdown_at_) {
+        shutdown_at_ = Clock::now();
+    }
+    shutdown_requested_ = true;
+    if (audited_terminal_) {
+        cancellation_source_.request_stop();
+        answer_reserved_ = false;
+        reserved_identity_.reset();
+        if (current_) {
+            resolve_current({ChallengeStatus::Shutdown, std::monostate{}});
+        }
+        return;
+    }
     state_ = State::Shutdown;
     cancellation_source_.request_stop();
     answer_reserved_ = false;
@@ -417,6 +437,106 @@ void RequestSession::shutdown() {
     error("DAEMON_SHUTDOWN", "daemon is shutting down", {{"reason", "daemon_shutdown"}}, kGeneric);
     if (current_) {
         resolve_current({ChallengeStatus::Shutdown, std::monostate{}});
+    }
+}
+
+AuditedTerminalStatus RequestSession::begin_audited_terminal() {
+    const std::lock_guard lock(session_mutex_);
+    if (shutdown_requested_) {
+        return AuditedTerminalStatus::Shutdown;
+    }
+    switch (state_) {
+    case State::Running:
+        if (Clock::now() >= deadline_) {
+            state_ = State::TimedOut;
+            return AuditedTerminalStatus::TimedOut;
+        }
+        audited_terminal_ = true;
+        return AuditedTerminalStatus::Designated;
+    case State::Disconnected:
+        return AuditedTerminalStatus::Disconnected;
+    case State::Shutdown:
+        return AuditedTerminalStatus::Shutdown;
+    case State::TimedOut:
+        return AuditedTerminalStatus::TimedOut;
+    case State::ProtocolError:
+    case State::AuditFatal:
+        return AuditedTerminalStatus::ProtocolError;
+    }
+    return AuditedTerminalStatus::ProtocolError;
+}
+
+AuditedTerminalStatus RequestSession::claim_audited_terminal_event(Clock::time_point committed_at) {
+    const std::lock_guard lock(session_mutex_);
+    if (audited_terminal_event_) {
+        return *audited_terminal_event_;
+    }
+    AuditedTerminalStatus result = AuditedTerminalStatus::ProtocolError;
+    if (!audited_terminal_) {
+        result = AuditedTerminalStatus::ProtocolError;
+    } else {
+        auto terminal_at = deadline_;
+        result = AuditedTerminalStatus::TimedOut;
+        if (disconnected_at_ && *disconnected_at_ < terminal_at) {
+            terminal_at = *disconnected_at_;
+            result = AuditedTerminalStatus::Disconnected;
+        }
+        if (shutdown_at_ && *shutdown_at_ < terminal_at) {
+            terminal_at = *shutdown_at_;
+            result = AuditedTerminalStatus::Shutdown;
+        }
+        if (committed_at < terminal_at) {
+            result = AuditedTerminalStatus::Designated;
+        } else if (result == AuditedTerminalStatus::TimedOut) {
+            state_ = State::TimedOut;
+        }
+    }
+    if (result != AuditedTerminalStatus::Designated) {
+        audited_terminal_event_ = result;
+    }
+    return result;
+}
+
+AuditedDispatchStatus RequestSession::dispatch_audited(const std::function<void()>& dispatch) {
+    const std::lock_guard lock(session_mutex_);
+    if (!audited_terminal_) {
+        return AuditedDispatchStatus::ProtocolError;
+    }
+    if (shutdown_requested_) {
+        return AuditedDispatchStatus::Shutdown;
+    }
+    switch (state_) {
+    case State::Running:
+        if (Clock::now() >= deadline_) {
+            return AuditedDispatchStatus::TimedOut;
+        }
+        dispatch();
+        return AuditedDispatchStatus::Dispatched;
+    case State::Disconnected:
+        return AuditedDispatchStatus::Disconnected;
+    case State::Shutdown:
+        return AuditedDispatchStatus::Shutdown;
+    case State::TimedOut:
+        return AuditedDispatchStatus::TimedOut;
+    case State::ProtocolError:
+    case State::AuditFatal:
+        return AuditedDispatchStatus::ProtocolError;
+    }
+    return AuditedDispatchStatus::ProtocolError;
+}
+
+void RequestSession::audit_fatal() {
+    const std::lock_guard lock(session_mutex_);
+    if (state_ == State::Disconnected || state_ == State::AuditFatal) {
+        return;
+    }
+    state_ = State::AuditFatal;
+    cancellation_source_.request_stop();
+    answer_reserved_ = false;
+    reserved_identity_.reset();
+    release_activity();
+    if (current_) {
+        resolve_current({ChallengeStatus::ProtocolError, std::monostate{}});
     }
 }
 

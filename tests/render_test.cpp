@@ -65,6 +65,18 @@ TEST_CASE("login and me human renderers match reviewed goldens", "[auth][render]
           golden("login.txt"));
 }
 
+TEST_CASE("logout human renderers match reviewed goldens", "[logout][render][golden]") {
+    CHECK(tgcli::cli::render_human("logout", {{"account", "main"}, {"logged_out", true}}) ==
+          golden("logout.txt"));
+    CHECK(tgcli::cli::render_human("logout", {{"dry_run", true},
+                                              {"plan",
+                                               {{"operation", "logout"},
+                                                {"account", "main"},
+                                                {"remote_logout", true},
+                                                {"tdlib_request", "logOut"}}}}) ==
+          golden("logout-dry-run.txt"));
+}
+
 TEST_CASE("daemon control human renderers match reviewed goldens",
           "[daemon-control][render][golden]") {
     CHECK(tgcli::cli::render_human("daemon status", {{"account", "main"},
