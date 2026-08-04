@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 
@@ -28,7 +29,7 @@ Frame round_trip(const Frame& frame) {
 }
 
 Request make_request() {
-    Request req;
+    Request req("main");
     req.id = 42;
     req.command = {"msg", "delete"};
     req.args = json{{"chat", "@dev"}, {"ids", json::array({1, 2})}};
@@ -93,9 +94,9 @@ json account_remove_target() {
 } // namespace
 
 TEST_CASE("serialized frames are single-line JSON", "[proto]") {
-    for (const Frame& frame :
-         {Frame{Hello{"0.1.0", 1}}, Frame{make_request()}, Frame{Result{1, json{{"ok", true}}}},
-          Frame{Error{2, "DENIED", "no grant", json::object(), 6}}}) {
+    for (const Frame& frame : {Frame{Hello{"0.1.0", kProtocolVersion}}, Frame{make_request()},
+                               Frame{Result{1, json{{"ok", true}}}},
+                               Frame{Error{2, "DENIED", "no grant", json::object(), 6}}}) {
         auto line = serialize(frame);
         CHECK(line.find('\n') == std::string::npos);
         CHECK(json::parse(line).is_object());
@@ -110,9 +111,17 @@ TEST_CASE("hello round-trip", "[proto]") {
 }
 
 TEST_CASE("request round-trip preserves context", "[proto]") {
+    const auto document = json::parse(serialize(make_request()));
+    CHECK(document.size() == 6);
+    for (const auto* field : {"type", "id", "account", "command", "args", "context"}) {
+        CHECK(document.contains(field));
+    }
+    CHECK(document["account"] == "main");
+
     auto frame = round_trip(make_request());
     auto& req = std::get<Request>(frame);
     CHECK(req.id == 42);
+    CHECK(req.account == "main");
     CHECK(req.command == std::vector<std::string>{"msg", "delete"});
     CHECK(req.args["chat"] == "@dev");
     CHECK(req.context.tty);
@@ -123,6 +132,34 @@ TEST_CASE("request round-trip preserves context", "[proto]") {
     CHECK(req.context.cwd == "/home/user");
     CHECK(req.context.media_dir == "/data/media");
     CHECK(req.context.write_authority == WriteAuthority::Deny);
+}
+
+TEST_CASE("request account is mandatory and uses the canonical account-name grammar",
+          "[proto][account][mutation]") {
+    STATIC_REQUIRE_FALSE(std::is_default_constructible_v<Request>);
+    const auto valid = json::parse(serialize(make_request()));
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value.erase("account"); },
+             [](json& value) { value["extra"] = true; }, [](json& value) { value["account"] = 1; },
+             [](json& value) { value["account"] = ""; },
+             [](json& value) { value["account"] = std::string(33, 'a'); },
+             [](json& value) { value["account"] = "bad.name"; },
+             [](json& value) { value["account"] = "m\xC3\xA4in"; }}) {
+        auto invalid = valid;
+        mutate(invalid);
+        std::string error;
+        INFO(invalid.dump());
+        CHECK_FALSE(parse(invalid.dump(), error));
+        CHECK_FALSE(error.empty());
+    }
+
+    for (const auto& invalid : {std::string{}, std::string(33, 'a'), std::string("bad.name"),
+                                std::string("m\xC3\xA4in")}) {
+        CHECK_THROWS_AS(Request(invalid), std::invalid_argument);
+        auto request = make_request();
+        request.account = invalid;
+        CHECK_THROWS_AS(serialize(request), std::invalid_argument);
+    }
 }
 
 TEST_CASE("request context nullables round-trip as null", "[proto]") {
@@ -402,7 +439,7 @@ TEST_CASE("request timeout distinguishes default from invalid present values", "
                 request_document_with_timeout(-1).dump(),
                 request_document_with_timeout(18446744073709551615ULL).dump(),
                 std::string(
-                    R"({"type":"request","id":42,"command":["version"],"args":{},"context":{"tty":true,"json":false,"yes":false,"dry_run":false,"timeout":1.7976931348623157e308,"cwd":"/","media_dir":null,"write_authority":"unset"}})"),
+                    R"({"type":"request","id":42,"account":"main","command":["version"],"args":{},"context":{"tty":true,"json":false,"yes":false,"dry_run":false,"timeout":1.7976931348623157e308,"cwd":"/","media_dir":null,"write_authority":"unset"}})"),
             })) {
             std::string error;
             INFO(line);

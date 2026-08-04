@@ -240,7 +240,7 @@ Outcome dispatch(const daemon::Dispatcher& dispatcher, std::vector<std::string> 
             outcome.challenges.push_back(challenge);
             return answer(challenge);
         });
-    proto::Request request;
+    proto::Request request("main");
     request.id = 77;
     request.command = std::move(command);
     request.args = std::move(args);
@@ -1073,7 +1073,7 @@ TEST_CASE("same-state update between api_id and api_hash restarts the credential
     FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitTdlibParameters});
     Outcome outcome;
     auto sink = callback_sink(outcome);
-    proto::Request request;
+    proto::Request request("main");
     request.id = 90;
     request.command = {"login"};
     request.args = {{"qr", false}, {"bot", false}};
@@ -1130,7 +1130,7 @@ TEST_CASE("same-state update between terms and names restarts registration confi
     FakeAuth auth(tree, registration);
     Outcome outcome;
     auto sink = callback_sink(outcome);
-    proto::Request request;
+    proto::Request request("main");
     request.id = 91;
     request.command = {"login"};
     request.args = {{"qr", false}, {"bot", false}};
@@ -1267,7 +1267,7 @@ TEST_CASE("a disconnected login orphan emits nothing and releases only after set
     FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitPhoneNumber});
     Outcome outcome;
     auto sink = callback_sink(outcome);
-    proto::Request request;
+    proto::Request request("main");
     request.id = 88;
     request.command = {"login"};
     request.args = {{"qr", false}, {"bot", false}};
@@ -1300,7 +1300,7 @@ TEST_CASE("a disconnected orphan deadline replaces the generation without a term
     FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitPhoneNumber});
     Outcome outcome;
     auto sink = callback_sink(outcome);
-    proto::Request request;
+    proto::Request request("main");
     request.id = 89;
     request.command = {"login"};
     request.args = {{"qr", false}, {"bot", false}};

@@ -183,6 +183,17 @@ bool wait_for_exists(const std::string& filename) {
     return false;
 }
 
+bool wait_for_missing(const std::string& first, const std::string& second) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (::access(first.c_str(), F_OK) != 0 && ::access(second.c_str(), F_OK) != 0) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
 class ChildGuard {
   public:
     explicit ChildGuard(pid_t pid) : pid_(pid) {}
@@ -245,6 +256,76 @@ TEST_CASE("real CLI account globals never spawn or create account roots",
     CHECK(no_daemon.err.empty());
     CHECK(json::parse(no_daemon.out)["items"].size() == 1);
     CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli"));
+}
+
+TEST_CASE("real CLI freezes explicit environment and default routes across daemon surfaces",
+          "[account][routing][cli][process][tdlib]") {
+    const ProcessEnvironment environment;
+    for (const auto* account : {"explicit", "environment", "configured"}) {
+        REQUIRE(run_cli(environment, {"account", "add", account}).exit_code == kOk);
+    }
+    REQUIRE(run_cli(environment, {"account", "use", "configured"}).exit_code == kOk);
+
+    struct RouteCase {
+        std::string account;
+        std::optional<std::string> environment_account;
+        std::vector<std::string> prefix;
+    };
+    for (const auto& route :
+         {RouteCase{"explicit", std::nullopt, {"--account", "explicit"}},
+          RouteCase{"environment", "environment", {}}, RouteCase{"configured", std::nullopt, {}}}) {
+        ProcessEnvironment::set_account(route.environment_account);
+        auto command = route.prefix;
+        command.emplace_back("doctor");
+        const auto doctor = run_cli(environment, command);
+        INFO(doctor.err);
+        REQUIRE(doctor.exit_code == kOk);
+        CHECK(doctor.err.empty());
+        const auto result = json::parse(doctor.out);
+        CHECK(result["account"] == route.account);
+
+        const std::string socket = environment.root() + "/run/tgcli/" + route.account + ".sock";
+        const std::string control = environment.root() + "/run/tgcli/" + route.account + ".ctl";
+        CHECK(result["daemon"]["socket"] == socket);
+        CHECK(wait_for_exists(socket));
+        CHECK(wait_for_exists(control));
+
+        command = route.prefix;
+        command.insert(command.end(), {"daemon", "stop"});
+        const auto stopped = run_cli(environment, command);
+        INFO(stopped.err);
+        REQUIRE(stopped.exit_code == kOk);
+        CHECK(stopped.err.empty());
+        CHECK(wait_for_missing(socket, control));
+    }
+}
+
+TEST_CASE("real CLI freezes implicit main across no-daemon and daemon routing",
+          "[account][routing][cli][process][tdlib]") {
+    const ProcessEnvironment environment;
+    const auto local = run_cli(environment, {"--no-daemon", "doctor"});
+    INFO(local.err);
+    REQUIRE(local.exit_code == kOk);
+    CHECK(local.err.empty());
+    CHECK(json::parse(local.out)["account"] == "main");
+
+    const auto remote = run_cli(environment, {"doctor"});
+    INFO(remote.err);
+    REQUIRE(remote.exit_code == kOk);
+    CHECK(remote.err.empty());
+    const std::string socket = environment.root() + "/run/tgcli/main.sock";
+    const std::string control = environment.root() + "/run/tgcli/main.ctl";
+    const auto result = json::parse(remote.out);
+    CHECK(result["account"] == "main");
+    CHECK(result["daemon"]["socket"] == socket);
+    CHECK(wait_for_exists(socket));
+    CHECK(wait_for_exists(control));
+
+    const auto stopped = run_cli(environment, {"daemon", "stop"});
+    INFO(stopped.err);
+    REQUIRE(stopped.exit_code == kOk);
+    CHECK(stopped.err.empty());
+    CHECK(wait_for_missing(socket, control));
 }
 
 TEST_CASE("daemon lifecycle --no-daemon fails before account routing", "[account][cli][process]") {

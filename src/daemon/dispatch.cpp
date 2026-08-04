@@ -83,6 +83,9 @@ void Dispatcher::register_command(const std::string& path, CommandDescriptor des
 void Dispatcher::dispatch(RequestSession& session) const {
     const auto& request = session.request();
     const auto key = command_key(request.command);
+    if (request_observer_) {
+        request_observer_(testing::RequestObservationStage::DispatcherLookup);
+    }
     const auto it = commands_.find(key);
     if (it == commands_.end()) {
         session.error("USAGE", "unknown command '" + key + "'", nlohmann::json::object(), kUsage);

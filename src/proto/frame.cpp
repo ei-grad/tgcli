@@ -1,11 +1,13 @@
 #include "proto/frame.hpp"
 
+#include "common/paths.hpp"
 #include "proto/destructive_plan.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace tgcli::proto {
@@ -192,6 +194,9 @@ struct FrameWriter {
     }
 
     json operator()(const Request& f) const {
+        if (!paths::valid_account_name(f.account)) {
+            throw std::invalid_argument("request account is invalid");
+        }
         json context{
             {"tty", f.context.tty},
             {"json", f.context.json},
@@ -202,11 +207,8 @@ struct FrameWriter {
             {"cwd", f.context.cwd},
             {"media_dir", f.context.media_dir ? json(*f.context.media_dir) : json(nullptr)},
             {"write_authority", authority_to_json(f.context.write_authority)}};
-        return {{"type", "request"},
-                {"id", f.id},
-                {"command", f.command},
-                {"args", f.args},
-                {"context", std::move(context)}};
+        return {{"type", "request"},    {"id", f.id},     {"account", f.account},
+                {"command", f.command}, {"args", f.args}, {"context", std::move(context)}};
     }
 
     json operator()(const Result& f) const {
@@ -319,15 +321,26 @@ class Parser {
     }
 
     std::optional<Frame> parse_request() {
+        if (!exact_fields(*doc_, {"type", "id", "account", "command", "args", "context"})) {
+            return fail("request: frame must contain exactly the protocol fields");
+        }
         auto id = parse_id();
         if (!id) {
             return std::nullopt;
+        }
+        const json* account = field("account");
+        if (account == nullptr || !account->is_string()) {
+            return fail("request: missing or non-string 'account'");
+        }
+        const auto& account_name = account->get_ref<const std::string&>();
+        if (!paths::valid_account_name(account_name)) {
+            return fail("request: invalid 'account'");
         }
         const json* command = field("command");
         if (command == nullptr || !command->is_array() || command->empty()) {
             return fail("request: 'command' must be a non-empty array");
         }
-        Request req;
+        Request req(account_name);
         req.id = *id;
         for (const auto& part : *command) {
             if (!part.is_string()) {
@@ -502,6 +515,12 @@ class Parser {
 } // namespace
 
 Answer::Answer() = default;
+
+Request::Request(std::string account_value) : account(std::move(account_value)) {
+    if (!paths::valid_account_name(account)) {
+        throw std::invalid_argument("request account is invalid");
+    }
+}
 
 // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
 Answer::Answer(std::uint64_t id_value, nlohmann::json&& answer_value,

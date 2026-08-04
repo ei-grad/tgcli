@@ -105,7 +105,7 @@ std::shared_ptr<daemon::CallbackSink> make_sink(
 }
 
 proto::Request request(bool tty = true, double timeout = 1.0) {
-    proto::Request value;
+    proto::Request value("main");
     value.id = 1;
     value.command = {"challenge-test"};
     value.context.tty = tty;

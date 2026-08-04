@@ -2,11 +2,13 @@
 
 #include "common/paths.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/request_observer.hpp"
 
 #include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -17,22 +19,42 @@ namespace tgcli::daemon {
 class ConnectionState;
 class RequestSession;
 
-struct ServerOptions {
-    ServerOptions(std::string socket_path_value, std::string binary_version_value,
-                  int protocol_version_value, std::string control_socket_path_value,
-                  std::string control_token_value, secure::WipeObserver wipe_observer_value = {})
-        : socket_path(std::move(socket_path_value)),
-          binary_version(std::move(binary_version_value)), protocol_version(protocol_version_value),
-          control_socket_path(std::move(control_socket_path_value)),
-          control_token(std::move(control_token_value)),
-          wipe_observer(std::move(wipe_observer_value)) {}
-
+class ServerOptions {
+  private:
+    std::string account_;
     std::string socket_path;
     std::string binary_version;
     int protocol_version = 0;
     std::string control_socket_path;
     std::string control_token;
     secure::WipeObserver wipe_observer;
+    testing::RequestObservationObserver request_observer;
+    testing::RequestAdmissionProbe request_admission_probe;
+
+    friend class Server;
+
+  public:
+    ServerOptions(std::string account_value, std::string socket_path_value,
+                  std::string binary_version_value, int protocol_version_value,
+                  std::string control_socket_path_value, std::string control_token_value,
+                  secure::WipeObserver wipe_observer_value = {},
+                  testing::RequestObservationObserver request_observer_value = {},
+                  testing::RequestAdmissionProbe request_admission_probe_value = {})
+        : account_(std::move(account_value)), socket_path(std::move(socket_path_value)),
+          binary_version(std::move(binary_version_value)), protocol_version(protocol_version_value),
+          control_socket_path(std::move(control_socket_path_value)),
+          control_token(std::move(control_token_value)),
+          wipe_observer(std::move(wipe_observer_value)),
+          request_observer(std::move(request_observer_value)),
+          request_admission_probe(std::move(request_admission_probe_value)) {
+        if (!paths::valid_account_name(account_)) {
+            throw std::invalid_argument("server account is invalid");
+        }
+    }
+
+    [[nodiscard]] const std::string& account() const {
+        return account_;
+    }
 };
 
 // Accepts connections on the account's unix socket and serves the JSONL

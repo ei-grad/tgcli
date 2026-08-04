@@ -817,10 +817,10 @@ bool wait_for_old_daemon_shutdown(RestartTarget& target, const std::string& sock
     return false;
 }
 
-bool request_binary_mismatched_stop(int fd, proto::FrameReader& reader, RestartTarget& target,
-                                    const std::string& socket_path, uid_t uid, Deadline deadline,
-                                    std::string& error) {
-    proto::Request stop_request;
+bool request_binary_mismatched_stop(int fd, proto::FrameReader& reader, const std::string& account,
+                                    RestartTarget& target, const std::string& socket_path,
+                                    uid_t uid, Deadline deadline, std::string& error) {
+    proto::Request stop_request(account);
     stop_request.id = 1;
     stop_request.command = {"daemon", "stop"};
     stop_request.context.cwd = "/";
@@ -887,10 +887,10 @@ bool join_shutdown_after_exchange_failure(RestartTarget& target, const std::stri
     return false;
 }
 
-bool request_compatible_stop(int fd, proto::FrameReader& reader, RestartTarget& target,
-                             const std::string& socket_path, uid_t uid, Deadline deadline,
-                             std::string& error) {
-    proto::Request stop_request;
+bool request_compatible_stop(int fd, proto::FrameReader& reader, const std::string& account,
+                             RestartTarget& target, const std::string& socket_path, uid_t uid,
+                             Deadline deadline, std::string& error) {
+    proto::Request stop_request(account);
     stop_request.id = 1;
     stop_request.command = {"daemon", "stop"};
     stop_request.context.cwd = "/";
@@ -927,14 +927,15 @@ bool request_out_of_band_stop(RestartTarget& target, const std::string& socket_p
 }
 
 bool stop_verified_daemon(HandshakeOutcome outcome, Session& session, proto::FrameReader& reader,
-                          RestartTarget& target, const std::string& socket_path, uid_t uid,
-                          Deadline deadline, std::string& error) {
+                          const std::string& account, RestartTarget& target,
+                          const std::string& socket_path, uid_t uid, Deadline deadline,
+                          std::string& error) {
     switch (outcome) {
     case HandshakeOutcome::Ok:
-        return request_compatible_stop(session.fd, reader, target, socket_path, uid, deadline,
-                                       error);
+        return request_compatible_stop(session.fd, reader, account, target, socket_path, uid,
+                                       deadline, error);
     case HandshakeOutcome::BinaryMismatch:
-        return request_binary_mismatched_stop(session.fd, reader, target, socket_path, uid,
+        return request_binary_mismatched_stop(session.fd, reader, account, target, socket_path, uid,
                                               deadline, error);
     case HandshakeOutcome::ProtocolMismatch:
     case HandshakeOutcome::IncompatibleHello:
@@ -966,8 +967,8 @@ bool recover_mismatched_daemon(HandshakeOutcome outcome, const std::string& acco
         error = "cannot verify mismatched daemon for restart: " + error;
         return false;
     }
-    if (stop_verified_daemon(outcome, session, reader, *target, socket_path, env.uid, deadline,
-                             error)) {
+    if (stop_verified_daemon(outcome, session, reader, account, *target, socket_path, env.uid,
+                             deadline, error)) {
         return true;
     }
     error = "cannot stop mismatched daemon: " + error;
@@ -1273,8 +1274,8 @@ int run_daemon_stop(const RunOptions& options, const paths::Environment& env,
                                       "cannot stop daemon: verified target is incomplete");
     }
     std::string stop_error;
-    if (!stop_verified_daemon(probe.handshake.outcome, session, *reader, *probe.target, socket_path,
-                              env.uid, deadline, stop_error)) {
+    if (!stop_verified_daemon(probe.handshake.outcome, session, *reader, options.account,
+                              *probe.target, socket_path, env.uid, deadline, stop_error)) {
         return daemon_control_failure("stop", "shutdown_failed", options,
                                       "cannot stop daemon: " + stop_error);
     }
@@ -1329,8 +1330,8 @@ int run_daemon_restart(const RunOptions& options, const paths::Environment& env,
         }
         old_owner = probe.owner_identity;
         std::string stop_error;
-        if (!stop_verified_daemon(probe.handshake.outcome, session, *reader, *probe.target,
-                                  socket_path, env.uid, deadline, stop_error)) {
+        if (!stop_verified_daemon(probe.handshake.outcome, session, *reader, options.account,
+                                  *probe.target, socket_path, env.uid, deadline, stop_error)) {
             return daemon_control_failure("restart", "shutdown_failed", options,
                                           "cannot restart daemon: " + stop_error);
         }
@@ -1371,9 +1372,26 @@ int run_daemon_control(const proto::Request& request, const RunOptions& options)
     return run_daemon_restart(options, env, *socket_path, *deadline);
 }
 
+std::optional<int> validate_request_route(const proto::Request& request,
+                                          const RunOptions& options) {
+    if (request.account != options.account) {
+        print_error("ACCOUNT_MISMATCH", "request account does not match the selected route",
+                    {{"requested_account", request.account}, {"daemon_account", options.account}});
+        return kNotFound;
+    }
+    if (!paths::valid_account_name(request.account)) {
+        print_error("USAGE", "invalid routed account", json::object());
+        return kUsage;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 int run_command(const proto::Request& request, const RunOptions& options) {
+    if (const auto route_error = validate_request_route(request, options); route_error) {
+        return *route_error;
+    }
     TerminalPrompt terminal_prompt;
     ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
     if (is_config_global_command(request.command)) {

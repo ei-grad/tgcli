@@ -1,5 +1,6 @@
 #pragma once
 
+#include "daemon/request_observer.hpp"
 #include "proto/frame.hpp"
 
 #include <functional>
@@ -115,12 +116,16 @@ struct CommandDescriptor {
 // §7): every request — socket or --no-daemon — passes through dispatch().
 class Dispatcher {
   public:
+    explicit Dispatcher(testing::RequestObservationObserver request_observer = {})
+        : request_observer_(std::move(request_observer)) {}
+
     void register_command(const std::string& path, CommandDescriptor descriptor);
     void dispatch(RequestSession& session) const;
     void dispatch(const proto::Request& request, ResponseSink& sink) const;
 
   private:
     std::map<std::string, CommandDescriptor> commands_;
+    testing::RequestObservationObserver request_observer_;
 };
 
 } // namespace tgcli::daemon

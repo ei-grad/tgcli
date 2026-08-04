@@ -19,7 +19,7 @@
 // the spec-bound part.
 namespace tgcli::proto {
 
-inline constexpr int kProtocolVersion = 1;
+inline constexpr int kProtocolVersion = 2;
 
 // The client folds --allow-write and TGCLI_ALLOW_WRITE into this field; the
 // daemon cannot see the invoking shell's environment (DESIGN.md §6/§10).
@@ -75,7 +75,10 @@ struct RequestContext {
 };
 
 struct Request {
+    explicit Request(std::string account_value);
+
     std::uint64_t id = 0;
+    std::string account;
     std::vector<std::string> command;
     nlohmann::json args = nlohmann::json::object();
     RequestContext context;

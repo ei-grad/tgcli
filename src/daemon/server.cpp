@@ -434,7 +434,11 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                 break;
             }
             if (const auto* hello = std::get_if<proto::Hello>(&*frame)) {
-                hello_seen = true;
+                if (hello_seen) {
+                    connection->send(proto::Error{0, "USAGE", "hello frame was already accepted",
+                                                  nlohmann::json::object(), kUsage});
+                    break;
+                }
                 if (hello->protocol_version != options_.protocol_version) {
                     connection->send(proto::Error{
                         0, "PROTOCOL_MISMATCH",
@@ -443,6 +447,7 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                         nlohmann::json::object(), kGeneric});
                     break;
                 }
+                hello_seen = true;
                 continue;
             }
             if (auto* answer = std::get_if<proto::Answer>(&*frame)) {
@@ -477,8 +482,23 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                                               nlohmann::json::object(), kUsage});
                 continue;
             }
+            if (request->account != options_.account()) {
+                connection->send(proto::Error{request->id,
+                                              "ACCOUNT_MISMATCH",
+                                              "request account does not match this daemon",
+                                              {{"requested_account", request->account},
+                                               {"daemon_account", options_.account()}},
+                                              kNotFound});
+                break;
+            }
+            if (options_.request_admission_probe) {
+                options_.request_admission_probe();
+            }
             auto sink = std::make_shared<ConnectionSink>(connection, request->id);
             active_session = std::make_shared<RequestSession>(*request, sink, connection->id());
+            if (options_.request_observer) {
+                options_.request_observer(testing::RequestObservationStage::SessionConstruction);
+            }
             active_terminal_visible = std::make_shared<std::atomic<bool>>(false);
             sink->set_terminal_hook([this, weak_session = std::weak_ptr(active_session),
                                      terminal_visible = active_terminal_visible](bool visible) {

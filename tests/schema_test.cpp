@@ -84,7 +84,7 @@ std::vector<SchemaCase> schema_cases() {
          {{"default_account", "work"}, {"previous_default", "main"}},
          "default_account"},
         {"version.result.schema.json",
-         {{"version", "0.1.0"}, {"protocol", 1}, {"tdlib", "1.8.65"}},
+         {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}},
          "version"},
         {"daemon-stop.result.schema.json", {{"stopping", true}}, "stopping"},
         {"daemon-status.result.schema.json",

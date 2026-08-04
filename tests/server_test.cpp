@@ -4,6 +4,7 @@
 #include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
 #include "common/paths.hpp"
+#include "daemon/activity_tracker.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
 #include "daemon/dispatch.hpp"
@@ -21,6 +22,8 @@
 #include <functional>
 #include <latch>
 #include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -35,9 +38,9 @@ using nlohmann::json;
 
 namespace {
 
-std::string test_socket_path() {
+std::string test_socket_path(std::string_view account = "main") {
     // Short and per-pid: sun_path is ~104 bytes and tests may run parallel.
-    return "/tmp/tgcli-test-" + std::to_string(getpid()) + "/main.sock";
+    return "/tmp/tgcli-test-" + std::to_string(getpid()) + "/" + std::string(account) + ".sock";
 }
 
 int connect_to(const std::string& path) {
@@ -72,8 +75,23 @@ void send_frame(int fd, const proto::Frame& frame) {
     REQUIRE(proto::write_frame(fd, frame, error));
 }
 
-proto::Request make_request(std::vector<std::string> command, std::uint64_t id = 1) {
-    proto::Request request;
+void send_line(int fd, std::string_view line) {
+    REQUIRE(::write(fd, line.data(), line.size()) == static_cast<ssize_t>(line.size()));
+    constexpr char newline = '\n';
+    REQUIRE(::write(fd, &newline, 1) == 1);
+}
+
+void check_eof(proto::FrameReader& reader) {
+    std::string io_error;
+    CHECK_FALSE(
+        reader.read_line_until(std::chrono::steady_clock::now() + std::chrono::seconds(2), io_error)
+            .has_value());
+    CHECK(io_error.empty());
+}
+
+proto::Request make_request(std::vector<std::string> command, std::uint64_t id = 1,
+                            std::string account = "test") {
+    proto::Request request(std::move(account));
     request.id = id;
     request.command = std::move(command);
     request.context.tty = true;
@@ -81,10 +99,115 @@ proto::Request make_request(std::vector<std::string> command, std::uint64_t id =
     return request;
 }
 
+constexpr std::array<std::pair<daemon::testing::RequestObservationStage, std::string_view>, 7>
+    kRequestObservationStages{
+        {{daemon::testing::RequestObservationStage::ConfigRead, "config"},
+         {daemon::testing::RequestObservationStage::HookExecution, "hook"},
+         {daemon::testing::RequestObservationStage::AuthStateRead, "auth"},
+         {daemon::testing::RequestObservationStage::PathResolution, "path"},
+         {daemon::testing::RequestObservationStage::ActivityAdmission, "activity"},
+         {daemon::testing::RequestObservationStage::SessionConstruction, "session"},
+         {daemon::testing::RequestObservationStage::DispatcherLookup, "dispatch"}}};
+
+struct RequestObservationCounters {
+    std::array<std::atomic<int>, kRequestObservationStages.size()> counts{};
+
+    void observe(daemon::testing::RequestObservationStage stage) {
+        counts.at(static_cast<std::size_t>(stage)).fetch_add(1, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] daemon::testing::RequestObservationObserver observer() {
+        return [this](daemon::testing::RequestObservationStage stage) { observe(stage); };
+    }
+
+    void reset() {
+        for (auto& count : counts) {
+            count.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    [[nodiscard]] int get(daemon::testing::RequestObservationStage stage) const {
+        return counts.at(static_cast<std::size_t>(stage)).load(std::memory_order_relaxed);
+    }
+};
+
+struct RoutedAccountProbe {
+    std::string account;
+    RequestObservationCounters* observations;
+    daemon::ActivityTracker activity;
+
+    RoutedAccountProbe(std::string account_value, RequestObservationCounters& observations_value)
+        : account(std::move(account_value)), observations(&observations_value),
+          activity([] {}, activity_hooks(*observations)) {
+        if (!activity.daemon_ready(std::nullopt)) {
+            throw std::runtime_error("request observation activity tracker did not become ready");
+        }
+    }
+
+    void install(daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "observe",
+            {daemon::Tier::Read, [this](const proto::Request&, daemon::RequestSession& session) {
+                 session.result({{"account", account}});
+             }});
+    }
+
+    [[nodiscard]] daemon::testing::RequestAdmissionProbe admission_probe() {
+        return [this] {
+            read_config();
+            execute_hook();
+            read_auth_state();
+            static_cast<void>(resolve_data_root());
+            auto activity_token = activity.try_request();
+            if (!activity_token) {
+                throw std::runtime_error("request observation activity admission failed");
+            }
+        };
+    }
+
+  private:
+    static std::shared_ptr<const daemon::testing::ActivityTrackerHooks>
+    activity_hooks(RequestObservationCounters& observations) {
+        auto hooks = std::make_shared<daemon::testing::ActivityTrackerHooks>();
+        hooks->before_admit_locked = [&observations] {
+            observations.observe(daemon::testing::RequestObservationStage::ActivityAdmission);
+        };
+        return hooks;
+    }
+
+    void read_config() const {
+        observations->observe(daemon::testing::RequestObservationStage::ConfigRead);
+    }
+
+    void execute_hook() const {
+        observations->observe(daemon::testing::RequestObservationStage::HookExecution);
+    }
+
+    void read_auth_state() const {
+        observations->observe(daemon::testing::RequestObservationStage::AuthStateRead);
+    }
+
+    [[nodiscard]] std::string resolve_data_root() const {
+        observations->observe(daemon::testing::RequestObservationStage::PathResolution);
+        paths::Environment environment;
+        environment.home = "/tmp/tgcli-observation-home";
+        environment.uid = getuid();
+        return paths::account_data_dir(account, environment);
+    }
+};
+
+void check_request_observations(const RequestObservationCounters& observations, int expected) {
+    for (const auto& [stage, name] : kRequestObservationStages) {
+        INFO(name);
+        CHECK(observations.get(stage) == expected);
+    }
+}
+
 struct TestDaemon {
     daemon::DaemonContext context;
     daemon::Dispatcher dispatcher;
-    std::string socket = test_socket_path();
+    std::string account;
+    std::string socket;
     daemon::Server server;
 
     TestDaemon(const TestDaemon&) = delete;
@@ -94,14 +217,25 @@ struct TestDaemon {
 
     explicit TestDaemon(const std::function<void(daemon::Dispatcher&)>& configure = {},
                         bool register_default_commands = true,
-                        secure::WipeObserver wipe_observer = {})
-        : server({socket, "9.9.9", proto::kProtocolVersion, {}, {}, std::move(wipe_observer)},
-                 dispatcher) {
+                        secure::WipeObserver wipe_observer = {}, std::string account_value = "test",
+                        const daemon::testing::RequestObservationObserver& request_observer = {},
+                        daemon::testing::RequestAdmissionProbe request_admission_probe = {})
+        : dispatcher(request_observer), account(std::move(account_value)),
+          socket(test_socket_path(account)), server({account,
+                                                     socket,
+                                                     "9.9.9",
+                                                     proto::kProtocolVersion,
+                                                     {},
+                                                     {},
+                                                     std::move(wipe_observer),
+                                                     request_observer,
+                                                     std::move(request_admission_probe)},
+                                                    dispatcher) {
         std::string error;
         const auto separator = socket.rfind('/');
         REQUIRE(separator != std::string::npos);
         REQUIRE(paths::ensure_private_dir(socket.substr(0, separator), getuid(), error));
-        context.account = "test";
+        context.account = account;
         context.binary_version = "9.9.9";
         context.protocol_version = proto::kProtocolVersion;
         context.tdlib_version = "1.2.3";
@@ -733,17 +867,137 @@ TEST_CASE("protocol mismatch gets a terminal error", "[server]") {
 }
 
 TEST_CASE("a request before hello is rejected", "[server]") {
-    const TestDaemon daemon;
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("main", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon([&probe](daemon::Dispatcher& dispatcher) { probe.install(dispatcher); },
+                            false, {}, "main", observer, probe.admission_probe());
+    observations.reset();
     const int fd = connect_to(daemon.socket);
     proto::FrameReader reader(fd);
     read_frame(reader); // daemon hello
-    send_frame(fd, make_request({"version"}));
+    send_frame(fd, make_request({"observe"}, 55, "work"));
 
     const auto response = read_frame(reader);
     const auto* error = std::get_if<proto::Error>(&response);
     REQUIRE(error != nullptr);
+    CHECK(error->id == 0);
     CHECK(error->code == "USAGE");
+    CHECK(error->details == json::object());
+    check_eof(reader);
+    check_request_observations(observations, 0);
     ::close(fd);
+}
+
+TEST_CASE("routed account mismatch is the sole terminal before request admission",
+          "[server][account][routing][race]") {
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("main", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon([&probe](daemon::Dispatcher& dispatcher) { probe.install(dispatcher); },
+                            false, {}, "main", observer, probe.admission_probe());
+    observations.reset();
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    read_frame(reader);
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"observe"}, 56, "work"));
+
+    const auto terminal = read_frame(reader);
+    const auto* error = std::get_if<proto::Error>(&terminal);
+    REQUIRE(error != nullptr);
+    CHECK(error->id == 56);
+    CHECK(error->code == "ACCOUNT_MISMATCH");
+    CHECK(error->exit_code == kNotFound);
+    CHECK(error->details == json{{"requested_account", "work"}, {"daemon_account", "main"}});
+    check_eof(reader);
+    check_request_observations(observations, 0);
+    ::close(fd);
+}
+
+TEST_CASE("strict request mutations are connection-scoped malformed frames",
+          "[server][proto][account][mutation]") {
+    const TestDaemon daemon({}, true, {}, "main");
+    const auto valid = json::parse(proto::serialize(make_request({"version"}, 57, "main")));
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value.erase("account"); },
+             [](json& value) { value["unknown"] = true; },
+             [](json& value) { value["account"] = json::array(); },
+             [](json& value) { value["account"] = ""; },
+             [](json& value) { value["account"] = std::string(33, 'x'); },
+             [](json& value) { value["account"] = "bad.name"; },
+             [](json& value) { value["account"] = "w\xC3\xB6rk"; }}) {
+        auto invalid = valid;
+        mutate(invalid);
+        const int fd = connect_to(daemon.socket);
+        proto::FrameReader reader(fd);
+        read_frame(reader);
+        send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+        send_line(fd, invalid.dump());
+
+        const auto terminal = read_frame(reader);
+        const auto* error = std::get_if<proto::Error>(&terminal);
+        REQUIRE(error != nullptr);
+        INFO(invalid.dump());
+        CHECK(error->id == 0);
+        CHECK(error->code == "USAGE");
+        CHECK(error->details == json::object());
+        check_eof(reader);
+        ::close(fd);
+    }
+}
+
+TEST_CASE("crossed account requests leave both daemons isolated and healthy",
+          "[server][account][routing][process]") {
+    RequestObservationCounters main_observations;
+    RequestObservationCounters work_observations;
+    RoutedAccountProbe main_probe("main", main_observations);
+    RoutedAccountProbe work_probe("work", work_observations);
+    const TestDaemon main_daemon(
+        [&main_probe](daemon::Dispatcher& dispatcher) { main_probe.install(dispatcher); }, false,
+        {}, "main", main_observations.observer(), main_probe.admission_probe());
+    const TestDaemon work_daemon(
+        [&work_probe](daemon::Dispatcher& dispatcher) { work_probe.install(dispatcher); }, false,
+        {}, "work", work_observations.observer(), work_probe.admission_probe());
+    main_observations.reset();
+    work_observations.reset();
+
+    for (const auto& [target, requested] : {std::pair{&main_daemon, std::string("work")},
+                                            std::pair{&work_daemon, std::string("main")}}) {
+        const int fd = connect_to(target->socket);
+        proto::FrameReader reader(fd);
+        read_frame(reader);
+        send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+        send_frame(fd, make_request({"observe"}, 58, requested));
+        const auto terminal = std::get<proto::Error>(read_frame(reader));
+        CHECK(terminal.code == "ACCOUNT_MISMATCH");
+        CHECK(terminal.details["requested_account"] == requested);
+        CHECK(terminal.details["daemon_account"] == target->account);
+        check_eof(reader);
+        ::close(fd);
+    }
+    check_request_observations(main_observations, 0);
+    check_request_observations(work_observations, 0);
+
+    const auto send_correct_request = [](const TestDaemon& target) {
+        const int fd = connect_to(target.socket);
+        proto::FrameReader reader(fd);
+        read_frame(reader);
+        send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+        send_frame(fd, make_request({"observe"}, 59, target.account));
+        const auto terminal = std::get<proto::Result>(read_frame(reader));
+        CHECK(terminal.data["account"] == target.account);
+        ::close(fd);
+    };
+
+    send_correct_request(main_daemon);
+    check_request_observations(main_observations, 1);
+    check_request_observations(work_observations, 0);
+
+    send_correct_request(work_daemon);
+    check_request_observations(main_observations, 1);
+    check_request_observations(work_observations, 1);
 }
 
 TEST_CASE("malformed frame gets a USAGE error and a closed connection", "[server]") {

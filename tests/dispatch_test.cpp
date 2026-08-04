@@ -42,7 +42,7 @@ Outcome dispatch(const daemon::Dispatcher& dispatcher, const std::vector<std::st
             outcome.error_code = std::move(code);
             outcome.exit_code = exit_code;
         });
-    proto::Request request;
+    proto::Request request("testacct");
     request.id = 1;
     request.command = command;
     dispatcher.dispatch(request, sink);
@@ -184,7 +184,7 @@ TEST_CASE("only the first terminal response is emitted", "[dispatch]") {
                               [&result_count](const json&) { ++result_count; },
                               [&error_count](const std::string&, const std::string&, const json&,
                                              int) { ++error_count; });
-    proto::Request request;
+    proto::Request request("testacct");
     request.id = 1;
     request.command = {"duplicate", "terminal"};
 

@@ -154,7 +154,7 @@ Outcome dispatch(const daemon::ConfigGlobalContext& context, std::vector<std::st
                                    {"details", std::move(details)}}}};
             outcome.exit_code = exit_code;
         });
-    proto::Request request;
+    proto::Request request("main");
     request.id = 1;
     request.command = std::move(command);
     request.args = std::move(args);
@@ -354,7 +354,7 @@ TEST_CASE("read-only account config loads stop on disconnect during an active tr
                               [&terminal_count](const json&) { ++terminal_count; },
                               [&terminal_count](const std::string&, const std::string&, const json&,
                                                 int) { ++terminal_count; });
-    proto::Request request;
+    proto::Request request("main");
     request.id = 1;
     request.command = {"account", "show"};
     request.args = target_args("main");

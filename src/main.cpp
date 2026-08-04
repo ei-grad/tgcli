@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include <CLI/CLI.hpp>
@@ -150,27 +151,28 @@ bool is_daemon_lifecycle(const std::vector<std::string>& command) {
            command == std::vector<std::string>{"daemon", "restart"};
 }
 
-void populate_config_global_args(tgcli::proto::Request& request,
-                                 const std::vector<std::string>& command, bool explicit_account,
-                                 const std::string& add_account, const std::string& show_account,
-                                 const std::string& use_account) {
-    request.args["global_account_supplied"] = explicit_account;
+void populate_config_global_args(nlohmann::json& args, const std::vector<std::string>& command,
+                                 bool explicit_account, const std::string& add_account,
+                                 const std::string& show_account, const std::string& use_account) {
+    args["global_account_supplied"] = explicit_account;
     if (command == std::vector<std::string>{"account", "add"}) {
-        request.args["account"] = add_account;
+        args["account"] = add_account;
     } else if (command == std::vector<std::string>{"account", "show"}) {
-        request.args["account"] = show_account;
+        args["account"] = show_account;
     } else if (command == std::vector<std::string>{"account", "use"}) {
-        request.args["account"] = use_account;
+        args["account"] = use_account;
     }
 }
 
-std::optional<int>
-resolve_request_account(const std::vector<std::string>& command, bool explicit_account,
-                        std::string& account, tgcli::proto::Request& request,
-                        bool& current_config_valid, const std::string& add_account,
-                        const std::string& show_account, const std::string& use_account) {
+std::optional<int> resolve_request_account(const std::vector<std::string>& command,
+                                           bool explicit_account, std::string& account,
+                                           nlohmann::json& args, bool& current_config_valid,
+                                           const std::string& add_account,
+                                           const std::string& show_account,
+                                           const std::string& use_account) {
     if (tgcli::cli::is_config_global_command(command)) {
-        populate_config_global_args(request, command, explicit_account, add_account, show_account,
+        account = "main";
+        populate_config_global_args(args, command, explicit_account, add_account, show_account,
                                     use_account);
         return std::nullopt;
     }
@@ -276,32 +278,37 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
-    tgcli::proto::Request request;
-    request.id = 1;
-    request.command = command;
-    request.context = make_request_context(json_output);
+    nlohmann::json request_args = nlohmann::json::object();
+    auto request_context = make_request_context(json_output);
     if (command == std::vector<std::string>{"login"}) {
-        request.args = {{"qr", login_qr}, {"bot", login_bot}};
+        request_args = {{"qr", login_qr}, {"bot", login_bot}};
     }
     if (timeout_option->count() != 0) {
-        request.context.timeout_seconds = timeout_seconds;
+        request_context.timeout_seconds = timeout_seconds;
     }
 
     const bool explicit_account = account_option->count() != 0;
     bool current_config_valid = true;
     if (const auto route_exit =
-            resolve_request_account(command, explicit_account, account, request,
+            resolve_request_account(command, explicit_account, account, request_args,
                                     current_config_valid, add_account, show_account, use_account);
         route_exit.has_value()) {
         return route_exit.value();
     }
 
+    const std::string resolved_account = account;
     if (command == std::vector<std::string>{"daemon", "run"}) {
-        return tgcli::daemon::run_daemon(account);
+        return tgcli::daemon::run_daemon(resolved_account);
     }
 
+    tgcli::proto::Request request(resolved_account);
+    request.id = 1;
+    request.command = command;
+    request.args = std::move(request_args);
+    request.context = std::move(request_context);
+
     tgcli::cli::RunOptions options;
-    options.account = account.empty() ? "main" : account;
+    options.account = resolved_account;
     options.json = json_output;
     options.no_daemon = no_daemon;
     options.auto_spawn = command != std::vector<std::string>{"daemon", "status"} &&
