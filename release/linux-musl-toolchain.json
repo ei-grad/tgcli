@@ -1,5 +1,5 @@
 {
-  "dependency_lock_sha256": "ec476fc68bb4a447ebaa1b9e1498f3b26f91e69a9740de65bb76f0aa8a61d745",
+  "dependency_lock_sha256": "af5485c708f8bfbeb2561217b64fe5289e9b9ba33996fe4cfad27412019e96c4",
   "image": "docker.io/dockcross/base@sha256:846afc88d415b67fed1c2c0a6961d9ca0d11fee739c8644d5b670ced497674ea",
   "openssl": {
     "source_sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
