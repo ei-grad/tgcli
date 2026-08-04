@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <deque>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -56,24 +57,9 @@ class AuthTracker {
         : client_(client), session_(session) {
         subscription_ = client_.subscribe_auth_states(
             [this](const std::shared_ptr<const AuthStateSnapshot>& snapshot) {
-                {
-                    const std::lock_guard lock(mutex_);
-                    latest_ = snapshot;
-                    pending_.push_back(snapshot);
-                }
-                if (snapshot) {
-                    session_.supersede(snapshot->client_generation, snapshot->auth_sequence);
-                }
-                cv_.notify_all();
+                observe(snapshot);
             });
-        const auto snapshot = client_.auth_state();
-        const std::lock_guard lock(mutex_);
-        if (snapshot &&
-            (!latest_ || std::tie(snapshot->client_generation, snapshot->auth_sequence) >
-                             std::tie(latest_->client_generation, latest_->auth_sequence))) {
-            latest_ = snapshot;
-            pending_.push_back(snapshot);
-        }
+        static_cast<void>(record(client_.auth_state()));
     }
 
     ~AuthTracker() {
@@ -100,8 +86,8 @@ class AuthTracker {
         return result;
     }
 
-    std::shared_ptr<const AuthStateSnapshot>
-    first_change_after(const AuthStateSnapshot& previous) const {
+    std::shared_ptr<const AuthStateSnapshot> first_change_after(const AuthStateSnapshot& previous) {
+        observe(client_.auth_state());
         const std::lock_guard lock(mutex_);
         const auto changed_from_previous = [&](const auto& candidate) {
             return candidate && (candidate->client_generation != previous.client_generation ||
@@ -126,6 +112,25 @@ class AuthTracker {
     }
 
   private:
+    bool record(const std::shared_ptr<const AuthStateSnapshot>& snapshot) {
+        const std::lock_guard lock(mutex_);
+        if (!snapshot ||
+            (latest_ && std::tie(snapshot->client_generation, snapshot->auth_sequence) <=
+                            std::tie(latest_->client_generation, latest_->auth_sequence))) {
+            return false;
+        }
+        latest_ = snapshot;
+        pending_.push_back(snapshot);
+        return true;
+    }
+
+    void observe(const std::shared_ptr<const AuthStateSnapshot>& snapshot) {
+        if (record(snapshot)) {
+            session_.supersede(snapshot->client_generation, snapshot->auth_sequence);
+        }
+        cv_.notify_all();
+    }
+
     core::TdClient& client_;
     RequestSession& session_;
     mutable std::mutex mutex_;
@@ -140,40 +145,82 @@ enum class WaitKind { Response, Updated, TimedOut, Cancelled, Failed };
 struct WaitResult {
     WaitKind kind = WaitKind::Failed;
     core::TdValue value;
+    std::optional<core::TdAuthorizationFailure> authorization_failure;
 };
+
+WaitResult consume_query_response(std::future<core::TdValue>& response,
+                                  const AuthStateSnapshot& sent, AuthTracker& tracker) {
+    try {
+        auto value = response.get();
+        const auto first_change = tracker.first_change_after(sent);
+        if (first_change && first_change->receive_event_sequence != 0 &&
+            (value.receive_event_sequence() == 0 ||
+             first_change->receive_event_sequence < value.receive_event_sequence())) {
+            return {WaitKind::Updated, {}, std::nullopt};
+        }
+        return {WaitKind::Response, std::move(value), std::nullopt};
+    } catch (const core::TdAuthorizationError& error) {
+        if (tracker.first_change_after(sent)) {
+            return {WaitKind::Updated, {}, std::nullopt};
+        }
+        return {WaitKind::Failed, {}, error.failure()};
+    } catch (const std::exception&) {
+        if (tracker.first_change_after(sent)) {
+            return {WaitKind::Updated, {}, std::nullopt};
+        }
+        return {WaitKind::Failed, {}, std::nullopt};
+    }
+}
 
 WaitResult wait_query(std::future<core::TdValue>& response, const AuthStateSnapshot& sent,
                       AuthTracker& tracker, RequestSession& session) {
     for (;;) {
         if (response.wait_for(0ms) == std::future_status::ready) {
-            try {
-                auto value = response.get();
-                const auto first_change = tracker.first_change_after(sent);
-                if (first_change && first_change->receive_event_sequence != 0 &&
-                    (value.receive_event_sequence() == 0 ||
-                     first_change->receive_event_sequence < value.receive_event_sequence())) {
-                    return {WaitKind::Updated, {}};
-                }
-                return {WaitKind::Response, std::move(value)};
-            } catch (const std::exception&) {
-                if (tracker.first_change_after(sent)) {
-                    return {WaitKind::Updated, {}};
-                }
-                return {WaitKind::Failed, {}};
-            }
+            return consume_query_response(response, sent, tracker);
         }
         if (tracker.first_change_after(sent)) {
-            return {WaitKind::Updated, {}};
+            return {WaitKind::Updated, {}, std::nullopt};
         }
         if (RequestSession::Clock::now() >= session.deadline()) {
-            return {WaitKind::TimedOut, {}};
+            return {WaitKind::TimedOut, {}, std::nullopt};
         }
         if (session.cancellation_requested() &&
             session.in_flight_state() != InFlightState::Orphaned) {
-            return {WaitKind::Cancelled, {}};
+            return {WaitKind::Cancelled, {}, std::nullopt};
         }
         std::this_thread::sleep_for(1ms);
     }
+}
+
+std::string_view auth_function_name(TdFunctionKind function) {
+    switch (function) {
+    case TdFunctionKind::GetAuthorizationState:
+    case TdFunctionKind::SetTdlibParameters:
+    case TdFunctionKind::SetAuthenticationPhoneNumber:
+    case TdFunctionKind::RequestQrCodeAuthentication:
+    case TdFunctionKind::CheckAuthenticationBotToken:
+    case TdFunctionKind::SetAuthenticationEmailAddress:
+    case TdFunctionKind::CheckAuthenticationEmailCode:
+    case TdFunctionKind::CheckAuthenticationCode:
+    case TdFunctionKind::RegisterUser:
+    case TdFunctionKind::CheckAuthenticationPassword:
+    case TdFunctionKind::GetMe:
+    case TdFunctionKind::LogOut:
+    case TdFunctionKind::Close:
+        return core::td_function_name(function);
+    case TdFunctionKind::GetOption:
+        return "other";
+    }
+    return "other";
+}
+
+void function_denied(RequestSession& session, std::string_view account,
+                     const AuthStateSnapshot& snapshot, TdFunctionKind function) {
+    session.error("AUTH_FUNCTION_DENIED", "TDLib authorization function was denied",
+                  {{"account", account},
+                   {"state", core::auth_state_name(snapshot.data.state)},
+                   {"function", auth_function_name(function)}},
+                  kDenied);
 }
 
 std::optional<std::string_view> credential_for(TdFunctionKind function, std::int32_t code,
@@ -224,17 +271,21 @@ std::optional<std::string_view> credential_for(TdFunctionKind function, std::int
                                       : std::optional<std::string_view>{found->credential};
 }
 
-std::int64_t retry_after(std::string_view message) {
-    static const std::regex pattern(R"((?:retry after|FLOOD_WAIT_)([0-9]+))", std::regex::icase);
+std::int32_t retry_after(std::string_view message) {
+    static const std::regex pattern(
+        R"((?:^|[^[:alnum:]_])(?:retry[[:space:]]+after[[:space:]]*|FLOOD_WAIT_)([0-9]+))",
+        std::regex::icase);
     std::cmatch match;
-    if (std::regex_search(message.begin(), message.end(), match, pattern) && match.size() == 2) {
-        try {
-            return std::stoll(match[1].str());
-        } catch (const std::exception&) {
-            return 0;
-        }
+    if (!std::regex_search(message.begin(), message.end(), match, pattern) || match.size() != 2) {
+        return 0;
     }
-    return 0;
+    std::int32_t value = 0;
+    for (const char character : match[1].str()) {
+        const auto digit = static_cast<std::int32_t>(character - '0');
+        constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+        value = value > (maximum - digit) / 10 ? maximum : value * 10 + digit;
+    }
+    return value;
 }
 
 std::string_view delivery_name(core::AuthCodeDelivery delivery) {
@@ -602,6 +653,10 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
         if (session.cancellation_requested() || waited.kind == WaitKind::Cancelled) {
             return true;
         }
+        if (waited.authorization_failure) {
+            function_denied(session, account_, *snapshot, function);
+            return true;
+        }
         if (waited.kind == WaitKind::Failed) {
             session.error("INTERNAL", "authentication request failed locally",
                           {{"operation", "login"}, {"reason", "internal_error"}}, kGeneric);
@@ -886,6 +941,10 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
                 return;
             }
             if (session.cancellation_requested()) {
+                return;
+            }
+            if (waited.authorization_failure) {
+                function_denied(session, account_, *snapshot, TdFunctionKind::SetTdlibParameters);
                 return;
             }
             if (waited.kind != WaitKind::Response) {
@@ -1225,6 +1284,10 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
             if (session.cancellation_requested()) {
                 return;
             }
+            if (waited.authorization_failure) {
+                function_denied(session, account_, *snapshot, TdFunctionKind::GetMe);
+                return;
+            }
             if (waited.kind != WaitKind::Response) {
                 return;
             }
@@ -1293,6 +1356,10 @@ void LoginCoordinator::me(const proto::Request& request, RequestSession& session
         return;
     }
     if (session.cancellation_requested()) {
+        return;
+    }
+    if (waited.authorization_failure) {
+        function_denied(session, account_, *snapshot, TdFunctionKind::GetMe);
         return;
     }
     if (waited.kind != WaitKind::Response) {

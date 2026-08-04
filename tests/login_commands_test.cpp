@@ -7,11 +7,17 @@
 #include "schema_matcher.hpp"
 #include "support/scripted_td_runtime.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <sys/stat.h>
@@ -292,6 +298,81 @@ const core::TdFieldValue* field(const core::TdFunctionData& function, std::strin
     return nullptr;
 }
 
+struct LoginFunctionSetup {
+    core::AuthStateData state;
+    json args{{"qr", false}, {"bot", false}};
+    std::size_t answers_before_send = 0;
+};
+
+LoginFunctionSetup login_setup(core::TdFunctionKind function) {
+    switch (function) {
+    case core::TdFunctionKind::SetTdlibParameters:
+        return {core::AuthStateData{core::AuthState::WaitTdlibParameters}};
+    case core::TdFunctionKind::SetAuthenticationPhoneNumber:
+        return {core::AuthStateData{core::AuthState::WaitPhoneNumber},
+                {{"qr", false}, {"bot", false}},
+                1};
+    case core::TdFunctionKind::RequestQrCodeAuthentication:
+        return {core::AuthStateData{core::AuthState::WaitPhoneNumber},
+                {{"qr", true}, {"bot", false}},
+                0};
+    case core::TdFunctionKind::CheckAuthenticationBotToken:
+        return {core::AuthStateData{core::AuthState::WaitPhoneNumber},
+                {{"qr", false}, {"bot", true}},
+                1};
+    case core::TdFunctionKind::SetAuthenticationEmailAddress:
+        return {
+            core::AuthStateData{core::AuthState::WaitEmailAddress, core::AuthWaitEmailAddress{}},
+            {{"qr", false}, {"bot", false}},
+            1};
+    case core::TdFunctionKind::CheckAuthenticationEmailCode:
+        return {core::AuthStateData{
+                    core::AuthState::WaitEmailCode,
+                    core::AuthWaitEmailCode{.allow_apple_id = false,
+                                            .allow_google_id = false,
+                                            .email_address_pattern = "a***@example.test",
+                                            .expected_length = 6,
+                                            .reset_state = core::AuthEmailResetState::None,
+                                            .reset_delay = 0,
+                                            .unsupported_reset_tdlib_type_id = std::nullopt}},
+                {{"qr", false}, {"bot", false}},
+                1};
+    case core::TdFunctionKind::CheckAuthenticationCode:
+        return {core::AuthStateData{
+                    core::AuthState::WaitCode,
+                    core::AuthWaitCode{.delivery = {core::AuthCodeDelivery::Sms, 5, std::nullopt},
+                                       .next_delivery = std::nullopt,
+                                       .resend_timeout = 30}},
+                {{"qr", false}, {"bot", false}},
+                1};
+    case core::TdFunctionKind::RegisterUser:
+        return {core::AuthStateData{core::AuthState::WaitRegistration,
+                                    core::AuthWaitRegistration{.terms_text = "terms",
+                                                               .minimum_user_age = 16,
+                                                               .show_popup = true}},
+                {{"qr", false}, {"bot", false}},
+                3};
+    case core::TdFunctionKind::CheckAuthenticationPassword:
+        return {
+            core::AuthStateData{core::AuthState::WaitPassword,
+                                core::AuthWaitPassword{.hint = "hint",
+                                                       .has_recovery_email_address = true,
+                                                       .has_passport_data = false,
+                                                       .recovery_email_address_pattern = "a***"}},
+            {{"qr", false}, {"bot", false}},
+            1};
+    case core::TdFunctionKind::GetMe:
+        return {core::AuthStateData{core::AuthState::Ready}};
+    case core::TdFunctionKind::GetAuthorizationState:
+    case core::TdFunctionKind::GetOption:
+    case core::TdFunctionKind::LogOut:
+    case core::TdFunctionKind::Close:
+        break;
+    }
+    FAIL("unsupported login function setup");
+    return {};
+}
+
 } // namespace
 
 TEST_CASE("me is Ready-only and returns the curated user through the real dispatcher",
@@ -315,6 +396,57 @@ TEST_CASE("me is Ready-only and returns the curated user through the real dispat
     CHECK(outcome.exit_code == kOk);
     CHECK((*outcome.result)["id"] == 123456);
     CHECK_THAT(*outcome.result, test::matches_json_schema("me.result.schema.json"));
+}
+
+TEST_CASE("typed TD authorization failures remain terminal through real dispatch",
+          "[auth][login][authorization][dispatch][schema]") {
+    const AuthTree tree;
+    FakeAuth auth(tree, core::AuthStateData{core::AuthState::Ready});
+    auth.runtime().set_before_send([](const core::TdFunctionData& function) {
+        if (function.kind() == core::TdFunctionKind::GetMe) {
+            throw core::TdAuthorizationError(core::TdAuthorizationFailure::FunctionDenied);
+        }
+    });
+
+    const auto outcome = dispatch(auth.dispatcher(), {"me"});
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "AUTH_FUNCTION_DENIED");
+    CHECK((*outcome.error)["error"]["details"] ==
+          json{{"account", "main"}, {"state", "ready"}, {"function", "getMe"}});
+    CHECK(outcome.exit_code == kDenied);
+    CHECK(outcome.terminal_count == 1);
+    CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+}
+
+TEST_CASE("every login wait site reports a typed TD authorization failure once",
+          "[auth][login][authorization][dispatch][schema]") {
+    const std::array functions{core::TdFunctionKind::SetTdlibParameters,
+                               core::TdFunctionKind::SetAuthenticationPhoneNumber,
+                               core::TdFunctionKind::GetMe};
+
+    for (const auto function : functions) {
+        DYNAMIC_SECTION(core::td_function_name(function)) {
+            const AuthTree tree;
+            const auto setup = login_setup(function);
+            FakeAuth auth(tree, setup.state);
+            auth.runtime().set_before_send([function](const core::TdFunctionData& sent) {
+                if (sent.kind() == function) {
+                    throw core::TdAuthorizationError(core::TdAuthorizationFailure::FunctionDenied);
+                }
+            });
+
+            const auto outcome = dispatch(auth.dispatcher(), {"login"}, setup.args);
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "AUTH_FUNCTION_DENIED");
+            CHECK((*outcome.error)["error"]["details"] ==
+                  json{{"account", "main"},
+                       {"state", core::auth_state_name(setup.state.state)},
+                       {"function", core::td_function_name(function)}});
+            CHECK(outcome.exit_code == kDenied);
+            CHECK(outcome.terminal_count == 1);
+            CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+        }
+    }
 }
 
 TEST_CASE("phone login follows state updates and returns getMe identity",
@@ -460,6 +592,225 @@ TEST_CASE("a listed phone rejection retries with a fresh challenge in the same o
     CHECK(outcome.challenges.at(0)["sequence"] == 1);
     CHECK(outcome.challenges.at(1)["sequence"] == 2);
     CHECK(outcome.challenges.at(0)["nonce"] != outcome.challenges.at(1)["nonce"]);
+}
+
+TEST_CASE("the closed credential rejection matrix retries every exact tuple",
+          "[auth][login][retry][credential-matrix][dispatch][schema]") {
+    struct CredentialCase {
+        core::TdFunctionKind function;
+        std::int32_t code;
+        std::string_view message;
+        std::string_view credential;
+    };
+    static constexpr std::array<CredentialCase, 25> cases{{
+        {core::TdFunctionKind::SetTdlibParameters, 400,
+         "Valid api_id must be provided. Can be obtained at https://my.telegram.org",
+         "app_credentials"},
+        {core::TdFunctionKind::SetTdlibParameters, 400,
+         "Valid api_hash must be provided. Can be obtained at https://my.telegram.org",
+         "app_credentials"},
+        {core::TdFunctionKind::SetTdlibParameters, 401, "Wrong database encryption key",
+         "database_key"},
+        {core::TdFunctionKind::SetAuthenticationPhoneNumber, 400, "Phone number must be non-empty",
+         "phone_number"},
+        {core::TdFunctionKind::SetAuthenticationPhoneNumber, 406, "PHONE_NUMBER_INVALID",
+         "phone_number"},
+        {core::TdFunctionKind::SetAuthenticationPhoneNumber, 400, "API_ID_INVALID",
+         "app_credentials"},
+        {core::TdFunctionKind::RequestQrCodeAuthentication, 400, "API_ID_INVALID",
+         "app_credentials"},
+        {core::TdFunctionKind::CheckAuthenticationBotToken, 400, "API_ID_INVALID",
+         "app_credentials"},
+        {core::TdFunctionKind::CheckAuthenticationBotToken, 400, "ACCESS_TOKEN_INVALID",
+         "bot_token"},
+        {core::TdFunctionKind::CheckAuthenticationBotToken, 400, "ACCESS_TOKEN_EXPIRED",
+         "bot_token"},
+        {core::TdFunctionKind::SetAuthenticationEmailAddress, 400,
+         "Email address must be non-empty", "email_address"},
+        {core::TdFunctionKind::SetAuthenticationEmailAddress, 400, "EMAIL_INVALID",
+         "email_address"},
+        {core::TdFunctionKind::CheckAuthenticationEmailCode, 400, "Code must be non-empty",
+         "email_code"},
+        {core::TdFunctionKind::CheckAuthenticationEmailCode, 400, "CODE_INVALID", "email_code"},
+        {core::TdFunctionKind::CheckAuthenticationEmailCode, 400, "EMAIL_VERIFY_EXPIRED",
+         "email_code"},
+        {core::TdFunctionKind::CheckAuthenticationEmailCode, 400, "PHONE_CODE_EMPTY", "email_code"},
+        {core::TdFunctionKind::CheckAuthenticationEmailCode, 400, "PHONE_CODE_INVALID",
+         "email_code"},
+        {core::TdFunctionKind::CheckAuthenticationEmailCode, 400, "PHONE_CODE_EXPIRED",
+         "email_code"},
+        {core::TdFunctionKind::CheckAuthenticationCode, 400, "PHONE_CODE_EMPTY",
+         "authentication_code"},
+        {core::TdFunctionKind::CheckAuthenticationCode, 400, "PHONE_CODE_INVALID",
+         "authentication_code"},
+        {core::TdFunctionKind::CheckAuthenticationCode, 400, "PHONE_CODE_EXPIRED",
+         "authentication_code"},
+        {core::TdFunctionKind::RegisterUser, 400, "First name must be non-empty",
+         "registration_name"},
+        {core::TdFunctionKind::RegisterUser, 400, "FIRSTNAME_INVALID", "registration_name"},
+        {core::TdFunctionKind::RegisterUser, 400, "LASTNAME_INVALID", "registration_name"},
+        {core::TdFunctionKind::CheckAuthenticationPassword, 400, "PASSWORD_HASH_INVALID",
+         "password"},
+    }};
+
+    for (const auto& entry : cases) {
+        DYNAMIC_SECTION(core::td_function_name(entry.function)
+                        << ":" << entry.code << ":" << entry.message) {
+            const AuthTree tree;
+            const auto setup = login_setup(entry.function);
+            FakeAuth auth(tree, setup.state);
+            std::size_t answers = 0;
+            auto pending = std::async(std::launch::async, [&] {
+                return dispatch(auth.dispatcher(), {"login"}, setup.args, true, 0.05,
+                                [&](const json& challenge) -> std::optional<json> {
+                                    if (answers >= setup.answers_before_send) {
+                                        return std::nullopt;
+                                    }
+                                    ++answers;
+                                    return answer_for(challenge);
+                                });
+            });
+            REQUIRE(auth.runtime().wait_for_sent(2));
+            const auto sent = auth.runtime().sent_functions();
+            REQUIRE(sent.size() == 2);
+            CHECK(sent.at(1).function.kind() == entry.function);
+            auth.runtime().push_response(
+                auth.first(), sent.at(1).query_id,
+                core::TdValue::from(core::TdError{entry.code, std::string(entry.message)}));
+
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+            CHECK(outcome.exit_code == kTimeout);
+            CHECK(outcome.terminal_count == 1);
+            REQUIRE(outcome.progress.size() == 1);
+            CHECK(outcome.progress.front() ==
+                  json{{"kind", "auth_retry"},
+                       {"auth_sequence", 1},
+                       {"state", core::auth_state_name(setup.state.state)},
+                       {"credential", entry.credential},
+                       {"tdlib_code", entry.code}});
+            CHECK(outcome.challenges.size() == setup.answers_before_send + 1);
+            CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+        }
+    }
+}
+
+TEST_CASE("a listed credential rejection is terminal without a TTY",
+          "[auth][login][retry][dispatch][schema]") {
+    const AuthTree tree;
+    FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitTdlibParameters});
+    auto pending = std::async(std::launch::async, [&] {
+        return dispatch(auth.dispatcher(), {"login"}, {{"qr", false}, {"bot", false}}, false);
+    });
+    REQUIRE(auth.runtime().wait_for_sent(2));
+    const auto sent = auth.runtime().sent_functions();
+    auth.runtime().push_response(
+        auth.first(), sent.at(1).query_id,
+        core::TdValue::from(core::TdError{
+            400, "Valid api_hash must be provided. Can be obtained at https://my.telegram.org"}));
+
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "AUTH_CREDENTIAL_REJECTED");
+    CHECK((*outcome.error)["error"]["details"] == json{{"account", "main"},
+                                                       {"state", "wait_tdlib_parameters"},
+                                                       {"credential", "app_credentials"},
+                                                       {"tdlib_code", 400}});
+    CHECK(outcome.exit_code == kNotAuthed);
+    CHECK(outcome.terminal_count == 1);
+    CHECK(outcome.challenges.empty());
+    CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+}
+
+TEST_CASE("credential classification rejects every near miss and unlisted TD error",
+          "[auth][login][retry][dispatch][schema]") {
+    struct ErrorCase {
+        std::int32_t code;
+        std::string_view message;
+    };
+    static constexpr std::array cases{
+        ErrorCase{406, "phone_number_invalid"},  ErrorCase{406, " PHONE_NUMBER_INVALID"},
+        ErrorCase{406, "PHONE_NUMBER_INVALID "}, ErrorCase{400, "PHONE_NUMBER_INVALID"},
+        ErrorCase{401, "PHONE_NUMBER_INVALID"},  ErrorCase{400, "ACCESS_TOKEN_INVALID"},
+        ErrorCase{500, "SERVER_ERROR"},          ErrorCase{599, "SERVER_ERROR"},
+    };
+
+    for (const auto& entry : cases) {
+        DYNAMIC_SECTION(entry.code << ":" << entry.message) {
+            const AuthTree tree;
+            FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitPhoneNumber});
+            auto pending = std::async(std::launch::async, [&] {
+                return dispatch(auth.dispatcher(), {"login"}, {{"qr", false}, {"bot", false}});
+            });
+            REQUIRE(auth.runtime().wait_for_sent(2));
+            const auto sent = auth.runtime().sent_functions();
+            auth.runtime().push_response(
+                auth.first(), sent.at(1).query_id,
+                core::TdValue::from(core::TdError{entry.code, std::string(entry.message)}));
+
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "TDLIB_ERROR");
+            CHECK((*outcome.error)["error"]["details"] ==
+                  json{{"operation", "login"}, {"tdlib_code", entry.code}});
+            CHECK(outcome.exit_code == kGeneric);
+            CHECK(outcome.terminal_count == 1);
+            CHECK(outcome.progress.empty());
+            CHECK(outcome.challenges.size() == 1);
+            CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+        }
+    }
+}
+
+TEST_CASE("login rate limits parse retry bounds without overflow",
+          "[auth][login][rate-limit][dispatch][schema]") {
+    struct RateLimitCase {
+        std::string_view message;
+        std::int32_t retry_after;
+    };
+    static constexpr std::array cases{
+        RateLimitCase{"FLOOD_WAIT_0", 0},
+        RateLimitCase{"Too Many Requests: retry after 17 seconds", 17},
+        RateLimitCase{"HTTP 429: retry after 17 seconds", 17},
+        RateLimitCase{"DC5 FLOOD_WAIT_17", 17},
+        RateLimitCase{"HTTP 429: ReTrY\tAfTeR 23 seconds", 23},
+        RateLimitCase{"retry after -17 seconds", 0},
+        RateLimitCase{"FLOOD_WAIT_-17", 0},
+        RateLimitCase{"HTTP 429 without a retry marker", 0},
+        RateLimitCase{"notretry after 29 seconds", 0},
+        RateLimitCase{"prefix_FLOOD_WAIT_31", 0},
+        RateLimitCase{"retry after 2147483647 seconds", std::numeric_limits<std::int32_t>::max()},
+        RateLimitCase{"retry after 21474836499999999999 seconds",
+                      std::numeric_limits<std::int32_t>::max()},
+        RateLimitCase{"flood wait", 0},
+    };
+
+    for (const auto& entry : cases) {
+        DYNAMIC_SECTION(entry.message) {
+            const AuthTree tree;
+            FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitPhoneNumber});
+            auto pending = std::async(std::launch::async, [&] {
+                return dispatch(auth.dispatcher(), {"login"}, {{"qr", false}, {"bot", false}});
+            });
+            REQUIRE(auth.runtime().wait_for_sent(2));
+            const auto sent = auth.runtime().sent_functions();
+            auth.runtime().push_response(
+                auth.first(), sent.at(1).query_id,
+                core::TdValue::from(core::TdError{429, std::string(entry.message)}));
+
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "RATE_LIMITED");
+            CHECK((*outcome.error)["error"]["details"] == json{{"operation", "login"},
+                                                               {"tdlib_code", 429},
+                                                               {"retry_after", entry.retry_after}});
+            CHECK(outcome.exit_code == kRateLimited);
+            CHECK(outcome.terminal_count == 1);
+            CHECK(outcome.progress.empty());
+            CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+        }
+    }
 }
 
 TEST_CASE("login maps the remaining interactive states to the exact TD functions",
@@ -1229,6 +1580,135 @@ TEST_CASE("auth response and update precedence follows queued TD receive order",
         const auto outcome = pending.get();
         REQUIRE(outcome.result);
         CHECK(outcome.error == std::nullopt);
+    }
+
+    SECTION("an authoritative update also wins over a typed local authorization failure") {
+        for (const bool advance_after_delayed_delivery : {false, true}) {
+            DYNAMIC_SECTION((advance_after_delayed_delivery
+                                 ? "a delayed duplicate does not hide the next transition"
+                                 : "the directly adopted update reaches getMe successfully")) {
+                const AuthTree tree;
+                FakeAuth auth(tree, core::AuthStateData{core::AuthState::WaitPhoneNumber});
+                std::mutex barrier_mutex;
+                std::condition_variable barrier_cv;
+                bool challenge_hook_entered = false;
+                bool allow_update = false;
+                bool subscriber_entered = false;
+                bool release_subscriber = false;
+                std::uint64_t delivered_sequence = 0;
+                const auto blocking_subscription = auth.client().subscribe_auth_states(
+                    [&](const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
+                        if (!snapshot || snapshot->auth_sequence < 2) {
+                            return;
+                        }
+                        std::unique_lock lock(barrier_mutex);
+                        subscriber_entered = true;
+                        barrier_cv.notify_all();
+                        static_cast<void>(
+                            barrier_cv.wait_for(lock, 2s, [&] { return release_subscriber; }));
+                    });
+                Outcome outcome;
+                auto sink = callback_sink(outcome);
+                proto::Request request("main");
+                request.id = 92;
+                request.command = {"login"};
+                request.args = {{"qr", false}, {"bot", false}};
+                request.context.tty = true;
+                request.context.timeout_seconds = 2.0;
+                daemon::RequestSession session(request, *sink);
+                bool update_observed = false;
+                session.set_challenge_return_hook([&](daemon::ChallengeStatus status) {
+                    if (status != daemon::ChallengeStatus::Answered || update_observed) {
+                        return;
+                    }
+                    {
+                        std::unique_lock lock(barrier_mutex);
+                        challenge_hook_entered = true;
+                        barrier_cv.notify_all();
+                        static_cast<void>(
+                            barrier_cv.wait_for(lock, 2s, [&] { return allow_update; }));
+                    }
+                    auth.runtime().push_update(auth.first(), {},
+                                               core::AuthStateData{core::AuthState::Ready});
+                    std::unique_lock lock(barrier_mutex);
+                    update_observed =
+                        barrier_cv.wait_for(lock, 2s, [&] { return subscriber_entered; });
+                });
+                auto pending =
+                    std::async(std::launch::async, [&] { auth.dispatcher().dispatch(session); });
+                bool hook_observed = false;
+                {
+                    std::unique_lock lock(barrier_mutex);
+                    hook_observed =
+                        barrier_cv.wait_for(lock, 2s, [&] { return challenge_hook_entered; });
+                }
+                const auto trailing_subscription = auth.client().subscribe_auth_states(
+                    [&](const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
+                        if (!snapshot) {
+                            return;
+                        }
+                        const std::lock_guard lock(barrier_mutex);
+                        delivered_sequence = std::max(delivered_sequence, snapshot->auth_sequence);
+                        barrier_cv.notify_all();
+                    });
+                {
+                    const std::lock_guard lock(barrier_mutex);
+                    allow_update = true;
+                }
+                barrier_cv.notify_all();
+                const bool first_get_me_sent = auth.runtime().wait_for_sent(2);
+                {
+                    const std::lock_guard lock(barrier_mutex);
+                    release_subscriber = true;
+                }
+                barrier_cv.notify_all();
+                bool delayed_delivery_completed = false;
+                {
+                    std::unique_lock lock(barrier_mutex);
+                    delayed_delivery_completed =
+                        barrier_cv.wait_for(lock, 2s, [&] { return delivered_sequence >= 2; });
+                }
+
+                bool later_update_delivered = false;
+                const auto sent = auth.runtime().sent_functions();
+                if (first_get_me_sent && delayed_delivery_completed &&
+                    advance_after_delayed_delivery) {
+                    auth.runtime().push_update(
+                        auth.first(), {}, core::AuthStateData{core::AuthState::WaitPhoneNumber});
+                    {
+                        std::unique_lock lock(barrier_mutex);
+                        later_update_delivered =
+                            barrier_cv.wait_for(lock, 2s, [&] { return delivered_sequence >= 3; });
+                    }
+                } else if (first_get_me_sent) {
+                    auth.runtime().push_response(auth.first(), sent.at(1).query_id,
+                                                 core::TdValue::from(ada()));
+                }
+
+                pending.get();
+                auth.client().unsubscribe_auth_states(trailing_subscription);
+                auth.client().unsubscribe_auth_states(blocking_subscription);
+                CHECK(hook_observed);
+                CHECK(update_observed);
+                CHECK(first_get_me_sent);
+                CHECK(delayed_delivery_completed);
+                CHECK(later_update_delivered == advance_after_delayed_delivery);
+                REQUIRE(sent.size() == 2);
+                CHECK(sent.at(1).function.kind() == core::TdFunctionKind::GetMe);
+                if (advance_after_delayed_delivery) {
+                    REQUIRE(outcome.error);
+                    CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+                    CHECK((*outcome.error)["error"]["details"] ==
+                          json{{"account", "main"},
+                               {"state", "wait_phone_number"},
+                               {"reason", "authorization_lost"}});
+                } else {
+                    REQUIRE(outcome.result);
+                    CHECK(outcome.error == std::nullopt);
+                }
+                CHECK(outcome.terminal_count == 1);
+            }
+        }
     }
 }
 

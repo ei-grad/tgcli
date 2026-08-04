@@ -48,6 +48,24 @@
         "registration_last_name",
         "registration_terms"
       ]
+    },
+    "auth_function": {
+      "enum": [
+        "getAuthorizationState",
+        "setTdlibParameters",
+        "setAuthenticationPhoneNumber",
+        "requestQrCodeAuthentication",
+        "checkAuthenticationBotToken",
+        "setAuthenticationEmailAddress",
+        "checkAuthenticationEmailCode",
+        "checkAuthenticationCode",
+        "registerUser",
+        "checkAuthenticationPassword",
+        "getMe",
+        "logOut",
+        "close",
+        "other"
+      ]
     }
   },
   "type": "object",
@@ -264,6 +282,25 @@
               "properties": {
                 "account": { "type": "string" },
                 "tdlib_type_id": { "type": "integer" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "AUTH_FUNCTION_DENIED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state", "function"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": { "$ref": "#/$defs/state" },
+                "function": { "$ref": "#/$defs/auth_function" }
               }
             }
           }

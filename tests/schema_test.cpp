@@ -242,6 +242,55 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(daemon_error);
 }
 
+TEST_CASE("auth function denial has a closed exact detail schema", "[schema][auth]") {
+    const std::vector<std::string_view> functions{
+        "getAuthorizationState",
+        "setTdlibParameters",
+        "setAuthenticationPhoneNumber",
+        "requestQrCodeAuthentication",
+        "checkAuthenticationBotToken",
+        "setAuthenticationEmailAddress",
+        "checkAuthenticationEmailCode",
+        "checkAuthenticationCode",
+        "registerUser",
+        "checkAuthenticationPassword",
+        "getMe",
+        "logOut",
+        "close",
+        "other",
+    };
+    for (const auto function : functions) {
+        const json error{
+            {"error",
+             {{"code", "AUTH_FUNCTION_DENIED"},
+              {"message", "TDLib authorization function was denied"},
+              {"details", {{"account", "main"}, {"state", "ready"}, {"function", function}}}}}};
+        CHECK_THAT(error, tgcli::test::matches_json_schema("auth.error.schema.json"));
+    }
+
+    json invalid{
+        {"error",
+         {{"code", "AUTH_FUNCTION_DENIED"},
+          {"message", "denied"},
+          {"details", {{"account", "main"}, {"state", "ready"}, {"function", "getOption"}}}}}};
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("auth.error.schema.json"));
+
+    invalid["error"]["details"]["function"] = "GETME";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("auth.error.schema.json"));
+
+    invalid["error"]["details"]["function"] = "getMe";
+    invalid["error"]["details"]["state"] = "Ready";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("auth.error.schema.json"));
+
+    invalid["error"]["details"]["state"] = "ready";
+    invalid["error"]["details"]["unexpected"] = true;
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("auth.error.schema.json"));
+
+    invalid["error"]["details"].erase("unexpected");
+    invalid["error"]["details"].erase("function");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("auth.error.schema.json"));
+}
+
 TEST_CASE("daemon control errors match their closed schema", "[schema][daemon-control]") {
     const std::vector<json> errors{
         {{"error", {{"code", "USAGE"}, {"message", "unsupported"}, {"details", json::object()}}}},
