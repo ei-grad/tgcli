@@ -141,6 +141,12 @@ class TdClient {
     std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    TdFunctionKind function, TdValue request);
     std::future<TdValue> get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization);
+    std::future<TdValue>
+    get_saved_messages_tags(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            std::int64_t saved_messages_topic_id);
+    std::future<TdValue>
+    search_saved_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          TdSearchSavedMessagesRequest request);
 
     [[nodiscard]] bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const;
 

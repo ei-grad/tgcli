@@ -17,6 +17,10 @@ namespace tgcli::daemon {
 class Dispatcher;
 }
 
+namespace tgcli::core {
+class TdClient;
+}
+
 namespace tgcli::cli {
 
 struct RunOptions {
@@ -38,6 +42,9 @@ struct RunOptions {
     // Optional in-process dispatcher injection for frontends and end-to-end
     // transport tests. The normal --no-daemon path builds the production table.
     const daemon::Dispatcher* in_process_dispatcher = nullptr;
+    // Shared fake-boundary seam for --no-daemon contract tests. Null creates
+    // the production TDLib client; the caller retains ownership when set.
+    core::TdClient* in_process_td_client = nullptr;
 };
 
 // Runs one command end to end: connect to (or spawn) the account daemon —

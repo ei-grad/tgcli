@@ -35,6 +35,8 @@ FunctionPolicy policy_for(TdFunctionKind function) {
         return {DescriptorKind::AuthBootstrap, AuthState::WaitPassword, TdOwnerKind::Login};
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetMe:
+    case TdFunctionKind::GetSavedMessagesTags:
+    case TdFunctionKind::SearchSavedMessages:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::LogOut:
         return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request};

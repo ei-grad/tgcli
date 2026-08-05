@@ -129,7 +129,9 @@ class TdClient::Impl {
     std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    TdFunctionKind function, TdValue request) {
         if (!authorization ||
-            (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe)) {
+            (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
+             function != TdFunctionKind::GetSavedMessagesTags &&
+             function != TdFunctionKind::SearchSavedMessages)) {
             return failed_future(TdAuthorizationFailure::FunctionDenied);
         }
         auto owner = issue_owner(TdOwnerKind::Request);
@@ -151,6 +153,20 @@ class TdClient::Impl {
         }
         return send_read(authorization, TdFunctionKind::GetMe,
                          runtime_->make_auth_function(TdAuthRequest{TdFunctionKind::GetMe}));
+    }
+
+    std::future<TdValue>
+    get_saved_messages_tags(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            std::int64_t saved_messages_topic_id) {
+        return send_read(authorization, TdFunctionKind::GetSavedMessagesTags,
+                         runtime_->make_get_saved_messages_tags(saved_messages_topic_id));
+    }
+
+    std::future<TdValue>
+    search_saved_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          TdSearchSavedMessagesRequest request) {
+        return send_read(authorization, TdFunctionKind::SearchSavedMessages,
+                         runtime_->make_search_saved_messages(std::move(request)));
     }
 
     std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -1064,6 +1080,18 @@ TdClient::send_read(const std::shared_ptr<const AuthStateSnapshot>& authorizatio
 std::future<TdValue>
 TdClient::get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
     return impl_->get_me(authorization);
+}
+
+std::future<TdValue>
+TdClient::get_saved_messages_tags(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int64_t saved_messages_topic_id) {
+    return impl_->get_saved_messages_tags(authorization, saved_messages_topic_id);
+}
+
+std::future<TdValue>
+TdClient::search_saved_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                TdSearchSavedMessagesRequest request) {
+    return impl_->search_saved_messages(authorization, std::move(request));
 }
 
 std::future<TdValue>

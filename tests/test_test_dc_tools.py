@@ -577,6 +577,28 @@ class HarnessInvariantTests(unittest.TestCase):
         runner.qr_approvals = 1
         acceptance._require_qr_approval(runner)
 
+    def test_saved_tags_milestone_flow_requires_the_exact_result_shape(self) -> None:
+        acceptance._assert_saved_tags(
+            {
+                "items": [
+                    {"tag": "🧪", "label": "experiments", "count": 7},
+                    {"tag": "custom:123456789", "label": "", "count": 2},
+                ],
+                "next": None,
+            }
+        )
+        invalid = (
+            {"items": [], "next": "cursor"},
+            {"items": [{"tag": "", "label": "", "count": 0}], "next": None},
+            {"items": [{"tag": "🧪", "label": "", "count": True}], "next": None},
+            {"items": [{"tag": "🧪", "label": "", "count": -1}], "next": None},
+        )
+        for document in invalid:
+            with self.subTest(document=document), self.assertRaises(
+                acceptance.AcceptanceError
+            ):
+                acceptance._assert_saved_tags(document)
+
     def test_observed_prompts_map_only_to_their_pinned_auth_states(self) -> None:
         result = acceptance.CommandResult(
             {},

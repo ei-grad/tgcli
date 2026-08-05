@@ -16,6 +16,7 @@
 #include "daemon/removal_journal.hpp"
 #include "daemon/removal_recovery.hpp"
 #include "daemon/request_session.hpp"
+#include "daemon/saved_commands.hpp"
 #include "daemon/server.hpp"
 
 #include <array>
@@ -24,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <pthread.h>
 #include <string>
 #include <string_view>
@@ -245,6 +247,7 @@ int run_daemon(const std::string& account) {
                                           environment_value("TGCLI_API_HASH"));
     AccountRemovalCoordinator account_removal(config_store, removal_journal, environment, account,
                                               removal_remote, stop_server, {}, stop_server);
+    SavedCoordinator saved(td, account);
 
     DaemonContext context;
     context.account = account;
@@ -255,6 +258,7 @@ int run_daemon(const std::string& account) {
     context.login = &login;
     context.logout = &logout;
     context.account_removal = &account_removal;
+    context.saved = &saved;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -313,7 +317,8 @@ int run_daemon(const std::string& account) {
 }
 
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
-                   std::string& error, const Dispatcher* dispatcher_override) {
+                   std::string& error, const Dispatcher* dispatcher_override,
+                   core::TdClient* td_client_override) {
     const auto environment = paths::real_environment();
     if (request.command == std::vector<std::string>{"account", "remove"} &&
         request.args.is_object()) {
@@ -345,10 +350,15 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         return false;
     }
 
-    core::TdClient td(core::TdLogConfiguration{
-        .file_path = paths::tdlib_log_file(account, environment),
-        .json_diagnostics = request.context.json,
-    });
+    std::unique_ptr<core::TdClient> owned_td;
+    if (td_client_override == nullptr) {
+        owned_td = std::make_unique<core::TdClient>(core::TdLogConfiguration{
+            .file_path = paths::tdlib_log_file(account, environment),
+            .json_diagnostics = request.context.json,
+        });
+        td_client_override = owned_td.get();
+    }
+    core::TdClient& td = *td_client_override;
     const config::Store config_store(paths::config_file(environment), environment.uid);
     ConfigRuntime config_runtime(config_store.path(), {}, environment.uid);
     const auto environment_value = [](const char* name) -> std::optional<std::string> {
@@ -365,6 +375,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
                                           environment_value("TGCLI_API_HASH"));
     AccountRemovalCoordinator account_removal(config_store, removal_journal, environment, account,
                                               removal_remote);
+    SavedCoordinator saved(td, account);
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -374,6 +385,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.login = &login;
     context.logout = &logout;
     context.account_removal = &account_removal;
+    context.saved = &saved;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -383,7 +395,9 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     register_commands(dispatcher, context);
     (dispatcher_override != nullptr ? *dispatcher_override : dispatcher).dispatch(request, sink);
 
-    td.close();
+    if (owned_td) {
+        td.close();
+    }
     ::close(lock_fd);
     ::close(removal_gate_fd);
     return true;

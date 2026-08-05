@@ -37,6 +37,12 @@
     "me": {
       "result": "me.result.schema.json"
     },
+    "saved search": {
+      "result": "saved-search.result.schema.json"
+    },
+    "saved tags": {
+      "result": "saved-tags.result.schema.json"
+    },
     "version": {
       "result": "version.result.schema.json"
     }

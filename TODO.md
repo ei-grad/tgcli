@@ -138,7 +138,7 @@ before the milestone is closed.
 - [ ] `tgcli read` (limits, --before, --since/--until, --topic, --local)
 - [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`
 - [ ] `tgcli search` (per-chat, --global, filters; server-side only)
-- [ ] `tgcli saved tags|search`: user-account-only reaction-tag discovery plus
+- [x] `tgcli saved tags|search`: user-account-only reaction-tag discovery plus
       tag-only/tag+text search; canonical emoji/custom selector round-trip,
       label/count/order output, account/scope/filter-bound cursor pagination,
       and contract coverage for NOT_AUTHED/BOT_UNSUPPORTED preflight, malformed
@@ -147,7 +147,7 @@ before the milestone is closed.
 - [ ] `tgcli unread`
 - [ ] `tgcli fetch <chat>` (--limit/--all/--since, resumable, progress frames)
 - [ ] `tgcli chat info`, `tgcli chat members`
-- [ ] Add a supported M2 read-path flow to the test-DC E2E milestone gate
+- [x] Add a supported M2 read-path flow to the test-DC E2E milestone gate
 - [ ] Review gate: M2 diff vs DESIGN.md
 
 ## M3 — Safety & write path

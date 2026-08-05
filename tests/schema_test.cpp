@@ -173,6 +173,24 @@ std::vector<SchemaCase> schema_cases() {
           {"config", {{"path", "/tmp/config.toml"}, {"exists", false}}}},
          "account",
          true},
+        {"saved-tags.result.schema.json",
+         {{"items", json::array({json{{"tag", "🧪"}, {"label", "experiments"}, {"count", 7}},
+                                 json{{"tag", "custom:123456789"}, {"label", ""}, {"count", 2}}})},
+          {"next", nullptr}},
+         "items",
+         true},
+        {"saved-search.result.schema.json",
+         {{"items", json::array({json{{"id", 200},
+                                      {"chat_id", 42},
+                                      {"date", "2026-07-02T12:00:00Z"},
+                                      {"text", "experiment result"}},
+                                 json{{"id", 199},
+                                      {"chat_id", 42},
+                                      {"date", "2026-07-02T11:59:00Z"},
+                                      {"text", ""}}})},
+          {"next", "tgcli.saved.v1.cursor"}},
+         "items",
+         true},
     };
 }
 
@@ -236,9 +254,11 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                           {"login", {{"result", "login.result.schema.json"}}},
                           {"logout", {{"result", "logout.result.schema.json"}}},
                           {"me", {{"result", "me.result.schema.json"}}},
+                          {"saved search", {{"result", "saved-search.result.schema.json"}}},
+                          {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
                           {"version", {{"result", "version.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 13);
+    CHECK(manifest["commands"].size() == 15);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -285,6 +305,8 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(auth_error);
     const auto daemon_error = tgcli::test::load_schema_document("daemon.error.schema.json");
     check_schema_node(daemon_error);
+    const auto saved_error = tgcli::test::load_schema_document("saved.error.schema.json");
+    check_schema_node(saved_error);
     for (const auto* filename : {"logout.error.schema.json", "account-remove.error.schema.json",
                                  "audit-intent.schema.json", "audit-checkpoint.schema.json",
                                  "audit-outcome.schema.json", "removal-tombstone.schema.json"}) {
@@ -293,6 +315,35 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
         CHECK(schema["$schema"] == kDialect);
         check_schema_node(schema);
     }
+}
+
+TEST_CASE("Saved Messages errors have exact command-specific shapes", "[schema][saved][error]") {
+    const std::vector<json> errors{
+        terminal_error("USAGE", {{"argument", "--tag"}, {"reason", "invalid_argument"}}),
+        terminal_error("NOT_AUTHED",
+                       {{"account", "main"}, {"state", "wait_code"}, {"reason", "not_ready"}}),
+        json{{"error",
+              {{"code", "BOT_UNSUPPORTED"},
+               {"message", "saved commands require a user account"},
+               {"details", json::object()}}}},
+        terminal_error("RATE_LIMITED",
+                       {{"operation", "saved_search"}, {"tdlib_code", 429}, {"retry_after", 5}}),
+        terminal_error("TDLIB_ERROR", {{"operation", "saved_search"}, {"tdlib_code", 400}}),
+        terminal_error("TDLIB_ERROR", {{"operation", "saved_tags"}, {"tdlib_type_id", 436294381}}),
+        terminal_error(
+            "TDLIB_ERROR",
+            {{"operation", "saved_tags"}, {"tdlib_type_id", -989117709}, {"custom_emoji_id", 0}}),
+        terminal_error("TIMEOUT", {{"operation", "saved_tags"}, {"state", "ready"}}),
+        terminal_error("INTERNAL", {{"operation", "saved_search"}, {"reason", "internal_error"}}),
+    };
+    for (const auto& error : errors) {
+        INFO(error.dump());
+        CHECK_THAT(error, tgcli::test::matches_json_schema("saved.error.schema.json"));
+    }
+
+    auto unknown = errors.front();
+    unknown["error"]["details"]["extra"] = true;
+    CHECK_THAT(unknown, !tgcli::test::matches_json_schema("saved.error.schema.json"));
 }
 
 TEST_CASE("destructive error schemas close command shapes and uint64 request ids",

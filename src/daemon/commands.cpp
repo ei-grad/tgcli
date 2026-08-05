@@ -5,6 +5,7 @@
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/request_session.hpp"
+#include "daemon/saved_commands.hpp"
 
 #include <cstdint>
 #include <unistd.h>
@@ -47,6 +48,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     if (context.account_removal != nullptr) {
         register_account_removal_command(dispatcher, *context.account_removal);
     }
+    if (context.saved != nullptr) {
+        register_saved_commands(dispatcher, *context.saved);
+    }
     if (context.logout != nullptr || context.account_removal != nullptr) {
         dispatcher.set_request_preflight([&context](const std::string& command,
                                                     RequestSession& session) {
@@ -55,6 +59,7 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
             }
             const bool account_command = command == "login" || command == "logout" ||
                                          command == "me" || command == "doctor" ||
+                                         command == "saved tags" || command == "saved search" ||
                                          command == "daemon status" || command == "daemon stop" ||
                                          command == "daemon restart";
             if (context.account_removal != nullptr && account_command &&
@@ -64,8 +69,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
             if (command == "logout" && session.request().context.dry_run) {
                 return true;
             }
-            if (context.logout != nullptr && (command == "login" || command == "logout" ||
-                                              command == "me" || command == "doctor")) {
+            if (context.logout != nullptr &&
+                (command == "login" || command == "logout" || command == "me" ||
+                 command == "doctor" || command == "saved tags" || command == "saved search")) {
                 return context.logout->preflight(session);
             }
             return true;

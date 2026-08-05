@@ -326,6 +326,9 @@ not satisfy `--tag`. An unused but valid tag is a successful empty list, not
 
 The first search page uses
 `tgcli saved search [<query>] --tag <selector> [-n N]` without `--cursor`.
+For this Saved-only command, omitted `-n` means 20 and an explicit value must
+be an integer from 1 through 100 inclusive. This is not yet a default for the
+broader M2 read surface.
 A continuation uses `tgcli saved search --cursor <token>` and may redundantly
 repeat the same query and canonical `--tag` selector; `-n` is omitted because
 the original page size is cursor-bound. The opaque cursor binds the
@@ -338,6 +341,22 @@ A cursor for another operation, account, or Saved Messages scope, a malformed
 cursor, or a supplied query/tag that differs from the cursor fails with
 `USAGE`. Results use the standard paginated message list in reverse message-id
 order, with the next opaque cursor in `next` or null when exhausted.
+
+The saved-search item is the Saved-only exact summary
+`{"id":integer,"chat_id":integer,"date":string,"text":string}`. `id` and
+`chat_id` are tdlib's returned message and chat ids. `date` is tdlib's Unix
+`message.date` rendered in UTC as `YYYY-MM-DDTHH:MM:SSZ`. `text` is the exact
+`formattedText.text` for `messageText`; it is the empty string for every other
+message-content variant. This deliberately does not establish the eventual
+global M2 `MessageSummary` or add speculative sender, topic, or media fields.
+
+Saved failures use the standard error envelope. `BOT_UNSUPPORTED` has exact
+empty details. TDLib RPC errors use `TDLIB_ERROR` with
+`{"operation":"saved_tags"|"saved_search","tdlib_code":integer}` except 429,
+which uses the standard `RATE_LIMITED` shape. A paid, unknown, null, invalid
+UTF-8 emoji, or otherwise unusable returned tag uses `TDLIB_ERROR` with
+`{"operation":"saved_tags","tdlib_type_id":integer}`; a non-positive custom
+emoji id additionally includes `custom_emoji_id`.
 
 `saved tags` and `saved search` are read-tier. The pinned
 `searchSavedMessages` API is Premium-only; an unavailable Premium capability

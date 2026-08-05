@@ -129,6 +129,63 @@ TdValue make_native_auth_function(TdAuthRequest request) {
                              TdFunctionData{request.function, std::move(fields)});
 }
 
+td_api::object_ptr<td_api::ReactionType> make_native_reaction(const TdReactionType& reaction) {
+    switch (reaction.kind) {
+    case TdReactionKind::Emoji:
+        return td_api::make_object<td_api::reactionTypeEmoji>(reaction.emoji);
+    case TdReactionKind::CustomEmoji:
+        return td_api::make_object<td_api::reactionTypeCustomEmoji>(reaction.custom_emoji_id);
+    case TdReactionKind::Paid:
+    case TdReactionKind::Unknown:
+        throw std::invalid_argument("unsupported Saved Messages reaction selector");
+    }
+    throw std::invalid_argument("unsupported Saved Messages reaction selector");
+}
+
+TdReactionType convert_reaction(const td_api::ReactionType* reaction) {
+    if (reaction == nullptr) {
+        return {
+            .kind = TdReactionKind::Unknown, .emoji = {}, .custom_emoji_id = 0, .tdlib_type_id = 0};
+    }
+    switch (reaction->get_id()) {
+    case td_api::reactionTypeEmoji::ID:
+        return {.kind = TdReactionKind::Emoji,
+                .emoji = static_cast<const td_api::reactionTypeEmoji&>(*reaction).emoji_,
+                .custom_emoji_id = 0,
+                .tdlib_type_id = reaction->get_id()};
+    case td_api::reactionTypeCustomEmoji::ID:
+        return {.kind = TdReactionKind::CustomEmoji,
+                .emoji = {},
+                .custom_emoji_id =
+                    static_cast<const td_api::reactionTypeCustomEmoji&>(*reaction).custom_emoji_id_,
+                .tdlib_type_id = reaction->get_id()};
+    case td_api::reactionTypePaid::ID:
+        return {.kind = TdReactionKind::Paid,
+                .emoji = {},
+                .custom_emoji_id = 0,
+                .tdlib_type_id = reaction->get_id()};
+    default:
+        return {.kind = TdReactionKind::Unknown,
+                .emoji = {},
+                .custom_emoji_id = 0,
+                .tdlib_type_id = reaction->get_id()};
+    }
+}
+
+TdSavedMessageSummary convert_saved_message(const td_api::message& message) {
+    std::string text;
+    if (message.content_ != nullptr && message.content_->get_id() == td_api::messageText::ID) {
+        const auto& content = static_cast<const td_api::messageText&>(*message.content_);
+        if (content.text_ != nullptr) {
+            text = content.text_->text_;
+        }
+    }
+    return {.id = message.id_,
+            .chat_id = message.chat_id_,
+            .date = message.date_,
+            .text = std::move(text)};
+}
+
 TdValue convert_response(NativeObjectPtr object) {
     if (object == nullptr) {
         return {};
@@ -154,6 +211,38 @@ TdValue convert_response(NativeObjectPtr object) {
             summary.usernames = std::move(user.usernames_->active_usernames_);
         }
         return TdValue::from(std::move(summary));
+    }
+    case td_api::savedMessagesTags::ID: {
+        auto& tags = static_cast<td_api::savedMessagesTags&>(*object);
+        TdSavedMessagesTags converted;
+        converted.tags.reserve(tags.tags_.size());
+        for (auto& item : tags.tags_) {
+            if (item == nullptr) {
+                converted.tags.push_back({.tag = {.kind = TdReactionKind::Unknown,
+                                                  .emoji = {},
+                                                  .custom_emoji_id = 0,
+                                                  .tdlib_type_id = 0},
+                                          .label = {},
+                                          .count = 0});
+                continue;
+            }
+            converted.tags.push_back({.tag = convert_reaction(item->tag_.get()),
+                                      .label = std::move(item->label_),
+                                      .count = item->count_});
+        }
+        return TdValue::from(std::move(converted));
+    }
+    case td_api::foundChatMessages::ID: {
+        auto& found = static_cast<td_api::foundChatMessages&>(*object);
+        TdFoundSavedMessages converted;
+        converted.next_from_message_id = found.next_from_message_id_;
+        converted.messages.reserve(found.messages_.size());
+        for (const auto& message : found.messages_) {
+            if (message != nullptr) {
+                converted.messages.push_back(convert_saved_message(*message));
+            }
+        }
+        return TdValue::from(std::move(converted));
     }
     default:
         return TdValue::from(std::move(object));
@@ -186,6 +275,10 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getOption::ID;
     case TdFunctionKind::GetMe:
         return function.get_id() == td_api::getMe::ID;
+    case TdFunctionKind::GetSavedMessagesTags:
+        return function.get_id() == td_api::getSavedMessagesTags::ID;
+    case TdFunctionKind::SearchSavedMessages:
+        return function.get_id() == td_api::searchSavedMessages::ID;
     case TdFunctionKind::LogOut:
         return function.get_id() == td_api::logOut::ID;
     case TdFunctionKind::Close:
@@ -527,6 +620,34 @@ class ProductionTdRuntime final : public TdRuntime {
         return make_native_auth_function(std::move(request));
     }
 
+    TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) override {
+        NativeFunctionPtr native =
+            td_api::make_object<td_api::getSavedMessagesTags>(saved_messages_topic_id);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::GetSavedMessagesTags,
+                           {{"saved_messages_topic_id", saved_messages_topic_id}}});
+    }
+
+    TdValue make_search_saved_messages(TdSearchSavedMessagesRequest request) override {
+        const std::string selector = request.tag.kind == TdReactionKind::Emoji
+                                         ? request.tag.emoji
+                                         : "custom:" + std::to_string(request.tag.custom_emoji_id);
+        auto tag = make_native_reaction(request.tag);
+        NativeFunctionPtr native = td_api::make_object<td_api::searchSavedMessages>(
+            request.saved_messages_topic_id, std::move(tag), request.query, request.from_message_id,
+            request.offset, request.limit);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::SearchSavedMessages,
+                           {{"saved_messages_topic_id", request.saved_messages_topic_id},
+                            {"tag", selector},
+                            {"query", request.query},
+                            {"from_message_id", request.from_message_id},
+                            {"offset", static_cast<std::int64_t>(request.offset)},
+                            {"limit", static_cast<std::int64_t>(request.limit)}}});
+    }
+
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               TdValue function) override {
         static_cast<void>(client_generation);
@@ -598,6 +719,14 @@ class ProductionTdRuntime final : public TdRuntime {
 } // namespace
 
 namespace detail {
+
+TdValue convert_production_response_for_test(TdValue object) {
+    auto* native = object.get_if<NativeObjectPtr>();
+    if (native == nullptr) {
+        return {};
+    }
+    return convert_response(std::move(*native));
+}
 
 std::optional<AuthStateData>
 convert_production_authorization_state_for_test(const TdValue& object,

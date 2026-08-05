@@ -39,6 +39,8 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_function(core::TdBuiltinFunction function) override;
     core::TdValue make_set_tdlib_parameters(core::TdlibParameters parameters) override;
     core::TdValue make_auth_function(core::TdAuthRequest request) override;
+    core::TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) override;
+    core::TdValue make_search_saved_messages(core::TdSearchSavedMessagesRequest request) override;
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               core::TdValue function) override;
     std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;
@@ -56,11 +58,13 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     [[nodiscard]] std::vector<ScriptedClient> clients() const;
     [[nodiscard]] bool initialized_before_first_client() const;
     [[nodiscard]] core::TdLogConfiguration logging_configuration() const;
+    void set_before_make(std::function<void(core::TdFunctionKind)> hook);
     void set_before_send(std::function<void(const core::TdFunctionData&)> hook);
     void set_receive_paused(bool paused);
     void set_close_automatically(bool enabled);
 
   private:
+    void before_make(core::TdFunctionKind function);
     void push_event(core::TdRuntimeEvent event);
 
     bool close_automatically_;
@@ -73,6 +77,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     std::vector<ScriptedClient> clients_;
     std::vector<SentTdFunction> sent_;
     std::deque<core::TdRuntimeEvent> events_;
+    std::function<void(core::TdFunctionKind)> before_make_;
     std::function<void(const core::TdFunctionData&)> before_send_;
 };
 

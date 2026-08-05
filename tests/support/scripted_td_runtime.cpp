@@ -46,6 +46,7 @@ core::TdValue ScriptedTdRuntime::make_set_tdlib_parameters(core::TdlibParameters
 }
 
 core::TdValue ScriptedTdRuntime::make_auth_function(core::TdAuthRequest request) {
+    before_make(request.function);
     std::vector<core::TdFunctionField> fields;
     switch (request.function) {
     case core::TdFunctionKind::SetAuthenticationPhoneNumber:
@@ -74,6 +75,30 @@ core::TdValue ScriptedTdRuntime::make_auth_function(core::TdAuthRequest request)
     }
     return core::TdValue::scripted_function(
         core::TdFunctionData{request.function, std::move(fields)});
+}
+
+core::TdValue
+ScriptedTdRuntime::make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) {
+    before_make(core::TdFunctionKind::GetSavedMessagesTags);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetSavedMessagesTags,
+                             {{"saved_messages_topic_id", saved_messages_topic_id}}});
+}
+
+core::TdValue
+ScriptedTdRuntime::make_search_saved_messages(core::TdSearchSavedMessagesRequest request) {
+    before_make(core::TdFunctionKind::SearchSavedMessages);
+    const std::string selector = request.tag.kind == core::TdReactionKind::Emoji
+                                     ? request.tag.emoji
+                                     : "custom:" + std::to_string(request.tag.custom_emoji_id);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::SearchSavedMessages,
+                             {{"saved_messages_topic_id", request.saved_messages_topic_id},
+                              {"tag", selector},
+                              {"query", request.query},
+                              {"from_message_id", request.from_message_id},
+                              {"offset", static_cast<std::int64_t>(request.offset)},
+                              {"limit", static_cast<std::int64_t>(request.limit)}}});
 }
 
 void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_generation,
@@ -167,9 +192,25 @@ core::TdLogConfiguration ScriptedTdRuntime::logging_configuration() const {
     return logging_configuration_;
 }
 
+void ScriptedTdRuntime::set_before_make(std::function<void(core::TdFunctionKind)> hook) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    before_make_ = std::move(hook);
+}
+
 void ScriptedTdRuntime::set_before_send(std::function<void(const core::TdFunctionData&)> hook) {
     const std::lock_guard<std::mutex> lock(mutex_);
     before_send_ = std::move(hook);
+}
+
+void ScriptedTdRuntime::before_make(core::TdFunctionKind function) {
+    std::function<void(core::TdFunctionKind)> hook;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        hook = before_make_;
+    }
+    if (hook) {
+        hook(function);
+    }
 }
 
 void ScriptedTdRuntime::set_receive_paused(bool paused) {

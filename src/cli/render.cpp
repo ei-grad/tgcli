@@ -170,6 +170,29 @@ std::string render_logout(const nlohmann::json& data) {
                        yes_no(data.value("logged_out", false)));
 }
 
+std::string render_saved_tags(const nlohmann::json& data) {
+    std::string out = "tag\tcount\tlabel\n";
+    for (const auto& item : data.at("items")) {
+        out += fmt::format("{}\t{}\t{}\n", item.at("tag").get<std::string>(),
+                           item.at("count").get<std::int32_t>(), item.at("label").dump());
+    }
+    out += "next: null\n";
+    return out;
+}
+
+std::string render_saved_search(const nlohmann::json& data) {
+    std::string out = "id\tchat_id\tdate\ttext\n";
+    for (const auto& item : data.at("items")) {
+        out += fmt::format("{}\t{}\t{}\t{}\n", item.at("id").get<std::int64_t>(),
+                           item.at("chat_id").get<std::int64_t>(),
+                           item.at("date").get<std::string>(), item.at("text").dump());
+    }
+    out += data.at("next").is_null()
+               ? "next: null\n"
+               : fmt::format("next: {}\n", data.at("next").get<std::string>());
+    return out;
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -211,6 +234,12 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "me") {
         return render_user(data);
+    }
+    if (command_key == "saved tags") {
+        return render_saved_tags(data);
+    }
+    if (command_key == "saved search") {
+        return render_saved_search(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

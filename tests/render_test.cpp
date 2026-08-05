@@ -105,3 +105,22 @@ TEST_CASE("daemon control human renderers match reviewed goldens",
                                                       {"socket", "/run/tgcli/main.sock"}}) ==
           golden("daemon-restart.txt"));
 }
+
+TEST_CASE("Saved Messages human renderers match reviewed goldens", "[saved][render][golden]") {
+    CHECK(tgcli::cli::render_human(
+              "saved tags",
+              {{"items",
+                json::array({json{{"tag", "🧪"}, {"label", "experiments"}, {"count", 7}},
+                             json{{"tag", "custom:123456789"}, {"label", ""}, {"count", 2}}})},
+               {"next", nullptr}}) == golden("saved-tags.txt"));
+    CHECK(tgcli::cli::render_human("saved search",
+                                   {{"items", json::array({json{{"id", 200},
+                                                                {"chat_id", 42},
+                                                                {"date", "2026-07-02T12:00:00Z"},
+                                                                {"text", "experiment result"}},
+                                                           json{{"id", 199},
+                                                                {"chat_id", 42},
+                                                                {"date", "2026-07-02T11:59:00Z"},
+                                                                {"text", ""}}})},
+                                    {"next", "cursor-2"}}) == golden("saved-search.txt"));
+}

@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "USAGE" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["argument", "reason"],
+              "properties": {
+                "argument": {
+                  "oneOf": [{ "type": "string" }, { "type": "null" }]
+                },
+                "reason": {
+                  "enum": ["missing_argument", "invalid_argument", "unknown_command", "unsupported_mode"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "NOT_AUTHED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "state", "reason"],
+              "properties": {
+                "account": { "type": "string" },
+                "state": {
+                  "enum": ["unknown", "wait_tdlib_parameters", "wait_phone_number", "wait_premium_purchase", "wait_email_address", "wait_email_code", "wait_code", "wait_other_device_confirmation", "wait_registration", "wait_password", "ready", "logging_out", "closing", "closed"]
+                },
+                "reason": { "enum": ["not_ready", "authorization_lost"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "BOT_UNSUPPORTED" },
+            "message": { "const": "saved commands require a user account" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "RATE_LIMITED" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "tdlib_code", "retry_after"],
+              "properties": {
+                "operation": { "enum": ["saved_tags", "saved_search"] },
+                "tdlib_code": { "const": 429 },
+                "retry_after": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "TDLIB_ERROR" },
+            "message": { "type": "string" },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["operation", "tdlib_code"],
+                  "properties": {
+                    "operation": { "enum": ["saved_tags", "saved_search"] },
+                    "tdlib_code": { "type": "integer" }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["operation", "tdlib_type_id"],
+                  "properties": {
+                    "operation": { "const": "saved_tags" },
+                    "tdlib_type_id": { "type": "integer" },
+                    "custom_emoji_id": { "type": "integer", "maximum": 0 }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "TIMEOUT" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "state"],
+              "properties": {
+                "operation": { "enum": ["saved_tags", "saved_search"] },
+                "state": {
+                  "oneOf": [
+                    { "enum": ["unknown", "wait_tdlib_parameters", "wait_phone_number", "wait_premium_purchase", "wait_email_address", "wait_email_code", "wait_code", "wait_other_device_confirmation", "wait_registration", "wait_password", "ready", "logging_out", "closing", "closed"] },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "INTERNAL" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "reason"],
+              "properties": {
+                "operation": { "enum": ["saved_tags", "saved_search"] },
+                "reason": { "const": "internal_error" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

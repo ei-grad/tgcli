@@ -3,6 +3,7 @@
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
 #include "daemon/daemon_run.hpp"
+#include "daemon/saved_commands.hpp"
 #include "proto/frame.hpp"
 
 #include <array>
@@ -167,6 +168,16 @@ int report_missing_command() {
     return tgcli::kUsage;
 }
 
+int report_usage(std::string_view message, const nlohmann::json& argument,
+                 std::string_view reason = "invalid_argument") {
+    const nlohmann::json rendered{{"error",
+                                   {{"code", "USAGE"},
+                                    {"message", message},
+                                    {"details", {{"argument", argument}, {"reason", reason}}}}}};
+    std::fputs((rendered.dump() + "\n").c_str(), stderr);
+    return tgcli::kUsage;
+}
+
 int report_unsupported_mode(std::string_view argument) {
     const nlohmann::json rendered{
         {"error",
@@ -299,6 +310,75 @@ resolve_request_account(const std::vector<std::string>& command, bool explicit_a
     return std::nullopt;
 }
 
+struct SavedCliArguments {
+    std::string query;
+    std::string tag;
+    std::string cursor;
+    int limit = tgcli::daemon::kDefaultSavedSearchLimit;
+    CLI::Option* query_option = nullptr;
+    CLI::Option* tag_option = nullptr;
+    CLI::Option* limit_option = nullptr;
+    CLI::Option* cursor_option = nullptr;
+};
+
+bool is_saved_tags(const std::vector<std::string>& command) {
+    return command == std::vector<std::string>{"saved", "tags"};
+}
+
+bool is_saved_search(const std::vector<std::string>& command) {
+    return command == std::vector<std::string>{"saved", "search"};
+}
+
+std::optional<int> validate_saved_arguments(const std::vector<std::string>& command,
+                                            const SavedCliArguments& saved) {
+    if (saved.cursor_option->count() != 0 && is_saved_tags(command)) {
+        return report_usage("saved tags does not accept --cursor", "--cursor");
+    }
+    if (saved.cursor_option->count() != 0 && !is_saved_search(command)) {
+        return report_usage("--cursor is not supported for this command", "--cursor",
+                            "unsupported_mode");
+    }
+    if (!is_saved_search(command)) {
+        return std::nullopt;
+    }
+    if (saved.cursor_option->count() != 0 && saved.limit_option->count() != 0) {
+        return report_usage("-n is not accepted with a continuation cursor", "-n");
+    }
+    if (saved.cursor_option->count() == 0 && saved.tag_option->count() == 0) {
+        return report_usage("saved search requires --tag on the first page", "--tag",
+                            "missing_argument");
+    }
+    if (saved.limit_option->count() != 0 &&
+        (saved.limit < 1 || saved.limit > tgcli::daemon::kMaximumSavedSearchLimit)) {
+        return report_usage("saved search limit must be between 1 and 100", "-n");
+    }
+    if (saved.tag_option->count() != 0 &&
+        !tgcli::daemon::parse_saved_reaction_selector(saved.tag)) {
+        return report_usage("invalid Saved Messages reaction selector", "--tag");
+    }
+    if (saved.query_option->count() != 0 && !tgcli::daemon::valid_utf8(saved.query)) {
+        return report_usage("saved search query must be valid UTF-8", "query");
+    }
+    if (saved.cursor_option->count() != 0 &&
+        !tgcli::daemon::decode_saved_search_cursor(saved.cursor)) {
+        return report_usage("invalid Saved Messages search cursor", "--cursor");
+    }
+    return std::nullopt;
+}
+
+nlohmann::json saved_search_request_args(const SavedCliArguments& saved) {
+    return {
+        {"query",
+         saved.query_option->count() != 0 ? nlohmann::json(saved.query) : nlohmann::json(nullptr)},
+        {"tag",
+         saved.tag_option->count() != 0 ? nlohmann::json(saved.tag) : nlohmann::json(nullptr)},
+        {"limit",
+         saved.limit_option->count() != 0 ? nlohmann::json(saved.limit) : nlohmann::json(nullptr)},
+        {"cursor", saved.cursor_option->count() != 0 ? nlohmann::json(saved.cursor)
+                                                     : nlohmann::json(nullptr)},
+    };
+}
+
 int run(int argc, char** argv) {
     if (consume_legacy_bot_token(argc, argv)) {
         return report_insecure_bot_token();
@@ -319,6 +399,7 @@ int run(int argc, char** argv) {
     bool yes = false;
     bool dry_run = false;
     double timeout_seconds = 0.0;
+    SavedCliArguments saved;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -331,6 +412,8 @@ int run(int argc, char** argv) {
                  "run in-process without the daemon (debugging escape hatch)");
     CLI::Option* timeout_option =
         app.add_option("--timeout", timeout_seconds, "per-command deadline in seconds");
+    saved.cursor_option =
+        app.add_option("--cursor", saved.cursor, "resume pagination from an opaque cursor");
 
     app.add_subcommand("version", "print tgcli version");
     app.add_subcommand("doctor", "health/auth probe");
@@ -380,6 +463,19 @@ int run(int argc, char** argv) {
         remove_cmd->add_option("--reassign-default", reassign_default,
                                "new default when removing the current default account");
 
+    CLI::App* saved_cmd = app.add_subcommand("saved", "Saved Messages reads");
+    saved_cmd->require_subcommand(1);
+    saved_cmd->add_subcommand("tags", "list Saved Messages reaction tags");
+    CLI::App* saved_search_cmd =
+        saved_cmd->add_subcommand("search", "search Saved Messages by reaction tag");
+    saved.query_option =
+        saved_search_cmd->add_option("query", saved.query, "optional exact text query");
+    saved.query_option->expected(0, 1);
+    saved.tag_option =
+        saved_search_cmd->add_option("--tag", saved.tag, "exact emoji or custom:<id> tag");
+    saved.limit_option =
+        saved_search_cmd->add_option("-n", saved.limit, "page size (1-100; default 20)");
+
     if (const auto parse_exit = parse_arguments(app, argc, argv); parse_exit.has_value()) {
         return parse_exit.value();
     }
@@ -399,6 +495,9 @@ int run(int argc, char** argv) {
     }
     if (command.empty()) {
         return report_missing_command();
+    }
+    if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
+        return *saved_exit;
     }
     if (no_daemon && is_daemon_lifecycle(command)) {
         const nlohmann::json rendered{
@@ -438,6 +537,8 @@ int run(int argc, char** argv) {
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (command == std::vector<std::string>{"login"}) {
         request_args = {{"qr", login_qr}, {"bot", login_bot}};
+    } else if (is_saved_search(command)) {
+        request_args = saved_search_request_args(saved);
     }
     if (timeout_option->count() != 0) {
         request_context.timeout_seconds = timeout_seconds;

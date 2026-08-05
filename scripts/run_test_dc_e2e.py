@@ -712,6 +712,28 @@ def _assert_bot_identity(user: Mapping[str, object]) -> None:
         raise AcceptanceError("bot login returned a non-bot identity")
 
 
+def _assert_saved_tags(document: object) -> None:
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"items", "next"}
+        or document["next"] is not None
+        or not isinstance(document["items"], list)
+    ):
+        raise AcceptanceError("saved tags returned an invalid result")
+    for item in document["items"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"tag", "label", "count"}
+            or not isinstance(item["tag"], str)
+            or not item["tag"]
+            or not isinstance(item["label"], str)
+            or not isinstance(item["count"], int)
+            or isinstance(item["count"], bool)
+            or item["count"] < 0
+        ):
+            raise AcceptanceError("saved tags returned an invalid item")
+
+
 def _require_qr_approval(runner: Runner) -> None:
     if runner.qr_approvals < 1:
         raise AcceptanceError("QR login completed without an auth_qr approval")
@@ -795,6 +817,12 @@ def _smoke(
     ).document
     if me != user_identity:
         raise AcceptanceError("me identity differs from login identity")
+    _assert_saved_tags(
+        runner.run_json(
+            "saved-tags-user",
+            ["--json", "--account", USER_ACCOUNT, "saved", "tags"],
+        ).document
+    )
 
     logout = runner.run_json(
         "logout-user",

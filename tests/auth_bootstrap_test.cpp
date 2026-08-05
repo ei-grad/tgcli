@@ -310,7 +310,9 @@ TEST_CASE("read functions require Ready in every authorization state",
             .auth_sequence = 1,
             .data = core::AuthStateData{state},
         };
-        for (const auto function : {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe}) {
+        for (const auto function : {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
+                                    core::TdFunctionKind::GetSavedMessagesTags,
+                                    core::TdFunctionKind::SearchSavedMessages}) {
             const core::TdFunctionData function_data{function};
             const auto denied = core::authorize_td_send(
                 descriptor_for(snapshot, function, core::DescriptorKind::Read,
@@ -318,6 +320,55 @@ TEST_CASE("read functions require Ready in every authorization state",
                 &function_data, snapshot, state == core::AuthState::Closed);
             CHECK(denied.has_value() == (state != core::AuthState::Ready));
         }
+    }
+}
+
+TEST_CASE("TdClient read admission is an exact closed function allowlist",
+          "[core][auth-bootstrap][safety][fake-boundary]") {
+    auto fake = make_fake_boundary(core::AuthState::Ready);
+    const auto snapshot = fake.client->auth_state();
+    struct Entry {
+        core::TdFunctionKind function;
+        bool allowed;
+    };
+    const std::array entries{
+        Entry{core::TdFunctionKind::GetAuthorizationState, false},
+        Entry{core::TdFunctionKind::SetTdlibParameters, false},
+        Entry{core::TdFunctionKind::SetAuthenticationPhoneNumber, false},
+        Entry{core::TdFunctionKind::RequestQrCodeAuthentication, false},
+        Entry{core::TdFunctionKind::CheckAuthenticationBotToken, false},
+        Entry{core::TdFunctionKind::SetAuthenticationEmailAddress, false},
+        Entry{core::TdFunctionKind::CheckAuthenticationEmailCode, false},
+        Entry{core::TdFunctionKind::CheckAuthenticationCode, false},
+        Entry{core::TdFunctionKind::RegisterUser, false},
+        Entry{core::TdFunctionKind::CheckAuthenticationPassword, false},
+        Entry{core::TdFunctionKind::GetOption, true},
+        Entry{core::TdFunctionKind::GetMe, true},
+        Entry{core::TdFunctionKind::GetSavedMessagesTags, true},
+        Entry{core::TdFunctionKind::SearchSavedMessages, true},
+        Entry{core::TdFunctionKind::LogOut, false},
+        Entry{core::TdFunctionKind::Close, false},
+    };
+    std::size_t sent_count = fake.runtime->sent_functions().size();
+    for (const auto& entry : entries) {
+        INFO(core::td_function_name(entry.function));
+        auto response = fake.client->send_read(
+            snapshot, entry.function,
+            core::TdValue::scripted_function(core::TdFunctionData{entry.function}));
+        if (!entry.allowed) {
+            REQUIRE(response.wait_for(0ms) == std::future_status::ready);
+            CHECK_THROWS_AS(response.get(), core::TdAuthorizationError);
+            CHECK(fake.runtime->sent_functions().size() == sent_count);
+            continue;
+        }
+        REQUIRE(fake.runtime->wait_for_sent(sent_count + 1));
+        const auto sent = fake.runtime->sent_functions();
+        CHECK(sent.back().function.kind() == entry.function);
+        fake.runtime->push_response(fake.first, sent.back().query_id,
+                                    core::TdValue::from(core::TdOk{}));
+        REQUIRE(response.wait_for(2s) == std::future_status::ready);
+        CHECK(response.get().get_if<core::TdOk>() != nullptr);
+        ++sent_count;
     }
 }
 

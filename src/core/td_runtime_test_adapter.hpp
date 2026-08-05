@@ -7,6 +7,8 @@
 
 namespace tgcli::core::detail {
 
+TdValue convert_production_response_for_test(TdValue object);
+
 std::optional<AuthStateData>
 convert_production_authorization_state_for_test(const TdValue& object,
                                                 bool authorization_state_response);

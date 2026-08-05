@@ -1069,8 +1069,8 @@ int run_in_process(const proto::Request& request, const RunOptions& options,
     FrameRenderer renderer(command_key(request.command), options.json);
     InProcessSink sink(renderer, prompt, request.context.tty);
     std::string error;
-    if (!daemon::run_no_daemon(request, sink, options.account, error,
-                               options.in_process_dispatcher)) {
+    if (!daemon::run_no_daemon(request, sink, options.account, error, options.in_process_dispatcher,
+                               options.in_process_td_client)) {
         print_error("GENERIC", error, json::object());
         return kGeneric;
     }

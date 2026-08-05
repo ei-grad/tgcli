@@ -387,6 +387,8 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
         return {core::AuthStateData{core::AuthState::Ready}};
     case core::TdFunctionKind::GetAuthorizationState:
     case core::TdFunctionKind::GetOption:
+    case core::TdFunctionKind::GetSavedMessagesTags:
+    case core::TdFunctionKind::SearchSavedMessages:
     case core::TdFunctionKind::LogOut:
     case core::TdFunctionKind::Close:
         break;

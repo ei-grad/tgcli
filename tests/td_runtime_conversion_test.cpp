@@ -61,12 +61,40 @@ class UnsupportedEmailResetState final : public td_api::EmailAddressResetState {
     }
 };
 
+class UnsupportedReactionType final : public td_api::ReactionType {
+  public:
+    static constexpr std::int32_t ID = 700'000'004;
+    [[nodiscard]] std::int32_t get_id() const final {
+        return ID;
+    }
+    void store(td::TlStorerToString& storer, const char* field_name) const final {
+        static_cast<void>(storer);
+        static_cast<void>(field_name);
+    }
+};
+
+class UnsupportedMessageContent final : public td_api::MessageContent {
+  public:
+    static constexpr std::int32_t ID = 700'000'005;
+    [[nodiscard]] std::int32_t get_id() const final {
+        return ID;
+    }
+    void store(td::TlStorerToString& storer, const char* field_name) const final {
+        static_cast<void>(storer);
+        static_cast<void>(field_name);
+    }
+};
+
 AuthStateData convert(NativeObjectPtr native, bool authorization_state_response = true) {
     const auto erased = TdValue::from(std::move(native));
     const auto converted = detail::convert_production_authorization_state_for_test(
         erased, authorization_state_response);
     REQUIRE(converted.has_value());
     return *converted;
+}
+
+TdValue convert_response(NativeObjectPtr native) {
+    return detail::convert_production_response_for_test(TdValue::from(std::move(native)));
 }
 
 void check_delivery(td_api::object_ptr<td_api::AuthenticationCodeType> type,
@@ -318,4 +346,72 @@ TEST_CASE("production converter preserves nulls and unsupported generated type i
                     false);
         CHECK(update_data == AuthStateData{AuthState::Ready});
     }
+}
+
+TEST_CASE("production converter preserves every Saved Messages reaction variant",
+          "[core][tdlib][td-runtime-converter][saved]") {
+    std::vector<td_api::object_ptr<td_api::savedMessagesTag>> values;
+    values.push_back(td_api::make_object<td_api::savedMessagesTag>(
+        td_api::make_object<td_api::reactionTypeEmoji>("👩🏽‍💻️"), "work", 7));
+    values.push_back(td_api::make_object<td_api::savedMessagesTag>(
+        td_api::make_object<td_api::reactionTypeCustomEmoji>(9223372036854775807LL), "", 2));
+    values.push_back(td_api::make_object<td_api::savedMessagesTag>(
+        td_api::make_object<td_api::reactionTypePaid>(), "paid", 1));
+    values.push_back(td_api::make_object<td_api::savedMessagesTag>(
+        td_api::make_object<UnsupportedReactionType>(), "unknown", 1));
+    values.push_back(td_api::make_object<td_api::savedMessagesTag>(nullptr, "null", 1));
+    values.emplace_back();
+    NativeObjectPtr native = td_api::make_object<td_api::savedMessagesTags>(std::move(values));
+    auto converted = convert_response(std::move(native));
+    const auto* tags = converted.get_if<TdSavedMessagesTags>();
+    REQUIRE(tags != nullptr);
+    REQUIRE(tags->tags.size() == 6);
+    CHECK(tags->tags[0] ==
+          TdSavedMessagesTag{.tag = {.kind = TdReactionKind::Emoji,
+                                     .emoji = "👩🏽‍💻️",
+                                     .custom_emoji_id = 0,
+                                     .tdlib_type_id = td_api::reactionTypeEmoji::ID},
+                             .label = "work",
+                             .count = 7});
+    CHECK(tags->tags[1].tag.kind == TdReactionKind::CustomEmoji);
+    CHECK(tags->tags[1].tag.custom_emoji_id == 9223372036854775807LL);
+    CHECK(tags->tags[2].tag.kind == TdReactionKind::Paid);
+    CHECK(tags->tags[2].tag.tdlib_type_id == td_api::reactionTypePaid::ID);
+    CHECK(tags->tags[3].tag.kind == TdReactionKind::Unknown);
+    CHECK(tags->tags[3].tag.tdlib_type_id == UnsupportedReactionType::ID);
+    CHECK(tags->tags[4].tag.kind == TdReactionKind::Unknown);
+    CHECK(tags->tags[4].tag.tdlib_type_id == 0);
+    CHECK(tags->tags[5].tag.kind == TdReactionKind::Unknown);
+    CHECK(tags->tags[5].tag.tdlib_type_id == 0);
+}
+
+TEST_CASE("production converter gives Saved text and non-text messages the exact summary",
+          "[core][tdlib][td-runtime-converter][saved]") {
+    auto text_message = td_api::make_object<td_api::message>();
+    text_message->id_ = 200;
+    text_message->chat_id_ = 42;
+    text_message->date_ = 1782993600;
+    text_message->content_ = td_api::make_object<td_api::messageText>(
+        td_api::make_object<td_api::formattedText>(
+            "idea 🧪", std::vector<td_api::object_ptr<td_api::textEntity>>{}),
+        nullptr, nullptr);
+
+    auto non_text_message = td_api::make_object<td_api::message>();
+    non_text_message->id_ = 199;
+    non_text_message->chat_id_ = 42;
+    non_text_message->date_ = 1782993540;
+    non_text_message->content_ = td_api::make_object<UnsupportedMessageContent>();
+
+    std::vector<td_api::object_ptr<td_api::message>> messages;
+    messages.push_back(std::move(text_message));
+    messages.push_back(std::move(non_text_message));
+    NativeObjectPtr native =
+        td_api::make_object<td_api::foundChatMessages>(2, std::move(messages), 190);
+    auto converted = convert_response(std::move(native));
+    const auto* found = converted.get_if<TdFoundSavedMessages>();
+    REQUIRE(found != nullptr);
+    CHECK(found->next_from_message_id == 190);
+    CHECK(found->messages == std::vector<TdSavedMessageSummary>{
+                                 {.id = 200, .chat_id = 42, .date = 1782993600, .text = "idea 🧪"},
+                                 {.id = 199, .chat_id = 42, .date = 1782993540, .text = ""}});
 }

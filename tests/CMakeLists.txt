@@ -27,6 +27,7 @@ add_executable(tgcli_unit_tests
     request_session_test.cpp
     routing_test.cpp
     server_test.cpp
+    saved_commands_test.cpp
     prompt_test.cpp
     render_test.cpp
     schema_matcher.cpp

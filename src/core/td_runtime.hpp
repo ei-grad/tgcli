@@ -30,6 +30,8 @@ enum class TdFunctionKind {
     CheckAuthenticationPassword,
     GetOption,
     GetMe,
+    GetSavedMessagesTags,
+    SearchSavedMessages,
     LogOut,
     Close,
 };
@@ -60,6 +62,10 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getOption";
     case TdFunctionKind::GetMe:
         return "getMe";
+    case TdFunctionKind::GetSavedMessagesTags:
+        return "getSavedMessagesTags";
+    case TdFunctionKind::SearchSavedMessages:
+        return "searchSavedMessages";
     case TdFunctionKind::LogOut:
         return "logOut";
     case TdFunctionKind::Close:
@@ -493,6 +499,56 @@ struct TdUserSummary {
     bool is_premium = false;
 };
 
+enum class TdReactionKind { Emoji, CustomEmoji, Paid, Unknown };
+
+struct TdReactionType {
+    TdReactionKind kind = TdReactionKind::Unknown;
+    std::string emoji;
+    std::int64_t custom_emoji_id = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdReactionType&) const = default;
+};
+
+struct TdSavedMessagesTag {
+    TdReactionType tag;
+    std::string label;
+    std::int32_t count = 0;
+
+    bool operator==(const TdSavedMessagesTag&) const = default;
+};
+
+struct TdSavedMessagesTags {
+    std::vector<TdSavedMessagesTag> tags;
+
+    bool operator==(const TdSavedMessagesTags&) const = default;
+};
+
+struct TdSavedMessageSummary {
+    std::int64_t id = 0;
+    std::int64_t chat_id = 0;
+    std::int32_t date = 0;
+    std::string text;
+
+    bool operator==(const TdSavedMessageSummary&) const = default;
+};
+
+struct TdFoundSavedMessages {
+    std::vector<TdSavedMessageSummary> messages;
+    std::int64_t next_from_message_id = 0;
+
+    bool operator==(const TdFoundSavedMessages&) const = default;
+};
+
+struct TdSearchSavedMessagesRequest {
+    std::int64_t saved_messages_topic_id = 0;
+    TdReactionType tag;
+    std::string query;
+    std::int64_t from_message_id = 0;
+    std::int32_t offset = 0;
+    std::int32_t limit = 0;
+};
+
 enum class TdBuiltinFunction { GetAuthorizationState, LogOut, Close };
 
 struct TdRuntimeEvent {
@@ -522,6 +578,8 @@ class TdRuntime {
     virtual TdValue make_function(TdBuiltinFunction function) = 0;
     virtual TdValue make_set_tdlib_parameters(TdlibParameters parameters) = 0;
     virtual TdValue make_auth_function(TdAuthRequest request) = 0;
+    virtual TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) = 0;
+    virtual TdValue make_search_saved_messages(TdSearchSavedMessagesRequest request) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
                       std::uint64_t query_id, TdValue function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;

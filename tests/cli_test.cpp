@@ -11,6 +11,7 @@
 #include "common/exit_codes.hpp"
 #include "common/net_compat.hpp"
 #include "common/paths.hpp"
+#include "core/td_client.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
 #include "daemon/dispatch.hpp"
@@ -19,6 +20,7 @@
 #include "proto/frame.hpp"
 #include "proto/frame_io.hpp"
 #include "schema_matcher.hpp"
+#include "support/scripted_td_runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,7 +33,9 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
+#include <memory>
 #include <poll.h>
 #include <sstream>
 #include <string>
@@ -1686,6 +1690,181 @@ TEST_CASE("daemon lifecycle parser exposes status stop restart and rejects no-da
                      {"details", json::object()}}}});
         CHECK_THAT(json::parse(outcome.err), test::matches_json_schema("daemon.error.schema.json"));
     }
+}
+
+TEST_CASE("Saved Messages parser exposes its nested surface and rejects invalid input locally",
+          "[cli][saved][process][schema]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "saved-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("--cursor") != std::string::npos);
+
+    const auto saved_help = run_binary_captured({"saved", "--help"}, env, "saved-help");
+    REQUIRE(saved_help.exit_code == kOk);
+    const auto saved_help_text = saved_help.out + saved_help.err;
+    CHECK(saved_help_text.find("tags") != std::string::npos);
+    CHECK(saved_help_text.find("search") != std::string::npos);
+
+    const auto search_help =
+        run_binary_captured({"saved", "search", "--help"}, env, "saved-search-help");
+    REQUIRE(search_help.exit_code == kOk);
+    const auto search_help_text = search_help.out + search_help.err;
+    CHECK(search_help_text.find("query") != std::string::npos);
+    CHECK(search_help_text.find("--tag") != std::string::npos);
+    CHECK(search_help_text.find("-n") != std::string::npos);
+
+    struct InvalidCase {
+        std::string stem;
+        std::vector<std::string> arguments;
+        std::optional<std::string> argument;
+        std::string reason;
+    };
+    const std::vector<InvalidCase> cases{
+        {"saved-missing-tag", {"saved", "search"}, std::nullopt, "missing_argument"},
+        {"saved-custom-zero",
+         {"saved", "search", "--tag", "custom:0"},
+         "--tag",
+         "invalid_argument"},
+        {"saved-custom-leading-zero",
+         {"saved", "search", "--tag", "custom:01"},
+         "--tag",
+         "invalid_argument"},
+        {"saved-invalid-utf8-tag",
+         {"saved", "search", "--tag", std::string("\xF0\x28\x8C\x28", 4)},
+         "--tag",
+         "invalid_argument"},
+        {"saved-invalid-utf8-query",
+         {"saved", "search", std::string("\xED\xA0\x80", 3), "--tag", "🧪"},
+         "query",
+         "invalid_argument"},
+        {"saved-limit-zero",
+         {"saved", "search", "--tag", "🧪", "-n", "0"},
+         "-n",
+         "invalid_argument"},
+        {"saved-limit-high",
+         {"saved", "search", "--tag", "🧪", "-n", "101"},
+         "-n",
+         "invalid_argument"},
+        {"saved-limit-noninteger",
+         {"saved", "search", "--tag", "🧪", "-n", "twenty"},
+         std::nullopt,
+         "invalid_argument"},
+        {"saved-tags-cursor",
+         {"--cursor", "not-a-cursor", "saved", "tags"},
+         "--cursor",
+         "invalid_argument"},
+        {"saved-cursor-limit",
+         {"--cursor", "not-a-cursor", "saved", "search", "-n", "20"},
+         "-n",
+         "invalid_argument"},
+    };
+    for (const auto& test_case : cases) {
+        const auto outcome = run_binary_captured(test_case.arguments, env, test_case.stem);
+        INFO(test_case.stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        const auto error = json::parse(outcome.err);
+        CHECK(error["error"]["code"] == "USAGE");
+        CHECK(error["error"]["details"]["reason"] == test_case.reason);
+        if (test_case.argument) {
+            CHECK(error["error"]["details"]["argument"] == *test_case.argument);
+        }
+        CHECK_THAT(error, test::matches_json_schema("saved.error.schema.json"));
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("Saved Messages no-daemon fake boundary preserves stdout and stderr discipline",
+          "[cli][saved][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    REQUIRE(scripted->clients().size() == 1);
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request tags("main");
+    tags.id = 1;
+    tags.command = {"saved", "tags"};
+    tags.args = json::object();
+    tags.context.json = true;
+    tags.context.cwd = "/";
+    auto tags_pending =
+        std::async(std::launch::async, [&] { return run_request_captured(tags, options, env); });
+    REQUIRE(scripted->wait_for_sent(2));
+    auto sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                                    .first_name = "Ada",
+                                                                    .last_name = "",
+                                                                    .usernames = {},
+                                                                    .phone_number = "12025550123",
+                                                                    .is_bot = false,
+                                                                    .is_premium = true}));
+    REQUIRE(scripted->wait_for_sent(3));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetSavedMessagesTags);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdSavedMessagesTags{
+                                .tags = {{.tag = {.kind = core::TdReactionKind::Emoji,
+                                                  .emoji = "🧪",
+                                                  .custom_emoji_id = 0,
+                                                  .tdlib_type_id = -1942084920},
+                                          .label = "experiments",
+                                          .count = 7}}}));
+    const auto tags_outcome = tags_pending.get();
+    CHECK(tags_outcome.exit_code == kOk);
+    CHECK(tags_outcome.err.empty());
+    CHECK(
+        tags_outcome.out ==
+        json{{"items", json::array({json{{"tag", "🧪"}, {"label", "experiments"}, {"count", 7}}})},
+             {"next", nullptr}}
+                .dump() +
+            "\n");
+
+    proto::Request search("main");
+    search.id = 2;
+    search.command = {"saved", "search"};
+    search.args = {{"query", nullptr}, {"tag", "🧪"}, {"limit", nullptr}, {"cursor", nullptr}};
+    search.context.json = true;
+    search.context.cwd = "/";
+    auto bot_pending =
+        std::async(std::launch::async, [&] { return run_request_captured(search, options, env); });
+    REQUIRE(scripted->wait_for_sent(4));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 84,
+                                                                    .first_name = "Bot",
+                                                                    .last_name = "",
+                                                                    .usernames = {},
+                                                                    .phone_number = "",
+                                                                    .is_bot = true,
+                                                                    .is_premium = false}));
+    const auto bot_outcome = bot_pending.get();
+    CHECK(bot_outcome.exit_code == kUsage);
+    CHECK(bot_outcome.out.empty());
+    CHECK(json::parse(bot_outcome.err) ==
+          json{{"error",
+                {{"code", "BOT_UNSUPPORTED"},
+                 {"message", "saved commands require a user account"},
+                 {"details", json::object()}}}});
+    CHECK(scripted->sent_functions().size() == 4);
 }
 
 TEST_CASE("verbose is client-owned diagnostics and leaves command data on stdout",

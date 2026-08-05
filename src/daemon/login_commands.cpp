@@ -313,6 +313,8 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::Close:
         return core::td_function_name(function);
     case TdFunctionKind::GetOption:
+    case TdFunctionKind::GetSavedMessagesTags:
+    case TdFunctionKind::SearchSavedMessages:
         return "other";
     }
     return "other";
