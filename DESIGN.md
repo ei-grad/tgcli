@@ -132,21 +132,26 @@ tgcli doctor                                      auth state, tdlib version, dae
                                                   when the daemon is unreachable
 
 tgcli chats [--folder <f>] [--archived] [--unread] [-n N]
+tgcli chats --cursor <token>
 tgcli read <chat> [-n N] [--before <msg-id>] [--since TS] [--until TS]
-              [--topic <id>] [--local]           (alias: history)
+              [--topic <kind:id>] [--local]      (alias: history)
+tgcli read --cursor <token>
+tgcli history --cursor <token>
 tgcli send <chat> [TEXT | -] [--file PATH]... [--caption TEXT]
               [--md | --html] [--reply-to ID] [--topic ID]
               [--silent] [--schedule <ts|"online">] [--spoiler]
 tgcli search <query> [--chat <c> | --global] [--from <user>]
               [--type text|photo|video|doc|link|voice] [-n N]
               always server-side — tdlib has no local search (§8)
+tgcli search --cursor <token>
 tgcli unread                                      per-chat unread counters
 tgcli fetch <chat> [--limit N | --all] [--since TS]
               deliberately warm the local DB with history for one chat
               (pages getChatHistory; enables later --local / offline work);
               progress on stderr, resumable, per-chat and per-depth targeting
 tgcli download <chat> <msg-id> [-O <dir|path>]    progress on stderr
-tgcli resolve <t.me-link | @username | title>     → ids, type, metadata
+tgcli resolve <id | t.me-link | @username | title>
+                                                  → ids, type, metadata
 
 tgcli listen [--chat <c>]... [--types message,edit,delete,reaction,chat]
               [--timeout S] [--count N]           NDJSON stream, one update per line;
@@ -177,6 +182,7 @@ tgcli msg link <chat> <id>                        → t.me permalink
 
 tgcli chat info <chat>
 tgcli chat members <chat> [--admins|--bots|--query <q>] [-n N]
+tgcli chat members --cursor <token>
 tgcli chat join <invite-link | @username>
 tgcli chat leave <chat>                           destructive
 tgcli chat mark-read <chat>
@@ -212,23 +218,86 @@ tgcli version
 
 ### 4.1 Selectors
 
-`<chat>` accepts `@username`, a numeric tdlib chat id, a `t.me/...` link, or a
-title substring. A selector that parses as an integer is always a chat id,
-never a title. Title resolution uses tdlib `searchChats` (plus
-`searchPublicChat` for unseen `@usernames`). An ambiguous title fails with
-exit 2 and a `candidates` list in the error object, so a human or an agent can
-retry with a precise id. `<user>` follows the same rules against
-contacts/chat members.
+`<chat>` classification is deterministic and ordered: a signed decimal is a
+tdlib chat id and is never interpreted as a title; `@username` is an exact
+public username; an `https://t.me/...` or bare `t.me/...` value is classified
+with `getInternalLinkType`; every other non-empty value is a case-sensitive UTF-8
+byte substring over `chat.title`. Syntactically valid numeric and username
+selectors therefore never fall back to title matching.
+
+Title matching scans active, non-secret chats in **fully loaded Main and
+Archive lists**. Main order precedes Archive order. `searchChats` may optimize
+candidate discovery, but it never establishes absence or completeness because
+the pinned tdlib implementation indexes normalized word prefixes rather than
+arbitrary substrings. The resolver grows each list's materialized prefix with
+`getChats` and `loadChats(list, 100)` until tdlib reports the documented
+end/404. If the request deadline wins first, resolution is `TIMEOUT`, never a
+partial-domain result. It then materializes each chat with `getChat`, excludes
+secret chats, and applies the exact byte-substring predicate. Zero
+matches is `NOT_FOUND`; one resolves; more than one is `AMBIGUOUS`. The latter
+has exact details:
+
+```json
+{"selector":"dev","scope":"active_dialogs","candidates":[{"id":-1001,"title":"Development","type":"supergroup","is_bot":false,"usernames":["dev"]}],"truncated":false}
+```
+
+At most 20 candidates are returned in Main-then-Archive order and `truncated`
+states whether more exact matches existed. A short successful `loadChats` is
+not end-of-list. Under `read --local`, no `loadChats` or other network-capable
+lookup is allowed: the title domain is the Main+Archive prefix materialized at
+request start, and a miss is `NOT_FOUND` with exact details
+`{"selector":string,"scope":"local_materialized"}`.
+
+All other `read --local` selector branches are equally offline: numeric ids use
+local `getChat`; usernames and PublicChat/BotStart links match only active
+usernames already present in the materialized Main+Archive prefix; Saved
+Messages may use local `createPrivateChat(me.id, false)`. Message, invite, and
+direct-message links, or an unseen username, return the same
+`local_materialized` miss instead of calling `searchPublicChat`,
+`getMessageLinkInfo`, `checkChatInviteLink`, or full-info network lookups.
+
+`<user>` accepts a positive tdlib user id, exact `@username`/public profile
+link, or a title substring over the display name. The global title domain is
+the complete returned `getContacts` set; a per-chat domain is the basic-group
+full member vector or the complete pages returned by
+`getSupergroupMembers(..., supergroupMembersFilterSearch)`. Ambiguous user
+details contain `selector`, no more than 20
+`{"id", "display_name", "usernames", "is_bot"}` candidates in tdlib order,
+and `truncated`; there is no `scope` field in a user ambiguity object.
 
 Title-substring resolution applies to read-tier commands only. Write- and
 destructive-tier commands require an exact selector (`@username`, id, or
 t.me link); a title substring fails with exit 2 and the `candidates` list.
-Rationale: `searchChats` matches only locally-known chats, so a fuzzy
-selector resolves differently depending on how warm the DB is — tolerable
-for a read, not for a send that could hit the wrong chat.
+This prevents a changing local dialog set from redirecting a mutation.
 
-`--since`/`--until` timestamps are ISO-8601 (date or datetime, UTC unless an
-offset is given) or relative (`30m`, `2h`, `7d`).
+The supported `t.me` classes and resolver actions are closed:
+
+| `InternalLinkType` | user session | bot session |
+|---|---|---|
+| `PublicChat` | `searchPublicChat` | allowed |
+| `BotStart` | resolve the bot chat; never execute the start parameter | allowed |
+| `Message` | `getMessageLinkInfo`; `/c/` links are supported | allowed |
+| `ChatInvite` | `checkChatInviteLink`, require nonzero `chat_id`, never join | `BOT_UNSUPPORTED` before `checkChatInviteLink` |
+| `DirectMessagesChat` | resolve the public channel, then `getSupergroupFullInfo.direct_messages_chat_id`; zero is `NOT_FOUND` | `BOT_UNSUPPORTED` before the user-only lookup |
+| `SavedMessages` | `getMe`, then local `createPrivateChat(me.id, false)` | `BOT_UNSUPPORTED` |
+| any other class | `USAGE`, reason `unsupported_link_type` | same |
+
+`getInternalLinkType` is allowed to classify a bot-session link. For a bot
+invite, the observable sequence is Ready, `getMe`, `getInternalLinkType`, then
+`BOT_UNSUPPORTED`; no `checkChatInviteLink` request is sent. Saved Messages
+materialization is not a Telegram-side write. Link resolution never joins a
+chat and never executes a bot-start parameter.
+
+`--since`/`--until` accept a valid `YYYY-MM-DD`, an ISO-8601 datetime with a
+UTC suffix, numeric offset or implicit UTC, or a positive relative
+`Nm`/`Nh`/`Nd`, with relative syntax exactly `^[1-9][0-9]*(m|h|d)$`.
+Fractional seconds of any finite precision are accepted.
+Relative values are evaluated once from the request-start wall clock. Date-only
+`since` is day start and date-only `until` is day end. Conversion to tdlib's
+integer seconds uses mathematical ceiling for the inclusive lower bound and
+floor for the inclusive upper bound. If the rounded `since` exceeds `until`,
+or either rounded endpoint does not fit tdlib's signed 32-bit seconds field,
+the command fails with pre-dispatch `USAGE`.
 
 Message ids are **tdlib message ids** everywhere (tdlib's message-id space
 differs from Telegram's server ids). `msg link` / `resolve` convert to/from
@@ -327,8 +396,9 @@ not satisfy `--tag`. An unused but valid tag is a successful empty list, not
 The first search page uses
 `tgcli saved search [<query>] --tag <selector> [-n N]` without `--cursor`.
 For this Saved-only command, omitted `-n` means 20 and an explicit value must
-be an integer from 1 through 100 inclusive. This is not yet a default for the
-broader M2 read surface.
+be an integer from 1 through 100 inclusive. This Saved rule remains exact;
+§4.4 independently adopts the same numeric default and range for the remaining
+M2 commands.
 A continuation uses `tgcli saved search --cursor <token>` and may redundantly
 repeat the same query and canonical `--tag` selector; `-n` is omitted because
 the original page size is cursor-bound. The opaque cursor binds the
@@ -363,6 +433,424 @@ emoji id additionally includes `custom_emoji_id`.
 surfaces through the existing `GENERIC` exit 1 with tdlib error details rather
 than defining a new exit code.
 
+### 4.4 M2 read contract
+
+All M2 result objects are curated strict objects; their schemas reject unknown
+properties. Chat and message ids are nonzero tdlib `int53` values and user ids
+are positive tdlib `int53` values. Unless a command says otherwise, `-n`
+defaults to 20 and accepts integers from 1 through 100. `chat members` instead
+defaults to 50 and accepts 1 through 200. Syntactically invalid ids, limits,
+topic references, timestamps and flag combinations fail before the selected
+target request.
+
+Every M2 command covered by this section first requires the selected account's
+authorization snapshot to be Ready, then calls `getMe` for identity/cursor
+binding and bot preflight. The already implemented Saved namespace retains its
+exact §4.3 shapes. `NOT_AUTHED` therefore precedes `BOT_UNSUPPORTED`. For an
+authenticated bot:
+
+| command | M2 behavior |
+|---|---|
+| `chats`, `read`/`history`, `search`, `unread`, `fetch` | `BOT_UNSUPPORTED` before any user-only tdlib request |
+| `msg get`, `msg link`, `chat info`, `chat members` | allowed |
+| `resolve` | the selector-specific matrix in §4.1 |
+
+#### Shared M2 objects
+
+A `TopicRef` is the lossless tagged representation of tdlib's four message
+topic variants:
+
+```json
+{"kind":"forum","id":123}
+```
+
+`kind` is `forum`, `thread`, `direct`, or `saved`. A forum id is a positive
+`int32`; every other id is a positive `int53`. CLI selectors accept
+`forum:123`, `thread:456`, `direct:789`, and `saved:321`. A bare positive
+decimal is exactly an alias for `forum:<id>`; tgcli never guesses topic kind
+from chat type.
+
+Live topic-history dispatch is exact:
+
+| kind | tdlib function |
+|---|---|
+| `forum` | `getForumTopicHistory(chat_id, id, ...)` |
+| `thread` | `getMessageThreadHistory(chat_id, id, ...)` |
+| `direct` | `getDirectMessagesChatTopicHistory(chat_id, id, ...)` |
+| `saved` | `getSavedMessagesTopicHistory(id, ...)`, only for the current user's Saved Messages chat |
+
+`--local` never calls those network-capable functions. It uses
+`getChatHistory(..., only_local=true)` and compares the complete tagged topic
+on each returned message. A `saved` topic paired with any other chat is
+pre-dispatch `USAGE`/`invalid_argument`.
+
+A `MessageSenderRef` is exactly `{"type":"user","id":42}` or
+`{"type":"chat","id":-1002}`. `MessageSummary` is:
+
+```json
+{
+  "id": 123,
+  "chat_id": -1001,
+  "date": "2026-08-05T10:00:00Z",
+  "sender": {"type":"user","id":42},
+  "is_outgoing": false,
+  "topic": {"kind":"forum","id":7},
+  "type": "text",
+  "text": "message or caption"
+}
+```
+
+`date` is UTC RFC 3339 at second precision and is null when tdlib `date` is
+zero. `topic` is `TopicRef` or null. `type` is exactly `text`, `photo`,
+`video`, `doc`, `voice`, or `other`; `messageAnimatedEmoji` is `text`.
+`text` is the documented formatted text or caption for the content variant,
+otherwise the empty string. A search filter such as `link` never changes the
+message's actual content `type`.
+
+`ChatIdentity` is:
+
+```json
+{"id":-1001,"title":"Project","type":"supergroup","is_bot":false,"usernames":["project"]}
+```
+
+`type` is `private`, `basic_group`, `supergroup`, or `channel`. `usernames`
+contains active tdlib usernames in returned order. `is_bot` can be true only
+for a private bot chat. `ChatSummary` contains every `ChatIdentity` field and:
+
+```json
+{
+  "is_archived": false,
+  "folder_ids": [2],
+  "is_marked_unread": false,
+  "unread_count": 3,
+  "unread_mention_count": 1,
+  "unread_reaction_count": 0,
+  "unread_poll_vote_count": 0,
+  "last_message": null
+}
+```
+
+`last_message` is `MessageSummary` or null. `chat.chat_lists`, not positions,
+determines list membership, `is_archived`, and ascending `folder_ids`.
+`chat.positions` supplies only the order key in the selected list. Membership
+without a matching nonzero position does not put the chat in that page.
+
+Secret chats are post-1.0. `chats` and `unread` skip them and continue scanning;
+global search uses only `searchMessages` and never merges
+`searchSecretMessages`. A secret target for `read`, per-chat `search`, `fetch`,
+`msg get`, `msg link`, `resolve`, `chat info`, or `chat members` fails before
+the target operation with `USAGE`, reason `unsupported_chat_type`.
+
+#### `chats`
+
+The scope is Main by default, Archive for `--archived`, or the positive numeric
+folder id from `--folder`; archive and folder are mutually exclusive. The
+`--unread` predicate is:
+
+```text
+is_marked_unread || unread_count > 0 || unread_mention_count > 0 ||
+unread_reaction_count > 0 || unread_poll_vote_count > 0
+```
+
+Results are ordered by the selected `chatPosition` key `(order, chat.id)`
+descending and have exact shape
+`{"items":[<ChatSummary>],"next":<cursor|null>}`. Pagination materializes a
+growing prefix:
+
+1. Request an initial prefix of 100 with `getChats(list, prefix_limit)` and
+   materialize its chats and selected positions.
+2. Scan only keys strictly below the cursor anchor; the anchor need not still
+   exist. Record the last raw scanned key even when `--unread` filters it out.
+3. If fewer than `-n` matches are available, call `loadChats(list, 100)`, grow
+   the requested prefix by at least 100, and reread the prefix.
+4. A short successful load is not EOF. Continue until the prefix grows, tdlib
+   reports documented end/404, or the absolute deadline wins. There is no raw
+   scan cap.
+
+Equal `order` values use chat id descending. A stateless continuation rebuilds
+the growing prefix after daemon restart. This is live-view keyset pagination,
+not snapshot isolation: a chat moved above the anchor can be missed, one moved
+below it can repeat, and removal of the anchor is harmless.
+
+#### `read` and `history`
+
+`history` is a parser alias canonicalized to `read` before the protocol frame,
+schema lookup, cursor operation and error details. `--before` is exclusive;
+`--since` and `--until` are inclusive and can be combined with it. Output order
+is decreasing tdlib message id. The result is exactly:
+
+```json
+{"items":[],"next":null,"boundary":"local_boundary"}
+```
+
+Every non-empty `items` element is a `MessageSummary`.
+
+The exact relationship between `boundary` and `next` is:
+
+| `boundary` | condition in this invocation | `next` |
+|---|---|---|
+| `page` | at least one new raw tdlib message was consumed and `time_anchor` was not reached | a cursor strictly after the last consumed raw message |
+| `time_anchor` | the exact inclusive `--since` cutoff anchor was reached | null |
+| `empty_before_until` | the initial live `getChatMessageByDate` for `--until` returned 404 | null |
+| `local_boundary` | a local invocation consumed no new raw message from its input anchor | null |
+| `tdlib_idle` | a live invocation produced no advancing raw message within the request's idle policy | null |
+
+`next` is never the input cursor and is emitted only after strict raw progress.
+Consequently a filtered page may be
+`{"items":[],"next":<advanced cursor>,"boundary":"page"}`. If a local
+boundary or live idle condition is encountered after raw progress, that
+invocation still returns `page` and its advancing cursor; an unchanged next
+invocation exposes the terminal boundary with null `next`. This preserves the
+resume anchor without allowing a same-state cursor loop. `time_anchor` is
+terminal even when the invocation made raw progress.
+
+Live reads use `getChatHistory` or the exact topic-history function above.
+For time filtering, the inclusive `--until` start anchor comes from
+`getChatMessageByDate(chat, until_floor)`, and the lower cutoff anchor from
+`getChatMessageByDate(chat, since_ceil - 1)`. Every returned message is also
+checked by timestamp. A 404 for the until anchor yields
+`empty_before_until`; a 404 for the since cutoff does not prove exhaustion.
+The scan terminates at the cutoff anchor, never merely because the first
+message with an older id has `date < since`.
+
+Local reads call only `getChatHistory(..., only_local=true)`, apply topic/time
+filters while scanning the entire available continuous prefix, and terminate
+at `local_boundary`; they never call `getChatMessageByDate`. tdlib's public
+local iterator stops where continuity is unknown and does not distinguish a
+gap from the true oldest message.
+
+Each history request asks for no more than `remaining + 1`; the inclusive
+anchor is removed. The scanner records the last consumed raw message before
+applying filters and has no bounded raw cap. A repeated/null-only upstream
+marker that claims continuation is `PAGINATION_INVALID`; an ordinary local
+zero-progress result or live idle result is the corresponding successful
+boundary.
+
+#### `msg get`, `msg link`, and `resolve`
+
+`msg get` accepts 1 through 100 message ids and always returns
+`{"items":[<MessageSummary>],"next":null}`. A single id still uses the list
+shape. `getMessages` result order follows argv order and duplicate ids remain
+duplicated. If any result position is null, the command is atomic and emits no
+stdout; `NOT_FOUND.details` is exactly
+`{"chat_id":integer,"missing_ids":[integer...]}`, with missing ids unique in
+first-occurrence order.
+
+`msg link` calls exactly
+`getMessageLink(chat_id, message_id, 0, 0, "", false, false)` and returns:
+
+```json
+{"chat_id":-1001,"message_id":123,"link":"https://t.me/example/7","is_public":true}
+```
+
+A documented 404 is `NOT_FOUND`; an eligibility or permission error is
+`TDLIB_ERROR`.
+
+`resolve` applies §4.1 and returns:
+
+```json
+{
+  "kind":"message",
+  "chat":{"id":-1001,"title":"Project","type":"supergroup","is_bot":false,"usernames":["project"]},
+  "message_id":123,
+  "topic":{"kind":"forum","id":7},
+  "link_type":"message",
+  "is_public":true
+}
+```
+
+`kind` is `chat`, `message`, or `topic`; message takes precedence over topic,
+which takes precedence over chat. `message_id` and `topic` are nullable.
+`link_type` is null or `public_chat`, `bot_start`, `message`, `chat_invite`,
+`direct_messages_chat`, or `saved_messages`. `is_public` is nullable and comes
+only from tdlib link/invite metadata, never from a username inference.
+
+#### `search`
+
+Without `--chat`, search is global; `--global` is an explicit equivalent and
+is mutually exclusive with `--chat`. Query bytes are exact, valid UTF-8 and
+non-empty. Per-chat search uses `searchChatMessages`; global search uses
+`searchMessages(chat_list=null)`, covering Main and Archive but not secret
+chats. Results are `{"items":[<MessageSummary>],"next":<cursor|null>}`.
+
+`photo`, `video`, `doc`, `link`, and `voice` map respectively to tdlib's Photo,
+Video, Document, Url, and VoiceNote search filters. `text` uses an empty tdlib
+filter followed by an exact content-class check for `messageText` or
+`messageAnimatedEmoji`. Per-chat `--from` is the tdlib `sender_id`; global
+`--from` is an exact client-side `message.sender_id` filter after server
+search.
+
+When global sender/text post-filtering is active, the scanner consumes whole
+upstream pages until it has `-n` matches, tdlib reports explicit continuation
+exhaustion, or the deadline wins. Each request asks for no more than the
+current remaining item count, so no matched tail is hidden outside the cursor.
+The cursor carries the complete `next_offset`/`next_from_message_id`, resolved
+sender, scope, exact query, content filter and page size. A repeated marker is
+`PAGINATION_INVALID`. Per-chat order is message id descending; global order is
+tdlib `(date, chat_id, message_id)` descending. Search never calls local
+history APIs.
+
+#### `unread`
+
+`unread` completely loads Main and then Archive with the same growing-prefix
+and documented-end rules as `chats`, excludes secret chats, deduplicates a chat
+across those lists and does not add folder lists. It applies the shared unread
+predicate and preserves Main-then-Archive tdlib order. The exact result is
+`{"items":[<UnreadSummary>],"next":null}`, where `UnreadSummary` is:
+
+```json
+{
+  "id":-1001,
+  "title":"Project",
+  "type":"supergroup",
+  "is_bot":false,
+  "is_archived":false,
+  "is_marked_unread":false,
+  "unread_count":3,
+  "unread_mention_count":1,
+  "unread_reaction_count":0,
+  "unread_poll_vote_count":0
+}
+```
+
+#### `chat info` and `chat members`
+
+`chat info` returns exactly the following strict object:
+
+```json
+{
+  "id":-1001,
+  "title":"Project",
+  "type":"supergroup",
+  "is_bot":false,
+  "usernames":["project"],
+  "description":"project room",
+  "member_count":42,
+  "is_forum":true,
+  "linked_chat_id":null,
+  "is_archived":false,
+  "folder_ids":[2],
+  "is_marked_unread":false,
+  "unread_count":3,
+  "unread_mention_count":1,
+  "unread_reaction_count":0,
+  "unread_poll_vote_count":0
+}
+```
+
+The type-specific sources are closed:
+
+| chat type | `description` | `member_count` | `is_forum` | `linked_chat_id` |
+|---|---|---|---|---|
+| private | `userFullInfo.bio.text` | null | false | null |
+| basic group | `basicGroupFullInfo.description` | `basicGroup.member_count` | false | null |
+| supergroup/channel | `supergroupFullInfo.description` | `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
+
+List/unread fields come from `chat`; active usernames retain tdlib order.
+
+Private and secret targets are unsupported for `chat members`. Basic groups
+use `basicGroupFullInfo.members` and local filtering/pagination. Supergroups
+and channels use `getSupergroupMembers` with Recent by default,
+Administrators for `--admins`, Bots for `--bots`, and Search for `--query`;
+the three filters are mutually exclusive. A supergroup cursor contains the
+tdlib offset. Every non-empty tdlib page keeps a continuation cursor and an
+empty probe alone sets `next` to null; approximate `total_count` never proves
+exhaustion. A basic-group cursor uses the exact vector offset and vector length
+for exhaustion.
+
+The result is `{"items":[<MemberSummary>],"next":<cursor|null>}`.
+`MemberSummary` is:
+
+```json
+{
+  "sender":{"type":"chat","id":-1002},
+  "display_name":"Linked channel",
+  "usernames":["linked"],
+  "is_bot":false,
+  "status":"banned",
+  "tag":"",
+  "joined_at":null
+}
+```
+
+`status` is `creator`, `administrator`, `member`, `restricted`, `left`, or
+`banned`; zero join time becomes null, otherwise it is UTC RFC 3339 seconds.
+For a user sender, display name is `first_name` plus one space and `last_name`
+only when `last_name` is non-empty, usernames are active in tdlib order, and
+bot status comes from the user type. For a chat sender, display name is `chat.title`,
+usernames come from chat-type metadata, and `is_bot` is false. `tag` is the
+creator/administrator custom title when present and the empty string otherwise;
+`joined_at` comes from tdlib's joined-chat date.
+
+#### `fetch`
+
+With none of `--limit`, `--all`, or `--since`, `fetch` targets a depth of 100.
+`--limit` accepts 1 through 1000000 and is mutually exclusive with `--all`;
+`--since` may accompany either. `--since` without a limit means all available
+history down to its inclusive anchor. Fetch has no default deadline; an
+explicit `--timeout` is one absolute deadline across local scan and network
+fill.
+
+The public tdlib local-history seam exposes only the continuous prefix
+reachable from newest history; it does not label the boundary as a gap or true
+oldest message. Fetch first scans that prefix with
+`getChatHistory(..., only_local=true)`, counts it, and records its boundary.
+Disconnected cached islands below the boundary are never selected as resume
+anchors. It then calls live `getChatHistory` from that boundary, removes the
+inclusive duplicate, and continues until a finite target or since anchor is
+reached, the absolute deadline wins, or tdlib returns no advancing messages.
+A repeated invocation rescans the continuous local prefix and resumes from its
+current boundary; no tgcli resume state is persisted.
+
+Fetch uses the same rounded `since` cutoff-anchor construction and per-message
+timestamp check as live `read`; it never assumes message-id order is date
+order. A missing older cutoff anchor does not prove completion. If both a
+finite depth and `--since` are supplied, reaching either requested boundary is
+a successful finite target; `--all --since` is likewise finite because of the
+since boundary.
+
+`cached_count` is the number of messages in the final continuous prefix,
+`oldest_message_id` is its oldest message, and `resume_from_message_id` is the
+anchor a later invocation can rediscover. They do not count or point into a
+disconnected cached island.
+
+Success is exactly:
+
+```json
+{
+  "chat_id":-1001,
+  "cached_count":250,
+  "oldest_message_id":123,
+  "target":{"limit":1000,"all":false,"since":null},
+  "target_reached":false,
+  "stop_reason":"tdlib_idle",
+  "resume_from_message_id":123
+}
+```
+
+For an empty prefix, `oldest_message_id` and `resume_from_message_id` are null.
+Within `target`, `limit` is the numeric depth or null, `all` records whether
+`--all` was supplied, and `since` is the rounded UTC RFC 3339 boundary or null;
+the implicit default is `{"limit":100,"all":false,"since":null}`.
+`stop_reason` is `target_reached`, `since_anchor_reached`, or `tdlib_idle`.
+`target_reached` is boolean for a finite limit or since objective and null for
+unbounded `--all`. `--all` means continue public live-history requests until
+`tdlib_idle`; it is not a certificate that remote history is complete. Public
+tdlib can return an empty/non-advancing page during races and exposes no
+remote-EOF proof, so neither `complete` nor `history_end` exists in the result.
+A certified `--all` would require a separately reviewed private/patched tdlib
+seam and a dependency provenance change.
+
+Progress is emitted on stderr as:
+
+```json
+{"operation":"fetch","chat_id":-1001,"cached":250,"target":1000,"oldest_message_id":123}
+```
+
+`target` is null when no numeric depth target exists and `oldest_message_id`
+is null for an empty prefix. Timeout preserves warmed tdlib state and uses the exact
+extended error details in §5.2; it never emits a successful completion claim.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result
@@ -374,15 +862,17 @@ object itself to stdout:
 
 List-returning commands print `{"items": [...], "next": <cursor|null>}`.
 `next` is an opaque, self-contained, account-scoped token: pass it back via
-`--cursor` (accepted by every paginated command) to fetch the next page
-deterministically; the daemon holds no per-cursor state. `read` additionally
-accepts a plain `--before <msg-id>` as the human-friendly equivalent.
+`--cursor` to continue a paginated command; the daemon holds no per-cursor
+state. With an unchanged tdlib view the continuation neither repeats nor skips
+items, but §4.4's live-view caveats apply when Telegram state changes between
+pages. `read` additionally accepts a plain `--before <msg-id>` as the
+human-friendly first-page anchor.
 Streams print one JSON object per line (NDJSON).
 
 Failures print a single error object to **stderr** and set the exit code:
 
 ```json
-{"error": {"code": "AMBIGUOUS", "message": "3 chats match 'dev'", "candidates": [...]}}
+{"error":{"code":"NOT_FOUND","message":"no chat matches 'dev'","details":{"selector":"dev"}}}
 ```
 
 - Result schemas are **curated and stable** per command (documented in
@@ -403,7 +893,7 @@ Failures print a single error object to **stderr** and set the exit code:
 |---|---|---|
 | 0 | OK | success |
 | 1 | GENERIC | unclassified error (tdlib error details on stderr) |
-| 2 | USAGE | bad arguments, unknown selector, ambiguous resolve |
+| 2 | USAGE | bad arguments, ambiguous selector, or unsupported selector type |
 | 3 | NOT_AUTHED | not logged in → `tgcli login` |
 | 4 | NOT_FOUND | operational target/routing failure: entity absent or routed daemon account mismatch |
 | 5 | RATE_LIMITED | Telegram flood wait surfaced; `retry_after` in error details |
@@ -476,8 +966,8 @@ keys and no others. `string[]` arrays are bytewise sorted unless the shape says
 otherwise. No secret, hook command, answer, raw argv, tdlib message or
 unredacted tdlib request is permitted in any field.
 
-`state` is `unknown` or one of the 13 tgcli state names in §8. `operation` is
-exactly `auth_bootstrap`, `login`, `logout`, `me`, `account_add`,
+`state` is `unknown` or one of the 13 tgcli state names in §8. For an M1
+failure, `operation` is exactly `auth_bootstrap`, `login`, `logout`, `me`, `account_add`,
 `account_list`, `account_show`, `account_use`, `account_remove`,
 `doctor`, `daemon_status`, `daemon_stop`, `daemon_restart`, `daemon_run`,
 `config_reload`, or `audit`.
@@ -520,7 +1010,7 @@ contains a stage that was merely attempted in memory.
 | `DAEMON_SHUTDOWN` | 1 | `{"reason":"daemon_shutdown"}` |
 | `INTERNAL` | 1 | `{"operation":operation,"reason":"internal_error"}` |
 
-The auxiliary enums are closed: `usage_reason` is `missing_argument`,
+For M1, the auxiliary enums are closed: `usage_reason` is `missing_argument`,
 `invalid_argument`, `mutually_exclusive`, `unknown_command`,
 `invalid_environment`, or `unsupported_mode`; `config_reason` is
 `path_invalid`, `wrong_owner`, `wrong_type`, `wrong_mode`, `wrong_link_count`,
@@ -587,6 +1077,153 @@ Known credential errors retry only under §8. Unknown 400/401, all 5xx and all
 other tdlib failures are `TDLIB_ERROR`; 429 is `RATE_LIMITED`. Account removal
 uses `TDLIB_ERROR` only for tdlib work, `LOCAL_CLEANUP_FAILED` for filesystem
 work, and the config/audit codes for those respective boundaries.
+
+### 5.2 M2 cursors, errors, and schemas
+
+The cursor continuation forms are exactly:
+
+```text
+tgcli chats --cursor TOKEN
+tgcli read --cursor TOKEN
+tgcli history --cursor TOKEN
+tgcli search --cursor TOKEN
+tgcli chat members --cursor TOKEN
+```
+
+Except for the exact Saved Messages redundancy rule in §4.3, a continuation
+accepts no selector, query, filter, `-n`, or `--before`; all read state comes
+from the token. A cursor is canonical base64url JSON without padding, a MAC, or
+daemon-side state. It contains a version, canonical operation, routed account,
+current `getMe.id`, page size, all normalized scopes/filters/resolved ids, and
+the complete upstream continuation or keyset.
+
+The token is untrusted read input, not a security capability. A structurally
+valid same-account token that a caller manually changes within the accepted
+schema represents a new explicit read request and is accepted; tgcli does not
+claim tamper detection. A new persisted signing key is not created. A malformed,
+noncanonical, or schema-invalid token is `USAGE`/`invalid_cursor`; an operation,
+account, or current-user mismatch is `USAGE`/`cursor_scope_mismatch`. A valid
+upstream marker that repeats instead of advancing is `PAGINATION_INVALID`, not
+an unchanged cursor or false exhaustion.
+
+M2 failures other than the already specified Saved namespace use the standard
+strict envelope
+`{"error":{"code":string,"message":string,"details":object}}`. The closed
+M2 `operation` enum is `chats`, `read`, `msg_get`, `msg_link`, `search`,
+`unread`, `fetch`, `resolve`, `chat_info`, or `chat_members`; `history` is
+always `read`. Exact common shapes are:
+
+| error code | exit | exact `details` |
+|---|---:|---|
+| `BOT_UNSUPPORTED` | 2 | `{"operation":operation}` |
+| `TDLIB_ERROR` | 1 | `{"operation":operation,"tdlib_code":integer}` |
+| `RATE_LIMITED` | 5 | `{"operation":operation,"tdlib_code":429,"retry_after":integer}` |
+| `TIMEOUT` | 7 | `{"operation":operation,"state":nullable_state}` |
+| `PAGINATION_INVALID` | 1 | `{"operation":operation,"reason":"non_advancing_upstream"}` |
+
+Fetch timeout replaces the general TIMEOUT details with:
+
+```json
+{
+  "operation":"fetch",
+  "chat_id":-1001,
+  "phase":"network_fill",
+  "state":"ready",
+  "cached_count":250,
+  "oldest_message_id":123,
+  "resume_from_message_id":123
+}
+```
+
+`phase` is `local_scan` or `network_fill`; `state` is a nullable §8 auth state,
+`cached_count` is a nonnegative integer, and the oldest/resume ids are null for
+an empty prefix. The single absolute request deadline and auth-loss precedence
+still apply.
+
+M2 target-not-found details are contextual and closed:
+
+| context | exact `NOT_FOUND.details` |
+|---|---|
+| ordinary chat/user/link resolver, including a numeric `getChat` context returning 400 | `{"selector":string}` |
+| any local resolver miss | `{"selector":string,"scope":"local_materialized"}` |
+| `msg get` null positions | `{"chat_id":integer,"missing_ids":integer[]}` |
+| `msg link` message 404 | `{"chat_id":integer,"message_id":integer}` |
+| missing topic target | `{"chat_id":integer,"topic":<TopicRef>}` |
+| missing numeric folder scope | `{"folder_id":integer}` |
+
+For username resolution, lifecycle/auth loss wins first and tdlib code 429 is
+`RATE_LIMITED`. After those checks, a returned code 400 maps to `NOT_FOUND`
+with the original selector only when its message is exactly
+`USERNAME_NOT_OCCUPIED` or `USERNAME_INVALID`. This applies to
+`searchPublicChat` and username-bearing link resolver branches; comparison is
+case-sensitive equality with no substring or normalization. Any other actual
+tdlib 400 is `TDLIB_ERROR` with `operation:"resolve"`. `USAGE` is reserved for
+local parse/validation failure before tdlib dispatch. Documented null/404
+results use the contextual table; tgcli does not otherwise parse tdlib message
+text to invent error categories.
+
+M2 extends `usage_reason` with `invalid_cursor`, `cursor_scope_mismatch`,
+`unsupported_chat_type`, and `unsupported_link_type`. It uses the existing
+`missing_argument`, `invalid_argument`, and `mutually_exclusive` reasons for
+ordinary CLI validation. `AMBIGUOUS` is exit 2 and has the chat/user candidate
+details defined in §4.1. A successful `local_boundary` or `tdlib_idle` is not
+an error.
+
+Implementation of the remaining M2 commands adds the following strict Draft
+2020-12 result schemas and result-only manifest keys:
+
+| schema file | manifest command key |
+|---|---|
+| `chats.result.schema.json` | `chats` |
+| `read.result.schema.json` | `read` |
+| `msg-get.result.schema.json` | `msg get` |
+| `msg-link.result.schema.json` | `msg link` |
+| `search.result.schema.json` | `search` |
+| `unread.result.schema.json` | `unread` |
+| `fetch.result.schema.json` | `fetch` |
+| `resolve.result.schema.json` | `resolve` |
+| `chat-info.result.schema.json` | `chat info` |
+| `chat-members.result.schema.json` | `chat members` |
+
+`history` has no manifest entry or schema because it canonicalizes to `read`.
+`read.result` includes the closed boundary enum and tagged topic definition.
+`fetch.result` has nullable `target_reached`, `oldest_message_id`, and
+`resume_from_message_id`, and has no `complete` or `history_end`. Actual JSON
+data is validated against these strict schemas; human output renders the same
+fields.
+
+M2 fake-boundary contract coverage must include:
+
+- invalid ids, limits, topic kinds/ranges, timestamps/combinations and cursors
+  before the selected target request; cross-command/account/user cursor scope;
+- mid-word title matches absent from `searchChats`, full Main+Archive loading,
+  local materialized-prefix misses, ambiguity truncation/order, and a deadline
+  before domain completion producing no partial resolver result;
+- bot preflight for every matrix row, including a bot invite trace with
+  `getInternalLinkType` but no `checkChatInviteLink`, and user invite resolution
+  with no join;
+- exact username 400 normalization after auth/429 precedence and a nonmatching
+  tdlib 400 remaining `TDLIB_ERROR`;
+- sparse `chats --unread` beyond 100 raw chats, equal-order ties, continuation
+  after restart and an anchor that moved or disappeared;
+- exclusive `--before`, inclusive fractional/date-only time bounds, an
+  out-of-order-date page that cannot terminate early, every topic kind, and
+  local reads that issue no network-capable topic/date/link request;
+- filtered read pages with raw progress and zero items returning an advancing
+  `page` cursor, followed by a zero-progress terminal boundary with null
+  `next`;
+- `msg get` argv order/duplicates and atomic mixed found/missing behavior, plus
+  the exact `msg link` tdlib call and contextual errors;
+- multi-page global sender/text search through matches/exhaustion, full marker
+  preservation and repeated-marker rejection;
+- Main/Archive unread deduplication, secret exclusion, exact chat-info source
+  branches, member user/chat senders, and member empty-probe exhaustion without
+  trusting approximate totals;
+- fetch with a disconnected cached island below the public local boundary,
+  finite/since/all targets, empty-prefix nulls, live non-advancement reported as
+  `tdlib_idle`, and timeout followed by a resumable repeated invocation; and
+- strict schema validation of actual result data plus human golden output with
+  the same information.
 
 ## 6. Safety model
 
@@ -1021,12 +1658,11 @@ type-erased public boundary keeps generated types from leaking across layers.
   key is likewise invalid and is never auto-migrated; users must remove it and
   rotate any token previously exposed through argv or plaintext config.
 - **Bot-account caveat**: a bot session has no dialog list, cannot read
-  arbitrary chat history, has no server-side search and no contacts — most
-  of the read surface (`chats`, `read`, `search`, `unread`, `fetch`) is
-  user-account-only. Bots suit narrow send/receive automation in chats they
-  are already in; an agent that needs to read should run on a user account.
-  A user-account-only command invoked on a bot session fails with exit 2 and
-  error code `BOT_UNSUPPORTED`.
+  arbitrary chat history, has no server-side global search and no contacts.
+  The exact M2 per-command and per-link matrix is in §4.4 and §4.1. Ready and
+  `getMe` precede bot classification; `BOT_UNSUPPORTED` is emitted before any
+  tdlib function carrying `CHECK_IS_USER`. Bots remain supported for the
+  narrow message/info/member reads and link classes named by that matrix.
 - **Every other command** requires the current snapshot to be `ready` at
   admission; anything else exits 3 with `account`, `state` and a generic
   `reason` in error details. If a ready generation loses authorization while
@@ -1114,17 +1750,18 @@ type-erased public boundary keeps generated types from leaking across layers.
   persistence mechanism.
 - **Local-only reads**: `--local` on `read` sets the `only_local` flag on
   `getChatHistory` — offline mode for agents that must not hit the network.
+  Topic-local reads use that same function plus exact tagged `TopicRef`
+  filtering; they never call a topic-history or date-anchor function.
   There is deliberately no `--local` on `search`: tdlib exposes no
   local-only search for regular chats (`searchChatMessages`/`searchMessages`
   are server-side), and tgcli does not pretend otherwise; offline filtering
   over prefetched history is a post-1.0 idea. `tgcli fetch` is the
-  deliberate warming path: it pages `getChatHistory` for one chat to a
-  requested depth/date, with progress on stderr. Resume keeps no persisted
-  state, but must be gap-aware: the local DB accretes disconnected islands
-  of messages (from `search` results, `msg get`, live updates), so the
-  resume anchor is the *first gap* found when paging `only_local` history
-  down from the newest message — not the globally oldest cached message,
-  which could sit below a hole and silently skip unfetched ranges.
+  deliberate warming path described exactly in §4.4. Public tdlib exposes the
+  continuous local prefix from newest history, but does not label its boundary
+  as a gap or the true oldest message and does not certify remote EOF. Fetch
+  therefore resumes from that public boundary, ignores disconnected cached
+  islands below it, and reports `tdlib_idle` rather than `complete` or
+  `history_end` when live history stops advancing.
 - **Options at startup**: tdlib defaults are kept; tgcli uses no
   notification machinery and relies on background updates being processed —
   both already the default behavior.
@@ -1894,7 +2531,12 @@ What makes tgcli specifically LLM-agent-friendly:
     M7 validates the already-complete suite for release rather than
     introducing it. M1's required smoke is isolated account bootstrap, phone
     auth/fixed code (and registration when requested), `me`, correlated logout
-    and re-login readiness. QR and bot E2E run only with their explicit
+    and re-login readiness. M2's required read flow runs
+    `tgcli chats -n 1 --json` after that auth smoke and requires exit 0 plus a
+    schema-valid list whether the account has zero or one returned chat; it
+    needs no pre-created message or chat fixture. The already landed Saved
+    slice separately runs `tgcli saved tags`; it does not mark the general
+    `chats` flow implemented. QR and bot E2E run only with their explicit
     approver/`bot_token_cmd` fixtures and otherwise report
     `fixture_missing:qr_approver`/`fixture_missing:bot_token_cmd`. Required
     states unavailable in the test DC, including Premium-only states, receive
@@ -1934,10 +2576,10 @@ summary:
   (status/stop/restart/run, idle_exit); the minimal shared safety kernel for
   destructive logout/account removal (authority, confirmation, dry-run,
   audit).
-- **M2** — read path: chats, read, msg get, search, Saved Messages reaction-tag
-  discovery/search, unread, resolve, fetch; resolver, JSON/human output, exit
-  codes; every new result-producing command lands with its manifest entry,
-  strict schema, and contract validation.
+- **M2** — read path: chats, read/history, msg get/link, search, Saved Messages
+  reaction-tag discovery/search, unread, resolve, fetch, chat info/members;
+  resolver, JSON/human output, exit codes; every new result-producing command
+  lands with its manifest entry, strict schema, and contract validation.
 - **M3** — extend the M1 safety kernel to the general write path:
   send/edit/delete/forward/react/mark-read/pin and the remaining destructive
   commands; add idempotency and general planners/audit integration.

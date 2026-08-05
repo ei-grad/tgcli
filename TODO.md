@@ -127,27 +127,51 @@ before the milestone is closed.
 
 ## M2 — Read path
 
-- [ ] Resolver: @username / id / t.me link / title substring; `candidates` on
-      ambiguity; integer selectors are always ids; title matching read-tier-only
-- [ ] Output layer: human renderers, `--json`, exit-code mapping, stderr
-      discipline; opaque `--cursor` pagination tokens
-- [ ] Every new M2 result-producing command adds its result-only manifest entry
-      and strict Draft 2020-12 schema (mutable until the M7 freeze), with
-      contract tests validating actual result data
-- [ ] `tgcli chats` (folders, archived, unread filters, pagination)
-- [ ] `tgcli read` (limits, --before, --since/--until, --topic, --local)
-- [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`
-- [ ] `tgcli search` (per-chat, --global, filters; server-side only)
+- [ ] Resolver: exact id/@username/t.me classification and link/bot matrix;
+      arbitrary title substring over fully loaded active Main+Archive, local
+      materialized-prefix scope, strict ambiguity candidates, and exact
+      username `NOT_FOUND` normalization
+- [ ] Shared M2 DTOs and parsing: lossless `TopicRef`, `MessageSummary`,
+      `ChatIdentity`/`ChatSummary`, member/user/chat sender variants, int53
+      boundaries, inclusive rounded timestamps, and command-specific limits
+- [ ] Output layer: equivalent human/JSON rendering, exact result/error shapes,
+      stderr discipline, and self-contained untrusted cursors without a MAC or
+      daemon state; reject bad scope and non-advancing upstream markers
+- [ ] Add strict Draft 2020-12 result schemas and manifest entries for `chats`,
+      `read`, `msg get`, `msg link`, `search`, `unread`, `fetch`, `resolve`,
+      `chat info`, and `chat members`; validate actual result data and keep
+      `history` schema-less as the canonical `read` alias
+- [ ] `tgcli chats`: Main/Archive/numeric-folder growing-prefix scan, exact
+      `(position.order, chat_id)` keyset, sparse unread pagination, and
+      live-view continuation cases across restart/movement/removal/ties
+- [ ] `tgcli read`/`history`: limits, exclusive `--before`, inclusive
+      `--since`/`--until`, all four topic kinds, offline continuous-prefix
+      behavior, exact `boundary`/`next` mapping, and advancing raw cursors
+- [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`: atomic ordered batch
+      reads, exact link call/result, resolver DTOs, and contextual targets
+- [ ] `tgcli search`: per-chat/global server search, exact filter mappings,
+      exhaustive sender/text post-filtering, full upstream cursors, and no
+      secret/local-search merge
 - [x] `tgcli saved tags|search`: user-account-only reaction-tag discovery plus
       tag-only/tag+text search; canonical emoji/custom selector round-trip,
       label/count/order output, account/scope/filter-bound cursor pagination,
       and contract coverage for NOT_AUTHED/BOT_UNSUPPORTED preflight, malformed
       selectors/cursors, cursor/filter mismatches, paid/unknown variants, empty
       matches, and reaction tags vs emoji text
-- [ ] `tgcli unread`
-- [ ] `tgcli fetch <chat>` (--limit/--all/--since, resumable, progress frames)
-- [ ] `tgcli chat info`, `tgcli chat members`
-- [x] Add a supported M2 read-path flow to the test-DC E2E milestone gate
+- [ ] `tgcli unread`: fully load and deduplicate Main then Archive, apply the
+      shared unread predicate, skip secret chats, and return `next:null`
+- [ ] `tgcli fetch <chat>`: default/finite/since/all targets, continuous local
+      prefix plus live fill, resumable progress/timeout details, and the public-
+      TDLib `tdlib_idle` limitation without false EOF/completeness claims
+- [ ] `tgcli chat info`, `tgcli chat members`: type-specific info sources,
+      user/chat senders, exact filters, and empty-probe pagination independent
+      of approximate member totals
+- [x] Landed Saved test-DC flow: after auth smoke, run `tgcli saved tags`,
+      validate the unpaginated tag-list result, and retain the exact sorted
+      test-DC skip artifact contract
+- [ ] General M2 read test-DC flow: after auth smoke, run
+      `tgcli chats -n 1 --json` and require exit 0 plus a schema-valid empty or
+      non-empty list without a pre-created fixture
 - [ ] Review gate: M2 diff vs DESIGN.md
 
 ## M3 — Safety & write path
