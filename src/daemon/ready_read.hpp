@@ -26,6 +26,7 @@ using ReadyReadStart = std::function<std::future<core::TdValue>(
 struct ReadyReadHooks {
     std::function<core::TdEventClock::time_point()> now;
     std::function<void()> wait;
+    std::function<void()> before_event_arbitration;
 };
 
 class ReadyReadSession {

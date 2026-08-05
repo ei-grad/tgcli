@@ -1239,7 +1239,6 @@ class ProductionTdRuntime final : public TdRuntime {
         if (response.object == nullptr) {
             return std::nullopt;
         }
-        const auto observed_at = TdEventClock::now();
 
         std::uint64_t generation = 0;
         bool authorization_state_response = false;
@@ -1270,8 +1269,7 @@ class ProductionTdRuntime final : public TdRuntime {
                               .client_generation = generation,
                               .query_id = response.request_id,
                               .object = convert_response(std::move(response.object)),
-                              .authorization_state = std::move(authorization_state),
-                              .observed_at = observed_at};
+                              .authorization_state = std::move(authorization_state)};
     }
 
   private:

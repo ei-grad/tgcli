@@ -7,6 +7,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -19,6 +20,12 @@ class LogoutCoordinator;
 namespace tgcli::core {
 
 class AuthBootstrap;
+
+struct TdClientEventHooks {
+    std::function<TdEventClock::time_point()> now;
+    // Runs under the publication gate after stamping and before any auth/response publication.
+    std::function<void(TdEventClock::time_point)> after_observed;
+};
 
 class TdOwnerLease {
   public:
@@ -117,6 +124,8 @@ class TdClient {
     explicit TdClient(const TdLogConfiguration& logging);
     explicit TdClient(std::unique_ptr<TdRuntime> runtime);
     TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging);
+    TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
+             TdClientEventHooks event_hooks);
     ~TdClient();
     TdClient(const TdClient&) = delete;
     TdClient& operator=(const TdClient&) = delete;
@@ -191,6 +200,10 @@ class TdClient {
     [[nodiscard]] std::shared_ptr<const AuthStateSnapshot> auth_state() const;
     std::uint64_t subscribe_auth_states(AuthStateHandler handler);
     void unsubscribe_auth_states(std::uint64_t id);
+
+    // Serializes a deadline decision with receive-event stamping and publication.
+    // The caller must keep the returned lock while inspecting response/auth visibility.
+    [[nodiscard]] std::unique_lock<std::mutex> lock_event_publication() const;
 
     // Graceful shutdown (DESIGN.md §10): asks tdlib to close, waits for
     // authorizationStateClosed so the database is flushed, then stops the

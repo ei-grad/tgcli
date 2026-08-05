@@ -82,8 +82,12 @@ struct TdClosedDecision::State {
 
 class TdClient::Impl {
   public:
-    Impl(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging)
-        : runtime_(std::move(runtime)) {
+    Impl(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
+         TdClientEventHooks event_hooks)
+        : runtime_(std::move(runtime)),
+          event_now_(event_hooks.now ? std::move(event_hooks.now)
+                                     : [] { return TdEventClock::now(); }),
+          after_event_observed_(std::move(event_hooks.after_observed)) {
         if (runtime_ == nullptr) {
             throw std::invalid_argument("TdClient runtime must not be null");
         }
@@ -524,6 +528,10 @@ class TdClient::Impl {
         auth_states_.unsubscribe(id);
     }
 
+    std::mutex& event_publication_mutex() const {
+        return event_publication_mutex_;
+    }
+
     bool close_until(std::chrono::steady_clock::time_point deadline) {
         std::call_once(close_begin_once_, [this] {
             std::shared_ptr<Generation> generation;
@@ -825,11 +833,16 @@ class TdClient::Impl {
             if (!event.has_value()) {
                 continue;
             }
-            handle_event(std::move(*event));
+            const std::unique_lock publication_lock(event_publication_mutex_);
+            const auto observed_at = event_now_();
+            if (after_event_observed_) {
+                after_event_observed_(observed_at);
+            }
+            handle_event(std::move(*event), observed_at);
         }
     }
 
-    void handle_event(TdRuntimeEvent event) {
+    void handle_event(TdRuntimeEvent event, TdEventClock::time_point observed_at) {
         std::shared_ptr<Generation> generation;
         {
             const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -845,7 +858,7 @@ class TdClient::Impl {
             close_generation_admission(generation);
         }
         const auto receive_event_sequence = next_receive_event_sequence_++;
-        event.object.set_receive_event_metadata(receive_event_sequence, event.observed_at);
+        event.object.set_receive_event_metadata(receive_event_sequence, observed_at);
 
         if (event.authorization_state) {
             if (event.authorization_state->state == AuthState::LoggingOut ||
@@ -860,7 +873,7 @@ class TdClient::Impl {
         }
 
         if (event.query_id == 0) {
-            handle_update(generation, std::move(event), receive_event_sequence);
+            handle_update(generation, std::move(event), receive_event_sequence, observed_at);
             return;
         }
 
@@ -873,7 +886,7 @@ class TdClient::Impl {
             }
             if (install_response) {
                 install_auth_state(generation, *event.authorization_state, false,
-                                   receive_event_sequence, event.observed_at);
+                                   receive_event_sequence, observed_at);
                 if (event.authorization_state->state == AuthState::Closed) {
                     handle_closed(generation);
                 }
@@ -883,11 +896,11 @@ class TdClient::Impl {
     }
 
     void handle_update(const std::shared_ptr<Generation>& generation, TdRuntimeEvent event,
-                       std::uint64_t receive_event_sequence) {
+                       std::uint64_t receive_event_sequence, TdEventClock::time_point observed_at) {
         if (event.authorization_state.has_value()) {
             const auto closed = event.authorization_state->state == AuthState::Closed;
             install_auth_state(generation, *event.authorization_state, true, receive_event_sequence,
-                               event.observed_at);
+                               observed_at);
             updates_.publish(event.object);
             if (closed) {
                 handle_closed(generation);
@@ -996,6 +1009,9 @@ class TdClient::Impl {
     }
 
     std::unique_ptr<TdRuntime> runtime_;
+    std::function<TdEventClock::time_point()> event_now_;
+    std::function<void(TdEventClock::time_point)> after_event_observed_;
+    mutable std::mutex event_publication_mutex_;
     mutable std::mutex state_mutex_;
     std::shared_ptr<Generation> current_;
     std::uint64_t next_generation_ = 1;
@@ -1140,7 +1156,11 @@ TdClient::TdClient(std::unique_ptr<TdRuntime> runtime)
     : TdClient(std::move(runtime), TdLogConfiguration{}) {}
 
 TdClient::TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging)
-    : impl_(std::make_unique<Impl>(std::move(runtime), logging)) {}
+    : TdClient(std::move(runtime), logging, {}) {}
+
+TdClient::TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
+                   TdClientEventHooks event_hooks)
+    : impl_(std::make_unique<Impl>(std::move(runtime), logging, std::move(event_hooks))) {}
 
 TdClient::~TdClient() = default;
 
@@ -1306,6 +1326,10 @@ std::uint64_t TdClient::subscribe_auth_states(AuthStateHandler handler) {
 
 void TdClient::unsubscribe_auth_states(std::uint64_t id) {
     impl_->unsubscribe_auth_states(id);
+}
+
+std::unique_lock<std::mutex> TdClient::lock_event_publication() const {
+    return std::unique_lock(impl_->event_publication_mutex());
 }
 
 void TdClient::close() {

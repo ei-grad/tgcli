@@ -779,7 +779,6 @@ struct TdRuntimeEvent {
     std::uint64_t query_id = 0;
     TdValue object;
     std::optional<AuthStateData> authorization_state;
-    TdEventClock::time_point observed_at = TdEventClock::now();
 };
 
 // The sole production/fake boundary used by TdClient. Implementations stamp
