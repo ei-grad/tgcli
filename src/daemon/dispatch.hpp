@@ -7,7 +7,9 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -20,6 +22,48 @@ class RequestSession;
 // cannot be forgotten. Full gate semantics land with M3; until then the
 // dispatcher fails every non-Read command closed.
 enum class Tier { Read, Write, Destructive };
+
+// Canonical M3/M4 operation identities. Their enumerator values are process-
+// local only; persistent and wire contracts use the names returned by the
+// policy registry.
+enum class M3Operation {
+    Send,
+    MsgEdit,
+    MsgDelete,
+    MsgForward,
+    MsgReact,
+    MsgPin,
+    MsgUnpin,
+    ChatMarkRead,
+    ChatMute,
+    ChatUnmute,
+    ChatPin,
+    ChatUnpin,
+    ChatArchive,
+    ChatUnarchive,
+    ChatJoin,
+    ChatLeave,
+    SavedAttach,
+};
+
+enum class M3BotPolicy { Allowed, ImmediateOnly, UserOnly };
+enum class M3ScheduleKind { None, At, Online };
+enum class M3BotAdmission { Allowed, Unsupported };
+
+struct M3OperationPolicy {
+    M3Operation operation;
+    std::string_view canonical_name;
+    std::string_view command_path;
+    Tier tier;
+    M3BotPolicy bot_policy;
+};
+
+std::span<const M3OperationPolicy> m3_operation_policies();
+const M3OperationPolicy* m3_operation_policy(M3Operation operation);
+std::optional<M3Operation> parse_m3_operation(std::string_view canonical_name);
+std::optional<M3Operation> m3_operation_for_command(std::string_view command_path);
+M3BotAdmission evaluate_m3_bot_admission(M3Operation operation, bool is_bot,
+                                         M3ScheduleKind schedule);
 
 struct ChallengeFailure {
     std::string code;
@@ -111,6 +155,7 @@ struct CommandDescriptor {
     Tier tier = Tier::Read;
     std::function<void(const proto::Request&, RequestSession&)> handler;
     bool m1_destructive_kernel = false;
+    std::optional<M3Operation> m3_operation = std::nullopt;
 };
 
 // The daemon-side dispatch table and the single safety chokepoint (DESIGN.md

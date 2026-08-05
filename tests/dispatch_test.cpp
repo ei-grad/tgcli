@@ -8,12 +8,16 @@
 #include "daemon/request_session.hpp"
 #include "schema_matcher.hpp"
 
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -57,6 +61,19 @@ daemon::DaemonContext test_context() {
     context.tdlib_version = "1.2.3";
     context.socket_path = "/tmp/test.sock";
     return context;
+}
+
+std::vector<std::string> command_parts(std::string_view path) {
+    std::vector<std::string> parts;
+    while (!path.empty()) {
+        const auto separator = path.find(' ');
+        parts.emplace_back(path.substr(0, separator));
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        path.remove_prefix(separator + 1);
+    }
+    return parts;
 }
 
 } // namespace
@@ -132,6 +149,149 @@ TEST_CASE("non-Read tiers fail closed pending the M3 gate", "[dispatch]") {
 
     for (const auto* name : {"poke", "nuke"}) {
         const auto outcome = dispatch(dispatcher, {name});
+        CHECK(outcome.error_code == "DENIED");
+        CHECK(outcome.exit_code == kDenied);
+    }
+    CHECK_FALSE(handler_ran);
+}
+
+TEST_CASE("M3 operation registry is closed and has exact tier and bot policy",
+          "[dispatch][m3][safety]") {
+    struct ExpectedPolicy {
+        daemon::M3Operation operation;
+        std::string_view canonical_name;
+        std::string_view command_path;
+        daemon::Tier tier;
+        daemon::M3BotPolicy bot_policy;
+    };
+    constexpr std::array expected{
+        ExpectedPolicy{daemon::M3Operation::Send, "send", "send", daemon::Tier::Write,
+                       daemon::M3BotPolicy::ImmediateOnly},
+        ExpectedPolicy{daemon::M3Operation::MsgEdit, "msg_edit", "msg edit", daemon::Tier::Write,
+                       daemon::M3BotPolicy::Allowed},
+        ExpectedPolicy{daemon::M3Operation::MsgDelete, "msg_delete", "msg delete",
+                       daemon::Tier::Destructive, daemon::M3BotPolicy::Allowed},
+        ExpectedPolicy{daemon::M3Operation::MsgForward, "msg_forward", "msg forward",
+                       daemon::Tier::Write, daemon::M3BotPolicy::Allowed},
+        ExpectedPolicy{daemon::M3Operation::MsgReact, "msg_react", "msg react", daemon::Tier::Write,
+                       daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::MsgPin, "msg_pin", "msg pin", daemon::Tier::Write,
+                       daemon::M3BotPolicy::Allowed},
+        ExpectedPolicy{daemon::M3Operation::MsgUnpin, "msg_unpin", "msg unpin", daemon::Tier::Write,
+                       daemon::M3BotPolicy::Allowed},
+        ExpectedPolicy{daemon::M3Operation::ChatMarkRead, "chat_mark_read", "chat mark-read",
+                       daemon::Tier::Write, daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatMute, "chat_mute", "chat mute", daemon::Tier::Write,
+                       daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatUnmute, "chat_unmute", "chat unmute",
+                       daemon::Tier::Write, daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatPin, "chat_pin", "chat pin", daemon::Tier::Write,
+                       daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatUnpin, "chat_unpin", "chat unpin",
+                       daemon::Tier::Write, daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatArchive, "chat_archive", "chat archive",
+                       daemon::Tier::Write, daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatUnarchive, "chat_unarchive", "chat unarchive",
+                       daemon::Tier::Write, daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatJoin, "chat_join", "chat join", daemon::Tier::Write,
+                       daemon::M3BotPolicy::UserOnly},
+        ExpectedPolicy{daemon::M3Operation::ChatLeave, "chat_leave", "chat leave",
+                       daemon::Tier::Destructive, daemon::M3BotPolicy::Allowed},
+        ExpectedPolicy{daemon::M3Operation::SavedAttach, "saved_attach", "saved attach",
+                       daemon::Tier::Write, daemon::M3BotPolicy::UserOnly},
+    };
+
+    const auto policies = daemon::m3_operation_policies();
+    REQUIRE(policies.size() == expected.size());
+    std::set<std::string_view> canonical_names;
+    std::set<std::string_view> command_paths;
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const auto& wanted = expected.at(index);
+        const auto& actual = policies[index];
+        CHECK(actual.operation == wanted.operation);
+        CHECK(actual.canonical_name == wanted.canonical_name);
+        CHECK(actual.command_path == wanted.command_path);
+        CHECK(actual.tier == wanted.tier);
+        CHECK(actual.bot_policy == wanted.bot_policy);
+        CHECK(canonical_names.emplace(actual.canonical_name).second);
+        CHECK(command_paths.emplace(actual.command_path).second);
+
+        REQUIRE(daemon::parse_m3_operation(wanted.canonical_name).has_value());
+        CHECK(*daemon::parse_m3_operation(wanted.canonical_name) == wanted.operation);
+        REQUIRE(daemon::m3_operation_for_command(wanted.command_path).has_value());
+        CHECK(*daemon::m3_operation_for_command(wanted.command_path) == wanted.operation);
+        REQUIRE(daemon::m3_operation_policy(wanted.operation) != nullptr);
+        CHECK(daemon::m3_operation_policy(wanted.operation)->canonical_name ==
+              wanted.canonical_name);
+
+        CHECK(daemon::evaluate_m3_bot_admission(wanted.operation, false,
+                                                daemon::M3ScheduleKind::None) ==
+              daemon::M3BotAdmission::Allowed);
+        const auto expected_bot = wanted.bot_policy == daemon::M3BotPolicy::UserOnly
+                                      ? daemon::M3BotAdmission::Unsupported
+                                      : daemon::M3BotAdmission::Allowed;
+        CHECK(daemon::evaluate_m3_bot_admission(wanted.operation, true,
+                                                daemon::M3ScheduleKind::None) == expected_bot);
+    }
+
+    CHECK(daemon::evaluate_m3_bot_admission(daemon::M3Operation::Send, false,
+                                            daemon::M3ScheduleKind::At) ==
+          daemon::M3BotAdmission::Allowed);
+    CHECK(daemon::evaluate_m3_bot_admission(daemon::M3Operation::Send, false,
+                                            daemon::M3ScheduleKind::Online) ==
+          daemon::M3BotAdmission::Allowed);
+    CHECK(daemon::evaluate_m3_bot_admission(daemon::M3Operation::Send, true,
+                                            daemon::M3ScheduleKind::At) ==
+          daemon::M3BotAdmission::Unsupported);
+    CHECK(daemon::evaluate_m3_bot_admission(daemon::M3Operation::Send, true,
+                                            daemon::M3ScheduleKind::Online) ==
+          daemon::M3BotAdmission::Unsupported);
+
+    const auto invalid = static_cast<daemon::M3Operation>(255);
+    CHECK(daemon::m3_operation_policy(invalid) == nullptr);
+    CHECK_FALSE(daemon::parse_m3_operation("msg-edit").has_value());
+    CHECK_FALSE(daemon::m3_operation_for_command("msg_edit").has_value());
+    CHECK(daemon::evaluate_m3_bot_admission(invalid, false, daemon::M3ScheduleKind::None) ==
+          daemon::M3BotAdmission::Unsupported);
+}
+
+TEST_CASE("M3 descriptors must match the closed registry and remain fail closed",
+          "[dispatch][m3][safety]") {
+    const auto handler = [](const proto::Request&, daemon::RequestSession& sink) {
+        sink.result(json::object());
+    };
+
+    daemon::Dispatcher rejected;
+    CHECK_THROWS_AS(
+        rejected.register_command("send", {daemon::Tier::Write, handler, false, std::nullopt}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command("wrong path", {daemon::Tier::Write, handler, false,
+                                                             daemon::M3Operation::Send}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command(
+                        "send", {daemon::Tier::Read, handler, false, daemon::M3Operation::Send}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command(
+                        "send", {daemon::Tier::Write, handler, true, daemon::M3Operation::Send}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command("send", {daemon::Tier::Write, handler, false,
+                                                       static_cast<daemon::M3Operation>(255)}),
+                    std::invalid_argument);
+
+    daemon::Dispatcher dispatcher;
+    bool handler_ran = false;
+    for (const auto& policy : daemon::m3_operation_policies()) {
+        dispatcher.register_command(
+            std::string(policy.command_path),
+            {policy.tier,
+             [&handler_ran](const proto::Request&, daemon::RequestSession& sink) {
+                 handler_ran = true;
+                 sink.result(json::object());
+             },
+             false, policy.operation});
+    }
+    for (const auto& policy : daemon::m3_operation_policies()) {
+        const auto outcome = dispatch(dispatcher, command_parts(policy.command_path));
         CHECK(outcome.error_code == "DENIED");
         CHECK(outcome.exit_code == kDenied);
     }

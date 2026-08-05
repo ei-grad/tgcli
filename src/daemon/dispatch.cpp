@@ -3,11 +3,36 @@
 #include "common/exit_codes.hpp"
 #include "daemon/request_session.hpp"
 
+#include <algorithm>
+#include <array>
 #include <exception>
+#include <stdexcept>
 
 namespace tgcli::daemon {
 
 namespace {
+
+constexpr std::array<M3OperationPolicy, 17> kM3OperationPolicies{{
+    {M3Operation::Send, "send", "send", Tier::Write, M3BotPolicy::ImmediateOnly},
+    {M3Operation::MsgEdit, "msg_edit", "msg edit", Tier::Write, M3BotPolicy::Allowed},
+    {M3Operation::MsgDelete, "msg_delete", "msg delete", Tier::Destructive, M3BotPolicy::Allowed},
+    {M3Operation::MsgForward, "msg_forward", "msg forward", Tier::Write, M3BotPolicy::Allowed},
+    {M3Operation::MsgReact, "msg_react", "msg react", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::MsgPin, "msg_pin", "msg pin", Tier::Write, M3BotPolicy::Allowed},
+    {M3Operation::MsgUnpin, "msg_unpin", "msg unpin", Tier::Write, M3BotPolicy::Allowed},
+    {M3Operation::ChatMarkRead, "chat_mark_read", "chat mark-read", Tier::Write,
+     M3BotPolicy::UserOnly},
+    {M3Operation::ChatMute, "chat_mute", "chat mute", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::ChatUnmute, "chat_unmute", "chat unmute", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::ChatPin, "chat_pin", "chat pin", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::ChatUnpin, "chat_unpin", "chat unpin", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::ChatArchive, "chat_archive", "chat archive", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::ChatUnarchive, "chat_unarchive", "chat unarchive", Tier::Write,
+     M3BotPolicy::UserOnly},
+    {M3Operation::ChatJoin, "chat_join", "chat join", Tier::Write, M3BotPolicy::UserOnly},
+    {M3Operation::ChatLeave, "chat_leave", "chat leave", Tier::Destructive, M3BotPolicy::Allowed},
+    {M3Operation::SavedAttach, "saved_attach", "saved attach", Tier::Write, M3BotPolicy::UserOnly},
+}};
 
 std::string command_key(const std::vector<std::string>& command) {
     std::string key;
@@ -21,6 +46,49 @@ std::string command_key(const std::vector<std::string>& command) {
 }
 
 } // namespace
+
+std::span<const M3OperationPolicy> m3_operation_policies() {
+    return kM3OperationPolicies;
+}
+
+const M3OperationPolicy* m3_operation_policy(M3Operation operation) {
+    const auto* const found =
+        std::ranges::find(kM3OperationPolicies, operation, &M3OperationPolicy::operation);
+    return found == kM3OperationPolicies.end() ? nullptr : &*found;
+}
+
+std::optional<M3Operation> parse_m3_operation(std::string_view canonical_name) {
+    const auto* const found =
+        std::ranges::find(kM3OperationPolicies, canonical_name, &M3OperationPolicy::canonical_name);
+    return found == kM3OperationPolicies.end() ? std::nullopt : std::optional{found->operation};
+}
+
+std::optional<M3Operation> m3_operation_for_command(std::string_view command_path) {
+    const auto* const found =
+        std::ranges::find(kM3OperationPolicies, command_path, &M3OperationPolicy::command_path);
+    return found == kM3OperationPolicies.end() ? std::nullopt : std::optional{found->operation};
+}
+
+M3BotAdmission evaluate_m3_bot_admission(M3Operation operation, bool is_bot,
+                                         M3ScheduleKind schedule) {
+    const auto* policy = m3_operation_policy(operation);
+    if (policy == nullptr) {
+        return M3BotAdmission::Unsupported;
+    }
+    if (!is_bot) {
+        return M3BotAdmission::Allowed;
+    }
+    switch (policy->bot_policy) {
+    case M3BotPolicy::Allowed:
+        return M3BotAdmission::Allowed;
+    case M3BotPolicy::ImmediateOnly:
+        return schedule == M3ScheduleKind::None ? M3BotAdmission::Allowed
+                                                : M3BotAdmission::Unsupported;
+    case M3BotPolicy::UserOnly:
+        return M3BotAdmission::Unsupported;
+    }
+    return M3BotAdmission::Unsupported;
+}
 
 void ResponseSink::item(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
@@ -77,6 +145,18 @@ std::optional<nlohmann::json> ResponseSink::challenge(nlohmann::json data) {
 }
 
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
+    const auto reserved_operation = m3_operation_for_command(path);
+    if (!descriptor.m3_operation) {
+        if (reserved_operation) {
+            throw std::invalid_argument("M3 command descriptor is missing its operation identity");
+        }
+    } else {
+        const auto* policy = m3_operation_policy(*descriptor.m3_operation);
+        if (policy == nullptr || policy->command_path != path || policy->tier != descriptor.tier ||
+            descriptor.m1_destructive_kernel) {
+            throw std::invalid_argument("M3 command descriptor does not match its static policy");
+        }
+    }
     commands_.emplace(path, std::move(descriptor));
 }
 
