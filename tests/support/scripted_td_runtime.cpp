@@ -232,21 +232,25 @@ std::optional<core::TdRuntimeEvent> ScriptedTdRuntime::receive(std::chrono::mill
 
 void ScriptedTdRuntime::push_response(ScriptedClient client, std::uint64_t query_id,
                                       core::TdValue object,
-                                      std::optional<core::AuthStateData> authorization_state) {
+                                      std::optional<core::AuthStateData> authorization_state,
+                                      core::TdEventClock::time_point observed_at) {
     push_event({.client_id = client.client_id,
                 .client_generation = client.client_generation,
                 .query_id = query_id,
                 .object = std::move(object),
-                .authorization_state = std::move(authorization_state)});
+                .authorization_state = std::move(authorization_state),
+                .observed_at = observed_at});
 }
 
 void ScriptedTdRuntime::push_update(ScriptedClient client, core::TdValue object,
-                                    std::optional<core::AuthStateData> authorization_state) {
+                                    std::optional<core::AuthStateData> authorization_state,
+                                    core::TdEventClock::time_point observed_at) {
     push_event({.client_id = client.client_id,
                 .client_generation = client.client_generation,
                 .query_id = 0,
                 .object = std::move(object),
-                .authorization_state = std::move(authorization_state)});
+                .authorization_state = std::move(authorization_state),
+                .observed_at = observed_at});
 }
 
 bool ScriptedTdRuntime::wait_for_sent(std::size_t count, std::chrono::milliseconds timeout) const {

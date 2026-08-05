@@ -228,6 +228,7 @@ TEST_CASE("AuthBootstrap is a closed function state and owner allowlist",
             .client_generation = 1,
             .auth_sequence = entry.sequence,
             .data = core::AuthStateData{entry.state},
+            .receive_observed_at = std::nullopt,
         };
         const core::TdFunctionData function{entry.function};
         CHECK_FALSE(core::authorize_td_send(descriptor_for(snapshot, entry.function,
@@ -309,16 +310,17 @@ TEST_CASE("read functions require Ready in every authorization state",
             .client_generation = 1,
             .auth_sequence = 1,
             .data = core::AuthStateData{state},
+            .receive_observed_at = std::nullopt,
         };
         for (const auto function :
              {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
               core::TdFunctionKind::GetSavedMessagesTags, core::TdFunctionKind::SearchSavedMessages,
-              core::TdFunctionKind::GetActiveSessions,
-              core::TdFunctionKind::GetChat, core::TdFunctionKind::GetChats,
-              core::TdFunctionKind::LoadChats, core::TdFunctionKind::SearchPublicChat,
-              core::TdFunctionKind::GetInternalLinkType, core::TdFunctionKind::GetMessageLinkInfo,
-              core::TdFunctionKind::CheckChatInviteLink, core::TdFunctionKind::GetUser,
-              core::TdFunctionKind::GetSupergroup, core::TdFunctionKind::GetSupergroupFullInfo,
+              core::TdFunctionKind::GetActiveSessions, core::TdFunctionKind::GetChat,
+              core::TdFunctionKind::GetChats, core::TdFunctionKind::LoadChats,
+              core::TdFunctionKind::SearchPublicChat, core::TdFunctionKind::GetInternalLinkType,
+              core::TdFunctionKind::GetMessageLinkInfo, core::TdFunctionKind::CheckChatInviteLink,
+              core::TdFunctionKind::GetUser, core::TdFunctionKind::GetSupergroup,
+              core::TdFunctionKind::GetSupergroupFullInfo,
               core::TdFunctionKind::CreatePrivateChat}) {
             const core::TdFunctionData function_data{function};
             const auto denied = core::authorize_td_send(
@@ -337,6 +339,7 @@ TEST_CASE("dormant session termination policy is destructive Ready-only and requ
         .client_generation = 1,
         .auth_sequence = 1,
         .data = core::AuthStateData{core::AuthState::Ready},
+        .receive_observed_at = std::nullopt,
     };
     const core::TdFunctionData function{core::TdFunctionKind::TerminateSession,
                                         {{"session_id", std::int64_t{0}}}};

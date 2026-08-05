@@ -636,7 +636,8 @@ class TdClient::Impl {
             AuthStateSnapshot{.client_id = client_id,
                               .client_generation = generation_number,
                               .auth_sequence = 0,
-                              .data = AuthStateData{AuthState::Unknown}});
+                              .data = AuthStateData{AuthState::Unknown},
+                              .receive_observed_at = std::nullopt});
         auth_state_.store(std::move(unknown), std::memory_order_release);
 
         const TdSendDescriptor descriptor{
@@ -844,7 +845,7 @@ class TdClient::Impl {
             close_generation_admission(generation);
         }
         const auto receive_event_sequence = next_receive_event_sequence_++;
-        event.object.set_receive_event_sequence(receive_event_sequence);
+        event.object.set_receive_event_metadata(receive_event_sequence, event.observed_at);
 
         if (event.authorization_state) {
             if (event.authorization_state->state == AuthState::LoggingOut ||
@@ -872,7 +873,7 @@ class TdClient::Impl {
             }
             if (install_response) {
                 install_auth_state(generation, *event.authorization_state, false,
-                                   receive_event_sequence);
+                                   receive_event_sequence, event.observed_at);
                 if (event.authorization_state->state == AuthState::Closed) {
                     handle_closed(generation);
                 }
@@ -885,8 +886,8 @@ class TdClient::Impl {
                        std::uint64_t receive_event_sequence) {
         if (event.authorization_state.has_value()) {
             const auto closed = event.authorization_state->state == AuthState::Closed;
-            install_auth_state(generation, *event.authorization_state, true,
-                               receive_event_sequence);
+            install_auth_state(generation, *event.authorization_state, true, receive_event_sequence,
+                               event.observed_at);
             updates_.publish(event.object);
             if (closed) {
                 handle_closed(generation);
@@ -906,7 +907,8 @@ class TdClient::Impl {
 
     void install_auth_state(const std::shared_ptr<Generation>& generation,
                             const AuthStateData& state, bool from_update,
-                            std::uint64_t receive_event_sequence) {
+                            std::uint64_t receive_event_sequence,
+                            TdEventClock::time_point observed_at) {
         if (state.state == AuthState::Closed) {
             close_generation_admission(generation);
         }
@@ -926,7 +928,8 @@ class TdClient::Impl {
                                   .client_generation = generation->number,
                                   .auth_sequence = sequence,
                                   .receive_event_sequence = receive_event_sequence,
-                                  .data = state});
+                                  .data = state,
+                                  .receive_observed_at = observed_at});
             auth_state_.store(snapshot, std::memory_order_release);
             generation->initial_state_installed = true;
             generation->accepted_auth_update |= from_update;

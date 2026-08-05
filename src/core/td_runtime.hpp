@@ -16,6 +16,7 @@
 namespace tgcli::core {
 
 class TdClient;
+using TdEventClock = std::chrono::steady_clock;
 
 enum class TdFunctionKind {
     GetAuthorizationState,
@@ -228,12 +229,17 @@ class TdValue {
         return function_;
     }
 
-    void set_receive_event_sequence(std::uint64_t sequence) {
+    void set_receive_event_metadata(std::uint64_t sequence, TdEventClock::time_point observed_at) {
         receive_event_sequence_ = sequence;
+        receive_observed_at_ = observed_at;
     }
 
     [[nodiscard]] std::uint64_t receive_event_sequence() const {
         return receive_event_sequence_;
+    }
+
+    [[nodiscard]] std::optional<TdEventClock::time_point> receive_observed_at() const {
+        return receive_observed_at_;
     }
 
   private:
@@ -254,6 +260,7 @@ class TdValue {
     std::unique_ptr<ValueBase> value_;
     std::optional<TdFunctionData> function_;
     std::uint64_t receive_event_sequence_ = 0;
+    std::optional<TdEventClock::time_point> receive_observed_at_;
 };
 
 enum class AuthState {
@@ -415,6 +422,7 @@ struct AuthStateSnapshot {
     std::uint64_t auth_sequence = 0;
     std::uint64_t receive_event_sequence = 0;
     AuthStateData data;
+    std::optional<TdEventClock::time_point> receive_observed_at;
 };
 
 enum class DescriptorKind { Read, AuthBootstrap, Write, Destructive, Lifecycle };
@@ -771,6 +779,7 @@ struct TdRuntimeEvent {
     std::uint64_t query_id = 0;
     TdValue object;
     std::optional<AuthStateData> authorization_state;
+    TdEventClock::time_point observed_at = TdEventClock::now();
 };
 
 // The sole production/fake boundary used by TdClient. Implementations stamp

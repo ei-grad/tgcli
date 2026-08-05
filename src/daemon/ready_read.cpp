@@ -16,7 +16,7 @@ namespace {
 
 using namespace std::chrono_literals;
 
-enum class ReadyChangeKind { None, Advanced, Lost };
+enum class ReadyChangeKind { None, Advanced, Lost, Invalid };
 
 struct ReadyChange {
     ReadyChangeKind kind = ReadyChangeKind::None;
@@ -36,11 +36,19 @@ ReadyReadResult empty_result(ReadyReadStatus status) {
     return {status, {}, std::nullopt, nullptr};
 }
 
+bool event_precedes_deadline(const std::optional<core::TdEventClock::time_point>& observed_at,
+                             core::TdEventClock::time_point deadline) {
+    return observed_at && *observed_at < deadline;
+}
+
 } // namespace
 
 class ReadyReadSession::Impl {
   public:
-    Impl(core::TdClient& client, RequestSession& session) : client_(client), session_(session) {
+    Impl(core::TdClient& client, RequestSession& session, ReadyReadHooks hooks)
+        : client_(client), session_(session),
+          now_(hooks.now ? std::move(hooks.now) : [] { return core::TdEventClock::now(); }),
+          wait_(hooks.wait ? std::move(hooks.wait) : [] { std::this_thread::sleep_for(1ms); }) {
         subscription_ = client_.subscribe_auth_states(
             [this](const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
                 observe(snapshot);
@@ -65,13 +73,13 @@ class ReadyReadSession::Impl {
     ReadyReadResult read(const ReadyReadStart& start,
                          std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
         for (;;) {
-            if (RequestSession::Clock::now() >= session_.deadline()) {
+            if (now_() >= session_.deadline()) {
                 return empty_result(ReadyReadStatus::TimedOut);
             }
             if (!session_.reserve_direct_in_flight()) {
                 return empty_result(ReadyReadStatus::Cancelled);
             }
-            if (RequestSession::Clock::now() >= session_.deadline()) {
+            if (now_() >= session_.deadline()) {
                 session_.settle_in_flight();
                 return empty_result(ReadyReadStatus::TimedOut);
             }
@@ -123,14 +131,24 @@ class ReadyReadSession::Impl {
             return candidate && std::tie(candidate->client_generation, candidate->auth_sequence) >
                                     std::tie(sent.client_generation, sent.auth_sequence);
         };
-        const auto lost = std::ranges::find_if(pending_, [&](const auto& candidate) {
-            return after_sent(candidate) && candidate->data.state != core::AuthState::Ready;
-        });
-        if (lost != pending_.end()) {
-            return {ReadyChangeKind::Lost, *lost};
+        std::shared_ptr<const core::AuthStateSnapshot> latest_ready;
+        for (const auto& candidate : pending_) {
+            if (!after_sent(candidate)) {
+                continue;
+            }
+            if (candidate->receive_event_sequence == 0 || !candidate->receive_observed_at) {
+                return {ReadyChangeKind::Invalid, candidate};
+            }
+            if (!event_precedes_deadline(candidate->receive_observed_at, session_.deadline())) {
+                continue;
+            }
+            if (candidate->data.state != core::AuthState::Ready) {
+                return {ReadyChangeKind::Lost, candidate};
+            }
+            latest_ready = candidate;
         }
-        if (after_sent(latest_) && latest_->data.state == core::AuthState::Ready) {
-            return {ReadyChangeKind::Advanced, latest_};
+        if (latest_ready) {
+            return {ReadyChangeKind::Advanced, std::move(latest_ready)};
         }
         return {};
     }
@@ -140,11 +158,25 @@ class ReadyReadSession::Impl {
         try {
             auto value = response.get();
             const auto change = ready_change_after(sent);
+            const auto observed_at = value.receive_observed_at();
+            const auto response_sequence = value.receive_event_sequence();
+            if (change.kind == ReadyChangeKind::Invalid) {
+                return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};
+            }
             if (change.kind == ReadyChangeKind::Lost && change.snapshot &&
                 change.snapshot->receive_event_sequence != 0 &&
-                (value.receive_event_sequence() == 0 ||
-                 change.snapshot->receive_event_sequence < value.receive_event_sequence())) {
+                (response_sequence == 0 ||
+                 change.snapshot->receive_event_sequence < response_sequence)) {
                 return {WaitStatus::AuthorizationLost, {}, std::nullopt, change.snapshot};
+            }
+            if (response_sequence == 0 || !observed_at) {
+                return {WaitStatus::Failed, {}, std::nullopt, nullptr};
+            }
+            if (!event_precedes_deadline(observed_at, session_.deadline())) {
+                if (change.kind == ReadyChangeKind::Advanced) {
+                    return {WaitStatus::ReadyAdvanced, {}, std::nullopt, change.snapshot};
+                }
+                return {WaitStatus::TimedOut, {}, std::nullopt, nullptr};
             }
             return {WaitStatus::Response, std::move(value), std::nullopt, nullptr};
         } catch (const core::TdAuthorizationError& error) {
@@ -155,6 +187,9 @@ class ReadyReadSession::Impl {
             if (change.kind == ReadyChangeKind::Advanced) {
                 return {WaitStatus::ReadyAdvanced, {}, std::nullopt, change.snapshot};
             }
+            if (change.kind == ReadyChangeKind::Invalid) {
+                return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};
+            }
             return {WaitStatus::Failed, {}, error.failure(), nullptr};
         } catch (const std::exception&) {
             const auto change = ready_change_after(sent);
@@ -163,6 +198,9 @@ class ReadyReadSession::Impl {
             }
             if (change.kind == ReadyChangeKind::Advanced) {
                 return {WaitStatus::ReadyAdvanced, {}, std::nullopt, change.snapshot};
+            }
+            if (change.kind == ReadyChangeKind::Invalid) {
+                return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};
             }
             return {WaitStatus::Failed, {}, std::nullopt, nullptr};
         }
@@ -178,14 +216,17 @@ class ReadyReadSession::Impl {
             if (change.kind == ReadyChangeKind::Lost) {
                 return {WaitStatus::AuthorizationLost, {}, std::nullopt, change.snapshot};
             }
-            if (RequestSession::Clock::now() >= session_.deadline()) {
+            if (change.kind == ReadyChangeKind::Invalid) {
+                return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};
+            }
+            if (now_() >= session_.deadline()) {
                 return {WaitStatus::TimedOut, {}, std::nullopt, nullptr};
             }
             if (session_.cancellation_requested() &&
                 session_.in_flight_state() != InFlightState::Orphaned) {
                 return {WaitStatus::Cancelled, {}, std::nullopt, nullptr};
             }
-            std::this_thread::sleep_for(1ms);
+            wait_();
         }
     }
 
@@ -209,14 +250,17 @@ class ReadyReadSession::Impl {
 
     core::TdClient& client_;
     RequestSession& session_;
+    std::function<core::TdEventClock::time_point()> now_;
+    std::function<void()> wait_;
     mutable std::mutex mutex_;
     std::shared_ptr<const core::AuthStateSnapshot> latest_;
     std::deque<std::shared_ptr<const core::AuthStateSnapshot>> pending_;
     std::uint64_t subscription_ = 0;
 };
 
-ReadyReadSession::ReadyReadSession(core::TdClient& client, RequestSession& session)
-    : impl_(std::make_unique<Impl>(client, session)) {}
+ReadyReadSession::ReadyReadSession(core::TdClient& client, RequestSession& session,
+                                   ReadyReadHooks hooks)
+    : impl_(std::make_unique<Impl>(client, session, std::move(hooks))) {}
 
 ReadyReadSession::~ReadyReadSession() = default;
 

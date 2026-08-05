@@ -23,9 +23,14 @@ struct ReadyReadResult {
 using ReadyReadStart = std::function<std::future<core::TdValue>(
     const std::shared_ptr<const core::AuthStateSnapshot>&)>;
 
+struct ReadyReadHooks {
+    std::function<core::TdEventClock::time_point()> now;
+    std::function<void()> wait;
+};
+
 class ReadyReadSession {
   public:
-    ReadyReadSession(core::TdClient& client, RequestSession& session);
+    ReadyReadSession(core::TdClient& client, RequestSession& session, ReadyReadHooks hooks = {});
     ~ReadyReadSession();
     ReadyReadSession(const ReadyReadSession&) = delete;
     ReadyReadSession& operator=(const ReadyReadSession&) = delete;

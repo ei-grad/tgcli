@@ -59,9 +59,11 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;
 
     void push_response(ScriptedClient client, std::uint64_t query_id, core::TdValue object = {},
-                       std::optional<core::AuthStateData> authorization_state = std::nullopt);
+                       std::optional<core::AuthStateData> authorization_state = std::nullopt,
+                       core::TdEventClock::time_point observed_at = core::TdEventClock::now());
     void push_update(ScriptedClient client, core::TdValue object = {},
-                     std::optional<core::AuthStateData> authorization_state = std::nullopt);
+                     std::optional<core::AuthStateData> authorization_state = std::nullopt,
+                     core::TdEventClock::time_point observed_at = core::TdEventClock::now());
 
     bool wait_for_sent(std::size_t count,
                        std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
