@@ -155,8 +155,8 @@ core::TdValue ScriptedTdRuntime::make_get_internal_link_type(std::string link) {
 
 core::TdValue ScriptedTdRuntime::make_get_message_link_info(std::string url) {
     before_make(core::TdFunctionKind::GetMessageLinkInfo);
-    return core::TdValue::scripted_function(core::TdFunctionData{
-        core::TdFunctionKind::GetMessageLinkInfo, {{"url", std::move(url)}}});
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetMessageLinkInfo, {{"url", std::move(url)}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_check_chat_invite_link(std::string link) {
