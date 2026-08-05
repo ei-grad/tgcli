@@ -2834,6 +2834,781 @@ direction. No external evidence gate remains; M5 must not be declared complete u
 the fail-closed RE2 repository integration and the rest of this contract are
 implemented and verified.
 
+### 4.7 M6 regular-device session contract
+
+This section is an additive session-only M6 contract. It preserves M0-M5 and
+the M3 safety/audit semantics except for the explicit closed-enum extensions
+and explicit absence of idempotency below. Every object defined here is strict:
+all shown fields are required, no undeclared field is allowed, and JSON Schema
+uses Draft 2020-12 with `additionalProperties:false` at every object boundary.
+
+#### 4.7.1 Grammar, frame args and option matrix
+
+Exact command grammar:
+
+```text
+tgcli session list
+tgcli session terminate <session-id>
+```
+
+`<session-id>` is a canonical signed TDLib `int64` rendered as an ASCII decimal
+string. It must:
+
+- match `^(?:0|-?[1-9][0-9]*)$`;
+- parse into `[-9223372036854775808, 9223372036854775807]`;
+- contain no plus sign, whitespace or leading zero;
+- reject `-0` while accepting canonical `0`.
+
+The CLI, request frame, returned session rows, plan, confirmation target, error
+details, audit arguments and human output all retain the canonical decimal
+**string**. No layer converts a session id to a JSON number. This avoids
+IEEE-754/int53 loss and prevents a different spelling from changing identity
+or fingerprint. Zero receives no inferred meaning: it is parsed and matched
+against the returned snapshot exactly like every other int64 value.
+
+After normal v3 top-level/context validation, the closed command/args pairs are
+exactly:
+
+```text
+command=["session","list"]
+args={}
+
+command=["session","terminate"]
+args={"session_id":SessionId}
+```
+
+No alias, original argv spelling, numeric session id or additional args field
+is accepted. Context retains the existing exact nine fields; the session id is
+never duplicated in context.
+
+Both commands accept the existing globals `--account`, `--json`, `-v`,
+`--timeout` and `--no-daemon`. The ordinary-command deadline is the accepted
+`request_deadline(timeout, Default60)`: absent `--timeout` means one absolute
+60-second deadline beginning at daemon request admission.
+
+Option rules are closed:
+
+| option | `session list` | `session terminate` |
+|---|---|---|
+| `--allow-write` / folded request write grant | unsupported CLI mode for list | accepted for real execution; unnecessary for dry-run |
+| `--yes` | `USAGE/unsupported_mode` | accepted; supplies destructive confirmation for real execution |
+| `--dry-run` | `USAGE/unsupported_mode` | accepted; auth-bound read-only plan |
+| `--idempotency-key` | `USAGE/unsupported_mode` | `USAGE/unsupported_mode` |
+| `--cursor`, `-n`, `--full` | `USAGE/unsupported_mode` | `USAGE/unsupported_mode` |
+
+`--yes` and a write grant may be present with `--dry-run`; they do not change
+the plan and are not evaluated. Unknown positional arguments, a missing or
+noncanonical id, duplicate singleton options and every unlisted command-local
+option use the inherited exact `USAGE` envelope with exit 2. Invalid id uses
+`{"argument":"session-id","reason":"invalid_argument"}`; unsupported flags
+use the offending flag as `argument` and `reason:"unsupported_mode"`.
+
+The request operation enum adds exactly `session_list` and
+`session_terminate`. The safety function enum adds exactly
+`getActiveSessions` and `terminateSession`. `session_list` declares `Read`;
+`session_terminate` declares `Destructive`. There is no `session` fallback or
+prefix dispatch.
+
+#### 4.7.2 TDLib boundary and device enum
+
+The native typed boundary adds exactly:
+
+```text
+TdFunctionKind::GetActiveSessions -> td_api::getActiveSessions
+TdFunctionKind::TerminateSession  -> td_api::terminateSession(session_id:int64)
+```
+
+The test descriptor for `TerminateSession` contains one field named
+`session_id` with signed int64 value. The list function has no fields. The
+factory, native matcher, type-erased response converter, scripted fake and
+daemon safety allowlist must agree on both kinds; a missing arm fails build or
+test rather than falling through to `other`.
+
+The curated `SessionDeviceType` enum is exactly these 17 lowercase values,
+mapped one-to-one from the pinned generated variants:
+
+```text
+android, apple, brave, chrome, edge, firefox, ipad, iphone, linux, mac,
+opera, safari, ubuntu, unknown, vivaldi, windows, xbox
+```
+
+`sessionDeviceTypeUnknown` is a supported value and maps to `"unknown"`.
+An unrecognized future variant is not silently folded to `"unknown"`; it is
+an incompatible TDLib boundary response and returns `INTERNAL` with
+`reason:"malformed_tdlib_response"` and the observed `tdlib_type_id`.
+
+The converter requires a non-null `td_api::sessions`, every element non-null,
+`inactive_session_ttl_days` in 1..366, an int64 session id, a non-null known
+device type, and dates in the allowed representation below. Zero is a valid
+int64 row id and is not rejected or rewritten. A boundary violation emits no
+partial result. No raw TD object or TD error text crosses the boundary.
+
+#### 4.7.3 Strict DTOs
+
+`Session` has exactly:
+
+```text
+id: SessionId
+is_current: boolean
+is_password_pending: boolean
+is_unconfirmed: boolean
+can_accept_secret_chats: boolean
+can_accept_calls: boolean
+device_type: SessionDeviceType
+api_id: signed int32 JSON integer
+application_name: string
+application_version: string
+is_official_application: boolean
+device_model: string
+platform: string
+system_version: string
+log_in_date: TimestampOrNull
+last_active_date: TimestampOrNull
+ip_address: string
+location: string
+```
+
+`SessionId` is the canonical decimal string from §4.7.1, including `"0"`.
+`TimestampOrNull` is either an exact UTC RFC3339 second string
+`YYYY-MM-DDTHH:MM:SSZ` for a positive TD Unix timestamp in 1..2147483647, or
+JSON null when the TD value is zero. A negative timestamp is a malformed TDLib
+response. Strings are copied byte-for-byte after the project's normal UTF-8
+JSON validation; empty TD strings remain empty and are never inferred.
+
+`SessionListResult` is exactly:
+
+```text
+{
+  "items": Session[],
+  "inactive_session_ttl_days": integer 1..366,
+  "next": null
+}
+```
+
+Items remain in the exact TDLib-returned order. tgcli does not sort, group,
+deduplicate or move the current session. Duplicate ids are a malformed TDLib
+response rather than a lossy deduplication opportunity. This list is finite
+and unpaginated; `next` is always null solely to retain the general list-result
+shape.
+
+`SessionTerminateTarget` has exactly:
+
+```text
+{
+  "id": SessionId,
+  "is_current": false,
+  "is_password_pending": boolean,
+  "is_unconfirmed": boolean,
+  "device_type": SessionDeviceType,
+  "application_name": string,
+  "application_version": string,
+  "device_model": string,
+  "platform": string,
+  "system_version": string,
+  "last_active_date": TimestampOrNull
+}
+```
+
+The immutable destructive plan is exactly:
+
+```text
+{
+  "operation": "session_terminate",
+  "account": string,
+  "tdlib_request": "terminateSession",
+  "session": SessionTerminateTarget
+}
+```
+
+The plan intentionally excludes `api_id`, IP address, location, login time,
+call/secret-chat capability and official-app status. They are returned by
+`session list` but are not needed to identify, confirm, audit or recover a
+termination. Confirmation and audit use the same immutable plan, with no
+second resolution and no additional personal-location data.
+
+Dry-run success is exactly:
+
+```text
+{"dry_run":true,"plan":<the exact SessionTerminatePlan>}
+```
+
+Real termination success is exactly:
+
+```text
+{"session_id":SessionId,"terminated":true}
+```
+
+A correlated public TDLib `Ok` maps to this result and to audit mutation state
+`confirmed` under this contract. Here `confirmed` means durable proof of the
+public TDLib acceptance terminal, not separately observed deletion. The pinned
+implementation maps the server boolean false case to public `Ok`; therefore
+the result does not prove that the target existed at dispatch, that this
+invocation caused its disappearance, that it remains absent, that a device
+received a push, or that local processes/cache closed. No post-dispatch
+`getActiveSessions` reread is made. Such a reread could race and would not
+recover causation or idempotence.
+
+#### 4.7.4 User, bot, connected-bot and target semantics
+
+Both operations require a user principal. Their common preflight is Ready,
+then correlated `getMe`, then principal binding and bot classification.
+A bot principal returns:
+
+```text
+BOT_UNSUPPORTED / exit 2
+details = {"operation":"session_list"|"session_terminate"}
+message = "session commands require a user account"
+```
+
+This error occurs before `getActiveSessions` or `terminateSession`, preserving
+the existing rule that tgcli never calls a TDLib `CHECK_IS_USER` request for a
+bot.
+
+`getActiveSessions` returns regular device sessions. tgcli does not call
+`getBusinessConnectedBot`, does not synthesize a connected-bot row, and does
+not accept a bot user id as a session id. A business connected bot is outside
+scope rather than an `unknown` device.
+
+`session terminate` resolves the canonical id, including `"0"`, against one
+exact `getActiveSessions` snapshot. Zero matches returns:
+
+```text
+NOT_FOUND / exit 4
+details = {"operation":"session_terminate","session_id":SessionId}
+message = "session not found"
+```
+
+More than one match is a malformed TDLib response. If the single matched row
+has `is_current:true`, the command returns before confirmation/audit/dispatch:
+
+```text
+PRECONDITION_FAILED / exit 1
+details = {
+  "operation":"session_terminate",
+  "session_id":SessionId,
+  "reason":"current_session"
+}
+message = "the current session cannot be terminated; use tgcli logout"
+```
+
+No rule equates id zero, or any other numeric value, with the current session;
+only the pinned returned row's `is_current` flag decides this precondition.
+tgcli never translates current-session termination into `logout`, never calls
+`terminateSession` for it and never creates a new auth-closing lifecycle.
+`is_unconfirmed` and `is_password_pending` do not prevent termination of a
+non-current session; the flags are shown in the target so the user can make an
+informed confirmation. The command does not confirm a session.
+
+After the immutable snapshot, the target can disappear or change concurrently.
+tgcli neither re-resolves before dispatch nor rereads afterward. A correlated
+public `Ok`, including the pinned server-false mapping, follows the acceptance
+semantics in §4.7.3; it is not an observable claim of non-racing causation or
+idempotence. A correlated public TD error remains an error and is never guessed
+to mean an already-absent success.
+
+#### 4.7.5 Admission, recovery preflight, dry-run and destructive order
+
+`session list` and `session terminate --dry-run` inspect and reconcile prior
+incomplete v2 audit groups under the same absolute deadline before their Ready
+admission. A real new `session terminate` follows the accepted M3 position
+instead: Ready/getMe/bot/authority steps precede inspection/reconciliation at
+its listed step 6, before target resolution or confirmation. If destructive
+write authority denies at step 5, the request returns without reconciliation
+and cannot append a prior-group record. Reconciliation on an eligible path may
+append/sync recovery records for prior invocations; those records belong to the
+prior invocation. List and dry-run create no audit group for their current
+invocation.
+
+`session list` runs this exact logical order:
+
+1. strict CLI/frame/config parse and frozen account match;
+2. inspect/reconcile prior incomplete v2 audit groups;
+3. Ready admission;
+4. correlated `getMe`, principal binding and bot classification;
+5. bot preflight;
+6. correlated `getActiveSessions` under the one request deadline;
+7. all-or-nothing strict conversion;
+8. one result terminal.
+
+`session terminate --dry-run` is the accepted M3/M4 auth-bound dry-run: an
+absent daemon may be spawned, while `--no-daemon` creates an isolated
+in-process client. Its exact order is:
+
+1. strict parse, frozen account match and id canonicalization;
+2. inspect/reconcile prior incomplete v2 audit groups;
+3. Ready, correlated `getMe`, principal binding and bot preflight;
+4. correlated `getActiveSessions` and exact unique target resolution;
+5. current-session rejection and immutable plan construction;
+6. return the dry-run result.
+
+Dry-run needs no write grant or confirmation, creates no current-invocation
+general audit group or idempotency entry, and calls no destructive TD function.
+Prior-group reconciliation is the sole permitted audit write on this path. It
+adds `getActiveSessions` to the closed M3/M4 dry-run read allowlist only for the
+`session_terminate` planner and performs no config mutation.
+
+A real new `session terminate` invocation extends the accepted M3 admission
+order as follows:
+
+1. strict CLI/frame/config parse and canonical session id;
+2. frozen account match and Ready snapshot;
+3. correlated `getMe`, principal binding and bot classification;
+4. bot preflight;
+5. destructive write authority;
+6. inspect/reconcile prior incomplete v2 audit groups and run the
+   capacity-readable preflight;
+7. M3 caller-input canonicalization and request fingerprint;
+8. correlated `getActiveSessions` and exact unique target resolution;
+9. reject a target whose matched row is current; build immutable strict plan;
+10. obtain destructive confirmation;
+11. fresh config-grant CAS if authority source is config;
+12. durably append and sync current v2 audit intent;
+13. durably append and sync `dispatch_started`;
+14. send exactly one `terminateSession(plan.session.id)`;
+15. if correlated public `Ok` wins, durably append and sync
+    `mutation_confirmed` with exact success terminal;
+16. durably append and sync audit outcome;
+17. emit exactly one terminal frame.
+
+There is no post-dispatch session reread and no idempotency lookup, insert,
+replay, reservation, store transition, spool or cleanup step. Before
+`dispatch_started`, mutation state is `none` and the outcome is `not_started`.
+After durable dispatch and before a correlated public terminal, mutation state
+is `possible`; tgcli never resends during recovery. Public `Ok` is recorded as
+the contract's `confirmed` acceptance terminal with the limits in §4.7.3.
+
+The confirmation action enum adds `session_terminate`. The challenge target is
+the exact immutable plan. Without a TTY, `--yes` is required. With a TTY, the
+exact prompt is:
+
+```text
+terminate session <id>: application=<JSON string> version=<JSON string> device=<device_type> model=<JSON string> platform=<JSON string> last_active=<JSON TimestampOrNull>? [y/N]
+```
+
+Only the accepted exact affirmative answer confirms. Cancellation, empty or
+malformed input, disconnect and deadline do not. The inherited
+`CONFIRMATION_REQUIRED` error contains action `session_terminate` and the exact
+plan as target. Authority denial returns at step 5 before reconciliation, so
+it creates no current-invocation intent and cannot append a prior-group recovery
+record. Resolution failure, current-session rejection, failed CAS and
+unconfirmed requests occur after step 6: prior-group reconciliation may already
+have appended its required records, but these failures create no
+current-invocation audit intent.
+
+#### 4.7.6 Audit v2 extension, without idempotency
+
+The M3 closed `operation` and v2 `command` enums add
+`session_terminate`; the v2 `tdlib_function` enum adds
+`terminateSession`. The v2 intent is unchanged structurally and has:
+
+```text
+command = "session_terminate"
+arguments = {"session_id":SessionId}
+plan = SessionTerminatePlan
+confirmation_source = "yes"|"tty"
+idempotency_key_hash = null
+```
+
+`arguments.session_id` accepts the full canonical signed-int64 string domain,
+including `"0"`. `request_fingerprint` uses the accepted M3 domain-separated
+canonical serialization with operation `session_terminate` and exact
+fingerprint input:
+
+```text
+session_terminate:
+  session_id: SessionId
+```
+
+It excludes timeout, JSON/human mode, tty state, `--yes`, authority source,
+resolved descriptive fields and transport ids. The fingerprint remains in
+the audit intent for integrity/correlation even though no idempotency feature
+is exposed.
+
+The only legal stage sequences are:
+
+```text
+no dispatch: []
+direct:      dispatch_started, mutation_confirmed?
+```
+
+There is no `idempotency_pending`. `dispatch_started.data` is the accepted M3
+object with `tdlib_function:"terminateSession"`; `mutation_confirmed.terminal`
+is the exact stored success terminal. An `Ok` terminal is the accepted TDLib
+acceptance evidence defined in §4.7.3, not an independently reread deletion
+proof. Outcome and `StoredTerminal` retain the accepted v2 shapes.
+
+Recovery is fail-closed:
+
+- intent without `dispatch_started` gets a durable failure outcome with
+  mutation `none`;
+- `mutation_confirmed` without outcome reconstructs the byte-equivalent
+  success outcome;
+- dispatch without proof gets `AUDIT_INCOMPLETE`, mutation `possible`, and no
+  automatic resend;
+- contradiction, changed plan/fingerprint, illegal stage or conflicting
+  terminal remains `AUDIT_INCOMPLETE`.
+
+Audit outcome sync precedes the terminal frame. Failure to append/sync intent
+returns `AUDIT_UNAVAILABLE` before dispatch. Failure after intent closes the
+connection without an unaudited terminal and enters the accepted audit-fatal
+path. Per-account audit inspection includes `session list` and
+`session terminate`; each path performs the exact prior-group reconciliation
+ordered in §4.7.5.
+
+#### 4.7.7 Deadline, auth-loss and TD response arbitration
+
+All TD requests use the accepted `(client_id,query_id)` correlation and one
+absolute request deadline. Event eligibility and terminal arbitration are
+identical to §4.5.9: an event is eligible only when observed monotonic time is
+strictly `< deadline`; equality belongs to the deadline; events from an old
+client generation are discarded.
+
+For `getMe`, `getActiveSessions` and the direct `terminateSession` RPC, a
+one-shot terminal claim chooses the earliest eligible correlated response,
+first non-Ready authorization event or deadline:
+
+- earlier correlated success continues or yields the public acceptance
+  terminal described in §4.7.3;
+- earlier TD error returns the mapped TD error;
+- earlier non-Ready returns `NOT_AUTHED` with
+  `reason:"authorization_lost"` and that event's exact auth snapshot;
+- deadline before either returns `TIMEOUT`;
+- late events only release correlation and never rewrite terminal/audit state.
+
+For list and terminate pre-dispatch, auth loss or deadline makes no Telegram
+mutation. After durable termination dispatch, TD error, auth loss and deadline
+all leave mutation `possible` unless a correlated public `Ok` won first. A
+public `Ok` produces the contract's `confirmed` acceptance terminal; no
+post-dispatch reread occurs.
+
+`session list` TIMEOUT details are exactly the accepted read shape:
+
+```text
+{"operation":"session_list","state":AuthStateOrNull}
+```
+
+`session terminate` TIMEOUT details add exactly these two direct branches to
+the accepted M3 strict oneOf:
+
+```text
+preflight:
+{"operation":"session_terminate","phase":"preflight",
+ "state":AuthStateOrNull,"outcome":"not_started",
+ "idempotency":"not_requested"}
+
+dispatch:
+{"operation":"session_terminate","phase":"dispatch",
+ "state":AuthStateOrNull,"outcome":"unknown",
+ "idempotency":"not_requested"}
+```
+
+The dispatch branch is impossible before synced `dispatch_started`; the
+preflight branch is impossible afterward. No branch permits `pending`,
+`not_created`, `removed` or `completed_unchanged` because the command has no
+idempotency contract.
+
+#### 4.7.8 Strict error surface
+
+Every failure uses the standard single stderr envelope and one LF. Messages
+are explanatory only; callers branch on code, exit and strict details.
+No error includes a raw TD message, request object, IP, location or raw argv.
+
+The session-specific exact detail shapes are:
+
+| code / exit | exact details |
+|---|---|
+| `BOT_UNSUPPORTED` / 2 | `{"operation":"session_list"|"session_terminate"}` |
+| `NOT_FOUND` / 4 | `{"operation":"session_terminate","session_id":SessionId}` |
+| `PRECONDITION_FAILED` / 1 | `{"operation":"session_terminate","session_id":SessionId,"reason":"current_session"}` |
+| `TDLIB_ERROR` / 1 | `{"operation":"session_list"|"session_terminate","tdlib_code":integer}` |
+| `RATE_LIMITED` / 5 | `{"operation":"session_list"|"session_terminate","tdlib_code":429,"retry_after":nonnegative_integer}` |
+| `INTERNAL` / 1 | `{"operation":"session_list"|"session_terminate","reason":"malformed_tdlib_response","tdlib_type_id":integer|null}` |
+
+Code 429 uses the accepted positive flood-wait parser and mathematical ceiling
+to seconds; if the TD error has no valid positive wait, `retry_after` is 0.
+Every other TD error remains `TDLIB_ERROR`; in particular, terminate errors
+are not guessed to mean already absent and are not mapped to success. Standard
+M1/M3 `USAGE`, `ACCOUNT_NOT_FOUND`, `ACCOUNT_MISMATCH`, `CONFIG_INVALID`,
+`CONFIG_CONFLICT`, `HOOK_FAILED`, `NOT_AUTHED`, `WRITE_DENIED`,
+`CONFIRMATION_REQUIRED`, `AUDIT_UNAVAILABLE`, `AUDIT_INCOMPLETE`,
+`PROTOCOL_ANSWER_INVALID`, daemon and shutdown errors retain their existing
+detail shapes and closed nested enums.
+
+#### 4.7.9 Self-contained JSON Schemas and catalogs
+
+M6 adds these packaged Draft 2020-12 schemas:
+
+```text
+docs/schemas/session-list.result.schema.json
+docs/schemas/session-terminate.result.schema.json
+docs/schemas/session.error.schema.json
+```
+
+`docs/schemas/manifest.json` remains result-only and adds exactly:
+
+```json
+{
+  "session list": {
+    "result": "session-list.result.schema.json"
+  },
+  "session terminate": {
+    "result": "session-terminate.result.schema.json"
+  }
+}
+```
+
+as entries within the existing `commands` map, preserving that manifest's
+repository-required ordering. The entries are a result catalog, not activation
+of the M7 `schema` CLI. `session.error.schema.json` is packaged and tested but
+has no entry in the result-only manifest.
+
+Each of the three files is self-contained: it has no external `$ref`, `$id` or
+`format`, defines every reused type under its own local `$defs`, and carries
+all range/calendar restrictions itself. Passing a separate C++ semantic check
+does not make a value schema-valid.
+
+The local `sessionId` definition in every applicable schema is exactly this
+full signed-int64 string language:
+
+```json
+{
+  "oneOf": [
+    { "const": "0" },
+    {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+    },
+    {
+      "type": "string",
+      "pattern": "^-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-8])$"
+    }
+  ]
+}
+```
+
+This accepts `-9223372036854775808`, `0` and `9223372036854775807`; it rejects
+both adjacent overflows, `-0`, plus signs and leading zeros without an external
+range checker.
+
+The local `timestampOrNull` definition is exactly null for TD timestamp zero
+or a calendar-valid UTC second in Unix range 1..2147483647. Its string branch
+is self-contained as follows (`T` and `Z` are literal):
+
+```json
+{
+  "oneOf": [
+    { "type": "null" },
+    {
+      "type": "string",
+      "not": { "const": "1970-01-01T00:00:00Z" },
+      "oneOf": [
+        {
+          "pattern": "^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+        },
+        {
+          "pattern": "^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+        },
+        {
+          "pattern": "^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:0[0-7])))Z$"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`session-list.result.schema.json` has an exact strict root requiring only
+`items,inactive_session_ttl_days,next`; `items` contains strict Session objects
+with all 18 fields in §4.7.3, local `sessionId`, the exact 17-value device enum,
+signed-int32 `api_id`, booleans/strings as specified, local `timestampOrNull`,
+TTL 1..366 and `next` const null.
+
+There is one cataloged `session-terminate.result.schema.json`. Its strict root
+is an exact `oneOf` with no wrapper widening:
+
+```text
+real branch:
+  required=[session_id,terminated], additionalProperties=false,
+  session_id=local sessionId, terminated=const true
+
+dry-run branch:
+  required=[dry_run,plan], additionalProperties=false,
+  dry_run=const true, plan=exact strict SessionTerminatePlan
+```
+
+The local plan/target definitions include every field and constraint in
+§4.7.3, including local sessionId and timestampOrNull. There is no second
+dry-run schema or uncataloged arbitrary-object escape hatch.
+
+`session.error.schema.json` is the exact named self-contained envelope for
+both session commands. Its root requires only `error`; `error` is a strict
+`oneOf` of:
+
+1. locally copied common branches reachable by this namespace:
+   `USAGE`, `ACCOUNT_NOT_FOUND`, `ACCOUNT_MISMATCH`, `CONFIG_INVALID`,
+   `CONFIG_CONFLICT`, `HOOK_FAILED`, `NOT_AUTHED`, `WRITE_DENIED`,
+   `CONFIRMATION_REQUIRED`, `AUDIT_UNAVAILABLE`, `AUDIT_INCOMPLETE`,
+   `PROTOCOL_ANSWER_INVALID`, `DAEMON_NOT_RUNNING`, `DAEMON_CONTROL_FAILED`
+   and `DAEMON_SHUTDOWN`; each branch copies the accepted exact detail shape,
+   closed enum and exit-independent envelope constraints into local `$defs`;
+2. the six session-specific branches in §4.7.8, using local `sessionId` and
+   exact operation enums;
+3. exactly these TIMEOUT detail branches:
+
+```text
+session_list:
+  {"operation":"session_list","state":AuthStateOrNull}
+session_terminate preflight:
+  {"operation":"session_terminate","phase":"preflight",
+   "state":AuthStateOrNull,"outcome":"not_started",
+   "idempotency":"not_requested"}
+session_terminate dispatch:
+  {"operation":"session_terminate","phase":"dispatch",
+   "state":AuthStateOrNull,"outcome":"unknown",
+   "idempotency":"not_requested"}
+```
+
+Every error branch requires exactly `code,message,details`; code is const,
+message is a string except where §4.7.4 fixes a const message, and details is
+the exact strict branch object. `CONFIRMATION_REQUIRED.target` locally embeds
+the exact SessionTerminatePlan. `AuthStateOrNull`, audit stages, account names,
+reason enums and all other referenced types are local definitions; the schema
+has no reference to another packaged file and no semantic-validator caveat.
+
+Manifest/package/schema tests require file/entry bijection for results,
+installed presence of all three files and direct Draft 2020-12 rejection of
+undeclared/missing fields, JSON-number ids, `-0`, both int64 overflows, unknown
+device types, 1970 zero-string, non-leap February 29, invalid month/day/time and
+timestamps after `2038-01-19T03:14:07Z`. They accept all three int64 boundary
+values and both timestamp boundaries (`1970-01-01T00:00:01Z`,
+`2038-01-19T03:14:07Z`) using the packaged schema alone.
+
+#### 4.7.10 Exact human output
+
+Human output is derived only from the curated DTO and preserves the same
+information as JSON. It is deterministic and ends with one LF.
+
+`session list` emits one TSV header, one row per item in TD order, then the two
+footer rows:
+
+```text
+id\tcurrent\tpassword_pending\tunconfirmed\tdevice\tapi_id\tapplication\tapplication_version\tofficial\tdevice_model\tplatform\tsystem_version\tlogin\tlast_active\tip\tlocation\taccept_secret_chats\taccept_calls
+<one row per Session>
+inactive_session_ttl_days\t<N>
+next\tnull
+```
+
+Id and integer cells are minimal decimal, including literal `0`. Boolean cells
+are `true|false`. Every string cell is a compact JSON string token, including
+quotes and JSON escaping, so tabs/newlines cannot create extra columns.
+Timestamp cells are a compact JSON string token or literal `null`. An empty
+list still prints the header and both footer rows.
+
+Real `session terminate` success is exactly:
+
+```text
+session_id\t<SessionId>
+terminated\ttrue
+```
+
+Dry-run human success is exactly:
+
+```text
+dry_run\ttrue
+plan\t<canonical compact JSON SessionTerminatePlan>
+```
+
+Canonical compact JSON preserves the plan key order shown in §4.7.3 and uses
+the project's JSON escaping. stdout contains no warning or progress line;
+stderr is empty on success. `--json` prints one compact exact result object
+and LF; errors print no stdout.
+
+#### 4.7.11 Tests and seams
+
+Implementation is not complete until the following focused coverage exists.
+
+Core/native tests:
+
+- both new `TdFunctionKind` names, factory descriptors and native matchers;
+- exact `terminateSession` signed-int64 argument, including INT64_MIN, zero and
+  INT64_MAX;
+- all 17 generated device variants converted to the exact enum value;
+- supported `sessionDeviceTypeUnknown` versus an unrecognized type id;
+- null result/session/device, duplicate ids, bad TTL and bad dates fail
+  all-or-nothing without partial DTO; zero id remains a normal row;
+- native and scripted-fake parity for returned order and every field;
+- pinned `ResetAuthorizationQuery` server-false/public-Ok behavior is captured
+  by a provenance fixture or exact source assertion.
+
+Command/fake tests:
+
+- strict grammar, frame args and canonical id boundaries, including zero;
+  every forbidden option;
+- Ready -> getMe -> user/bot ordering; bot traces contain neither
+  `getActiveSessions` nor `terminateSession`;
+- list/dry-run traces reconcile prior groups before Ready; real terminate
+  traces perform Ready/getMe/bot/authority first and reconcile at step 6 before
+  target resolution; authority-denied traces contain no reconciliation or
+  prior-group append; list/dry-run create no current invocation group;
+- list preserves order and makes exactly one `getActiveSessions` request;
+- terminate grant denial occurs before target lookup in a real invocation;
+- dry-run needs no grant/confirmation, calls only the admitted reads and
+  creates no current audit/store/spool/config/mutation artifact;
+- zero unmatched returns NOT_FOUND; zero matched non-current plans normally;
+  zero or nonzero matched current returns PRECONDITION_FAILED/current_session;
+- unknown id, duplicate id and current-session failure send no destructive
+  request and create no current intent;
+- immutable target is used by prompt, plan, audit and dispatch without a
+  second resolution or post-dispatch reread;
+- explicit deny beats all grants; request grant beats config source; config
+  grant gets the accepted fresh CAS;
+- non-TTY without `--yes`, TTY yes/no/malformed/disconnect/deadline;
+- audit intent and `dispatch_started` are synced before the TD call; public
+  `Ok`, including the server-false mapping, adds the acceptance
+  `mutation_confirmed`, outcome and then terminal without a deletion claim;
+- audit/store failure and recovery crash points at every durable boundary;
+- no idempotency DB read/write, no pending stage and no replay; an
+  `--idempotency-key` is rejected before Ready;
+- every correlated TD success/error/429/auth-loss/deadline ordering, including
+  `< deadline`, equality-to-deadline and old-generation events;
+- current session can still be ended only by the existing `logout` path;
+- business connected bots are not fetched or returned;
+- all three packaged schemas validate directly, plus exact human golden output
+  for empty/multi-row results, strings containing tabs/newlines, zero and
+  int64 ids outside int53.
+
+Daemon/no-daemon integration tests exercise the same handler and safety
+descriptor in both modes. CLI-to-frame tests prove that session ids remain
+strings and that neither parser nor JSON transport rounds them.
+
+The no-skip Saved TestDC suite adds one non-mutating flow named
+`m6.session.list` after authenticated user bootstrap:
+
+1. invoke `tgcli --json session list` through the daemon;
+2. validate stdout against `session-list.result.schema.json`;
+3. require `inactive_session_ttl_days` in 1..366, `next:null`, at least one
+   session, exactly one `is_current:true`, unique canonical ids, a known
+   17-value device enum and returned order preserved by a second immediate
+   call when TDLib returns the same id vector;
+4. require empty stderr and no audit/idempotency/spool/config mutation for the
+   current list invocation; the fixture begins with no incomplete audit group;
+5. issue the normal daemon stop command, verify the daemon PID exited, then
+   wait until the account socket disappears and the verified account lock can
+   be acquired/released by the harness under the existing bounded deadline;
+6. only after that release, repeat `tgcli --no-daemon --json session list` and
+   validate the same schema/invariants without requiring byte-identical
+   volatile dates or activity metadata.
+
+The no-mutation assertion excludes expected daemon lifecycle artifacts such as
+socket, PID/lock and lifecycle log/state changes, plus TDLib's permitted
+internal cache/database effects. It does not exclude tgcli config, current-
+invocation audit, idempotency or spool writes; those remain forbidden. TestDC
+does not terminate a real session. Destructive success, failure,
+current-session refusal, crash recovery and arbitration remain deterministic
+fake/native-boundary tests. This still satisfies the canonical M6 requirement
+to add one supported long-tail TestDC flow without creating an unsafe live
+side effect.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result

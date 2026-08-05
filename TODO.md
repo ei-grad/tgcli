@@ -267,7 +267,37 @@ before the milestone is closed.
 - [ ] `tgcli folder list|show|create|edit|delete|add-chat|remove-chat`
 - [ ] `tgcli topic list|create|edit|close|reopen`
 - [ ] `tgcli chat set-title|set-photo|set-description|invite-link|promote|demote|ban|unban|kick|set-permissions`
-- [ ] `tgcli session list|terminate`
+- [ ] Freeze the §4.7 session-only grammar/frame args, full signed-int64 string
+      identity including zero, 17-value device enum, strict DTO/error/human
+      output, bot/current/business-bot semantics, deadlines, TDLib acceptance
+      meaning and no-idempotency decision
+- [ ] Add dormant typed Session DTO/conversion, `getActiveSessions` and
+      `terminateSession` runtime factories/descriptors/native matchers,
+      scripted-fake seams and unregistered safety-policy descriptors at pinned
+      TDLib 1.8.65 / a17f87c4cff7b90b278d12b91ba0614383aaee82
+- [ ] Extend accepted audit v2 schemas/reconciler with dormant
+      `session_terminate`, direct dispatch/proof/recovery stages,
+      `idempotency_key_hash:null` and prior-group inspection; expose no command
+      and perform no real terminate dispatch yet
+- [ ] Add the one-of real/dry-run terminate result schema, list result schema,
+      exact self-contained session error schema, manifest entries and
+      deterministic human renderers; keep the public `schema` CLI deferred M7
+- [ ] Implement dormant complete list and terminate handlers with exact
+      Ready/getMe/bot/deadline ordering; wire terminate dispatch only through
+      the already-integrated destructive authority/confirmation/config-CAS/
+      audit-intent/dispatch/proof/outcome path, never around it
+- [ ] Add exhaustive dormant handler/CLI-frame/schema/human/fake/native/crash/
+      auth-loss/deadline tests, including zero and int64-outside-int53 ids, all
+      device variants, current-session refusal, public-Ok semantics and
+      business-bot exclusion
+- [ ] Atomically activate/register the complete `session list|terminate`
+      CLI/frame surface only after both handlers, safety policy, audit v2,
+      schemas/renderers and focused tests are present and passing
+- [ ] Add the no-skip non-mutating Saved TestDC `m6.session.list` flow with
+      verified daemon stop/lock release before `--no-daemon`, plus release-
+      provenance checks; do not terminate a live/TestDC session
+- [ ] Review gate: session-only M6 semantic diff vs DESIGN.md §4.7 and pinned
+      TDLib generated API/AccountManager.cpp/Requests.cpp
 - [ ] `tgcli storage stats|optimize` (tdlib file-store usage, optimizeStorage)
 - [ ] Add a supported M6 long-tail flow to the test-DC E2E milestone gate
 - [ ] Review gate: M6 diff vs DESIGN.md
@@ -289,6 +319,7 @@ before the milestone is closed.
 
 ## Post-1.0 ideas
 
+- [ ] Account/profile/privacy commands (not hidden M6 requirements)
 - [ ] MCP server mode (`tgcli mcp` over stdio)
 - [ ] Offline search: client-side filtering over prefetched local history
 - [ ] Secret chats
