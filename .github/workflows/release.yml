@@ -568,6 +568,11 @@ jobs:
       - name: Test
         run: ctest --test-dir build/release --output-on-failure
 
+      - name: Verify the pinned static RE2 build
+        run: |
+          python3 scripts/release/verify_re2_build.py \
+            --build-directory build/release
+
       - name: Reverify source identity after the macOS build
         env:
           SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}

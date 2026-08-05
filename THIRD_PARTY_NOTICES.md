@@ -24,6 +24,21 @@ blessing are reproduced in
 The bundled Zetetic redistribution notice is reproduced in
 [`release/licenses/TDLib-SQLCipher.txt`](release/licenses/TDLib-SQLCipher.txt).
 
+<!-- lock-id:re2 -->
+### RE2 2022-12-01
+
+Source: <https://github.com/google/re2> at
+`4be240789d5b322df9f02b7e19c8651f3ccbf205`.
+
+RE2 is available under the BSD 3-Clause License. Its exact license text is
+reproduced in [`release/licenses/RE2.txt`](release/licenses/RE2.txt).
+
+The pinned runtime sources include the Plan 9 UTF routines in `util/rune.cc`
+and `util/utf.h`, by Rob Pike and Ken Thompson, Copyright (c) 2002 Lucent
+Technologies. Their exact notice is reproduced in
+[`release/licenses/RE2-Lucent-UTF.txt`](release/licenses/RE2-Lucent-UTF.txt)
+and recorded as `LicenseRef-RE2-Lucent-2002`.
+
 <!-- lock-id:cli11 -->
 ### CLI11 2.5.0
 

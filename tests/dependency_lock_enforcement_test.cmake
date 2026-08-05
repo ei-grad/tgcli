@@ -225,7 +225,39 @@ expect_failure(
     --repo-root "${REPO_ROOT}"
     --lock-file "${boolean_version_lock}")
 
+string(REPLACE
+    "da5c23ecdb9a55c82d6802ee55812dfb99a035a4838287c0b7c0051bd0fdb9fc"
+    "0000000000000000000000000000000000000000000000000000000000000000"
+    drifted_re2_archive_json "${lock_json}")
+set(drifted_re2_archive_lock "${TEST_OUTPUT_DIR}/drifted-re2-archive-lock.json")
+file(WRITE "${drifted_re2_archive_lock}" "${drifted_re2_archive_json}")
+expect_failure(
+    "RE2 archive evidence drift" "archive evidence differs"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --lock-file "${drifted_re2_archive_lock}")
+
 file(READ "${REPO_ROOT}/CMakeLists.txt" cmake_text)
+set(ignored_icu_cmake "${TEST_OUTPUT_DIR}/ignored-icu.cmake")
+file(WRITE "${ignored_icu_cmake}" "${cmake_text}\nset(RE2_USE_ICU OFF)\n")
+expect_failure(
+    "nonexistent RE2 ICU option" "must not use the nonexistent RE2_USE_ICU option"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --cmake-file "${ignored_icu_cmake}")
+
+string(REPLACE
+    "set(USEPCRE OFF CACHE BOOL \"Disable RE2 PCRE test support\" FORCE)"
+    "set(USEPCRE ON CACHE BOOL \"Enable forbidden RE2 PCRE test support\" FORCE)"
+    pcre_cmake_text "${cmake_text}")
+set(enabled_pcre_cmake "${TEST_OUTPUT_DIR}/enabled-pcre.cmake")
+file(WRITE "${enabled_pcre_cmake}" "${pcre_cmake_text}")
+expect_failure(
+    "enabled RE2 PCRE support" "must force USEPCRE=OFF exactly once"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --cmake-file "${enabled_pcre_cmake}")
+
 set(extra_cmake "${TEST_OUTPUT_DIR}/extra-fetchcontent.cmake")
 file(WRITE "${extra_cmake}" "${cmake_text}\n"
     "fetchcontent_declare(unlocked\n"

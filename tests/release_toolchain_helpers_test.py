@@ -18,6 +18,7 @@ REPO_ROOT = pathlib.Path(sys.argv[1]).resolve()
 ARCHIVE_TOOL = REPO_ROOT / "scripts/release/archive_tool.py"
 INSPECTOR = REPO_ROOT / "scripts/release/inspect_linux_artifact.py"
 PROVENANCE = REPO_ROOT / "scripts/release/build_provenance.py"
+RE2_BUILD_VERIFIER = REPO_ROOT / "scripts/release/verify_re2_build.py"
 LOCAL_CACHE_ROOTS = (
     REPO_ROOT / "scripts/__pycache__",
     REPO_ROOT / "scripts/release/__pycache__",
@@ -378,6 +379,82 @@ def runtime_decoy_test(base: pathlib.Path) -> None:
         raise AssertionError("same-basename runtime decoy unexpectedly succeeded")
 
 
+def re2_build_verifier_tests(base: pathlib.Path) -> None:
+    verifier = import_script("verify_re2_build", RE2_BUILD_VERIFIER)
+
+    def expect_re2_failure(action, diagnostic: str) -> None:
+        try:
+            action()
+        except verifier.Re2VerificationError as error:
+            if diagnostic not in str(error):
+                raise AssertionError(
+                    f"unexpected RE2 verifier failure: {error}"
+                ) from error
+        else:
+            raise AssertionError(f"RE2 verifier unexpectedly accepted {diagnostic}")
+
+    valid_cache = "".join(
+        f"{option}:BOOL=OFF\n"
+        for option in ("BUILD_SHARED_LIBS", "RE2_BUILD_TESTING", "USEPCRE")
+    )
+    verifier.validate_cache(valid_cache)
+    expect_re2_failure(
+        lambda: verifier.validate_cache(valid_cache + "RE2_USE_ICU:BOOL=OFF\n"),
+        "nonexistent RE2_USE_ICU",
+    )
+
+    compile_commands = [
+        {"command": f"c++ -c /source/{source}", "file": f"/source/{source}"}
+        for source in sorted(verifier.RE2_RUNTIME_SOURCES)
+    ]
+    verifier.validate_compile_commands(compile_commands)
+    invalid_commands = list(compile_commands)
+    invalid_commands[0] = dict(invalid_commands[0])
+    invalid_commands[0]["command"] += " -DRE2_USE_ICU"
+    expect_re2_failure(
+        lambda: verifier.validate_compile_commands(invalid_commands),
+        "forbidden RE2 compile definition",
+    )
+    invalid_commands[0]["command"] = 'c++ "-DRE2_USE_ICU=1" -c /source/re2.cc'
+    expect_re2_failure(
+        lambda: verifier.validate_compile_commands(invalid_commands),
+        "forbidden RE2 compile definition",
+    )
+    test_commands = list(compile_commands)
+    test_commands.append(
+        {"command": "c++ -c /source/util/pcre.cc", "file": "/source/util/pcre.cc"}
+    )
+    expect_re2_failure(
+        lambda: verifier.validate_compile_commands(test_commands),
+        "test or benchmark source",
+    )
+
+    build = base / "re2-build-contract"
+    re2_build = build / "_deps/re2-build"
+    re2_build.mkdir(parents=True)
+    (re2_build / "libre2.a").write_bytes(b"static re2")
+    verifier.validate_build_artifacts(build)
+    verifier.validate_link_commands("c++ /build/_deps/re2-build/libre2.a -o tgcli\n")
+    verifier.validate_link_map("LOAD /build/_deps/re2-build/libre2.a\n")
+    for library in ("icuuc", "pcre", "absl_strings"):
+        expect_re2_failure(
+            lambda library=library: verifier.validate_link_commands(
+                f"c++ /build/_deps/re2-build/libre2.a -l{library} -o tgcli\n"
+            ),
+            "forbidden runtime library",
+        )
+
+    shared_build = base / "re2-shared-contract"
+    shared_re2_build = shared_build / "_deps/re2-build"
+    shared_re2_build.mkdir(parents=True)
+    (shared_re2_build / "libre2.a").write_bytes(b"static re2")
+    (shared_re2_build / "libre2.so").write_bytes(b"shared re2")
+    expect_re2_failure(
+        lambda: verifier.validate_build_artifacts(shared_build),
+        "shared or unexpected RE2 artifact",
+    )
+
+
 def swapped_artifact_test(base: pathlib.Path) -> None:
     source = base / "provenance-source"
     source.mkdir()
@@ -504,6 +581,7 @@ def main() -> int:
         archive_failure_tests(base)
         partial_cleanup_test(base)
         runtime_decoy_test(base)
+        re2_build_verifier_tests(base)
         swapped_artifact_test(base)
     final_cache_entries = local_cache_entries()
     if final_cache_entries != INITIAL_LOCAL_CACHE_ENTRIES:

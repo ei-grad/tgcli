@@ -123,3 +123,26 @@ TEST_CASE("TDLib embedded SQLite licensing is complete", "[dependency-lock]") {
     CHECK(license_paths == std::set<std::string>{"release/licenses/SQLite-blessing.txt",
                                                  "release/licenses/TDLib-SQLCipher.txt"});
 }
+
+TEST_CASE("RE2 source and embedded UTF licensing match the accepted gate",
+          "[dependency-lock]") {
+    auto lock = load_json("dependencies.lock.json");
+    auto* re2 = find_component(lock, "re2");
+    REQUIRE(re2 != nullptr);
+
+    CHECK((*re2)["version"].as<std::string>() == "2022-12-01");
+    CHECK((*re2)["immutable_ref"].as<std::string>() ==
+          "4be240789d5b322df9f02b7e19c8651f3ccbf205");
+    CHECK((*re2)["archive_sha256"].as<std::string>() ==
+          "da5c23ecdb9a55c82d6802ee55812dfb99a035a4838287c0b7c0051bd0fdb9fc");
+    CHECK((*re2)["source_tree_sha256"].as<std::string>() ==
+          "6d3942bcd96377f18ec60a7b190d1b217d037ff0132ff6ae8dc463347c067046");
+
+    const auto& embedded = (*re2)["embedded_components"];
+    REQUIRE(embedded.size() == 1);
+    CHECK(embedded[0]["id"].as<std::string>() == "re2-plan9-utf");
+    CHECK(embedded[0]["source_path"].as<std::string>() ==
+          "util/rune.cc and util/utf.h");
+    CHECK(embedded[0]["license_expression"].as<std::string>() ==
+          "LicenseRef-RE2-Lucent-2002");
+}

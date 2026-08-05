@@ -1,5 +1,5 @@
 {
-  "dependency_lock_sha256": "af5485c708f8bfbeb2561217b64fe5289e9b9ba33996fe4cfad27412019e96c4",
+  "dependency_lock_sha256": "a0cae6386eeb80890de9c64c868e5959071661457d071825242c1f1db6748b04",
   "image": "docker.io/dockcross/base@sha256:846afc88d415b67fed1c2c0a6961d9ca0d11fee739c8644d5b670ced497674ea",
   "openssl": {
     "source_sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
@@ -8,7 +8,7 @@
   },
   "recipe": {
     "path": "scripts/release/build-linux-musl.sh",
-    "sha256": "8d5d91b8a113b165fd0c020defd91f9e578d792a5646d81ae74b7e05f9c9e241"
+    "sha256": "add8aa1e0938677e29afcad559687c9798ee4fb4bfba441450f0789c878792ef"
   },
   "schema_version": 1,
   "target": "x86_64-linux-musl",

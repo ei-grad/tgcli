@@ -11,6 +11,7 @@ readonly VERIFIER="$REPO_ROOT/scripts/verify_dependency_lock.py"
 readonly ARCHIVE_TOOL="$REPO_ROOT/scripts/release/archive_tool.py"
 readonly ARTIFACT_INSPECTOR="$REPO_ROOT/scripts/release/inspect_linux_artifact.py"
 readonly PROVENANCE_TOOL="$REPO_ROOT/scripts/release/build_provenance.py"
+readonly RE2_BUILD_VERIFIER="$REPO_ROOT/scripts/release/verify_re2_build.py"
 readonly RUNTIME_VERIFIER="$REPO_ROOT/scripts/release/verify_toolchain_runtime.py"
 readonly INPUT_DIRECTORY="${TGCLI_RELEASE_INPUTS_DIR:-$REPO_ROOT/build/release-inputs}"
 readonly OUTPUT_DIRECTORY="${TGCLI_RELEASE_OUTPUT_DIR:-$REPO_ROOT/build/release-static}"
@@ -118,7 +119,7 @@ prepare_sources() {
     local suffix
 
     for component_id in \
-        tdlib cli11 nlohmann_json fmt tomlplusplus openssl zlib catch2 jsoncons gperf; do
+        tdlib re2 cli11 nlohmann_json fmt tomlplusplus openssl zlib catch2 jsoncons gperf; do
         suffix=.tar.gz
         extraction_directory="$WORK_DIRECTORY/sources/$component_id"
         extract_archive "$INPUT_DIRECTORY/$component_id$suffix" "$extraction_directory"
@@ -387,6 +388,7 @@ build_release() {
         -DFETCHCONTENT_SOURCE_DIR_FMT="$SOURCE_FMT" \
         -DFETCHCONTENT_SOURCE_DIR_JSONCONS="$SOURCE_JSONCONS" \
         -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON="$SOURCE_NLOHMANN_JSON" \
+        -DFETCHCONTENT_SOURCE_DIR_RE2="$SOURCE_RE2" \
         -DFETCHCONTENT_SOURCE_DIR_TD="$SOURCE_TDLIB" \
         -DFETCHCONTENT_SOURCE_DIR_TOMLPLUSPLUS="$SOURCE_TOMLPLUSPLUS" \
         -DOPENSSL_ROOT_DIR="$TARGET_PREFIX" \
@@ -406,6 +408,9 @@ build_release() {
         fail "release test invocation failed"
     fi
     sed -n '1,240p' "$WORK_DIRECTORY/ctest.log"
+    python3 "$RE2_BUILD_VERIFIER" \
+        --build-directory "$WORK_DIRECTORY/app" \
+        --link-map "$WORK_DIRECTORY/app/tgcli.link.map"
     python3 "$PROVENANCE_TOOL" source-identity \
         --repo-root "$REPO_ROOT" \
         --expected-commit "$TGCLI_SOURCE_SHA" >/dev/null

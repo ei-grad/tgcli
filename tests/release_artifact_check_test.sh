@@ -103,6 +103,15 @@ if [[ "$archive_name" != openssl.tar.gz ]]; then
     printf 'staged archive name differs from the canonical verifier contract\n' >&2
     exit 1
 fi
+codeload_archive_name="$(
+    bash "$checker" staged-archive-name \
+        re2 \
+        https://codeload.github.com/google/re2/tar.gz/4be240789d5b322df9f02b7e19c8651f3ccbf205
+)"
+if [[ "$codeload_archive_name" != re2.tar.gz ]]; then
+    printf 'codeload staged archive name differs from the canonical contract\n' >&2
+    exit 1
+fi
 expect_failure_message unsafe-staged-archive-source 'unsupported source archive' \
     bash "$checker" staged-archive-name openssl https://example.invalid/openssl.zip
 
@@ -132,6 +141,13 @@ component = {
 }
 if module.staged_archive_name("openssl", component) != "openssl.tar.gz":
     raise SystemExit("dependency lock verifier staging name changed")
+codeload = {
+    "id": "re2",
+    "source_archive": "https://codeload.github.com/google/re2/tar.gz/"
+    "4be240789d5b322df9f02b7e19c8651f3ccbf205",
+}
+if module.staged_archive_name("re2", codeload) != "re2.tar.gz":
+    raise SystemExit("dependency lock verifier cannot stage codeload archives")
 PY
 
 fixture_root="$(mktemp -d)"
@@ -610,6 +626,7 @@ required = [
     "no-shared",
     "-DOPENSSL_USE_STATIC_LIBS=TRUE",
     "verify-macos-build",
+    "verify_re2_build.py",
     "verify-remote-tag",
     "classify-release-state",
     'gh release create "$TAG_NAME"',

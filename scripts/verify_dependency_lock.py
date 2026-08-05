@@ -18,6 +18,7 @@ class VerificationError(RuntimeError):
 
 DIRECT_FETCHCONTENT = {
     "tdlib": "TGCLI_TDLIB_REV",
+    "re2": "TGCLI_RE2_REV",
     "cli11": "TGCLI_CLI11_REV",
     "nlohmann_json": "TGCLI_NLOHMANN_JSON_REV",
     "fmt": "TGCLI_FMT_REV",
@@ -36,6 +37,7 @@ BUILD_ONLY_SCOPE = "build-only"
 RELEASE_RUNTIME_IDS = {"openssl", "zlib", "musl", "gcc-runtime"}
 BUILD_INPUT_IDS = {
     "tdlib",
+    "re2",
     "cli11",
     "nlohmann_json",
     "fmt",
@@ -49,6 +51,7 @@ BUILD_INPUT_IDS = {
 }
 SOURCE_TREE_IDS = {
     "tdlib",
+    "re2",
     "cli11",
     "nlohmann_json",
     "fmt",
@@ -61,6 +64,7 @@ SOURCE_TREE_IDS = {
 }
 EXPECTED_INTEGRATIONS = {
     "tdlib": "fetchcontent-or-pinned-prefix",
+    "re2": "fetchcontent",
     "cli11": "fetchcontent",
     "nlohmann_json": "fetchcontent",
     "fmt": "fetchcontent",
@@ -210,6 +214,28 @@ def archive_basename(component: dict) -> str:
     name = PurePosixPath(urllib.parse.urlparse(component["source_archive"]).path).name
     require(name, f"{component['id']}: source archive has no filename")
     return name
+
+
+def archive_suffix(component: dict) -> str:
+    parsed = urllib.parse.urlparse(component["source_archive"])
+    source_name = PurePosixPath(parsed.path).name
+    for suffix in (".tar.gz", ".tar.xz"):
+        if source_name.endswith(suffix):
+            return suffix
+    parts = PurePosixPath(parsed.path).parts
+    if len(parts) >= 2 and parts[-2] == "tar.gz" and parts[-1]:
+        return ".tar.gz"
+    raise VerificationError(
+        f"{component['id']}: source archive must be a .tar.gz or .tar.xz file"
+    )
+
+
+def archive_is_bound_to_commit(component: dict) -> bool:
+    archive_path = urllib.parse.urlparse(component["source_archive"]).path
+    immutable_ref = component["immutable_ref"]
+    return archive_path.endswith(
+        (f"/{immutable_ref}.tar.gz", f"/tar.gz/{immutable_ref}")
+    )
 
 
 def validate_release_toolchain(document: dict, by_id: dict[str, dict]) -> dict:
@@ -511,9 +537,7 @@ def validate_lock_document(
                 f"{component_id}: FetchContent ref must be a full commit",
             )
             require(
-                component["source_archive"].endswith(
-                    f"/{component['immutable_ref']}.tar.gz"
-                ),
+                archive_is_bound_to_commit(component),
                 f"{component_id}: source archive is not bound to its commit",
             )
         if component_id == "linux-build-image":
@@ -601,6 +625,52 @@ def validate_lock_document(
             "release/licenses/TDLib-SQLCipher.txt",
         },
         "TDLib SQLite license texts are incomplete",
+    )
+    re2 = by_id["re2"]
+    require(
+        re2["version"] == "2022-12-01"
+        and re2["immutable_ref"] == "4be240789d5b322df9f02b7e19c8651f3ccbf205"
+        and re2["source_archive"]
+        == "https://codeload.github.com/google/re2/tar.gz/4be240789d5b322df9f02b7e19c8651f3ccbf205",
+        "RE2 source identity differs from the accepted dependency gate",
+    )
+    require(
+        re2["archive_sha256"]
+        == "da5c23ecdb9a55c82d6802ee55812dfb99a035a4838287c0b7c0051bd0fdb9fc"
+        and re2["archive_size"] == 382881
+        and re2["source_tree_sha256"]
+        == "6d3942bcd96377f18ec60a7b190d1b217d037ff0132ff6ae8dc463347c067046",
+        "RE2 archive evidence differs from the accepted dependency gate",
+    )
+    require(
+        re2["license_expression"] == "BSD-3-Clause"
+        and re2["license_files"]
+        == [
+            {
+                "path": "release/licenses/RE2.txt",
+                "sha256": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449",
+            }
+        ],
+        "RE2 BSD license evidence differs from the accepted dependency gate",
+    )
+    re2_embedded = {embedded["id"]: embedded for embedded in re2["embedded_components"]}
+    require(
+        set(re2_embedded) == {"re2-plan9-utf"},
+        "RE2 embedded dependency inventory is incomplete",
+    )
+    re2_utf = re2_embedded["re2-plan9-utf"]
+    require(
+        re2_utf["version"] == "2002"
+        and re2_utf["source_path"] == "util/rune.cc and util/utf.h"
+        and re2_utf["license_expression"] == "LicenseRef-RE2-Lucent-2002"
+        and re2_utf["license_files"]
+        == [
+            {
+                "path": "release/licenses/RE2-Lucent-UTF.txt",
+                "sha256": "8af3194d846fcddce0f5e8d4ae6c404744d9b7922a24f23415bd15a9cfe5e6ee",
+            }
+        ],
+        "RE2 embedded Plan 9 UTF notice is incomplete",
     )
     checked_in_licenses = {
         str(item.relative_to(repo_root))
@@ -706,6 +776,44 @@ def validate_repo_consistency(
             is not None,
             f"CMake resolved revision assertion missing for {component_id}",
         )
+
+    ignored_icu_option = re.search(
+        r"(?im)^[ \t]*(?:set|option)\([ \t]*RE2_USE_ICU\b", cmake
+    )
+    injected_icu_definition = re.search(
+        r"^[ \t]*(?:add|target)_compile_definitions\([^)]*\bRE2_USE_ICU\b"
+        r"|(?:^|[ \t\"'])-DRE2_USE_ICU(?:=|[ \t\"']|$)",
+        cmake,
+        flags=re.MULTILINE | re.IGNORECASE | re.DOTALL,
+    )
+    require(
+        ignored_icu_option is None and injected_icu_definition is None,
+        "CMake must not use the nonexistent RE2_USE_ICU option",
+    )
+    for option in ("BUILD_SHARED_LIBS", "RE2_BUILD_TESTING", "USEPCRE"):
+        assignments = re.findall(
+            rf"(?m)^[ \t]*set\({option}\b[^\n]*\)[ \t]*(?:#[^\n]*)?$",
+            cmake,
+        )
+        require(
+            len(assignments) == 1
+            and re.fullmatch(
+                rf"[ \t]*set\({option}[ \t]+OFF[ \t]+CACHE[ \t]+BOOL\b"
+                rf"[^\n]*[ \t]+FORCE\)[ \t]*(?:#[^\n]*)?",
+                assignments[0],
+            )
+            is not None,
+            f"CMake must force {option}=OFF exactly once for RE2",
+        )
+    daemon_link = re.search(
+        r"target_link_libraries\(tgcli_daemon\b(?P<body>.*?)\)",
+        cmake,
+        flags=re.DOTALL,
+    )
+    require(
+        daemon_link is not None and "re2::re2" in daemon_link.group("body").split(),
+        "CMake must link the static RE2 target into tgcli_daemon",
+    )
 
     script_matches = re.findall(
         r"(?m)^[ \t]*TDLIB_REV=([^\s#]+)(?:[ \t]+#[^\n]*)?[ \t]*$",
@@ -875,13 +983,7 @@ def validate_release_contract(
 
 
 def staged_archive_name(component_id: str, component: dict) -> str:
-    source_name = archive_basename(component)
-    for suffix in (".tar.gz", ".tar.xz"):
-        if source_name.endswith(suffix):
-            return f"{component_id}{suffix}"
-    raise VerificationError(
-        f"{component_id}: source archive must be a .tar.gz or .tar.xz file"
-    )
+    return f"{component_id}{archive_suffix(component)}"
 
 
 def verify_staged_archive(file: Path, component_id: str, component: dict) -> None:

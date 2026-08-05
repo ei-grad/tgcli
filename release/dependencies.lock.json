@@ -145,6 +145,42 @@
       ]
     },
     {
+      "id": "re2",
+      "name": "RE2",
+      "scope": "runtime",
+      "lock_state": "locked",
+      "integration": "fetchcontent",
+      "source_repository": "https://github.com/google/re2",
+      "source_archive": "https://codeload.github.com/google/re2/tar.gz/4be240789d5b322df9f02b7e19c8651f3ccbf205",
+      "immutable_ref": "4be240789d5b322df9f02b7e19c8651f3ccbf205",
+      "version": "2022-12-01",
+      "archive_sha256": "da5c23ecdb9a55c82d6802ee55812dfb99a035a4838287c0b7c0051bd0fdb9fc",
+      "archive_size": 382881,
+      "source_tree_sha256": "6d3942bcd96377f18ec60a7b190d1b217d037ff0132ff6ae8dc463347c067046",
+      "license_expression": "BSD-3-Clause",
+      "license_files": [
+        {
+          "path": "release/licenses/RE2.txt",
+          "sha256": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449"
+        }
+      ],
+      "embedded_components": [
+        {
+          "id": "re2-plan9-utf",
+          "name": "Plan 9 UTF routines",
+          "version": "2002",
+          "source_path": "util/rune.cc and util/utf.h",
+          "license_expression": "LicenseRef-RE2-Lucent-2002",
+          "license_files": [
+            {
+              "path": "release/licenses/RE2-Lucent-UTF.txt",
+              "sha256": "8af3194d846fcddce0f5e8d4ae6c404744d9b7922a24f23415bd15a9cfe5e6ee"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "cli11",
       "name": "CLI11",
       "scope": "runtime",

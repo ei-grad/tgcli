@@ -687,7 +687,16 @@ for suffix in (".tar.gz", ".tar.xz"):
         print(f"{component_id}{suffix}")
         break
 else:
-    raise SystemExit("staged archive naming failed: unsupported source archive")
+    parts = pathlib.PurePosixPath(parsed.path).parts
+    if (
+        parsed.scheme == "https"
+        and len(parts) >= 2
+        and parts[-2] == "tar.gz"
+        and parts[-1]
+    ):
+        print(f"{component_id}.tar.gz")
+    else:
+        raise SystemExit("staged archive naming failed: unsupported source archive")
 PY
 }
 

@@ -14,9 +14,14 @@ option(TGCLI_SYSTEM_TDLIB
 option(TGCLI_BUILD_TESTS "Build tests" ON)
 option(TGCLI_WERROR "Treat compiler warnings as errors" OFF)
 
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static third-party libraries" FORCE)
+set(RE2_BUILD_TESTING OFF CACHE BOOL "Disable RE2 tests and benchmarks" FORCE)
+set(USEPCRE OFF CACHE BOOL "Disable RE2 PCRE test support" FORCE)
+
 # These exact source commits are mirrored in release/dependencies.lock.json.
 # A TDLib bump is a contract-change-class PR (REVIEW.md §7).
 set(TGCLI_TDLIB_REV a17f87c4cff7b90b278d12b91ba0614383aaee82)
+set(TGCLI_RE2_REV 4be240789d5b322df9f02b7e19c8651f3ccbf205)
 set(TGCLI_CLI11_REV 4160d259d961cd393fd8d67590a8c7d210207348)
 set(TGCLI_NLOHMANN_JSON_REV 55f93686c01528224f448c19128836e7df245f72)
 set(TGCLI_FMT_REV 40626af88bd7df9a5fb80be7b25ac85b122d6c21)
@@ -26,6 +31,7 @@ set(TGCLI_JSONCONS_REV cb54cdc3134a62634466bf7bcd24f1a906f4ef25)
 
 include(cmake/DependencyLock.cmake)
 tgcli_assert_dependency_lock(tdlib ${TGCLI_TDLIB_REV})
+tgcli_assert_dependency_lock(re2 ${TGCLI_RE2_REV})
 tgcli_assert_dependency_lock(cli11 ${TGCLI_CLI11_REV})
 tgcli_assert_dependency_lock(nlohmann_json ${TGCLI_NLOHMANN_JSON_REV})
 tgcli_assert_dependency_lock(fmt ${TGCLI_FMT_REV})
@@ -37,6 +43,9 @@ include(FetchContent)
 FetchContent_Declare(cli11
     GIT_REPOSITORY https://github.com/CLIUtils/CLI11
     GIT_TAG ${TGCLI_CLI11_REV})
+FetchContent_Declare(re2
+    GIT_REPOSITORY https://github.com/google/re2
+    GIT_TAG ${TGCLI_RE2_REV})
 FetchContent_Declare(nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json
     GIT_TAG ${TGCLI_NLOHMANN_JSON_REV})
@@ -46,13 +55,34 @@ FetchContent_Declare(fmt
 FetchContent_Declare(tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus
     GIT_TAG ${TGCLI_TOMLPLUSPLUS_REV})
-FetchContent_MakeAvailable(cli11 nlohmann_json fmt tomlplusplus)
+FetchContent_MakeAvailable(cli11 re2 nlohmann_json fmt tomlplusplus)
 tgcli_assert_resolved_git_revision(cli11 "${cli11_SOURCE_DIR}" ${TGCLI_CLI11_REV})
+tgcli_assert_resolved_git_revision(re2 "${re2_SOURCE_DIR}" ${TGCLI_RE2_REV})
 tgcli_assert_resolved_git_revision(
     nlohmann_json "${nlohmann_json_SOURCE_DIR}" ${TGCLI_NLOHMANN_JSON_REV})
 tgcli_assert_resolved_git_revision(fmt "${fmt_SOURCE_DIR}" ${TGCLI_FMT_REV})
 tgcli_assert_resolved_git_revision(
     tomlplusplus "${tomlplusplus_SOURCE_DIR}" ${TGCLI_TOMLPLUSPLUS_REV})
+
+if(NOT TARGET re2 OR NOT TARGET re2::re2)
+    message(FATAL_ERROR "Pinned RE2 did not provide re2::re2")
+endif()
+get_target_property(tgcli_re2_type re2 TYPE)
+if(NOT tgcli_re2_type STREQUAL "STATIC_LIBRARY")
+    message(FATAL_ERROR "Pinned RE2 must resolve to a static library")
+endif()
+get_target_property(tgcli_re2_runtime_libraries re2 INTERFACE_LINK_LIBRARIES)
+if(NOT tgcli_re2_runtime_libraries STREQUAL "Threads::Threads")
+    message(FATAL_ERROR "Pinned RE2 runtime closure must contain only Threads::Threads")
+endif()
+get_target_property(tgcli_re2_compile_definitions re2 COMPILE_DEFINITIONS)
+if(tgcli_re2_compile_definitions
+   MATCHES "(^|;)(RE2_USE_ICU|USEPCRE)(=[^;]*)?($|;)")
+    message(FATAL_ERROR "Pinned RE2 has a forbidden ICU or PCRE compile definition")
+endif()
+if(TARGET testing OR TARGET regexp_benchmark)
+    message(FATAL_ERROR "Pinned RE2 tests and benchmarks must remain disabled")
+endif()
 
 if(TGCLI_SYSTEM_TDLIB)
     find_package(Td REQUIRED)
@@ -147,7 +177,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/daemon_run.cpp)
 target_link_libraries(tgcli_daemon
     PUBLIC tgcli_proto tgcli_util
-    PRIVATE tgcli_core)
+    PRIVATE tgcli_core re2::re2)
 
 add_library(tgcli_cli STATIC
     src/cli/client.cpp
