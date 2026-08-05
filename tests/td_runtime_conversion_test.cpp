@@ -4,6 +4,7 @@
 #include "core/td_runtime_test_adapter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -88,8 +89,8 @@ void check_delivery(td_api::object_ptr<td_api::AuthenticationCodeType> type,
 
 TEST_CASE("async TDLib log failure diagnostics remain one sanitized NDJSON record",
           "[core][tdlib][logging]") {
-    int output_pipe[2]{};
-    REQUIRE(::pipe(output_pipe) == 0);
+    std::array<int, 2> output_pipe{};
+    REQUIRE(::pipe(output_pipe.data()) == 0);
     const int saved_stderr = ::dup(STDERR_FILENO);
     REQUIRE(saved_stderr >= 0);
     REQUIRE(::dup2(output_pipe[1], STDERR_FILENO) == STDERR_FILENO);

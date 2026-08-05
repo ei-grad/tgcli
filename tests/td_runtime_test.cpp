@@ -91,10 +91,10 @@ struct FakeClient {
 };
 
 FakeClient make_fake_client(bool close_automatically = true,
-                            tgcli::core::TdLogConfiguration logging = {}) {
+                            const tgcli::core::TdLogConfiguration& logging = {}) {
     auto runtime = std::make_unique<ScriptedTdRuntime>(close_automatically);
     auto* runtime_ptr = runtime.get();
-    auto client = std::make_unique<TdClient>(std::move(runtime), std::move(logging));
+    auto client = std::make_unique<TdClient>(std::move(runtime), logging);
     REQUIRE(runtime_ptr->wait_for_sent(1));
     const auto clients = runtime_ptr->clients();
     REQUIRE(clients.size() == 1);

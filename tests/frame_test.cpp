@@ -244,7 +244,7 @@ TEST_CASE("response frames round-trip", "[proto]") {
 TEST_CASE("every request id frame preserves uint64 maximum and rejects overflow",
           "[proto][request-id]") {
     constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
-    const auto check = [maximum](Frame frame) {
+    const auto check = [](Frame frame) {
         auto encoded = serialize(frame);
         const auto marker = std::string{"\"id\":"} + std::to_string(maximum);
         const auto position = encoded.find(marker);

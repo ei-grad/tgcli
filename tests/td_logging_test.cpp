@@ -40,6 +40,11 @@ class PrivateTree {
         root_ = created;
     }
 
+    PrivateTree(const PrivateTree&) = delete;
+    PrivateTree& operator=(const PrivateTree&) = delete;
+    PrivateTree(PrivateTree&&) = delete;
+    PrivateTree& operator=(PrivateTree&&) = delete;
+
     ~PrivateTree() {
         std::filesystem::remove_all(root_);
     }
@@ -84,7 +89,8 @@ void write_bytes(const std::string& filename, std::string_view bytes, mode_t mod
     REQUIRE(::chmod(filename.c_str(), mode) == 0);
 }
 
-TdLogConfiguration logging_at(const std::string& directory, std::uint64_t max_size = 1024 * 1024) {
+TdLogConfiguration logging_at(const std::string& directory,
+                              std::uint64_t max_size = std::uint64_t{1024} * 1024) {
     return {.file_path = directory + "/tdlib.log", .max_file_size = max_size};
 }
 
@@ -143,13 +149,14 @@ TEST_CASE("TDLib log sink serializes concurrent records without tearing",
     const PrivateTree tree;
     const auto configuration = logging_at(tree.directory("state"));
     auto sink = require_sink(configuration);
-    constexpr int kThreads = 8;
-    constexpr int kRecords = 100;
+    constexpr std::size_t kThreads = 8;
+    constexpr std::size_t kRecords = 100;
     std::atomic<bool> append_ok{true};
     std::vector<std::thread> threads;
-    for (int thread = 0; thread < kThreads; ++thread) {
+    threads.reserve(kThreads);
+    for (std::size_t thread = 0; thread < kThreads; ++thread) {
         threads.emplace_back([&, thread] {
-            for (int record = 0; record < kRecords; ++record) {
+            for (std::size_t record = 0; record < kRecords; ++record) {
                 std::string error;
                 const auto line =
                     "thread=" + std::to_string(thread) + ",record=" + std::to_string(record) + "\n";
@@ -194,13 +201,13 @@ TEST_CASE("production and test-DC accounts write only their isolated log roots",
 
     std::array<pid_t, 2> children{};
     for (std::size_t index = 0; index < children.size(); ++index) {
-        children[index] = ::fork();
-        REQUIRE(children[index] >= 0);
-        if (children[index] == 0) {
+        children.at(index) = ::fork();
+        REQUIRE(children.at(index) >= 0);
+        if (children.at(index) == 0) {
             std::string error;
-            auto sink = TdLogSink::create(configurations[index], ::getuid(), error);
+            auto sink = TdLogSink::create(configurations.at(index), ::getuid(), error);
             if (sink == nullptr ||
-                !sink->append(tgcli::core::kTdLogVerbosity, records[index], error)) {
+                !sink->append(tgcli::core::kTdLogVerbosity, records.at(index), error)) {
                 ::_exit(1);
             }
             ::_exit(0);
