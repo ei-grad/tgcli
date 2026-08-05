@@ -185,7 +185,7 @@ std::string read_file(const std::string& filename) {
 }
 
 ProcessOutcome run_cli(const ProcessEnvironment& environment,
-                       const std::vector<std::string>& arguments) {
+                       const std::vector<std::string>& arguments, bool json_output = true) {
     static std::size_t sequence = 0;
     const std::string output_path =
         environment.root() + "/process-" + std::to_string(sequence) + ".out";
@@ -204,7 +204,10 @@ ProcessOutcome run_cli(const ProcessEnvironment& environment,
         ::close(output);
         ::close(errors);
 
-        std::vector<std::string> owned{TGCLI_TEST_BINARY, "--json"};
+        std::vector<std::string> owned{TGCLI_TEST_BINARY};
+        if (json_output) {
+            owned.emplace_back("--json");
+        }
         owned.insert(owned.end(), arguments.begin(), arguments.end());
         std::vector<char*> argv;
         argv.reserve(owned.size() + 1);
@@ -219,6 +222,13 @@ ProcessOutcome run_cli(const ProcessEnvironment& environment,
     REQUIRE(::waitpid(child, &status, 0) == child);
     REQUIRE(WIFEXITED(status));
     return {WEXITSTATUS(status), read_file(output_path), read_file(error_path)};
+}
+
+void check_no_cli_state(const ProcessEnvironment& environment) {
+    CHECK_FALSE(std::filesystem::exists(environment.production_config()));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/data/tgcli"));
+    CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli"));
 }
 
 int run_daemon_direct(const std::string& account) {
@@ -441,6 +451,137 @@ TEST_CASE("real CLI rejects unsupported global dry-run before routing or runtime
     CHECK_FALSE(std::filesystem::exists(environment.root() + "/run/tgcli"));
     CHECK_FALSE(std::filesystem::exists(environment.root() + "/state/tgcli"));
     CHECK_FALSE(std::filesystem::exists(environment.root() + "/data/tgcli"));
+}
+
+TEST_CASE("reserved raw and full modes fail before routing or persistent side effects",
+          "[cli][process][unsupported-mode][safety]") {
+    const ProcessEnvironment environment;
+    ProcessEnvironment::set_account(std::optional<std::string>{"bad.name"});
+
+    struct UnsupportedCase {
+        const char* name;
+        std::vector<std::string> arguments;
+        const char* argument;
+        bool json_output;
+    };
+    const std::vector<UnsupportedCase> cases{
+        {"raw without payload", {"raw"}, "raw", false},
+        {"raw with payload", {"raw", "{}"}, "raw", true},
+        {"raw payload containing full", {"raw", R"({"value":"--full"})"}, "raw", true},
+        {"raw with arbitrary remainder", {"raw", "{}", "extra", "--bogus"}, "raw", true},
+        {"raw short help", {"raw", "-h"}, "raw", true},
+        {"raw long help", {"raw", "--help"}, "raw", true},
+        {"full without command", {"--full"}, "--full", true},
+        {"full explicit false", {"--full=false", "version"}, "--full", true},
+        {"full short help", {"--full", "-h"}, "--full", true},
+        {"full long help", {"--full", "--help"}, "--full", true},
+        {"help before full", {"--help", "--full"}, "--full", true},
+        {"full before version", {"--full", "version"}, "--full", true},
+        {"full after version", {"version", "--full"}, "--full", false},
+        {"full before version short help", {"--full", "version", "-h"}, "--full", true},
+        {"full after version short help", {"version", "--full", "-h"}, "--full", true},
+        {"full before version long help", {"--full", "version", "--help"}, "--full", true},
+        {"full after version long help", {"version", "--full", "--help"}, "--full", true},
+        {"full daemon", {"daemon", "run", "--full"}, "--full", true},
+        {"full account", {"account", "add", "work", "--full"}, "--full", true},
+        {"full auth", {"login", "--full"}, "--full", true},
+        {"raw with destructive globals",
+         {"--allow-write", "--yes", "--dry-run", "-v", "raw", "{}"},
+         "raw",
+         true},
+        {"full with destructive globals",
+         {"--full", "--allow-write", "--yes", "--dry-run", "-v", "logout"},
+         "--full",
+         true},
+    };
+
+    for (const auto& test_case : cases) {
+        DYNAMIC_SECTION(test_case.name) {
+            const auto outcome = run_cli(environment, test_case.arguments, test_case.json_output);
+            REQUIRE(outcome.exit_code == kUsage);
+            CHECK(outcome.out.empty());
+            const nlohmann::json expected{
+                {"error",
+                 {{"code", "USAGE"},
+                  {"message", std::string(test_case.argument) + " is reserved until M7"},
+                  {"details",
+                   {{"argument", test_case.argument}, {"reason", "unsupported_mode"}}}}}};
+            CHECK(outcome.err == expected.dump() + "\n");
+            check_no_cli_state(environment);
+        }
+    }
+}
+
+TEST_CASE("ordinary help and attached option values bypass reserved-mode detection",
+          "[cli][process][unsupported-mode]") {
+    const ProcessEnvironment environment;
+
+    for (const auto* help : {"-h", "--help"}) {
+        DYNAMIC_SECTION(help) {
+            const auto outcome = run_cli(environment, {help}, false);
+            REQUIRE(outcome.exit_code == kOk);
+            CHECK_FALSE((outcome.out.empty() && outcome.err.empty()));
+            CHECK((outcome.out + outcome.err).find("tgcli") != std::string::npos);
+            check_no_cli_state(environment);
+        }
+    }
+
+    const auto attached = run_cli(environment, {"--account=--full", "version"});
+    REQUIRE(attached.exit_code == kNotFound);
+    CHECK(attached.out.empty());
+    const auto attached_error = nlohmann::json::parse(attached.err);
+    CHECK(attached_error["error"]["code"] == "ACCOUNT_NOT_FOUND");
+    CHECK(attached_error["error"]["details"] == nlohmann::json{{"account", "--full"}});
+    check_no_cli_state(environment);
+}
+
+TEST_CASE("legacy bot-token rejection precedes reserved-mode and help handling",
+          "[cli][process][unsupported-mode][safety]") {
+    const ProcessEnvironment environment;
+    constexpr std::string_view secret = "123456:reserved-mode-secret";
+
+    const auto outcome =
+        run_cli(environment, {"login", "--bot-token", std::string(secret), "--full", "--help"});
+
+    REQUIRE(outcome.exit_code == kUsage);
+    CHECK(outcome.out.empty());
+    CHECK(outcome.err.find(secret) == std::string::npos);
+    CHECK(nlohmann::json::parse(outcome.err) ==
+          nlohmann::json{{"error",
+                          {{"code", "INSECURE_SECRET_INPUT"},
+                           {"message", "bot tokens are not accepted on the command line"},
+                           {"details", {{"argument", "--bot-token"}, {"replacement", "--bot"}}}}}});
+    check_no_cli_state(environment);
+}
+
+TEST_CASE("reserved modes preserve ordinary missing and unknown parser errors",
+          "[cli][process][unsupported-mode]") {
+    const ProcessEnvironment environment;
+    struct ParseCase {
+        const char* name;
+        std::vector<std::string> arguments;
+        const char* message;
+        const char* reason;
+    };
+    const std::vector<ParseCase> cases{
+        {"missing command", {}, "required command argument is missing", "missing_argument"},
+        {"unknown command", {"frobnicate"}, "unknown command or argument", "unknown_command"},
+    };
+
+    for (const auto& test_case : cases) {
+        DYNAMIC_SECTION(test_case.name) {
+            const auto outcome = run_cli(environment, test_case.arguments);
+            REQUIRE(outcome.exit_code == kUsage);
+            CHECK(outcome.out.empty());
+            const nlohmann::json expected{
+                {"error",
+                 {{"code", "USAGE"},
+                  {"message", test_case.message},
+                  {"details", {{"argument", nullptr}, {"reason", test_case.reason}}}}}};
+            CHECK(outcome.err == expected.dump() + "\n");
+            check_no_cli_state(environment);
+        }
+    }
 }
 
 TEST_CASE("real CLI rejects invalid TGCLI_ALLOW_WRITE before routing",

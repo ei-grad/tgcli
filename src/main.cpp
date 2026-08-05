@@ -67,6 +67,20 @@ bool consume_legacy_bot_token(int argc, char** argv) noexcept {
     return found;
 }
 
+bool contains_reserved_full(int argc, char** argv) noexcept {
+    constexpr std::string_view option = "--full";
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) {
+            continue;
+        }
+        const std::string_view argument(argv[index]);
+        if (argument == option || argument.starts_with("--full=")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int report_insecure_bot_token() {
     const nlohmann::json rendered{
         {"error",
@@ -141,6 +155,26 @@ std::optional<int> parse_arguments(CLI::App& app, int argc, char** argv) {
         std::fputs((rendered.dump() + "\n").c_str(), stderr);
         return tgcli::kUsage;
     }
+}
+
+int report_missing_command() {
+    const nlohmann::json rendered{
+        {"error",
+         {{"code", "USAGE"},
+          {"message", "required command argument is missing"},
+          {"details", {{"argument", nullptr}, {"reason", "missing_argument"}}}}}};
+    std::fputs((rendered.dump() + "\n").c_str(), stderr);
+    return tgcli::kUsage;
+}
+
+int report_unsupported_mode(std::string_view argument) {
+    const nlohmann::json rendered{
+        {"error",
+         {{"code", "USAGE"},
+          {"message", std::string(argument) + " is reserved until M7"},
+          {"details", {{"argument", argument}, {"reason", "unsupported_mode"}}}}}};
+    std::fputs((rendered.dump() + "\n").c_str(), stderr);
+    return tgcli::kUsage;
 }
 
 std::vector<std::string> selected_command(const CLI::App& app) {
@@ -269,12 +303,16 @@ int run(int argc, char** argv) {
     if (consume_legacy_bot_token(argc, argv)) {
         return report_insecure_bot_token();
     }
+    if (contains_reserved_full(argc, argv)) {
+        return report_unsupported_mode("--full");
+    }
     CLI::App app{"tgcli — Telegram CLI"};
-    app.require_subcommand(1);
+    app.require_subcommand(0, 1);
     app.fallthrough();
 
     std::string account;
     bool json_output = false;
+    bool full = false;
     bool no_daemon = false;
     bool verbose = false;
     bool allow_write = false;
@@ -284,6 +322,7 @@ int run(int argc, char** argv) {
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
+    CLI::Option* full_option = app.add_flag("--full", full, "reserved until M7");
     app.add_flag("-v,--verbose", verbose, "show tgcli diagnostics on stderr");
     app.add_flag("--allow-write", allow_write, "grant writes for this invocation");
     app.add_flag("--yes", yes, "approve destructive actions non-interactively");
@@ -295,6 +334,9 @@ int run(int argc, char** argv) {
 
     app.add_subcommand("version", "print tgcli version");
     app.add_subcommand("doctor", "health/auth probe");
+    CLI::App* raw_cmd = app.add_subcommand("raw", "reserved until M7");
+    raw_cmd->set_help_flag();
+    raw_cmd->fallthrough(false)->prefix_command();
     bool login_qr = false;
     bool login_bot = false;
     std::string rejected_bot_token;
@@ -349,6 +391,15 @@ int run(int argc, char** argv) {
     }
 
     const auto command = selected_command(app);
+    if (full_option->count() != 0) {
+        return report_unsupported_mode("--full");
+    }
+    if (command == std::vector<std::string>{"raw"}) {
+        return report_unsupported_mode("raw");
+    }
+    if (command.empty()) {
+        return report_missing_command();
+    }
     if (no_daemon && is_daemon_lifecycle(command)) {
         const nlohmann::json rendered{
             {"error",
