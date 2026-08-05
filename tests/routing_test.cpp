@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -230,4 +231,25 @@ TEST_CASE("explicit client routing stops at a removal tombstone before account a
 
     const auto version = cli::resolve_account_route({"version"}, environment, "work", std::nullopt);
     REQUIRE(version.selection);
+
+    auto tombstone = journal.load(invocation, failure);
+    REQUIRE(tombstone);
+    auto document = daemon::serialize(*tombstone);
+    document["stage"] = "outcome_synced";
+    document["completed_stages"] =
+        nlohmann::json::array({"planned", "intent_synced", "outcome_synced"});
+    document["next_stage"] = nullptr;
+    std::ofstream output(journal.tombstone_path(invocation), std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << document.dump() << '\n';
+    output.close();
+    REQUIRE(output.good());
+
+    const auto invalid = cli::resolve_account_route({"doctor"}, environment, "work", std::nullopt);
+    REQUIRE(invalid.error);
+    CHECK(invalid.error->code == "AUDIT_UNAVAILABLE");
+    CHECK(invalid.error->exit_code == kDenied);
+    CHECK(invalid.error->details == nlohmann::json{{"account", "work"},
+                                                   {"path", journal.tombstone_path(invocation)},
+                                                   {"reason", "path_invalid"}});
 }

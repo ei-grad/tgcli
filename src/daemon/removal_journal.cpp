@@ -319,7 +319,8 @@ std::optional<RemovalTombstone> parse_tombstone(const json& value, RemovalJourna
     auto prefix = stages;
     if (*stage == AuditStage::OutcomeSynced) {
         prefix.pop_back();
-        if (prefix.empty()) {
+        if (prefix.size() < 2 || prefix[0] != AuditStage::Planned ||
+            prefix[1] != AuditStage::IntentSynced) {
             failure.reason = "path_invalid";
             return std::nullopt;
         }
@@ -417,7 +418,12 @@ std::optional<RemovalTombstone> load_from_directory(int directory, std::string_v
         failure.reason = "path_invalid";
         return std::nullopt;
     }
-    return parse_tombstone(parsed, failure);
+    auto tombstone = parse_tombstone(parsed, failure);
+    if (tombstone && tombstone->invocation_id != invocation_id) {
+        failure.reason = "path_invalid";
+        return std::nullopt;
+    }
+    return tombstone;
 }
 
 std::optional<AuthoritySource> parse_authority(const json& value) {
@@ -458,8 +464,8 @@ std::optional<std::vector<AuditStage>> parse_stages(const json& value) {
     return stages;
 }
 
-std::optional<std::set<std::string, std::less<>>>
-nonterminal_tombstones(int directory, uid_t expected_uid, RemovalJournalFailure& failure) {
+std::optional<std::vector<std::string>> tombstone_invocations(int directory,
+                                                              RemovalJournalFailure& failure) {
     const int duplicate = ::dup(directory);
     if (duplicate < 0) {
         failure.reason = "open_failed";
@@ -486,24 +492,18 @@ nonterminal_tombstones(int directory, uid_t expected_uid, RemovalJournalFailure&
         return std::nullopt;
     }
     std::ranges::sort(invocations);
-    std::set<std::string, std::less<>> result;
-    for (const auto& invocation : invocations) {
-        auto tombstone = load_from_directory(directory, invocation, expected_uid, failure);
-        if (!tombstone) {
-            return std::nullopt;
-        }
-        if (tombstone->stage != AuditStage::OutcomeSynced) {
-            result.insert(invocation);
-        }
-    }
     failure.reason.clear();
-    return result;
+    return invocations;
 }
 
 struct AuditScan {
     std::map<std::string, proto::AccountRemovePlan, std::less<>> pending;
     std::set<std::string, std::less<>> completed;
+    std::map<std::string, proto::AccountRemovePlan, std::less<>> plans;
+    std::map<std::string, std::vector<AuditStage>, std::less<>> completed_stages;
     std::map<std::string, json, std::less<>> outcomes;
+    std::map<std::string, std::string, std::less<>> generations;
+    std::set<std::string, std::less<>> oldest_invocations;
 };
 
 AuditRecordIdentity audit_identity(const json& record, const std::string& invocation) {
@@ -532,7 +532,7 @@ std::optional<AccountRemoveRemoteResult> parse_remote_result(const json& result)
 }
 
 bool consume_intent(const json& record, const AuditRecordIdentity& identity,
-                    const std::string& invocation, AuditScan& scan) {
+                    const std::string& invocation, std::string_view generation, AuditScan& scan) {
     if (!exact_fields(record, {"schema_version", "phase", "invocation_id", "timestamp", "account",
                                "command", "arguments", "plan", "config_snapshot",
                                "authority_source", "confirmation_source"}) ||
@@ -551,15 +551,19 @@ bool consume_intent(const json& record, const AuditRecordIdentity& identity,
     if (!canonical || serialize(*canonical) != record) {
         return false;
     }
+    scan.plans.emplace(invocation, *plan);
+    scan.generations.emplace(invocation, generation);
     scan.pending.emplace(invocation, std::move(*plan));
     return true;
 }
 
 bool consume_outcome(const json& record, const AuditRecordIdentity& identity,
-                     const std::string& invocation, AuditScan& scan) {
+                     const std::string& invocation, std::string_view generation, AuditScan& scan) {
     std::string error;
     const auto found = scan.pending.find(invocation);
-    if (found == scan.pending.end()) {
+    const auto found_generation = scan.generations.find(invocation);
+    if (found == scan.pending.end() || found_generation == scan.generations.end() ||
+        found_generation->second != generation) {
         return false;
     }
     const auto stages = parse_stages(record["completed_stages"]);
@@ -585,11 +589,12 @@ bool consume_outcome(const json& record, const AuditRecordIdentity& identity,
     }
     scan.pending.erase(found);
     scan.completed.insert(invocation);
+    scan.completed_stages.emplace(invocation, *stages);
     scan.outcomes.emplace(invocation, record);
     return true;
 }
 
-bool consume_audit_record(const json& record, AuditScan& scan) {
+bool consume_audit_record(const json& record, std::string_view generation, AuditScan& scan) {
     if (!record.is_object() || !record.contains("phase") || !record["phase"].is_string() ||
         !record.contains("invocation_id") || !record["invocation_id"].is_string() ||
         !valid_invocation_id(record["invocation_id"].get_ref<const std::string&>()) ||
@@ -599,7 +604,7 @@ bool consume_audit_record(const json& record, AuditScan& scan) {
     const auto invocation = record["invocation_id"].get<std::string>();
     const auto identity = audit_identity(record, invocation);
     if (record["phase"] == "intent") {
-        return consume_intent(record, identity, invocation, scan);
+        return consume_intent(record, identity, invocation, generation, scan);
     }
     if (record["phase"] != "outcome" ||
         !exact_fields(record, {"schema_version", "phase", "invocation_id", "timestamp", "account",
@@ -607,10 +612,11 @@ bool consume_audit_record(const json& record, AuditScan& scan) {
                                "error"})) {
         return false;
     }
-    return consume_outcome(record, identity, invocation, scan);
+    return consume_outcome(record, identity, invocation, generation, scan);
 }
 
-bool consume_audit_bytes(std::string_view bytes, AuditScan& scan) {
+bool consume_audit_bytes(std::string_view bytes, std::string_view generation, AuditScan& scan,
+                         bool oldest) {
     std::size_t offset = 0;
     while (offset < bytes.size()) {
         const auto newline = bytes.find('\n', offset);
@@ -618,8 +624,11 @@ bool consume_audit_bytes(std::string_view bytes, AuditScan& scan) {
             return false;
         }
         const auto parsed = json::parse(bytes.substr(offset, newline - offset), nullptr, false);
-        if (parsed.is_discarded() || !consume_audit_record(parsed, scan)) {
+        if (parsed.is_discarded() || !consume_audit_record(parsed, generation, scan)) {
             return false;
+        }
+        if (oldest) {
+            scan.oldest_invocations.insert(parsed["invocation_id"].get<std::string>());
         }
         offset = newline + 1;
     }
@@ -636,7 +645,8 @@ std::optional<AuditScan> scan_audit(int directory, uid_t expected_uid,
         if (!bytes) {
             return std::nullopt;
         }
-        if (!bytes->empty() && !consume_audit_bytes(*bytes, scan)) {
+        if (!bytes->empty() &&
+            !consume_audit_bytes(*bytes, name, scan, std::string_view{name} == "audit.log.4")) {
             failure.reason = "path_invalid";
             return std::nullopt;
         }
@@ -645,31 +655,152 @@ std::optional<AuditScan> scan_audit(int directory, uid_t expected_uid,
     return scan;
 }
 
-bool rotate_audit_if_needed(int directory, uid_t expected_uid, std::size_t incoming,
-                            const std::shared_ptr<const testing::RemovalJournalHooks>& hooks,
-                            RemovalJournalFailure& failure) {
-    struct stat current {};
-    if (::fstatat(directory, "audit.log", &current, AT_SYMLINK_NOFOLLOW) != 0) {
-        return errno == ENOENT;
+bool verified_terminal_tombstone(const RemovalTombstone& tombstone, const AuditScan& scan) {
+    if (tombstone.stage != AuditStage::OutcomeSynced || tombstone.completed_stages.size() < 3 ||
+        tombstone.completed_stages.back() != AuditStage::OutcomeSynced ||
+        !scan.completed.contains(tombstone.invocation_id)) {
+        return false;
     }
-    const auto threshold = hooks ? hooks->rotation_bytes : std::size_t{32} * 1024 * 1024;
-    if (current.st_size < 0 ||
-        static_cast<std::uint64_t>(current.st_size) + incoming <= threshold) {
+    const auto found_plan = scan.plans.find(tombstone.invocation_id);
+    const auto found_stages = scan.completed_stages.find(tombstone.invocation_id);
+    if (found_plan == scan.plans.end() || found_stages == scan.completed_stages.end() ||
+        proto::serialize(found_plan->second) != proto::serialize(tombstone.plan)) {
+        return false;
+    }
+    auto tombstone_prefix = tombstone.completed_stages;
+    tombstone_prefix.pop_back();
+    return found_stages->second == tombstone_prefix;
+}
+
+struct IncomingAuditIntent {
+    std::string invocation_id;
+    proto::AccountRemovePlan plan;
+};
+
+std::optional<IncomingAuditIntent> parse_incoming_intent(const json& record) {
+    AuditScan scan;
+    if (!consume_audit_record(record, "incoming", scan) || scan.pending.size() != 1) {
+        return std::nullopt;
+    }
+    const auto invocation = record["invocation_id"].get<std::string>();
+    const auto found = scan.pending.find(invocation);
+    if (found == scan.pending.end()) {
+        return std::nullopt;
+    }
+    return IncomingAuditIntent{invocation, found->second};
+}
+
+std::optional<IncomingAuditIntent> validate_incoming_tombstone(int directory, uid_t expected_uid,
+                                                               const AuditScan& scan,
+                                                               const json& incoming_record,
+                                                               RemovalJournalFailure& failure) {
+    auto incoming = parse_incoming_intent(incoming_record);
+    if (!incoming || scan.plans.contains(incoming->invocation_id)) {
+        failure.reason = "path_invalid";
+        return std::nullopt;
+    }
+    auto tombstone = load_from_directory(directory, incoming->invocation_id, expected_uid, failure);
+    if (!tombstone || tombstone->stage != AuditStage::Planned ||
+        tombstone->completed_stages != std::vector{AuditStage::Planned} ||
+        tombstone->next_stage != AuditStage::IntentSynced ||
+        proto::serialize(tombstone->plan) != proto::serialize(incoming->plan)) {
+        failure.reason = "path_invalid";
+        return std::nullopt;
+    }
+    return incoming;
+}
+
+bool retire_terminal_tombstones(int directory, const std::vector<std::string>& invocations,
+                                RemovalJournalFailure& failure) {
+    for (const auto& invocation : invocations) {
+        const std::string name = invocation + ".json";
+        if (::unlinkat(directory, name.c_str(), 0) != 0) {
+            failure.reason = "rotate_failed";
+            return false;
+        }
+    }
+    if (!invocations.empty() && ::fsync(directory) != 0) {
+        failure.reason = "rotate_failed";
+        return false;
+    }
+    return true;
+}
+
+std::optional<bool> prepare_audit_rotation(int directory, uid_t expected_uid, const AuditScan& scan,
+                                           const IncomingAuditIntent& incoming,
+                                           RemovalJournalFailure& failure) {
+    auto invocations = tombstone_invocations(directory, failure);
+    if (!invocations) {
+        return std::nullopt;
+    }
+    bool protected_audit_group = !scan.pending.empty();
+    bool incoming_tombstone = false;
+    std::vector<std::string> retired;
+    for (const auto& invocation : *invocations) {
+        auto tombstone = load_from_directory(directory, invocation, expected_uid, failure);
+        if (!tombstone) {
+            return std::nullopt;
+        }
+        if (invocation == incoming.invocation_id) {
+            incoming_tombstone = true;
+            continue;
+        }
+        if (tombstone->stage == AuditStage::OutcomeSynced) {
+            if (!verified_terminal_tombstone(*tombstone, scan)) {
+                return true;
+            }
+            if (scan.oldest_invocations.contains(invocation)) {
+                retired.push_back(invocation);
+            }
+            continue;
+        }
+        protected_audit_group = true;
+    }
+    if (!incoming_tombstone) {
+        failure.reason = "path_invalid";
+        return std::nullopt;
+    }
+    if (protected_audit_group) {
         return true;
     }
+    if (!retire_terminal_tombstones(directory, retired, failure)) {
+        return std::nullopt;
+    }
+    return false;
+}
+
+bool rotate_audit_if_needed(int directory, uid_t expected_uid, std::size_t incoming_size,
+                            const json& incoming_record,
+                            const std::shared_ptr<const testing::RemovalJournalHooks>& hooks,
+                            RemovalJournalFailure& failure) {
     auto scanned = scan_audit(directory, expected_uid, failure);
     if (!scanned) {
         return false;
     }
-    auto protected_invocations = nonterminal_tombstones(directory, expected_uid, failure);
-    if (!protected_invocations) {
+    auto incoming =
+        validate_incoming_tombstone(directory, expected_uid, *scanned, incoming_record, failure);
+    if (!incoming) {
         return false;
     }
-    const bool protected_audit_group =
-        std::ranges::any_of(*protected_invocations, [&scanned](const auto& invocation) {
-            return scanned->pending.contains(invocation) || scanned->completed.contains(invocation);
-        });
-    if (!scanned->pending.empty() || protected_audit_group) {
+    struct stat current {};
+    if (::fstatat(directory, "audit.log", &current, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT) {
+            return true;
+        }
+        failure.reason = "open_failed";
+        return false;
+    }
+    const auto threshold = hooks ? hooks->rotation_bytes : std::size_t{32} * 1024 * 1024;
+    if (current.st_size < 0 ||
+        static_cast<std::uint64_t>(current.st_size) + incoming_size <= threshold) {
+        return true;
+    }
+    const auto protected_audit =
+        prepare_audit_rotation(directory, expected_uid, *scanned, *incoming, failure);
+    if (!protected_audit) {
+        return false;
+    }
+    if (*protected_audit) {
         return true;
     }
     if (injected(hooks, RemovalJournalFault::AuditRotate)) {
@@ -710,7 +841,7 @@ bool append_audit_record(int directory, const json& record, uid_t expected_uid, 
         return false;
     }
     if (begin_group &&
-        !rotate_audit_if_needed(directory, expected_uid, line.size(), hooks, failure)) {
+        !rotate_audit_if_needed(directory, expected_uid, line.size(), record, hooks, failure)) {
         return false;
     }
     const Descriptor audit(::openat(directory, "audit.log",
@@ -813,6 +944,16 @@ bool RemovalJournal::advance(const std::string& invocation_id, AuditStage stage,
         return false;
     }
     if (tombstone->stage == stage) {
+        if (stage == AuditStage::OutcomeSynced) {
+            auto scan = scan_audit(opened.descriptor.get(), expected_uid_, failure);
+            if (!scan) {
+                return false;
+            }
+            if (!verified_terminal_tombstone(*tombstone, *scan)) {
+                failure.reason = "path_invalid";
+                return false;
+            }
+        }
         failure.reason.clear();
         return true;
     }
@@ -835,6 +976,16 @@ bool RemovalJournal::advance(const std::string& invocation_id, AuditStage stage,
     tombstone->stage = stage;
     tombstone->completed_stages = std::move(candidate);
     tombstone->next_stage = expected_next(*tombstone);
+    if (stage == AuditStage::OutcomeSynced) {
+        auto scan = scan_audit(opened.descriptor.get(), expected_uid_, failure);
+        if (!scan) {
+            return false;
+        }
+        if (!verified_terminal_tombstone(*tombstone, *scan)) {
+            failure.reason = "path_invalid";
+            return false;
+        }
+    }
     return write_tombstone(opened.descriptor.get(), *tombstone, expected_uid_, false, hooks_,
                            failure);
 }
@@ -861,31 +1012,13 @@ RemovalInspection RemovalJournal::inspect_account(std::string_view account) cons
     if (!journal_lock) {
         return {RemovalInspectionStatus::Invalid, {}, directory_, std::move(failure)};
     }
-    const int duplicate = ::dup(opened.descriptor.get());
-    if (duplicate < 0) {
-        return {RemovalInspectionStatus::Invalid, {}, directory_, {"open_failed"}};
+    auto tombstones = tombstone_invocations(opened.descriptor.get(), failure);
+    if (!tombstones) {
+        return {RemovalInspectionStatus::Invalid, {}, directory_, std::move(failure)};
     }
-    DIR* stream = ::fdopendir(duplicate);
-    if (stream == nullptr) {
-        ::close(duplicate);
-        return {RemovalInspectionStatus::Invalid, {}, directory_, {"open_failed"}};
-    }
-    std::vector<std::string> tombstones;
-    errno = 0;
-    while (const auto* entry = ::readdir(stream)) {
-        const std::string name(entry->d_name);
-        if (name.ends_with(".json")) {
-            tombstones.push_back(name.substr(0, name.size() - 5));
-        }
-    }
-    const int read_error = errno;
-    ::closedir(stream);
-    if (read_error != 0) {
-        return {RemovalInspectionStatus::Invalid, {}, directory_, {"open_failed"}};
-    }
-    std::ranges::sort(tombstones);
     std::unique_ptr<RemovalTombstone> matched;
-    for (const auto& invocation : tombstones) {
+    std::optional<AuditScan> scan;
+    for (const auto& invocation : *tombstones) {
         auto tombstone =
             load_from_directory(opened.descriptor.get(), invocation, expected_uid_, failure);
         if (!tombstone) {
@@ -894,7 +1027,20 @@ RemovalInspection RemovalJournal::inspect_account(std::string_view account) cons
                     tombstone_path(invocation),
                     std::move(failure)};
         }
-        if (tombstone->account == account && tombstone->stage != AuditStage::OutcomeSynced) {
+        if (tombstone->stage == AuditStage::OutcomeSynced) {
+            if (!scan) {
+                scan = scan_audit(opened.descriptor.get(), expected_uid_, failure);
+                if (!scan) {
+                    return {RemovalInspectionStatus::Invalid, {}, audit_path(), std::move(failure)};
+                }
+            }
+            if (!verified_terminal_tombstone(*tombstone, *scan)) {
+                return {RemovalInspectionStatus::Invalid,
+                        {},
+                        tombstone_path(invocation),
+                        {"path_invalid"}};
+            }
+        } else if (tombstone->account == account) {
             if (matched) {
                 return {RemovalInspectionStatus::Invalid, {}, directory_, {"path_invalid"}};
             }

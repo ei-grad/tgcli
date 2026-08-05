@@ -221,6 +221,22 @@ std::shared_ptr<testing::AccountRemovalHooks> deterministic_hooks() {
     return hooks;
 }
 
+void force_unverified_terminal(const RemovalJournal& journal, std::string_view invocation) {
+    RemovalJournalFailure failure;
+    auto tombstone = journal.load(invocation, failure);
+    REQUIRE(tombstone);
+    auto document = serialize(*tombstone);
+    document["stage"] = "outcome_synced";
+    document["completed_stages"] =
+        nlohmann::json::array({"planned", "intent_synced", "outcome_synced"});
+    document["next_stage"] = nullptr;
+    std::ofstream output(journal.tombstone_path(invocation), std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << document.dump() << '\n';
+    output.close();
+    REQUIRE(output.good());
+}
+
 } // namespace
 
 TEST_CASE("keep-session removal never requests remote logout and commits every local stage",
@@ -329,6 +345,37 @@ TEST_CASE("remote uncertainty writes a failure outcome and preserves all local s
     REQUIRE(tombstone);
     CHECK_THAT(serialize(*tombstone),
                tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
+}
+
+TEST_CASE("unaudited terminal blocks removal before remote or local destructive work",
+          "[removal][command][audit][recovery]") {
+    const TempRemoval temp;
+    const auto store = temp.store();
+    auto journal = temp.journal();
+    const auto fresh =
+        plan_account_removal(store, journal, temp.environment(), "work", false, std::nullopt);
+    REQUIRE(fresh);
+    const std::string invocation = "00112233445566778899aabbccddeeff";
+    RemovalJournalFailure failure;
+    REQUIRE(journal.create(invocation, fresh.planned->plan, failure));
+    force_unverified_terminal(journal, invocation);
+
+    FakeRemote remote;
+    AccountRemovalCoordinator coordinator(store, journal, temp.environment(), "work", remote, {},
+                                          deterministic_hooks());
+    const auto terminal = run(coordinator, request());
+    REQUIRE(terminal.error);
+    CHECK(terminal.error->code == "AUDIT_UNAVAILABLE");
+    CHECK(terminal.error->details == nlohmann::json{{"account", "work"},
+                                                    {"path", journal.tombstone_path(invocation)},
+                                                    {"reason", "path_invalid"}});
+    CHECK(remote.proof_calls == 0);
+    CHECK(remote.close_calls == 0);
+    CHECK(std::filesystem::exists(temp.data_root()));
+    CHECK(std::filesystem::exists(temp.state_root()));
+    const auto current = store.load();
+    REQUIRE(current);
+    CHECK(current.snapshot->accounts.contains("work"));
 }
 
 TEST_CASE("remote return without its durable proof checkpoint fails closed",

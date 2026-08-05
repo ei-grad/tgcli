@@ -86,6 +86,22 @@ std::string two_accounts(std::string_view default_account = "main") {
            "[accounts.work]\nallow_write = false\n";
 }
 
+void force_unverified_terminal(const RemovalJournal& journal, std::string_view invocation) {
+    RemovalJournalFailure failure;
+    auto tombstone = journal.load(invocation, failure);
+    REQUIRE(tombstone);
+    auto document = serialize(*tombstone);
+    document["stage"] = "outcome_synced";
+    document["completed_stages"] =
+        nlohmann::json::array({"planned", "intent_synced", "outcome_synced"});
+    document["next_stage"] = nullptr;
+    std::ofstream output(journal.tombstone_path(invocation), std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output << document.dump() << '\n';
+    output.close();
+    REQUIRE(output.good());
+}
+
 } // namespace
 
 TEST_CASE("removal planner resolves non-default roots snapshot and resulting default",
@@ -193,4 +209,31 @@ TEST_CASE("repeated removal resolves its tombstone before the missing config acc
     REQUIRE(resumed.error);
     CHECK(resumed.error->code == "REMOVAL_INCOMPLETE");
     CHECK(resumed.error->details["reason"] == "identity_ambiguous");
+}
+
+TEST_CASE("removal planner fails closed on an unaudited terminal without touching state",
+          "[removal][planner][recovery][audit]") {
+    const TempPlanningTree temp(two_accounts());
+    temp.create_account_data();
+    const auto store = temp.store();
+    const auto journal = temp.journal();
+    const auto fresh =
+        plan_account_removal(store, journal, temp.environment(), "work", false, std::nullopt);
+    REQUIRE(fresh);
+    const std::string invocation = "00112233445566778899aabbccddeeff";
+    RemovalJournalFailure failure;
+    REQUIRE(journal.create(invocation, fresh.planned->plan, failure));
+    force_unverified_terminal(journal, invocation);
+
+    const auto rejected =
+        plan_account_removal(store, journal, temp.environment(), "work", false, std::nullopt);
+    REQUIRE(rejected.error);
+    CHECK(rejected.error->code == "AUDIT_UNAVAILABLE");
+    CHECK(rejected.error->details == nlohmann::json{{"account", "work"},
+                                                    {"path", journal.tombstone_path(invocation)},
+                                                    {"reason", "path_invalid"}});
+    const auto current = store.load();
+    REQUIRE(current);
+    CHECK(current.snapshot->accounts.contains("work"));
+    CHECK(std::filesystem::exists(temp.account_data()));
 }
