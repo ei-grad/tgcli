@@ -155,6 +155,63 @@ TEST_CASE("non-Read tiers fail closed pending the M3 gate", "[dispatch]") {
     CHECK_FALSE(handler_ran);
 }
 
+TEST_CASE("M1 destructive bypass is bound to its two exact command paths",
+          "[dispatch][m1][safety]") {
+    constexpr std::array<std::string_view, 2> allowed_paths{"logout", "account remove"};
+    daemon::Dispatcher dispatcher;
+    std::set<std::string_view> handled_paths;
+    for (const auto path : allowed_paths) {
+        dispatcher.register_command(
+            std::string(path),
+            {daemon::Tier::Destructive,
+             [path, &handled_paths](const proto::Request&, daemon::RequestSession& sink) {
+                 handled_paths.emplace(path);
+                 sink.result({{"ok", true}});
+             },
+             true});
+    }
+    for (const auto path : allowed_paths) {
+        const auto outcome = dispatch(dispatcher, command_parts(path));
+        REQUIRE(outcome.result.has_value());
+        CHECK(outcome.exit_code == kOk);
+        CHECK(handled_paths.contains(path));
+    }
+    CHECK(handled_paths.size() == allowed_paths.size());
+
+    const auto handler = [](const proto::Request&, daemon::RequestSession& sink) {
+        sink.result({{"unsafe", true}});
+    };
+    daemon::Dispatcher rejected;
+    CHECK_THROWS_AS(rejected.register_command("nuke", {daemon::Tier::Destructive, handler, true}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command("loguot", {daemon::Tier::Destructive, handler, true}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command("logout", {daemon::Tier::Write, handler, true}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        rejected.register_command("account remove", {daemon::Tier::Read, handler, true}),
+        std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command(
+                        "send", {daemon::Tier::Write, handler, true, daemon::M3Operation::Send}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(rejected.register_command("chat leave", {daemon::Tier::Destructive, handler,
+                                                             true, daemon::M3Operation::ChatLeave}),
+                    std::invalid_argument);
+
+    daemon::Dispatcher unmarked;
+    bool unmarked_ran = false;
+    unmarked.register_command(
+        "logout", {daemon::Tier::Destructive,
+                   [&unmarked_ran](const proto::Request&, daemon::RequestSession& sink) {
+                       unmarked_ran = true;
+                       sink.result({{"unsafe", true}});
+                   }});
+    const auto denied = dispatch(unmarked, {"logout"});
+    CHECK(denied.error_code == "DENIED");
+    CHECK(denied.exit_code == kDenied);
+    CHECK_FALSE(unmarked_ran);
+}
+
 TEST_CASE("M3 operation registry is closed and has exact tier and bot policy",
           "[dispatch][m3][safety]") {
     struct ExpectedPolicy {
@@ -253,6 +310,16 @@ TEST_CASE("M3 operation registry is closed and has exact tier and bot policy",
     CHECK_FALSE(daemon::m3_operation_for_command("msg_edit").has_value());
     CHECK(daemon::evaluate_m3_bot_admission(invalid, false, daemon::M3ScheduleKind::None) ==
           daemon::M3BotAdmission::Unsupported);
+
+    const auto invalid_schedule = static_cast<daemon::M3ScheduleKind>(255);
+    for (const auto& policy : policies) {
+        CHECK(daemon::evaluate_m3_bot_admission(policy.operation, false, invalid_schedule) ==
+              daemon::M3BotAdmission::Unsupported);
+        if (policy.bot_policy != daemon::M3BotPolicy::UserOnly) {
+            CHECK(daemon::evaluate_m3_bot_admission(policy.operation, true, invalid_schedule) ==
+                  daemon::M3BotAdmission::Unsupported);
+        }
+    }
 }
 
 TEST_CASE("M3 descriptors must match the closed registry and remain fail closed",

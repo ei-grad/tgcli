@@ -34,6 +34,20 @@ constexpr std::array<M3OperationPolicy, 17> kM3OperationPolicies{{
     {M3Operation::SavedAttach, "saved_attach", "saved attach", Tier::Write, M3BotPolicy::UserOnly},
 }};
 
+constexpr bool is_m1_destructive_command(std::string_view path) noexcept {
+    return path == "logout" || path == "account remove";
+}
+
+constexpr bool is_valid_m3_schedule(M3ScheduleKind schedule) noexcept {
+    switch (schedule) {
+    case M3ScheduleKind::None:
+    case M3ScheduleKind::At:
+    case M3ScheduleKind::Online:
+        return true;
+    }
+    return false;
+}
+
 std::string command_key(const std::vector<std::string>& command) {
     std::string key;
     for (const auto& part : command) {
@@ -71,6 +85,9 @@ std::optional<M3Operation> m3_operation_for_command(std::string_view command_pat
 
 M3BotAdmission evaluate_m3_bot_admission(M3Operation operation, bool is_bot,
                                          M3ScheduleKind schedule) {
+    if (!is_valid_m3_schedule(schedule)) {
+        return M3BotAdmission::Unsupported;
+    }
     const auto* policy = m3_operation_policy(operation);
     if (policy == nullptr) {
         return M3BotAdmission::Unsupported;
@@ -145,6 +162,10 @@ std::optional<nlohmann::json> ResponseSink::challenge(nlohmann::json data) {
 }
 
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
+    if (descriptor.m1_destructive_kernel &&
+        (descriptor.tier != Tier::Destructive || !is_m1_destructive_command(path))) {
+        throw std::invalid_argument("M1 destructive bypass does not match its static policy");
+    }
     const auto reserved_operation = m3_operation_for_command(path);
     if (!descriptor.m3_operation) {
         if (reserved_operation) {
@@ -181,8 +202,9 @@ void Dispatcher::dispatch(RequestSession& session) const {
     }
     // M1 opens only the audited destructive kernel used by logout and account
     // removal. Every other non-read descriptor remains denied until M3.
-    const bool m1_destructive =
-        it->second.tier == Tier::Destructive && it->second.m1_destructive_kernel;
+    const bool m1_destructive = is_m1_destructive_command(key) &&
+                                it->second.tier == Tier::Destructive &&
+                                it->second.m1_destructive_kernel;
     if (it->second.tier != Tier::Read && !m1_destructive) {
         session.error("DENIED", "write-tier commands are not implemented yet (fail-closed gate)",
                       nlohmann::json::object(), kDenied);
