@@ -556,6 +556,154 @@ bash "$checker" verify-macos-build \
     "$fixture_root/build/macos-x86_64-provenance.json" \
     "$fixture_root/build/macos-x86_64-SBOM.json"
 
+package_root="$fixture_root/package/tgcli-fixture"
+mkdir -p "$package_root/release"
+cp "$fixture_root/build/macos-universal" "$package_root/tgcli"
+cp "$fixture_root/build/macos-arm64-provenance.json" \
+    "$package_root/PROVENANCE-arm64.json"
+cp "$fixture_root/build/macos-x86_64-provenance.json" \
+    "$package_root/PROVENANCE-x86_64.json"
+cp "$fixture_root/build/macos-arm64-SBOM.json" "$package_root/SBOM-arm64.json"
+cp "$fixture_root/build/macos-x86_64-SBOM.json" "$package_root/SBOM-x86_64.json"
+cp "$fixture_root/release/dependencies.lock.json" \
+    "$package_root/release/dependencies.lock.json"
+cp -R "$fixture_root/release/licenses" "$package_root/release/licenses"
+python3 - \
+    "$root" \
+    "$fixture_root/build/macos-universal-provenance.json" \
+    "$package_root" <<'PY'
+import importlib
+import json
+import pathlib
+import sys
+
+repo_root = pathlib.Path(sys.argv[1])
+source_provenance = pathlib.Path(sys.argv[2])
+package = pathlib.Path(sys.argv[3])
+sys.path.insert(0, str(repo_root / "scripts/release"))
+provenance_tool = importlib.import_module("build_provenance")
+
+provenance = json.loads(source_provenance.read_text(encoding="utf-8"))
+provenance["artifact"]["path"] = "tgcli"
+(package / "PROVENANCE.json").write_text(
+    json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+sbom = provenance_tool.build_sbom_document(
+    package / "tgcli",
+    package / "release/dependencies.lock.json",
+    package / "PROVENANCE.json",
+    "macos-universal",
+    {
+        "macos-arm64": package / "SBOM-arm64.json",
+        "macos-x86_64": package / "SBOM-x86_64.json",
+    },
+)
+(package / "SBOM.json").write_text(
+    json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
+
+bash "$checker" verify-macos-build \
+    "$package_root/tgcli" \
+    "$package_root/PROVENANCE.json" \
+    "$package_root/SBOM.json" \
+    macos-universal \
+    "$source_sha" \
+    "$source_tree" \
+    "$package_root/release/dependencies.lock.json" \
+    "$package_root/PROVENANCE-arm64.json" \
+    "$package_root/SBOM-arm64.json" \
+    "$package_root/PROVENANCE-x86_64.json" \
+    "$package_root/SBOM-x86_64.json"
+
+missing_package="$fixture_root/package/missing-slice"
+mkdir -p "$missing_package/release"
+cp "$package_root/tgcli" "$package_root/PROVENANCE.json" "$package_root/SBOM.json" \
+    "$package_root/PROVENANCE-arm64.json" "$package_root/SBOM-arm64.json" \
+    "$package_root/PROVENANCE-x86_64.json" "$missing_package/"
+cp "$package_root/release/dependencies.lock.json" \
+    "$missing_package/release/dependencies.lock.json"
+cp -R "$package_root/release/licenses" "$missing_package/release/licenses"
+expect_failure_message missing-packaged-slice-sbom 'x86_64 packaged SBOM is missing' \
+    bash "$checker" verify-macos-build \
+        "$missing_package/tgcli" \
+        "$missing_package/PROVENANCE.json" \
+        "$missing_package/SBOM.json" \
+        macos-universal \
+        "$source_sha" \
+        "$source_tree" \
+        "$missing_package/release/dependencies.lock.json" \
+        "$missing_package/PROVENANCE-arm64.json" \
+        "$missing_package/SBOM-arm64.json" \
+        "$missing_package/PROVENANCE-x86_64.json" \
+        "$missing_package/SBOM-x86_64.json"
+
+symlink_package="$fixture_root/package/symlink-slice"
+mkdir -p "$symlink_package/release"
+cp "$package_root/tgcli" "$package_root/PROVENANCE.json" "$package_root/SBOM.json" \
+    "$package_root/PROVENANCE-arm64.json" "$package_root/PROVENANCE-x86_64.json" \
+    "$package_root/SBOM-x86_64.json" "$symlink_package/"
+ln -s "$package_root/SBOM-arm64.json" "$symlink_package/SBOM-arm64.json"
+cp "$package_root/release/dependencies.lock.json" \
+    "$symlink_package/release/dependencies.lock.json"
+cp -R "$package_root/release/licenses" "$symlink_package/release/licenses"
+expect_failure_message symlink-packaged-slice-sbom 'cannot be a symlink' \
+    bash "$checker" verify-macos-build \
+        "$symlink_package/tgcli" \
+        "$symlink_package/PROVENANCE.json" \
+        "$symlink_package/SBOM.json" \
+        macos-universal \
+        "$source_sha" \
+        "$source_tree" \
+        "$symlink_package/release/dependencies.lock.json" \
+        "$symlink_package/PROVENANCE-arm64.json" \
+        "$symlink_package/SBOM-arm64.json" \
+        "$symlink_package/PROVENANCE-x86_64.json" \
+        "$symlink_package/SBOM-x86_64.json"
+
+tampered_package="$fixture_root/package/tampered-slice"
+cp -R "$package_root" "$tampered_package"
+printf '\n' >> "$tampered_package/SBOM-arm64.json"
+expect_failure_message tampered-packaged-slice-sbom \
+    'universal provenance does not bind both architecture slices' \
+    bash "$checker" verify-macos-build \
+        "$tampered_package/tgcli" \
+        "$tampered_package/PROVENANCE.json" \
+        "$tampered_package/SBOM.json" \
+        macos-universal \
+        "$source_sha" \
+        "$source_tree" \
+        "$tampered_package/release/dependencies.lock.json" \
+        "$tampered_package/PROVENANCE-arm64.json" \
+        "$tampered_package/SBOM-arm64.json" \
+        "$tampered_package/PROVENANCE-x86_64.json" \
+        "$tampered_package/SBOM-x86_64.json"
+
+swapped_package="$fixture_root/package/swapped-slices"
+mkdir -p "$swapped_package/release"
+cp "$package_root/tgcli" "$package_root/PROVENANCE.json" "$package_root/SBOM.json" \
+    "$package_root/PROVENANCE-arm64.json" "$package_root/PROVENANCE-x86_64.json" \
+    "$swapped_package/"
+cp "$package_root/SBOM-x86_64.json" "$swapped_package/SBOM-arm64.json"
+cp "$package_root/SBOM-arm64.json" "$swapped_package/SBOM-x86_64.json"
+cp "$package_root/release/dependencies.lock.json" \
+    "$swapped_package/release/dependencies.lock.json"
+cp -R "$package_root/release/licenses" "$swapped_package/release/licenses"
+expect_failure_message swapped-packaged-slice-sboms \
+    'packaged slice SBOM and provenance identities differ' \
+    bash "$checker" verify-macos-build \
+        "$swapped_package/tgcli" \
+        "$swapped_package/PROVENANCE.json" \
+        "$swapped_package/SBOM.json" \
+        macos-universal \
+        "$source_sha" \
+        "$source_tree" \
+        "$swapped_package/release/dependencies.lock.json" \
+        "$swapped_package/PROVENANCE-arm64.json" \
+        "$swapped_package/SBOM-arm64.json" \
+        "$swapped_package/PROVENANCE-x86_64.json" \
+        "$swapped_package/SBOM-x86_64.json"
+
 ln -s macos-arm64 "$fixture_root/build/macos-arm64-link"
 expect_failure_message symlink-macos-inspection 'not an executable regular file' \
     bash "$checker" inspect-macos "$fixture_root/build/macos-arm64-link"
@@ -801,6 +949,8 @@ required = [
     "verify_re2_build.py",
     "write-sbom",
     "verify-sbom",
+    "SBOM-arm64.json",
+    "SBOM-x86_64.json",
     "SBOM.json",
     "sbom_sha256",
     "verify-remote-tag",
@@ -847,11 +997,29 @@ if "install -D" in universal:
 for evidence in (
     "arm64_binary_sha256",
     "arm64_provenance_sha256",
+    "arm64_sbom_sha256",
     "x86_64_binary_sha256",
     "x86_64_provenance_sha256",
+    "x86_64_sbom_sha256",
 ):
     if evidence not in universal:
         raise SystemExit(f"universal provenance is missing {evidence}")
+package_step = universal.split("      - name: Package the universal binary\n", 1)[1]
+package_verification = package_step.split(
+    "bash scripts/check-release-artifact.sh verify-macos-build \\\n", 1
+)[1].split('          find "package/$package"', 1)[0]
+if "components/" in package_verification:
+    raise SystemExit("packaged universal verification cannot use external slice files")
+for packaged_evidence in (
+    '"package/$package/PROVENANCE-arm64.json"',
+    '"package/$package/SBOM-arm64.json"',
+    '"package/$package/PROVENANCE-x86_64.json"',
+    '"package/$package/SBOM-x86_64.json"',
+):
+    if packaged_evidence not in package_verification:
+        raise SystemExit(
+            f"packaged universal verification is missing {packaged_evidence}"
+        )
 
 sign = workflow.split("\n  sign:\n", 1)[1].split("\n  release:\n", 1)[0]
 release = workflow.split("\n  release:\n", 1)[1]

@@ -1,19 +1,42 @@
 include_guard(GLOBAL)
 
-function(tgcli_make_re2_available)
-    cmake_policy(PUSH)
-    cmake_policy(SET CMP0077 NEW)
+function(_tgcli_capture_cache_entry option prefix)
+    if(DEFINED CACHE{${option}})
+        set(${prefix}_EXISTS TRUE PARENT_SCOPE)
+        foreach(property TYPE HELPSTRING VALUE)
+            get_property(value CACHE "${option}" PROPERTY ${property})
+            set(${prefix}_${property} "${value}" PARENT_SCOPE)
+        endforeach()
+    else()
+        set(${prefix}_EXISTS FALSE PARENT_SCOPE)
+    endif()
+endfunction()
 
-    # These normal variables shadow caller cache entries only while RE2 is
-    # configured.  CMP0077 prevents upstream option() calls from rewriting the
-    # cache, so both normal and cache state are unchanged when the function
-    # returns.
-    set(BUILD_SHARED_LIBS OFF)
-    set(RE2_BUILD_TESTING OFF)
-    set(USEPCRE OFF)
+function(_tgcli_restore_cache_entry option prefix)
+    if(${prefix}_EXISTS)
+        set(${option} "${${prefix}_VALUE}" CACHE STRING
+            "${${prefix}_HELPSTRING}" FORCE)
+        set_property(CACHE ${option} PROPERTY TYPE "${${prefix}_TYPE}")
+        set_property(CACHE ${option} PROPERTY HELPSTRING "${${prefix}_HELPSTRING}")
+        set_property(CACHE ${option} PROPERTY VALUE "${${prefix}_VALUE}")
+    else()
+        unset(${option} CACHE)
+    endif()
+endfunction()
+
+function(tgcli_make_re2_available)
+    foreach(option BUILD_SHARED_LIBS RE2_BUILD_TESTING USEPCRE)
+        set(prefix tgcli_re2_cache_${option})
+        _tgcli_capture_cache_entry(${option} ${prefix})
+        set(${option} OFF CACHE BOOL "Private pinned RE2 option" FORCE)
+        unset(${option})
+    endforeach()
+
     FetchContent_MakeAvailable(re2)
 
-    cmake_policy(POP)
+    foreach(option BUILD_SHARED_LIBS RE2_BUILD_TESTING USEPCRE)
+        _tgcli_restore_cache_entry(${option} tgcli_re2_cache_${option})
+    endforeach()
     set(re2_SOURCE_DIR "${re2_SOURCE_DIR}" PARENT_SCOPE)
     set(re2_BINARY_DIR "${re2_BINARY_DIR}" PARENT_SCOPE)
 endfunction()

@@ -1041,6 +1041,10 @@ jobs:
             "package/$package/PROVENANCE-arm64.json"
           install -m 0644 components/x86_64/PROVENANCE.json \
             "package/$package/PROVENANCE-x86_64.json"
+          install -m 0644 components/arm64/SBOM.json \
+            "package/$package/SBOM-arm64.json"
+          install -m 0644 components/x86_64/SBOM.json \
+            "package/$package/SBOM-x86_64.json"
           install -d "package/$package/release"
           install -m 0644 "$DEPENDENCY_LOCK" "package/$package/$DEPENDENCY_LOCK"
           install -m 0644 "$DEPENDENCY_LOCK_SCHEMA" \
@@ -1072,6 +1076,8 @@ jobs:
             PROVENANCE-arm64.json
             PROVENANCE-x86_64.json
             PROVENANCE.json
+            SBOM-arm64.json
+            SBOM-x86_64.json
             SBOM.json
             README.md
             THIRD_PARTY_NOTICES.md
@@ -1101,12 +1107,10 @@ jobs:
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
             "package/$package/$DEPENDENCY_LOCK" \
-            components/arm64/tgcli \
-            components/arm64/PROVENANCE.json \
-            components/arm64/SBOM.json \
-            components/x86_64/tgcli \
-            components/x86_64/PROVENANCE.json \
-            components/x86_64/SBOM.json
+            "package/$package/PROVENANCE-arm64.json" \
+            "package/$package/SBOM-arm64.json" \
+            "package/$package/PROVENANCE-x86_64.json" \
+            "package/$package/SBOM-x86_64.json"
           find "package/$package" -exec gtouch -d "@$SOURCE_EPOCH" {} +
           gtar \
             --sort=name \

@@ -247,12 +247,14 @@ expect_failure(
     --repo-root "${REPO_ROOT}"
     --cmake-file "${ignored_icu_cmake}")
 
-string(REPLACE "set(USEPCRE OFF)" "set(USEPCRE ON CACHE BOOL \"leak\" FORCE)"
+string(REPLACE
+    "set(\${option} OFF CACHE BOOL \"Private pinned RE2 option\" FORCE)"
+    "set(\${option} ON CACHE BOOL \"leak\" FORCE)"
     enabled_pcre_text "${re2_cmake_text}")
 set(enabled_pcre_cmake "${TEST_OUTPUT_DIR}/enabled-pcre-helper.cmake")
 file(WRITE "${enabled_pcre_cmake}" "${enabled_pcre_text}")
 expect_failure(
-    "enabled RE2 PCRE support" "must scope USEPCRE=OFF to RE2 without cache leakage"
+    "enabled RE2 PCRE support" "must use a private cache transaction"
     "${PYTHON_EXECUTABLE}" "${verifier}"
     --repo-root "${REPO_ROOT}"
     --re2-cmake-file "${enabled_pcre_cmake}")

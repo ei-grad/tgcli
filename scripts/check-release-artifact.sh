@@ -443,7 +443,7 @@ def load_json(file: pathlib.Path, owner: str) -> dict:
     return document
 
 
-require(len(sys.argv) in {8, 14}, "invalid macOS build verification arguments")
+require(len(sys.argv) in {8, 12, 14}, "invalid macOS build verification arguments")
 artifact = regular_file(sys.argv[1], "macOS artifact")
 provenance_file = regular_file(sys.argv[2], "macOS provenance")
 sbom_file = regular_file(sys.argv[3], "macOS SBOM")
@@ -457,7 +457,7 @@ require(len(source_sha) == 40 and all(c in "0123456789abcdef" for c in source_sh
         "source commit is not an exact Git object id")
 require(len(source_tree) == 40 and all(c in "0123456789abcdef" for c in source_tree),
         "source tree is not an exact Git object id")
-require((platform == "macos-universal") == (len(sys.argv) == 14),
+require((platform == "macos-universal") == (len(sys.argv) in {12, 14}),
         "universal slice evidence arguments are incomplete")
 
 lock = load_json(lock_file, "dependency lock")
@@ -521,24 +521,97 @@ require(
 )
 
 if platform == "macos-universal":
-    arm64_binary = regular_file(sys.argv[8], "arm64 slice")
-    arm64_provenance = regular_file(sys.argv[9], "arm64 slice provenance")
-    arm64_sbom = regular_file(sys.argv[10], "arm64 slice SBOM")
-    x86_64_binary = regular_file(sys.argv[11], "x86_64 slice")
-    x86_64_provenance = regular_file(sys.argv[12], "x86_64 slice provenance")
-    x86_64_sbom = regular_file(sys.argv[13], "x86_64 slice SBOM")
-    expected_slices = {
-        "arm64": {
-            "binary_sha256": sha256_file(arm64_binary),
-            "provenance_sha256": sha256_file(arm64_provenance),
-            "sbom_sha256": sha256_file(arm64_sbom),
-        },
-        "x86_64": {
-            "binary_sha256": sha256_file(x86_64_binary),
-            "provenance_sha256": sha256_file(x86_64_provenance),
-            "sbom_sha256": sha256_file(x86_64_sbom),
-        },
-    }
+    if len(sys.argv) == 14:
+        arm64_binary = regular_file(sys.argv[8], "arm64 slice")
+        arm64_provenance = regular_file(sys.argv[9], "arm64 slice provenance")
+        arm64_sbom = regular_file(sys.argv[10], "arm64 slice SBOM")
+        x86_64_binary = regular_file(sys.argv[11], "x86_64 slice")
+        x86_64_provenance = regular_file(sys.argv[12], "x86_64 slice provenance")
+        x86_64_sbom = regular_file(sys.argv[13], "x86_64 slice SBOM")
+        expected_slices = {
+            "arm64": {
+                "binary_sha256": sha256_file(arm64_binary),
+                "provenance_sha256": sha256_file(arm64_provenance),
+                "sbom_sha256": sha256_file(arm64_sbom),
+            },
+            "x86_64": {
+                "binary_sha256": sha256_file(x86_64_binary),
+                "provenance_sha256": sha256_file(x86_64_provenance),
+                "sbom_sha256": sha256_file(x86_64_sbom),
+            },
+        }
+    else:
+        package_root = artifact.parent
+        require(
+            artifact.name == "tgcli"
+            and provenance_file == package_root / "PROVENANCE.json"
+            and sbom_file == package_root / "SBOM.json"
+            and lock_file == package_root / "release/dependencies.lock.json",
+            "packaged universal verification requires canonical package-root files",
+        )
+
+        packaged_slices = {}
+        packaged_arguments = {
+            "arm64": (sys.argv[8], sys.argv[9]),
+            "x86_64": (sys.argv[10], sys.argv[11]),
+        }
+        for arch, (provenance_argument, sbom_argument) in packaged_arguments.items():
+            slice_provenance = regular_file(
+                provenance_argument, f"{arch} packaged provenance"
+            )
+            slice_sbom_file = regular_file(sbom_argument, f"{arch} packaged SBOM")
+            require(
+                slice_provenance == package_root / f"PROVENANCE-{arch}.json"
+                and slice_sbom_file == package_root / f"SBOM-{arch}.json",
+                "packaged slice evidence must use canonical package-root files",
+            )
+            slice_provenance_document = load_json(
+                slice_provenance, f"{arch} packaged provenance"
+            )
+            slice_sbom = load_json(slice_sbom_file, f"{arch} packaged SBOM")
+            require(
+                set(slice_provenance_document)
+                == {
+                    "artifact",
+                    "dependency_lock",
+                    "locked_openssl",
+                    "platform",
+                    "re2_build",
+                    "recipes",
+                    "resolved_dependencies",
+                    "runner",
+                    "schema_version",
+                    "source",
+                    "tools",
+                }
+                and slice_provenance_document["schema_version"] == 2
+                and slice_provenance_document.get("platform") == f"macos-{arch}"
+                and slice_provenance_document.get("artifact") == slice_sbom.get("artifact")
+                and slice_sbom.get("platform") == f"macos-{arch}"
+                and slice_sbom.get("provenance")
+                == {
+                    "sha256": sha256_file(slice_provenance),
+                    "size": slice_provenance.stat().st_size,
+                },
+                "packaged slice SBOM and provenance identities differ",
+            )
+            slice_source = slice_provenance_document.get("source")
+            slice_lock = slice_provenance_document.get("dependency_lock")
+            require(
+                isinstance(slice_source, dict)
+                and slice_source.get("sha") == source_sha
+                and slice_source.get("tree") == source_tree
+                and isinstance(slice_lock, dict)
+                and slice_lock.get("sha256") == sha256_file(lock_file)
+                and slice_lock.get("value") == lock,
+                "packaged slice provenance differs from the universal source or lock",
+            )
+            packaged_slices[arch] = {
+                "binary_sha256": slice_sbom["artifact"]["sha256"],
+                "provenance_sha256": sha256_file(slice_provenance),
+                "sbom_sha256": sha256_file(slice_sbom_file),
+            }
+        expected_slices = packaged_slices
     require(provenance.get("slices") == expected_slices,
             "universal provenance does not bind both architecture slices")
 else:
@@ -562,7 +635,7 @@ else:
 PY
     local sbom_tool
     sbom_tool="$(cd "$(dirname "$0")" && pwd)/release/build_provenance.py"
-    if [[ "$4" == macos-universal ]]; then
+    if [[ "$4" == macos-universal && "$#" -eq 13 ]]; then
         python3 "$sbom_tool" verify-sbom \
             --artifact "$1" \
             --lock "$7" \
@@ -570,6 +643,15 @@ PY
             --platform "$4" \
             --slice-sbom "macos-arm64=${10}" \
             --slice-sbom "macos-x86_64=${13}" \
+            --sbom "$3"
+    elif [[ "$4" == macos-universal ]]; then
+        python3 "$sbom_tool" verify-sbom \
+            --artifact "$1" \
+            --lock "$7" \
+            --provenance "$2" \
+            --platform "$4" \
+            --slice-sbom "macos-arm64=$9" \
+            --slice-sbom "macos-x86_64=${11}" \
             --sbom "$3"
     else
         python3 "$sbom_tool" verify-sbom \
@@ -845,7 +927,7 @@ PY
 usage() {
     printf 'usage: %s inspect-linux|inspect-macos|inspect-macos-universal <artifact>\n' "$0" >&2
     printf '       %s verify-linux-build <artifact> <provenance> <sbom> <source-sha> <source-tree> <image> [repo-root]\n' "$0" >&2
-    printf '       %s verify-macos-build <artifact> <provenance> <sbom> <platform> <source-sha> <source-tree> <lock> [<arm64> <arm64-provenance> <arm64-sbom> <x86_64> <x86_64-provenance> <x86_64-sbom>]\n' "$0" >&2
+    printf '       %s verify-macos-build <artifact> <provenance> <sbom> <platform> <source-sha> <source-tree> <lock> [<arm64> <arm64-provenance> <arm64-sbom> <x86_64> <x86_64-provenance> <x86_64-sbom> | <arm64-provenance> <arm64-sbom> <x86_64-provenance> <x86_64-sbom>]\n' "$0" >&2
     printf '       %s verify-release-bundle|verify-signed-layout <version> <directory>\n' "$0" >&2
     printf '       %s classify-release-state <version> <directory> <tag> <source-sha> <release-json>\n' "$0" >&2
     printf '       %s verify-remote-tag <source-sha> <owner/repository> <tag>\n' "$0" >&2
@@ -872,7 +954,7 @@ case "${1:-}" in
         verify_linux_build "$2" "$3" "$4" "$5" "$6" "$7" "${8:-}"
         ;;
     verify-macos-build)
-        [[ "$#" -eq 8 || "$#" -eq 14 ]] || usage
+        [[ "$#" -eq 8 || "$#" -eq 12 || "$#" -eq 14 ]] || usage
         verify_macos_build "${@:2}"
         ;;
     verify-release-bundle)

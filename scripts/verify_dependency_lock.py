@@ -809,29 +809,37 @@ def validate_repo_consistency(
     require(helper_match is not None, "RE2 scoped dependency helper is missing")
     helper_body = helper_match.group("body")
     require(
-        re.search(r"cmake_policy\(SET[ \t]+CMP0077[ \t]+NEW\)", helper_body) is not None
+        "CMP0077" not in re2_cmake
+        and re.search(
+            r"set\(\$\{option\}[ \t]+OFF[ \t]+CACHE[ \t]+BOOL[ \t]+"
+            r'"[^"]+"[ \t]+FORCE\)',
+            helper_body,
+        )
+        is not None
+        and "unset(${option})" in helper_body
         and re.search(r"FetchContent_MakeAvailable\([ \t]*re2[ \t]*\)", helper_body)
         is not None,
-        "RE2 helper must preserve caller options with CMP0077",
+        "RE2 helper must use a private cache transaction",
     )
     for option in ("BUILD_SHARED_LIBS", "RE2_BUILD_TESTING", "USEPCRE"):
         root_assignments = re.findall(
             rf"(?m)^[ \t]*set\({option}\b[^\n]*\)[ \t]*(?:#[^\n]*)?$", cmake
         )
-        assignments = re.findall(
-            rf"(?m)^[ \t]*set\({option}\b[^\n]*\)[ \t]*(?:#[^\n]*)?$",
-            helper_body,
-        )
         require(
             not root_assignments
-            and len(assignments) == 1
-            and re.fullmatch(
-                rf"[ \t]*set\({option}[ \t]+OFF\)[ \t]*(?:#[^\n]*)?",
-                assignments[0],
-            )
-            is not None,
-            f"CMake must scope {option}=OFF to RE2 without cache leakage",
+            and len(re.findall(rf"\b{option}\b", helper_body)) >= 1,
+            f"CMake cache transaction omits {option}",
         )
+    require(
+        "if(DEFINED CACHE{${option}})" in re2_cmake
+        and "foreach(property TYPE HELPSTRING VALUE)" in re2_cmake
+        and "set_property(CACHE ${option} PROPERTY TYPE" in re2_cmake
+        and "set_property(CACHE ${option} PROPERTY HELPSTRING" in re2_cmake
+        and "set_property(CACHE ${option} PROPERTY VALUE" in re2_cmake
+        and "unset(${option} CACHE)" in re2_cmake
+        and "_tgcli_restore_cache_entry(${option}" in helper_body,
+        "RE2 helper must restore cache existence, type, help, and value",
+    )
     daemon_link = re.search(
         r"target_link_libraries\(tgcli_daemon\b(?P<body>.*?)\)",
         cmake,
