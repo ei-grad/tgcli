@@ -41,6 +41,13 @@ struct Occurrence {
     bool operator==(const Occurrence&) const = default;
 };
 
+enum class ReadyChangeKind { None, Advanced, Lost };
+
+struct ReadyChange {
+    ReadyChangeKind kind = ReadyChangeKind::None;
+    std::shared_ptr<const AuthStateSnapshot> snapshot;
+};
+
 json user_json(const core::TdUserSummary& user) {
     return {{"id", user.id},
             {"first_name", user.first_name},
@@ -100,6 +107,26 @@ class AuthTracker {
         return changed_from_previous(latest_) ? latest_ : nullptr;
     }
 
+    ReadyChange ready_change_after(const AuthStateSnapshot& previous) {
+        observe(client_.auth_state());
+        const std::lock_guard lock(mutex_);
+        const auto after_previous = [&](const auto& candidate) {
+            return candidate && std::tie(candidate->client_generation, candidate->auth_sequence) >
+                                    std::tie(previous.client_generation, previous.auth_sequence);
+        };
+        const auto authorization_lost = [&](const auto& candidate) {
+            return after_previous(candidate) && candidate->data.state != AuthState::Ready;
+        };
+        const auto lost = std::ranges::find_if(pending_, authorization_lost);
+        if (lost != pending_.end()) {
+            return {ReadyChangeKind::Lost, *lost};
+        }
+        if (after_previous(latest_) && latest_->data.state == AuthState::Ready) {
+            return {ReadyChangeKind::Advanced, latest_};
+        }
+        return {};
+    }
+
     std::shared_ptr<const AuthStateSnapshot>
     wait_after(const AuthStateSnapshot& previous, RequestSession::Clock::time_point deadline) {
         std::unique_lock lock(mutex_);
@@ -140,12 +167,13 @@ class AuthTracker {
     std::uint64_t subscription_ = 0;
 };
 
-enum class WaitKind { Response, Updated, TimedOut, Cancelled, Failed };
+enum class WaitKind { Response, Updated, ReadyAdvanced, TimedOut, Cancelled, Failed };
 
 struct WaitResult {
     WaitKind kind = WaitKind::Failed;
     core::TdValue value;
     std::optional<core::TdAuthorizationFailure> authorization_failure;
+    std::shared_ptr<const AuthStateSnapshot> snapshot;
 };
 
 WaitResult consume_query_response(std::future<core::TdValue>& response,
@@ -156,19 +184,19 @@ WaitResult consume_query_response(std::future<core::TdValue>& response,
         if (first_change && first_change->receive_event_sequence != 0 &&
             (value.receive_event_sequence() == 0 ||
              first_change->receive_event_sequence < value.receive_event_sequence())) {
-            return {WaitKind::Updated, {}, std::nullopt};
+            return {WaitKind::Updated, {}, std::nullopt, nullptr};
         }
-        return {WaitKind::Response, std::move(value), std::nullopt};
+        return {WaitKind::Response, std::move(value), std::nullopt, nullptr};
     } catch (const core::TdAuthorizationError& error) {
         if (tracker.first_change_after(sent)) {
-            return {WaitKind::Updated, {}, std::nullopt};
+            return {WaitKind::Updated, {}, std::nullopt, nullptr};
         }
-        return {WaitKind::Failed, {}, error.failure()};
+        return {WaitKind::Failed, {}, error.failure(), nullptr};
     } catch (const std::exception&) {
         if (tracker.first_change_after(sent)) {
-            return {WaitKind::Updated, {}, std::nullopt};
+            return {WaitKind::Updated, {}, std::nullopt, nullptr};
         }
-        return {WaitKind::Failed, {}, std::nullopt};
+        return {WaitKind::Failed, {}, std::nullopt, nullptr};
     }
 }
 
@@ -179,16 +207,92 @@ WaitResult wait_query(std::future<core::TdValue>& response, const AuthStateSnaps
             return consume_query_response(response, sent, tracker);
         }
         if (tracker.first_change_after(sent)) {
-            return {WaitKind::Updated, {}, std::nullopt};
+            return {WaitKind::Updated, {}, std::nullopt, nullptr};
         }
         if (RequestSession::Clock::now() >= session.deadline()) {
-            return {WaitKind::TimedOut, {}, std::nullopt};
+            return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
         }
         if (session.cancellation_requested() &&
             session.in_flight_state() != InFlightState::Orphaned) {
-            return {WaitKind::Cancelled, {}, std::nullopt};
+            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
         }
         std::this_thread::sleep_for(1ms);
+    }
+}
+
+WaitResult consume_ready_query_response(std::future<core::TdValue>& response,
+                                        const AuthStateSnapshot& sent, AuthTracker& tracker) {
+    try {
+        auto value = response.get();
+        const auto change = tracker.ready_change_after(sent);
+        if (change.kind == ReadyChangeKind::Lost && change.snapshot &&
+            change.snapshot->receive_event_sequence != 0 &&
+            (value.receive_event_sequence() == 0 ||
+             change.snapshot->receive_event_sequence < value.receive_event_sequence())) {
+            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
+        }
+        return {WaitKind::Response, std::move(value), std::nullopt, nullptr};
+    } catch (const core::TdAuthorizationError& error) {
+        const auto change = tracker.ready_change_after(sent);
+        if (change.kind == ReadyChangeKind::Lost) {
+            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
+        }
+        if (change.kind == ReadyChangeKind::Advanced) {
+            return {WaitKind::ReadyAdvanced, {}, std::nullopt, change.snapshot};
+        }
+        return {WaitKind::Failed, {}, error.failure(), nullptr};
+    } catch (const std::exception&) {
+        const auto change = tracker.ready_change_after(sent);
+        if (change.kind == ReadyChangeKind::Lost) {
+            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
+        }
+        if (change.kind == ReadyChangeKind::Advanced) {
+            return {WaitKind::ReadyAdvanced, {}, std::nullopt, change.snapshot};
+        }
+        return {WaitKind::Failed, {}, std::nullopt, nullptr};
+    }
+}
+
+WaitResult wait_ready_query(std::future<core::TdValue>& response, const AuthStateSnapshot& sent,
+                            AuthTracker& tracker, RequestSession& session) {
+    for (;;) {
+        if (response.wait_for(0ms) == std::future_status::ready) {
+            return consume_ready_query_response(response, sent, tracker);
+        }
+        const auto change = tracker.ready_change_after(sent);
+        if (change.kind == ReadyChangeKind::Lost) {
+            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
+        }
+        if (RequestSession::Clock::now() >= session.deadline()) {
+            return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
+        }
+        if (session.cancellation_requested() &&
+            session.in_flight_state() != InFlightState::Orphaned) {
+            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+}
+
+WaitResult wait_get_me(core::TdClient& client, AuthTracker& tracker, RequestSession& session,
+                       std::shared_ptr<const AuthStateSnapshot>& snapshot) {
+    for (;;) {
+        if (!session.reserve_direct_in_flight()) {
+            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
+        }
+        auto future = client.get_me(snapshot);
+        auto waited = wait_ready_query(future, *snapshot, tracker, session);
+        session.settle_in_flight();
+        if (waited.kind != WaitKind::ReadyAdvanced) {
+            return waited;
+        }
+        if (session.cancellation_requested()) {
+            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
+        }
+        if (!waited.snapshot || waited.snapshot->data.state != AuthState::Ready) {
+            return {WaitKind::Failed, {}, std::nullopt, nullptr};
+        }
+        snapshot = std::move(waited.snapshot);
     }
 }
 
@@ -1256,21 +1360,17 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
             continue;
         }
         case AuthState::Ready: {
-            if (!session.reserve_direct_in_flight()) {
-                return;
-            }
-            auto future = client_.get_me(snapshot);
-            auto waited = wait_query(future, *snapshot, tracker, session);
-            session.settle_in_flight();
+            auto ready_snapshot = snapshot;
+            auto waited = wait_get_me(client_, tracker, session, ready_snapshot);
             if (waited.kind == WaitKind::Updated) {
                 if (session.cancellation_requested()) {
                     return;
                 }
-                const auto state = tracker.current();
                 session.error(
                     "NOT_AUTHED", "authorization was lost before login identity completed",
                     {{"account", account_},
-                     {"state", state ? core::auth_state_name(state->data.state) : "unknown"},
+                     {"state", waited.snapshot ? core::auth_state_name(waited.snapshot->data.state)
+                                               : "unknown"},
                      {"reason", "authorization_lost"}},
                     kNotAuthed);
                 return;
@@ -1281,11 +1381,11 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
                 }
                 return;
             }
-            if (session.cancellation_requested()) {
+            if (session.cancellation_requested() || waited.kind == WaitKind::Cancelled) {
                 return;
             }
             if (waited.authorization_failure) {
-                function_denied(session, account_, *snapshot, TdFunctionKind::GetMe);
+                function_denied(session, account_, *ready_snapshot, TdFunctionKind::GetMe);
                 return;
             }
             if (waited.kind != WaitKind::Response) {
@@ -1321,7 +1421,7 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
 void LoginCoordinator::me(const proto::Request& request, RequestSession& session) {
     static_cast<void>(request);
     AuthTracker tracker(client_, session);
-    const auto snapshot = tracker.current();
+    auto snapshot = tracker.current();
     if (!snapshot || snapshot->data.state != AuthState::Ready) {
         session.error(
             "NOT_AUTHED", "account is not authorized",
@@ -1331,22 +1431,18 @@ void LoginCoordinator::me(const proto::Request& request, RequestSession& session
             kNotAuthed);
         return;
     }
-    if (!session.reserve_direct_in_flight()) {
-        return;
-    }
-    auto future = client_.get_me(snapshot);
-    auto waited = wait_query(future, *snapshot, tracker, session);
-    session.settle_in_flight();
+    auto waited = wait_get_me(client_, tracker, session, snapshot);
     if (waited.kind == WaitKind::Updated) {
         if (session.cancellation_requested()) {
             return;
         }
-        const auto state = tracker.current();
-        session.error("NOT_AUTHED", "authorization was lost",
-                      {{"account", account_},
-                       {"state", state ? core::auth_state_name(state->data.state) : "unknown"},
-                       {"reason", "authorization_lost"}},
-                      kNotAuthed);
+        session.error(
+            "NOT_AUTHED", "authorization was lost",
+            {{"account", account_},
+             {"state",
+              waited.snapshot ? core::auth_state_name(waited.snapshot->data.state) : "unknown"},
+             {"reason", "authorization_lost"}},
+            kNotAuthed);
         return;
     }
     if (waited.kind == WaitKind::TimedOut) {
@@ -1355,7 +1451,7 @@ void LoginCoordinator::me(const proto::Request& request, RequestSession& session
         }
         return;
     }
-    if (session.cancellation_requested()) {
+    if (session.cancellation_requested() || waited.kind == WaitKind::Cancelled) {
         return;
     }
     if (waited.authorization_failure) {

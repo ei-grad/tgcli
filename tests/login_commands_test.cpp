@@ -1,4 +1,5 @@
 #include "common/config.hpp"
+#include "common/config_test_support.hpp"
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
 #include "daemon/dispatch.hpp"
@@ -20,6 +21,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -88,6 +90,25 @@ class AuthTree {
         output.close();
         REQUIRE(::chmod(config_path().c_str(), 0600) == 0);
     }
+    void install_transaction_marker() const {
+        const auto lock_path = config_root() + "/tgcli/config.lock";
+        std::ofstream lock(lock_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(lock.good());
+        lock.close();
+        REQUIRE(::chmod(lock_path.c_str(), 0600) == 0);
+
+        const auto marker_path = config_root() + "/tgcli/.config.toml.transaction";
+        std::ofstream marker(marker_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(marker.good());
+        marker << "pending-present\n"
+               << std::string(64, '0') << '\n'
+               << std::string(64, '1') << '\n';
+        marker.close();
+        REQUIRE(::chmod(marker_path.c_str(), 0600) == 0);
+    }
+    void clear_transaction_marker() const {
+        REQUIRE(std::filesystem::remove(config_root() + "/tgcli/.config.toml.transaction"));
+    }
     [[nodiscard]] paths::Environment environment() const {
         paths::Environment result;
         result.xdg_config_home = config_root();
@@ -109,8 +130,9 @@ class FakeAuth {
              core::AuthBootstrap::HookRunner hook_runner = secret_hook::run,
              bool close_automatically = true, std::string account = "main",
              std::optional<std::string> environment_api_id = {},
-             std::optional<std::string> environment_api_hash = {})
-        : store_(tree.config_path()) {
+             std::optional<std::string> environment_api_hash = {},
+             std::shared_ptr<const config::testing::StoreHooks> store_hooks = {})
+        : store_(tree.config_path(), std::move(store_hooks)) {
         auto runtime = std::make_unique<test::ScriptedTdRuntime>(close_automatically);
         runtime_ = runtime.get();
         client_ = std::make_unique<core::TdClient>(std::move(runtime));
@@ -1238,6 +1260,193 @@ TEST_CASE("login fails once when authorization is lost while getMe is pending",
                   {{"account", "main"},
                    {"state", "wait_phone_number"},
                    {"reason", "authorization_lost"}}}}}});
+}
+
+TEST_CASE("Ready getMe preserves receive order across repeated Ready updates",
+          "[auth][login][ordering][dispatch]") {
+    for (const std::string_view command : {"login", "me"}) {
+        for (const bool response_first : {true, false}) {
+            DYNAMIC_SECTION(std::string(command) + (response_first
+                                                        ? " response before Ready"
+                                                        : " repeated Ready before response")) {
+                const AuthTree tree;
+                FakeAuth auth(tree, core::AuthStateData{core::AuthState::Ready});
+                auto pending = std::async(std::launch::async, [&] {
+                    return dispatch(auth.dispatcher(), {std::string(command)},
+                                    command == "login" ? json{{"qr", false}, {"bot", false}}
+                                                       : json::object());
+                });
+                REQUIRE(auth.runtime().wait_for_sent(2));
+                const auto sent = auth.runtime().sent_functions();
+                REQUIRE(sent.size() == 2);
+                CHECK(sent.at(1).function.kind() == core::TdFunctionKind::GetMe);
+
+                auth.runtime().set_receive_paused(true);
+                if (response_first) {
+                    auth.runtime().push_response(auth.first(), sent.at(1).query_id,
+                                                 core::TdValue::from(ada()));
+                    auth.runtime().push_update(auth.first(), {},
+                                               core::AuthStateData{core::AuthState::Ready});
+                } else {
+                    auth.runtime().push_update(auth.first(), {},
+                                               core::AuthStateData{core::AuthState::Ready});
+                    auth.runtime().push_update(auth.first(), {},
+                                               core::AuthStateData{core::AuthState::Ready});
+                    auth.runtime().push_response(auth.first(), sent.at(1).query_id,
+                                                 core::TdValue::from(ada()));
+                }
+                auth.runtime().set_receive_paused(false);
+
+                const auto outcome = pending.get();
+                REQUIRE(outcome.result);
+                CHECK(outcome.error == std::nullopt);
+                CHECK(outcome.exit_code == kOk);
+                CHECK(outcome.terminal_count == 1);
+                const auto final_sent = auth.runtime().sent_functions();
+                CHECK(std::ranges::count_if(final_sent, [](const auto& item) {
+                          return item.function.kind() == core::TdFunctionKind::GetMe;
+                      }) == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Ready getMe reports the first later non-ready state exactly once",
+          "[auth][login][ordering][authorization][dispatch]") {
+    for (const std::string_view command : {"login", "me"}) {
+        DYNAMIC_SECTION(command) {
+            const AuthTree tree;
+            FakeAuth auth(tree, core::AuthStateData{core::AuthState::Ready});
+            auto pending = std::async(std::launch::async, [&] {
+                return dispatch(auth.dispatcher(), {std::string(command)},
+                                command == "login" ? json{{"qr", false}, {"bot", false}}
+                                                   : json::object());
+            });
+            REQUIRE(auth.runtime().wait_for_sent(2));
+            const auto sent = auth.runtime().sent_functions();
+
+            auth.runtime().set_receive_paused(true);
+            auth.runtime().push_update(auth.first(), {},
+                                       core::AuthStateData{core::AuthState::Ready});
+            auth.runtime().push_update(auth.first(), {},
+                                       core::AuthStateData{core::AuthState::Ready});
+            auth.runtime().push_update(auth.first(), {},
+                                       core::AuthStateData{core::AuthState::WaitPhoneNumber});
+            auth.runtime().push_update(auth.first(), {},
+                                       core::AuthStateData{core::AuthState::WaitPassword});
+            auth.runtime().push_update(auth.first(), {},
+                                       core::AuthStateData{core::AuthState::Ready});
+            auth.runtime().push_response(auth.first(), sent.at(1).query_id,
+                                         core::TdValue::from(ada()));
+            auth.runtime().set_receive_paused(false);
+            REQUIRE(auth.wait_state_sequence(6));
+
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+            CHECK((*outcome.error)["error"]["details"] == json{{"account", "main"},
+                                                               {"state", "wait_phone_number"},
+                                                               {"reason", "authorization_lost"}});
+            CHECK(outcome.exit_code == kNotAuthed);
+            CHECK(outcome.terminal_count == 1);
+            CHECK_THAT(*outcome.error, test::matches_json_schema("auth.error.schema.json"));
+        }
+    }
+}
+
+TEST_CASE("Ready getMe resolves stale admission failures against authoritative updates",
+          "[auth][login][ordering][authorization][dispatch]") {
+    for (const bool authorization_lost : {false, true}) {
+        DYNAMIC_SECTION(std::string(authorization_lost ? "first non-ready update wins"
+                                                       : "newer Ready snapshot is retried")) {
+            const AuthTree tree;
+            tree.install_transaction_marker();
+            auto hooks = std::make_shared<config::testing::StoreHooks>();
+            std::mutex barrier_mutex;
+            std::condition_variable barrier_cv;
+            bool read_blocked = false;
+            bool release_read = false;
+            hooks->at_read_stage = [&](config::testing::ReadStage) {
+                std::unique_lock lock(barrier_mutex);
+                read_blocked = true;
+                barrier_cv.notify_all();
+                static_cast<void>(barrier_cv.wait_for(lock, 2s, [&] { return release_read; }));
+            };
+            FakeAuth auth(tree, core::AuthStateData{core::AuthState::Ready}, secret_hook::run, true,
+                          "main", {}, {}, hooks);
+            auto pending = std::async(std::launch::async, [&] {
+                return dispatch(auth.dispatcher(), {"login"}, {{"qr", false}, {"bot", false}}, true,
+                                5.0);
+            });
+            {
+                std::unique_lock lock(barrier_mutex);
+                REQUIRE(barrier_cv.wait_for(lock, 2s, [&] { return read_blocked; }));
+            }
+
+            auth.runtime().push_update(auth.first(), {},
+                                       core::AuthStateData{core::AuthState::Ready});
+            if (authorization_lost) {
+                auth.runtime().push_update(auth.first(), {},
+                                           core::AuthStateData{core::AuthState::WaitPhoneNumber});
+                auth.runtime().push_update(auth.first(), {},
+                                           core::AuthStateData{core::AuthState::Ready});
+            }
+            REQUIRE(auth.wait_state_sequence(authorization_lost ? 4 : 2));
+            tree.clear_transaction_marker();
+            {
+                const std::lock_guard lock(barrier_mutex);
+                release_read = true;
+            }
+            barrier_cv.notify_all();
+
+            if (authorization_lost) {
+                const auto outcome = pending.get();
+                REQUIRE(outcome.error);
+                CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+                CHECK((*outcome.error)["error"]["details"] ==
+                      json{{"account", "main"},
+                           {"state", "wait_phone_number"},
+                           {"reason", "authorization_lost"}});
+                CHECK(outcome.exit_code == kNotAuthed);
+                CHECK(outcome.terminal_count == 1);
+                CHECK(auth.runtime().sent_functions().size() == 1);
+            } else {
+                REQUIRE(auth.runtime().wait_for_sent(2));
+                const auto sent = auth.runtime().sent_functions();
+                REQUIRE(sent.size() == 2);
+                CHECK(sent.at(1).function.kind() == core::TdFunctionKind::GetMe);
+                auth.runtime().push_response(auth.first(), 1, core::TdValue::from(ada()));
+                CHECK(pending.wait_for(20ms) == std::future_status::timeout);
+                auth.runtime().push_response(auth.first(), sent.at(1).query_id,
+                                             core::TdValue::from(ada()));
+                const auto outcome = pending.get();
+                REQUIRE(outcome.result);
+                CHECK(outcome.error == std::nullopt);
+                CHECK(outcome.exit_code == kOk);
+                CHECK(outcome.terminal_count == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Ready update flood remains bounded by the original getMe deadline",
+          "[auth][login][timeout][ordering][dispatch]") {
+    const AuthTree tree;
+    FakeAuth auth(tree, core::AuthStateData{core::AuthState::Ready});
+    auto pending = std::async(std::launch::async, [&] {
+        return dispatch(auth.dispatcher(), {"me"}, json::object(), true, 0.05);
+    });
+    REQUIRE(auth.runtime().wait_for_sent(2));
+    for (std::size_t index = 0; index < 64; ++index) {
+        auth.runtime().push_update(auth.first(), {}, core::AuthStateData{core::AuthState::Ready});
+    }
+
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+    CHECK((*outcome.error)["error"]["details"] == json{{"operation", "me"}, {"state", "ready"}});
+    CHECK(outcome.exit_code == kTimeout);
+    CHECK(outcome.terminal_count == 1);
 }
 
 TEST_CASE("bot login uses its hook once and exposes only a redacted descriptor",
