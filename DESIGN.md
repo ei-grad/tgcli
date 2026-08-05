@@ -115,7 +115,7 @@ Global flags:
 --timeout <sec>        per-command deadline (default 60; streams, file
                        transfers and fetch: unlimited unless set)
 --cursor <token>       resume pagination from a `next` token (§5)
---idempotency-key <k>  idempotent writes: record-then-send, replay on repeat (§6)
+--idempotency-key <k>  idempotent M3/M4 writes and exact replay (§4.5.7)
 --verbose / -v         diagnostics to stderr
 --no-daemon            debugging: run in-process without the daemon (§10)
 --no-color
@@ -137,9 +137,9 @@ tgcli read <chat> [-n N] [--before <msg-id>] [--since TS] [--until TS]
               [--topic <kind:id>] [--local]      (alias: history)
 tgcli read --cursor <token>
 tgcli history --cursor <token>
-tgcli send <chat> [TEXT | -] [--file PATH]... [--caption TEXT]
-              [--md | --html] [--reply-to ID] [--topic ID]
-              [--silent] [--schedule <ts|"online">] [--spoiler]
+tgcli send <chat> <TEXT|-> [--md | --html] [--reply-to ID]
+              [--topic <bare-int|forum:int>] [--silent]
+              [--schedule <RFC3339|online>]
 tgcli search <query> [--chat <c> | --global] [--from <user>]
               [--type text|photo|video|doc|link|voice] [-n N]
               always server-side — tdlib has no local search (§8)
@@ -851,6 +851,1032 @@ Progress is emitted on stderr as:
 is null for an empty prefix. Timeout preserves warmed tdlib state and uses the exact
 extended error details in §5.2; it never emits a successful completion claim.
 
+### 4.5 M3 write and minimal M4 Saved attachment contract
+
+This subsection is the normative additive contract for M3 and the minimal M4
+`saved attach` slice. It preserves the canonical M0–M2 contracts except for
+the protocol/dry-run delta already frozen in §§6 and 10. All JSON objects
+defined here are strict and use `additionalProperties:false`.
+
+#### 4.5.1 Базовые типы, tier и bot matrix
+
+Переиспользуются exact M2 `ChatIdentity`, `TopicRef`, `MessageSenderRef`,
+`MessageSummary`. `int53` — JSON integer в safe signed range; chat id nonzero,
+message/user/topic ids положительные там, где это требует M2.
+
+`MessageWriteResult` имеет ровно поля `MessageSummary` плюс `scheduled:boolean`.
+`date` null тогда и только тогда, когда возвращённое TDLib Message имеет
+non-null `scheduling_state`; `scheduled` вычисляется из фактического Message,
+не из request.
+
+Closed operations:
+
+```text
+send, msg_edit, msg_delete, msg_forward, msg_react, msg_pin, msg_unpin,
+chat_mark_read, chat_mute, chat_unmute, chat_pin, chat_unpin,
+chat_archive, chat_unarchive, chat_join, chat_leave, saved_attach
+```
+
+| Operation | Tier | Bot |
+|---|---|---|
+| `send` without schedule | Write | allowed |
+| `send` with any schedule | Write | `BOT_UNSUPPORTED` preflight |
+| `msg_edit`, `msg_delete`, `msg_forward`, `msg_pin`, `msg_unpin` | Write except delete Destructive | allowed |
+| `msg_react` | Write | `BOT_UNSUPPORTED` preflight |
+| `chat_leave` | Destructive | allowed |
+| all other `chat_*` | Write | `BOT_UNSUPPORTED` preflight |
+| `saved_attach` | Write | `BOT_UNSUPPORTED` namespace preflight |
+
+`msg_delete` и `chat_leave` расширяют `destructive_action`. Ready, then `getMe`,
+then bot classification precede bot decision. `msg_react` rejects a bot before
+`getMessageAvailableReactions`, `getMessageProperties`, `addMessageReaction`
+или `removeMessageReaction`. Bot scheduled send rejects before resolver,
+`getOption("unix_time")` и `sendMessage`.
+
+#### 4.5.2 Admission и immutable plan
+
+Real new invocation order:
+
+1. strict CLI/frame/config parse;
+2. frozen account match, Ready snapshot;
+3. correlated `getMe`, principal binding, bot classification;
+4. bot preflight;
+5. write authority;
+6. audit/store reconciliation and capacity-readable preflight;
+7. parse/hash caller-controlled inputs and compute request fingerprint;
+8. locked idempotency lookup;
+9. completed replay/pending/conflict handling; destructive completed replay
+   confirms stored plan here;
+10. exact-only M2 target resolution and read-only property validation;
+11. immutable strict plan;
+12. destructive confirmation for a new mutation;
+13. fresh config-grant CAS recheck when authority source was config;
+14. durable audit intent;
+15. keyed invocation performs locked idempotency insert-if-absent with quota
+    reservation; unkeyed invocation skips this step;
+16. keyed loser closes its audit group as mutation `none`; keyed winner or
+    unkeyed invocation continues;
+17. file second-pass spool and durable `spool_ready`, only for that keyed
+    winner or unkeyed post-intent invocation;
+18. schedule boundary recheck, if applicable;
+19. durable `dispatch_started`;
+20. mutating TDLib call;
+21. durable progress/mutation checkpoints;
+22. durable audit outcome;
+23. durable store complete/remove/retain transition;
+24. eligible spool cleanup;
+25. exactly one terminal frame.
+
+A deadline or failure before step 19 is `not_started`. Никакой step не
+re-resolve-ит immutable plan.
+
+Write selectors — exact id, `@username` или supported t.me link. Title
+substring никогда не становится target; resolver может вернуть только
+`AMBIGUOUS` candidates.
+
+#### 4.5.3 Strict results, plans и errors
+
+Success DTO:
+
+| Operation | Exact result |
+|---|---|
+| `send`, `msg_edit`, `saved_attach` | `MessageWriteResult` |
+| `msg_delete` | `{"chat_id":int53,"message_ids":int53[],"for_all":boolean,"deleted":true}` |
+| `msg_forward` | `{"from_chat_id":int53,"to_chat_id":int53,"items":ForwardItem[]}`; every item is the sent branch |
+| `msg_react` | `{"chat_id":int53,"message_id":int53,"reaction":string,"removed":boolean,"big":boolean}` |
+| `msg_pin/unpin` | `{"chat_id":int53,"message_id":int53,"pinned":boolean}` |
+| `chat_mark_read` | `{"chat_id":int53,"last_read_message_id":int53\|null,"marked_read":true}` |
+| `chat_mute/unmute` | `{"chat_id":int53,"muted":boolean,"duration_seconds":integer}` |
+| `chat_pin/unpin` | `{"chat_id":int53,"chat_list":"main"\|"archive","pinned":boolean}` |
+| `chat_archive/unarchive` | `{"chat_id":int53,"archived":boolean}` |
+| join success/request | `{"status":"joined","chat_id":int53}` or `{"status":"request_sent","chat_id":int53\|null}` |
+| `chat_leave` | `{"chat_id":int53,"left":true}` |
+
+Every plan has exact common fields `operation`, `account`, `tdlib_request`.
+Per-operation remainder:
+
+```text
+send:
+  chat:ChatIdentity, text:string,
+  parse_mode:"plain"|"markdown_v2"|"html",
+  reply_to:int53|null, requested_topic:ForumTopicRef|null,
+  effective_topic:ForumTopicRef|null, silent:boolean,
+  schedule:Schedule|null, observed_server_unix_time:int64|null
+msg_edit:
+  chat:ChatIdentity, message_id:int53, text:string
+msg_delete:
+  chat:ChatIdentity, message_ids:int53[1..100],
+  requested_for_all:boolean, effective_for_all:boolean
+msg_forward:
+  from:ChatIdentity, to:ChatIdentity, message_ids:int53[1..100],
+  drop_author:boolean
+msg_react:
+  chat:ChatIdentity, message_id:int53, reaction:string,
+  remove:boolean, big:boolean
+msg_pin/msg_unpin:
+  chat:ChatIdentity, message_id:int53, pinned:boolean
+chat_mark_read:
+  chat:ChatIdentity, last_message_id:int53|null,
+  tdlib_request:"viewMessages"|null
+chat_mute/chat_unmute:
+  chat:ChatIdentity, muted:boolean, duration_seconds:int32
+chat_pin/chat_unpin:
+  chat:ChatIdentity, chat_list:"main"|"archive", pinned:boolean
+chat_archive/chat_unarchive:
+  chat:ChatIdentity, archived:boolean
+chat_join:
+  source:"username"|"invite_link", chat:ChatIdentity|null,
+  invite_link_sha256:sha256|null
+chat_leave:
+  chat:ChatIdentity
+saved_attach:
+  chat:ChatIdentity, message_id:int53,
+  effective_topic:SavedTopicRef|null, caption:string, file:FileSnapshot
+```
+
+Every named field above is required; no other field is permitted. A
+`ForumTopicRef` is exactly `{"kind":"forum","id":positive_int32}`; a
+`SavedTopicRef` is exactly `{"kind":"saved","id":positive_int53}`.
+Nullable fields are explicit JSON null. `Schedule` is null,
+`{"kind":"online"}`, либо
+`{"kind":"at","send_date":positive_int32}`. Raw invite отсутствует.
+`observed_server_unix_time` is null exactly when `schedule` is null or
+online.
+
+`tdlib_request` exact mapping:
+
+```text
+send,saved_attach=sendMessage
+msg_edit=editMessageText
+msg_delete=deleteMessages
+msg_forward=forwardMessages
+msg_react=addMessageReaction|removeMessageReaction
+msg_pin=pinChatMessage; msg_unpin=unpinChatMessage
+chat_mark_read=viewMessages|null
+chat_mute,chat_unmute=setChatNotificationSettings
+chat_pin,chat_unpin=toggleChatIsPinned
+chat_archive,chat_unarchive=addChatToList
+chat_join=joinChat|joinChatByInviteLink
+chat_leave=leaveChat
+```
+`FileSnapshot` exact:
+
+```json
+{"path":"/absolute/input.csv","name":"input.csv","size":1234,
+ "sha256":"sha256:<64 lowercase hex>","device":1,"inode":2,
+ "mtime_ns":3,"ctime_ns":4}
+```
+
+`path/name` are strings; `size/device/inode` are uint64;
+`mtime_ns/ctime_ns` are signed int64. All eight fields are required.
+
+Common new strict errors:
+
+```text
+BOT_UNSUPPORTED/2:
+  {"operation":operation}
+PRECONDITION_FAILED/1:
+  {"operation":operation,"chat_id":int53|null,"message_id":int53|null,
+   "reason":precondition_reason}
+IDEMPOTENCY_CONFLICT/2:
+  {"operation":operation,"key_hash":sha256,
+   "expected_fingerprint":sha256,"actual_fingerprint":sha256}
+IDEMPOTENCY_PENDING/1:
+  {"operation":operation,"key_hash":sha256,"fingerprint":sha256,
+   "invocation_id":hex32,"temporary_message_ids":int53[]}
+IDEMPOTENCY_UNAVAILABLE/6:
+  {"account":string,"path":string,"reason":durability_reason}
+SEND_FAILED/1:
+  {"operation":"send"|"saved_attach","chat_id":int53,
+   "temporary_message_id":int53,"reason":"deleted_before_confirmation"}
+FORWARD_FAILED/1 or FORWARD_PARTIAL/1:
+  {"operation":"msg_forward","from_chat_id":int53,"to_chat_id":int53,
+   "items":ForwardItem[]}
+JOIN_APPROVAL_REQUIRED/1:
+  {"operation":"chat_join","bot_user_id":int53,"query_id":int53}
+JOIN_DECLINED/1:
+  {"operation":"chat_join"}
+INPUT_CHANGED/1:
+  {"operation":"saved_attach","path":string}
+SPOOL_UNAVAILABLE/1:
+  {"operation":"saved_attach","path":string,"reason":durability_reason}
+```
+
+`precondition_reason` exact:
+
+```text
+not_editable, not_deletable_for_self, not_deletable_for_all,
+not_forwardable, not_copyable, not_pinnable, not_replyable,
+wrong_content_type, wrong_chat_type, wrong_topic, chat_not_listed,
+saved_notifications_unsupported, online_schedule_unsupported,
+schedule_window_elapsed, schedule_too_far, reply_markup_preservation_unsupported,
+reaction_unavailable
+```
+
+`durability_reason` exact:
+
+```text
+path_invalid, wrong_owner, wrong_type, wrong_mode, wrong_link_count,
+too_large, capacity_exhausted, open_failed, lock_failed, read_failed,
+write_failed, sync_failed, rename_failed, directory_sync_failed,
+parse_error, schema_error, contradiction
+```
+
+M2 `NOT_FOUND`, `RATE_LIMITED` и `TDLIB_ERROR` shapes сохраняются, кроме
+forward-specific 429:
+
+```json
+{"operation":"msg_forward","tdlib_code":429,"retry_after":12,"items":[]}
+```
+
+`items` обязателен и содержит full all-failed vector, если vector существовал,
+иначе `[]`.
+
+#### 4.5.4 Grammar, topics и command defaults
+
+`send`:
+
+```text
+tgcli send <chat> <TEXT|-> [--md|--html] [--reply-to ID]
+           [--topic <bare-int|forum:int>] [--silent]
+           [--schedule <RFC3339|online>]
+```
+
+Stdin ≤1 MiB, valid UTF-8, без NUL. Parsed text 1–4096 Unicode scalars.
+Markdown — TDLib Markdown v2; HTML — TDLib HTML; plain имеет empty entities.
+External replies не поддерживаются. General M3 `--topic` принимает только
+bare positive int32 или `forum:<positive-int32>`. `thread:`, `direct:` и
+`saved:` — pre-dispatch `USAGE/unsupported_topic_kind`.
+
+Reply проверяется `getMessage` + `getMessageProperties.can_be_replied`.
+Без explicit topic reply может наследовать только `TopicRef(kind=forum)`.
+Explicit forum обязан совпасть. Reply с thread/direct/saved topic в general
+send отклоняется `PRECONDITION_FAILED/wrong_topic`. Это правило отражается:
+fingerprint содержит caller `reply_to` и requested forum/null; plan/audit
+дополнительно содержит effective inherited forum/null.
+
+M4 `saved_attach` — единственное исключение: original обязан находиться в
+current user's Saved chat; inherited topic допускается только
+`TopicRef(kind=saved)` либо null. Любой forum/thread/direct в этом adapter —
+`PRECONDITION_FAILED/wrong_topic`. Caller topic flag отсутствует. Fingerprint
+содержит original message id и marker `"topic":"inherit_saved"`; derived
+saved topic не является caller-controlled и фиксируется в plan/audit.
+
+`messageSendOptions` имеет все поля false/0/null кроме silent, schedule и
+random nonzero int32 `sending_id`; `only_preview=false`, `clear_draft=false`,
+reply markup/link preview null.
+
+`msg edit`: plain text rules send; formatting flags unsupported. Требуются
+text content и `can_be_edited`. Non-null bot reply markup отклоняется, чтобы
+его не потерять.
+
+`msg delete`: 1–100 unique ascending ids. Private/basic uses
+`revoke=--for-all`. Supergroup/channel/secret фактически revoke; без explicit
+`--for-all` fail до confirmation. Все properties проверяются.
+
+`msg forward`: 1–100 unique ids уже strictly increasing; input order не
+сортируется. `--drop-author` ставит `send_copy=true,remove_caption=false` и
+требует copy capability. Один `forwardMessages` call.
+
+`msg react`: exact nonempty valid UTF-8 ≤64 bytes, без normalization; только
+`reactionTypeEmoji`. Add uses `update_recent_reactions=true`; remove uses
+`removeMessageReaction`; `--remove --big` mutually exclusive.
+
+Message pin: `pinChatMessage(disable_notification=false,only_for_self=false)`
+либо `unpinChatMessage`; pin требует `can_be_pinned`.
+
+Mark read: current `chat.last_message.id`; `viewMessages([id],null,true)`.
+Пустой chat — audited no-op, без mutating call.
+
+Mute: no duration = `INT32_MAX`; grammar
+`^[1-9][0-9]*(s|m|h|d|w)$`, итог 1–31,622,400. Unmute duration запрещён.
+Полный observed settings object копируется; меняются только
+`use_default_mute_for=false,mute_for=<n|0>`. Saved Messages mutation запрещена.
+
+Chat list pin выбирает Archive при membership, иначе Main; ни одного —
+`chat_not_listed`. Archive/unarchive uses `addChatToList`.
+
+Join принимает exact `@username` или invite. Invite plan/audit/diagnostics
+содержат только domain-separated SHA-256. Guard URL никогда не открывается и
+не выводится. Success/RequestSent — success; Guard — approval error; Declined
+— declined error. Leave разрешён только group/supergroup/channel и destructive.
+
+#### 4.5.5 Exact schedule contract
+
+RFC3339 принимает timezone-required instant и finite fractional seconds.
+Conversion в Unix seconds — mathematical ceiling. Результат обязан быть
+1…2147483647. `server_now` берётся только из
+`getOption("unix_time")`/`optionValueInteger`.
+
+При planning:
+
+```text
+send_date > server_now + 10
+send_date - server_now <= 367 * 86400
+```
+
+Равенство `+10` отклоняется `schedule_window_elapsed`; равенство `+367d`
+разрешено. Непомещающийся int32 — `USAGE/invalid_argument`.
+
+После durable intent/pending, непосредственно перед `dispatch_started`, tgcli
+повторяет `getOption("unix_time")`. Если первая inequality уже false —
+durable no-mutation outcome, pending удаляется, `schedule_window_elapsed`.
+Если second false — `schedule_too_far`. Никакой `sendMessage` не вызывается.
+
+Между последним read и внутренним TDLib
+`send_date <= G()->unix_time()+10` остаётся неустранимая race. Tgcli не
+заявляет atomic schedule admission. Если TDLib coerces request to immediate,
+фактический returned/succeeded Message имеет null scheduling state и success
+возвращает `scheduled:false` с обычной date. Это confirmed mutation, store
+completed. Если scheduling state non-null, `scheduled:true,date:null`.
+Acceptance покрывает `+10`, `+11`, `+367d`, `+367d+1`, second-boundary crossing
+и authoritative immediate result.
+
+`online` user-only, private regular-user, not self, с exact online/offline
+visibility; иначе `online_schedule_unsupported`. Bot с `online` или date
+получает `BOT_UNSUPPORTED`.
+
+#### 4.5.6 Audit schema version 2
+
+M1 version-1 records и schemas не меняются. Один `audit.log` принимает strict
+top-level oneOf:
+
+```text
+existing exact schema_version=1 M1 intent/checkpoint/outcome
+new exact schema_version=2 M3 intent/checkpoint/outcome
+```
+
+Unknown version/phase/field — contradiction. Group key —
+`(schema_version,invocation_id)`; reuse одного invocation id в двух versions
+или commands — contradiction.
+
+v2 common scalar rules: `hex32`/`invocation_id` = 32 lowercase hex;
+`uint32` = 0…4294967295, positive uint32 excludes zero; `uint64` =
+0…18446744073709551615; `int64` is signed 64-bit; `unix_seconds` =
+integer 0…253402300799. Audit timestamp = UTC RFC3339 seconds
+`YYYY-MM-DDTHH:MM:SSZ`, year 1970…9999. Account/operation/tdlib_function
+use their closed enums; hashes are `sha256:<64 lowercase hex>`.
+
+Intent exact keys:
+
+```text
+schema_version=2, phase="intent", invocation_id, timestamp, account,
+command, arguments, plan, request_fingerprint, config_snapshot,
+authority_source, confirmation_source, idempotency_key_hash
+```
+
+`authority_source` = `request|config`. `request` means the grant came
+from v3's already folded `RequestContext.write_authority`; tgcli does not
+claim whether the client folded a CLI flag or environment value. Adding that
+distinction would require a separately reviewed protocol field and is not M3.
+`confirmation_source` = null for Write, `yes|tty` for new Destructive.
+`request_fingerprint` and non-null `idempotency_key_hash` are sha256;
+`idempotency_key_hash` is sha256|null. `config_snapshot` is the non-null
+frozen config-file identity:
+
+```text
+sha256:<64 lowercase hex>;dev:<device>;ino:<inode>;size:<size>;ctime_ns:<ctime>
+```
+
+The `device,inode,size,ctime` fields are all minimal unsigned decimal uint64.
+There is no plus or leading zero except literal `0`. Hash covers the complete
+file bytes; stat
+identity is captured from the same opened non-symlink current-uid config FD
+before/after reading and must be unchanged. A Ready M3 account without this
+actual frozen config snapshot fails config admission before intent. The fresh
+config-grant recheck compares the complete identity string, not only hash.
+Raw key/invite отсутствуют.
+
+`arguments` strict oneOf keyed by command:
+
+```text
+send:
+  chat:string, text:string, parse_mode:"plain"|"markdown_v2"|"html",
+  reply_to:int53|null, topic:ForumTopicRef|null, silent:boolean,
+  schedule:Schedule|null
+msg_edit:
+  chat:string, message_id:int53, text:string
+msg_delete:
+  chat:string, message_ids:int53[1..100], for_all:boolean
+msg_forward:
+  from:string, to:string, message_ids:int53[1..100], drop_author:boolean
+msg_react:
+  chat:string, message_id:int53, reaction:string,
+  remove:boolean, big:boolean
+msg_pin/msg_unpin:
+  chat:string, message_id:int53
+chat_mark_read:
+  chat:string
+chat_mute/chat_unmute:
+  chat:string, duration_seconds:int32
+chat_pin/chat_unpin:
+  chat:string
+chat_archive/chat_unarchive:
+  chat:string
+chat_join username:
+  source:"username", username:string
+chat_join invite:
+  source:"invite_link", invite_link_sha256:sha256
+chat_leave:
+  chat:string
+saved_attach:
+  message_id:int53, path:string, caption:string
+```
+
+Каждая branch содержит ровно перечисленные required fields. `chat/from/to` здесь —
+validated original selector string; invite raw исключён. `plan` — strict oneOf
+из §4.5.3.
+
+Checkpoint exact keys:
+
+```text
+schema_version=2, phase="checkpoint", invocation_id, timestamp, account,
+command, checkpoint_sequence, stage, data
+```
+
+`checkpoint_sequence` positive uint32, строго растёт. Stage/data oneOf:
+
+```text
+idempotency_pending:
+  key_hash:sha256, request_fingerprint:sha256,
+  expires_at:unix_seconds, reserved_terminal_bytes:uint32
+spool_ready:
+  file:FileSnapshot, relative_path:string
+dispatch_started:
+  tdlib_function:tdlib_function, dispatch_token:hex32,
+  client_generation:uint64
+temporary_ids_observed:
+  temporary_message_ids:int53[1..100]
+forward_progress:
+  items:ForwardItem[1..100]
+mutation_confirmed:
+  terminal:StoredTerminal
+```
+
+`dispatch_token` = 32 lowercase hex; это tgcli correlation, не TD query id.
+`relative_path` имеет exact form
+`spool/<invocation_id>/<safe-basename>` и не absolute.
+
+Legal first-occurrence stage orders:
+
+```text
+direct:       [idempotency_pending?], dispatch_started, mutation_confirmed?
+single-send:  [idempotency_pending?], dispatch_started,
+              temporary_ids_observed?, mutation_confirmed?
+saved-attach: [idempotency_pending?], spool_ready, dispatch_started,
+              temporary_ids_observed?, mutation_confirmed?
+forward:      [idempotency_pending?], dispatch_started,
+              temporary_ids_observed?, forward_progress*, mutation_confirmed?
+no-op:        [idempotency_pending?]
+```
+
+Only `forward_progress` may repeat; каждый record — full input-order vector и
+может менять item только `pending→sent|failed`. Temporary ids никогда не
+меняются и не переиспользуются. `mutation_confirmed.terminal` — exact recovery
+payload; partial-forward error допустим. Stage после `mutation_confirmed`
+запрещён.
+
+Outcome exact keys:
+
+```text
+schema_version=2, phase="outcome", invocation_id, timestamp, account,
+command, success, mutation_state, completed_stages, terminal
+```
+
+`terminal` — `StoredTerminal`; `success` true iff kind=result.
+`success` is boolean; `mutation_state` is
+`none|possible|confirmed`; `completed_stages` — ordered unique
+first-occurrence stage array, exact legal prefix.
+M3 mutation state:
+
+- `confirmed`: durable success proof или хотя бы один sent forward item;
+- `possible`: dispatch durable, но success/failure proof отсутствует;
+- `none`: dispatch отсутствует либо every dispatched item имеет explicit
+  TDLib failure/upstream-null proof and no deletion ambiguity.
+
+`StoredTerminal` oneOf, без transport id:
+
+```json
+{"kind":"result","data":{}}
+```
+
+```json
+{"kind":"error","code":"TIMEOUT","message":"stable contract text",
+ "details":{},"exit_code":7}
+```
+
+Intent и every checkpoint fsync before следующего mutation-relevant step.
+Outcome fsync precedes store transition и terminal frame. После intent failure
+append закрывает connection без terminal и включает audit-fatal shutdown.
+
+Recovery:
+
+- intent без dispatch → append failure outcome, mutation none; remove pending,
+  cleanup incomplete spool;
+- dispatch без proof → outcome `AUDIT_INCOMPLETE`, mutation possible; key
+  остаётся pending;
+- `mutation_confirmed` без outcome → reconstruct exact outcome из terminal;
+- full terminal forward_progress без outcome → derive exact success/failure,
+  при success item сначала append mutation_confirmed;
+- outcome + stale pending store → repair store до terminal/removal/pending;
+- corrupt sequence, identity mismatch, stage regression, changed immutable
+  field, two different terminal payloads, store/audit fingerprint mismatch,
+  missing pinned generation или impossible success/state combination —
+  contradiction, `AUDIT_INCOMPLETE`, no resend.
+
+Rotation не разделяет open v2 group. Audit segment, на который ссылается
+pending store/spool, нельзя overwrite/delete до repair либо entry expiry.
+Если fixed rotation set не имеет unpinned slot, новый intent получает
+`AUDIT_UNAVAILABLE/capacity_exhausted` до mutation. Complete v1 groups
+подчиняются прежнему retention; mixed reader не переинтерпретирует их как v2.
+
+#### 4.5.7 Idempotency store и exact transitions
+
+`idempotency.db` — strict JSON snapshot:
+
+```json
+{"schema_version":1,"entries":[]}
+```
+
+Current uid, regular non-symlink, `0600`, link count 1, ≤16 MiB и ≤10,000
+entries. Rewrite: same-dir `O_EXCL` temp, file fsync, rename, directory fsync.
+Entries sorted by `key_hash`. Cross-process verified lock + per-account mutex;
+network/file hashing не выполняются под lock.
+
+Entry exact:
+
+```text
+key_hash:sha256, request_fingerprint:sha256, operation:operation,
+state:"pending"|"completed", invocation_id:hex32,
+audit_generation:uint64, created_at:unix_seconds, expires_at:unix_seconds,
+reserved_terminal_bytes:uint32, plan:Plan,
+temporary_message_ids:int53[], forward_progress:ForwardItem[],
+spool:SpoolRef|null, terminal:StoredTerminal|null
+```
+
+`SpoolRef` имеет ровно
+`{"relative_path":string,"file":FileSnapshot}`. Pending terminal null;
+completed terminal
+`StoredTerminal`. Completed has `reserved_terminal_bytes=0`.
+`created_at/expires_at` are integer Unix seconds 0…253402300799;
+`expires_at=created_at+604800` exactly. `audit_generation` pins a real segment.
+No transport request id/raw key/raw invite.
+
+Before pending insert quota reserves maximum terminal bytes:
+
+```text
+msg_forward: 4,194,304
+send, msg_edit, saved_attach: 65,536
+all other operations: 32,768
+```
+
+Admission требует simultaneously entry count <10,000, actual serialized
+snapshot ≤16 MiB. Under the insertion lock tgcli canonically serializes the
+whole prospective pending entry, including plan/progress/spool nulls and JSON
+array delimiter growth. Let `candidate_increment_bytes` be the exact increase
+from inserting that entry into the current canonical snapshot. Admission
+requires both:
+
+```text
+actual_bytes + candidate_increment_bytes <= 16 MiB
+actual_bytes + candidate_increment_bytes
+  + sum(existing pending terminal-growth reservations)
+  + new terminal-growth reservation <= 16 MiB
+```
+
+Thus the reservation is additional future terminal growth, not a substitute
+for the entire serialized pending entry.
+Strict curated terminal больше reservation — `schema_error`, durability-fatal;
+dispatch до такой невозможности не допускается.
+
+Lookup и later insertion оба под lock. Miss не является reservation. После
+durable intent `insert-if-absent`:
+
+- отсутствует → caller atomically becomes winner;
+- существует → caller не dispatch-ит; его уже durable intent закрывается
+  durable outcome `mutation_state:none`;
+- после loser outcome same completed fingerprint replays, same pending returns
+  `IDEMPOTENCY_PENDING`, different fingerprint conflicts;
+- inability to close loser outcome means no terminal and audit-fatal.
+
+Completed replay проходит Ready/getMe/bot/authority. `msg_delete`/`chat_leave`
+дополнительно требуют fresh confirmation над exact stored `plan`; cancel/no-TTY
+возвращает canonical `CONFIRMATION_REQUIRED`, store не меняется, нового audit
+group нет. Если monotonic deadline выигрывает во время replay confirmation,
+возвращается exact §4.5.11 `replay_confirmation` TIMEOUT; completed entry и prior
+audit остаются byte-unchanged. Replay строит Result/Error с текущим Request.id.
+
+Per-cutpoint transitions:
+
+| Cutpoint/outcome | audit | keyed store | terminal |
+|---|---|---|---|
+| before intent | none | none | ordinary error |
+| intent, insert failed | none outcome required | none | idempotency error only after outcome |
+| pending, before dispatch (including changed file/schedule recheck) | none outcome | remove pending | exact error |
+| dispatch, no proof; timeout/auth/generation/shutdown/top-level uncertain TD error | possible outcome | keep pending | exact error if durability succeeds |
+| explicit single send failed state/update | none outcome | remove pending | TDLIB/RATE error |
+| temporary message deleted before confirmation | possible outcome | keep pending | SEND_FAILED |
+| direct correlated success/result | confirmed outcome | completed result | result |
+| direct correlated error after dispatch | possible outcome | keep pending | TDLIB/RATE error |
+| join Guard/Declined explicit no-join result | none outcome | remove pending | join error |
+| empty mark-read audited no-op | none outcome | completed result | result |
+| forward all success | confirmed outcome | completed result | result |
+| forward partial success | confirmed outcome | completed FORWARD_PARTIAL | error |
+| forward all explicit failed/null | none outcome | remove pending | FORWARD_FAILED/RATE |
+| forward any deleted ambiguity and no success | possible outcome | keep pending | FORWARD_FAILED |
+| forward deadline with any pending | confirmed if a sent item else possible | keep pending | TIMEOUT |
+
+После Telegram success порядок фиксирован:
+mutation checkpoint → audit outcome → store completion → terminal. Если audit
+outcome durable, но store completion fail, daemon не выдаёт ни success, ни
+replacement error; connection closes, daemon enters durability-fatal, startup
+repair completes store from audit. Segment остаётся pinned. Аналогично failure
+store transition обязан стать durable до error frame.
+
+Pending expiry никогда не auto-resend-ит. Reconciliation сначала закрывает
+audit ambiguity; затем entry удаляется и segment/spool может быть released.
+После expiry exactly-once не заявляется.
+
+#### 4.5.8 Canonical JSON, hashes, fingerprints и secrecy
+
+Canonical JSON domain содержит только null, booleans, strings, integers,
+arrays, objects:
+
+- input strings valid Unicode scalar UTF-8; normalization отсутствует;
+- object keys unique и сортируются по unsigned UTF-8 bytes;
+- arrays сохраняют order;
+- integers — minimal base-10 ASCII, minus only for negative, zero exactly `0`,
+  no plus/leading zero/fraction/exponent;
+- strings quoted; `"` и `\` escaped; U+0000…U+001F всегда `\u00xx` с lowercase
+  hex; остальные scalars raw UTF-8;
+- whitespace отсутствует.
+
+```text
+key_hash =
+ SHA256("tgcli-idempotency-key-v1\0" || exact_key_bytes)
+fingerprint =
+ SHA256("tgcli-idempotency-request-v1\0" || canonical_json_bytes)
+invite_hash =
+ SHA256("tgcli-invite-link-v1\0" || exact_invite_bytes)
+```
+
+Hash strings render `sha256:` + lowercase hex.
+
+Fingerprint root exact:
+
+```json
+{"version":1,"account":"main","principal":{"id":42,"is_bot":false},
+ "operation":"send","payload":{}}
+```
+
+Payload exact per operation:
+
+```text
+send:
+  chat_selector,text,parse_mode,reply_to,requested_topic,silent,schedule
+msg_edit:
+  chat_selector,message_id,text
+msg_delete:
+  chat_selector,message_ids,for_all
+msg_forward:
+  from_selector,to_selector,message_ids,drop_author
+msg_react:
+  chat_selector,message_id,reaction,remove,big
+msg_pin/msg_unpin:
+  chat_selector,message_id
+chat_mark_read:
+  chat_selector
+chat_mute/chat_unmute:
+  chat_selector,duration_seconds
+chat_pin/chat_unpin:
+  chat_selector
+chat_archive/chat_unarchive:
+  chat_selector
+chat_join username:
+  source,username
+chat_join invite:
+  source,invite_link_sha256
+chat_leave:
+  chat_selector
+saved_attach:
+  message_id,topic="inherit_saved",name,size,sha256,caption
+```
+
+`chat_selector/from_selector/to_selector`, `username`, text, reaction,
+caption and name are strings; ids and arrays use the ranges in §4.5.3; flags are
+booleans; hashes/FileSnapshot fields use their named strict types.
+`requested_topic` is ForumTopicRef/null. Schedule is null,
+`{"kind":"online"}` либо `{"kind":"at","send_date":int32}`. Exact selectors
+после syntactic canonicalization: decimal IDs minimal; username и non-invite
+public links сохраняют exact validated input bytes; invite заменён hash.
+Fingerprint не включает timeout/tty/json/yes/authority/cwd
+directory/server_now/effective resolved ids/transport id.
+
+Raw idempotency key никогда не передаётся TDLib. Raw invite живёт только до
+`checkChatInviteLink/joinChatByInviteLink`; tgcli diagnostics/errors/audit/store
+используют hash. TDLib log callback обязан иметь concurrent sensitive-value
+registry и до sink заменять exact invite bytes на
+`<redacted:invite-link>` до конца correlated request; raw value затем wiped.
+
+Tests создают distinct random byte sentinels для key/invite, провоцируют
+success, parse error, TD error, timeout, audit/store error и log rotation, затем
+byte-scan-ят stdout/stderr, every audit/store generation, tdlib.log
+generations, crash diagnostics и core-disabled test artifacts. Ни один raw
+sentinel не допускается; hash обязан присутствовать в соответствующем
+audit/store record.
+
+#### 4.5.9 Direct RPC and single-message arbitration
+
+Every TD response/update/auth transition получает monotonic
+`receive_event_sequence`. Event eligible только если observed monotonic time
+`< deadline`; equality принадлежит deadline. Old generation discarded.
+One-shot CAS выбирает terminal.
+
+Для direct RPC earliest eligible correlated response против first non-Ready
+auth event wins:
+
+- earlier success/ok confirms desired state;
+- earlier TD error returns TD error; post-dispatch mutation остаётся possible;
+- earlier non-Ready returns `NOT_AUTHED/authorization_lost`, mutation possible;
+- deadline before both returns TIMEOUT, mutation possible.
+
+Late events только освобождают correlation; store state не меняют. Cancellation
+до durable dispatch — not_started; после — unknown/pending.
+
+Single send subscribes before `sendMessage`. Callback only queues. Immediate:
+
+- `messageSendingStatePending` → durable temp id, wait;
+- `messageSendingStateFailed` → explicit failure;
+- null sending state → authoritative stable Message;
+- unknown variant → INTERNAL possible/pending.
+
+`updateMessageSendSucceeded.old_message_id` maps temp→final Message.
+`updateMessageSendFailed` explicit failure. `updateDeleteMessages` с temp id
+до success — deletion ambiguity. Response/update arbitrary order буферизуется.
+Final id только из success Message. Scheduled success — server acceptance, не
+future delivery.
+
+#### 4.5.10 Forward exact vector contract
+
+`ForwardItem` strict oneOf:
+
+```json
+{"source_id":1,"status":"pending","temporary_message_id":-1}
+```
+
+```json
+{"source_id":1,"status":"sent",
+ "message":{"id":101,"chat_id":-1001,"date":"2026-08-05T10:00:00Z",
+            "sender":{"type":"user","id":42},"is_outgoing":true,
+            "topic":null,"type":"text","text":"forwarded","scheduled":false}}
+```
+
+```json
+{"source_id":1,"status":"failed",
+ "failure_reason":"upstream_null|tdlib_error|deleted_before_confirmation",
+ "tdlib_code":null,"retry_after":null}
+```
+
+`message` in the sent branch is the exact §4.5.1 `MessageWriteResult`, never an
+arbitrary object or summary subtype. Each branch has exactly the shown fields;
+the pending branch alone has `temporary_message_id`, the sent branch alone
+has `message`, and the failed branch alone has
+`failure_reason,tdlib_code,retry_after`.
+
+`tdlib_code` non-null only for `tdlib_error`; `retry_after` non-null only for
+code 429 and equals mathematical ceiling of positive TDLib seconds. Null
+immediate vector element is `upstream_null`; temp deletion has no invented
+code and is `deleted_before_confirmation`.
+
+Immediate vector length must equal input. Every item follows single-send
+correlation. Terminal aggregation:
+
+- all sent → ordered success result;
+- at least one sent and all terminal → `FORWARD_PARTIAL`, completed error;
+- none sent, all terminal, every failed code 429 → forward RATE_LIMITED,
+  `retry_after=max(item.retry_after)`;
+- none sent, all terminal otherwise → `FORWARD_FAILED`;
+- any pending at deadline → forward TIMEOUT with full vector.
+
+The same `ForwardItem` schema is referenced by success result, both forward
+errors, TIMEOUT, every `forward_progress` checkpoint and store entry. Success
+contains only sent branches; PARTIAL contains at least one sent and one failed
+and no pending; FAILED/RATE contains only failed; TIMEOUT may contain any
+branch and may use `[]` only before the immediate vector exists.
+
+All-failed mutation state none only when every reason is upstream-null or
+explicit TDLib send failure. Any deletion ambiguity makes possible. Any sent
+item makes confirmed. Top-level `forwardMessages` error before vector is
+possible after dispatch and keeps key pending. Multi-message atomicity и
+automatic subset retry не заявляются.
+
+#### 4.5.11 TIMEOUT strict oneOf
+
+`state` is null or one exact §4.5.7 auth state. Every M3 TIMEOUT details matches
+exactly one branch:
+
+```json
+{"operation":"<any>","phase":"preflight","state":"ready",
+ "outcome":"not_started",
+ "idempotency":"not_requested|not_created|removed"}
+```
+
+```json
+{"operation":"msg_delete|chat_leave","phase":"replay_confirmation",
+ "state":"ready","outcome":"not_started",
+ "idempotency":"completed_unchanged"}
+```
+
+```json
+{"operation":"<direct-op>","phase":"dispatch","state":"ready",
+ "outcome":"unknown","idempotency":"not_requested|pending"}
+```
+
+```json
+{"operation":"send|saved_attach","phase":"confirmation","state":"ready",
+ "outcome":"unknown","idempotency":"not_requested|pending",
+ "temporary_message_id":null}
+```
+
+```json
+{"operation":"msg_forward","phase":"confirmation","state":"ready",
+ "outcome":"unknown","idempotency":"not_requested|pending","items":[]}
+```
+
+`<any>` means the closed §4.5.1 operation enum. `direct-op` is exactly
+`msg_edit,msg_delete,msg_react,msg_pin,msg_unpin,chat_mark_read,chat_mute,
+chat_unmute,chat_pin,chat_unpin,chat_archive,chat_unarchive,chat_join,
+chat_leave`.
+Single temp is null или one int53. Forward items length 0…100 in input order.
+Post-dispatch keyed timeout всегда `pending`; pre-dispatch keyed pending,
+если уже создан, удаляется durable и reports `removed`; keyed request до
+insert reports `not_created`; no key = `not_requested`.
+`completed_unchanged` допускается только для deadline в confirmation
+completed destructive replay: no new intent, no store write, no dispatch.
+TIMEOUT никогда не claims not_started после `dispatch_started`.
+
+#### 4.5.12 File snapshot/spool and Saved attach
+
+Minimal M4 sends any one file as document:
+
+```text
+inputDocument(inputFileLocal(spool_path), thumbnail=null,
+              disable_content_type_detection=true)
+inputMessageDocument(document, caption)
+```
+
+No autodetection/albums/spoiler in v1.
+
+PATH valid UTF-8 1…4096 bytes, no NUL. Relative resolves against frozen cwd.
+Each component opened no-follow; target readable nonempty regular. Basename
+не empty, `.` или `..`. Owner restriction и extra size cap отсутствуют.
+
+Pass 1 before idempotency lookup opens source once, records
+dev/inode/size/mtime_ns/ctime_ns before and after, hashes all bytes, requires
+identity stable, then closes. Dry-run stops here.
+
+Pass 2 is permitted only after durable intent. For keyed execution it is
+further permitted only after the invocation wins durable
+`insert-if-absent`; an unkeyed invocation performs the same pass immediately
+after its durable intent. It creates:
+
+```text
+<account-state>/spool/<invocation_id>/<basename>
+```
+
+Every new directory `0700`, file `0600 O_EXCL`. Creation fsyncs each newly
+created parent: account-state after spool root, spool root after invocation
+dir, then file fsync and invocation-dir fsync. Source is reopened no-follow
+once; copy+SHA is one pass. Before/after identity and digest must equal pass 1.
+Mismatch: no dispatch, durable INPUT_CHANGED outcome, remove pending only when
+keyed, then cleanup.
+
+Only after complete copy/fsync tgcli appends+fsyncs `spool_ready`; only spool
+path enters TDLib. Recovery/cleanup:
+
+| Crash cutpoint | Action |
+|---|---|
+| during create/copy, no `spool_ready` | no dispatch possible; delete incomplete invocation dir, fsync spool root, close outcome none; remove pending only when keyed |
+| `spool_ready`, no dispatch | delete spool, close outcome none; remove pending only when keyed |
+| keyed dispatch, no terminal proof | retain spool and audit/store reference through pending expiry |
+| keyed mutation checkpoint/outcome, store not completed | retain until store repair |
+| keyed completed/removal store durable | cleanup may run; missing-after-delete is success; fsync spool root |
+| unkeyed durable terminal outcome | cleanup may run; missing-after-delete is success; fsync spool root |
+| unkeyed unknown | retain by audit invocation until terminal proof or intent timestamp +604800 |
+
+Cleanup failure не меняет уже confirmed Telegram result; reference остаётся
+durable и startup повторяет cleanup. Startup никогда удаляет spool по age
+без reconciled audit/store relation.
+
+`saved_attach` exact order:
+
+1. Ready → `getMe` → user-only preflight.
+2. Parse message id/path/caption; perform pass 1.
+3. Fingerprint only caller facts:
+   `message_id,topic="inherit_saved",name,size,sha256,caption`.
+4. Keyed lookup may replay/conflict/pending here. Completed replay therefore
+   does not require Saved materialization or the original message to exist.
+5. Only unkeyed/new-miss execution materializes self chat, gets
+   original/properties, validates reply, accepts derived saved/null topic and
+   builds immutable plan.
+6. Durable intent; keyed insert winner or unkeyed continuation.
+7. Pass 2, `spool_ready`, dispatch and common single-message coordinator.
+
+Derived self chat id, original properties and effective saved/null topic are
+plan/audit facts, never fingerprint inputs. The original is not changed.
+
+#### 4.5.13 Acceptance and TestDC
+
+Required fake-boundary/contract gates:
+
+- v3 exact frame/context, v1/v2↔v3 frozen replacement, status/stop/restart,
+  absent/mismatch M3 dry-run autospawn;
+- named dry-run allowlist and observed TDLib cache effects; zero
+  audit/store/spool/config writes and zero mutating TD call;
+- bot immediate send positive; bot date/online/reaction negative before
+  user-only calls;
+- folded request grant audits `authority_source=request`; config grant audits
+  `config`; hash/stat replacement at every config snapshot capture/recheck
+  rejects the complete canonical identity;
+- schedule rounding/int32 and every boundary/race in §4.5.5;
+- locked same-key miss race proving one dispatch and loser durable none outcome;
+- quota tests include the exact prospective pending-entry insertion bytes plus
+  terminal growth and reject before dispatch;
+- every audit/store/spool fsync cutpoint, including success→outcome→store
+  failure with no terminal and startup repair;
+- mixed v1/v2 audit, every stage/data branch, contradictions, pinned rotation;
+- exact canonical bytes/golden hash vectors and raw sentinel scans;
+- destructive completed replay prompts stored plan and never dispatches;
+  confirmation deadline yields `completed_unchanged` with byte-identical
+  store/audit;
+- all direct response/auth/deadline permutations;
+- all single-send response/update/delete/generation permutations;
+- every forward vector/429/deletion/timeout aggregation;
+- keyed-winner and unkeyed-post-intent file symlink/replacement/in-place
+  rewrite/two-pass mismatch and every cleanup cutpoint;
+- strict actual result/error/audit/store schema validation.
+
+TestDC M3 flow is mandatory after canonical user auth smoke:
+
+1. Send unique text to Saved with unique key.
+2. Immediately after final id, install a scope guard that always executes
+   `msg delete <saved-chat> <final-id> --yes` with write authority.
+3. Verify `msg get` final id.
+4. Repeat same key/payload: current-id result byte-equivalent in data, no second
+   Telegram message.
+5. Same key/different text → IDEMPOTENCY_CONFLICT.
+6. Run registered cleanup on success and every assertion/command failure.
+7. Verify deleted message absent.
+
+Cleanup failure fails the test and preserves private stdout/stderr/audit
+artifacts with the final id; it is never swallowed by an earlier failure.
+Registration itself occurs before step 3.
+
+M3 flow has no skip branch. Missing required user phone/code/API fixture,
+login failure, Saved capability error, arbitrary TDLib error или cleanup error
+fails job. Только существующие canonical optional auth skips
+`fixture_missing:qr_approver`, `fixture_missing:bot_token_cmd` и exact
+`test_dc_state_not_forceable:<state>` остаются допустимыми для их existing
+M1 tests; они не могут быть assigned M3 flow.
+
+#### 4.5.14 Implementation dependency slices
+
+0. Separate reviewed DESIGN-only protocol/dry-run precursor.
+1. Protocol v3 parser/writer/schemas and v1/v2↔v3 lifecycle fixtures.
+2. M2 exact resolver/principal reuse and bot matrix.
+3. Neutral TD request/update DTOs and direct arbitration.
+4. Audit v2 schemas/writer/recovery/rotation.
+5. Canonical JSON, idempotency store/quota/CAS/repair.
+6. Shared direct and single-message coordinators.
+7. Send text/schedule/topics.
+8. Edit/react/message pin.
+9. Delete/leave confirmation and replay confirmation.
+10. Forward vector coordinator.
+11. Chat writes/join.
+12. Two-pass spool and cleanup.
+13. Saved attach adapter.
+14. Full fake-boundary, fault, sentinel and TestDC gates.
+
+#### 4.5.15 Explicitly impossible/non-guaranteed
+
+v1 не заявляет:
+
+- atomic multi-message forward;
+- exactly-once без key, после pending expiry или после unknown outcome;
+- final message id recovery, если ни TDLib, ни durable checkpoint не оставили
+  correlation proof;
+- cancellation после dispatch;
+- preservation concurrent notification-setting writes как CAS;
+- coherent malicious in-place source version; second pass гарантирует только
+  совпадение полной observed identity и прочитанного digest;
+- atomic schedule boundary между `getOption` и TDLib internal clock;
+- future delivery time for scheduled/online message;
+- adding attachment into already-existing message;
+- undo delete/leave.
+
+При unknown outcome tgcli не пытается «догадаться» или автоматически повторить
+mutation.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result
@@ -1420,19 +2446,16 @@ Supporting mechanisms:
   execution. Normalized
   non-secret arguments and resolved targets are recorded; secret-bearing
   fields are always excluded. Files rotate by size (§9).
-- **`--idempotency-key <k>`** — record-then-send: the key is written to the
-  store as *pending* (with a payload fingerprint) before the request is
-  dispatched, and updated with the result on completion. Replay semantics: a
-  *completed* key returns the recorded result without calling Telegram; a
-  *pending* key (the prior attempt's outcome is unknown — daemon crash or
-  client-side timeout mid-send) fails with exit 1 and error code
-  `IDEMPOTENCY_PENDING` instead of re-sending, so the caller can inspect the
-  chat or pick a new key; the same key with a different payload fingerprint
-  is a usage error. Entries expire after 7 days. The gate is checked before
-  the store: with no grant or under an explicit deny, replay of even a
-  *completed* key exits 6 — a write-tier command never returns results in a
-  denied context. Recording only successes would not prevent double-sends in
-  the very scenario retries exist for; record-then-send does.
+- **`--idempotency-key <k>`** — after durable audit intent, a locked
+  insert-if-absent records only the domain-separated key hash, complete
+  request fingerprint, immutable plan and quota reservation as pending before
+  dispatch. A matching completed entry replays its stored terminal with the
+  current transport id and no Telegram call; destructive replay first
+  reconfirms the stored plan. A matching pending entry returns
+  `IDEMPOTENCY_PENDING`; a different fingerprint returns
+  `IDEMPOTENCY_CONFLICT`. The write gate precedes lookup and replay. Entries
+  expire at exactly 604800 seconds without automatic resend. Exact quota,
+  transition, crash-repair and audit-pinning rules are §4.5.7.
 
 ## 7. Architecture
 
@@ -2490,7 +3513,7 @@ What makes tgcli specifically LLM-agent-friendly:
   blocking call with a deterministic timeout exit code.
 - `listen --json --count N --timeout S` gives bounded streaming reads that
   exit 0 on planned expiry.
-- `--idempotency-key` makes retries safe (record-then-send, §6).
+- `--idempotency-key` provides the bounded retry semantics in §4.5.7.
 - Once M7 activates `raw`, it guarantees no capability cliff: anything td_api
   can do is reachable.
 - Stable curated schemas under `docs/schemas/`, also dumpable at runtime via
@@ -2640,8 +3663,8 @@ summary:
 - **M3** — extend the M1 safety kernel to the general write path:
   send/edit/delete/forward/react/mark-read/pin and the remaining destructive
   commands; add idempotency and general planners/audit integration.
-- **M4** — files: download/upload with progress frames, media types, single-file
-  Saved Messages attachment replies that preserve the replied-to message.
+- **M4** — files: download with progress frames and the single-file
+  Saved Messages document-reply adapter that preserves the replied-to message.
 - **M5** — streaming: multiplexed update subscriptions, listen, wait-for.
 - **M6** — folders, topics, contacts, chat admin, sessions.
 - **M7** — raw passthrough, shell completions, man pages, packaging (static
@@ -2650,6 +3673,7 @@ summary:
   wiring; each M2–M6 gate adds a supported feature flow; M7 validates the
   complete accumulated suite.
 - **Post-1.0 ideas**: MCP server mode (`tgcli mcp` over stdio), secret chats,
+  general `send --file` media autodetection/captions/albums/spoilers,
   scheduled-message management, message translation.
 
 ## 15. Open questions

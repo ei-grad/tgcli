@@ -176,33 +176,60 @@ before the milestone is closed.
 
 ## M3 — Safety & write path
 
-- [ ] Extend M1's safety chokepoint from `logout`/`account remove` to every
-      Write/Destructive static descriptor; preserve default deny,
-      `--allow-write` / `TGCLI_ALLOW_WRITE` / standing `allow_write`, and the
-      explicit-deny override while keeping `login` tier-exempt
-- [ ] Extend M1 confirmation, dry-run planning and intent/outcome audit to all
-      M3 writes/destructive commands; preserve secret-field exclusion
-- [ ] `--idempotency-key`: record-then-send store, pending/completed replay
-      semantics (pending → exit 1 IDEMPOTENCY_PENDING), payload fingerprint
-      check, 7-day expiry; gate checked before the store
-- [ ] `tgcli send` (text, --md/--html, --reply-to, --silent, --schedule);
-      waits for updateMessageSendSucceeded, returns the final message id
-- [ ] `tgcli msg edit|delete|forward|react|pin|unpin`
-- [ ] `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join|leave`
-- [ ] Add a supported M3 write-path flow to the test-DC E2E milestone gate
+- [ ] Implement the frozen protocol-v3 precursor: strict nine-field context
+      with `idempotency_key`, Hello-first parsing/writing, v1/v2↔v3 frozen
+      control replacement, exact status/stop/restart/autospawn behavior, and
+      auth-bound M3/M4 dry-run read allowlist/effect fixtures
+- [ ] Reuse exact M2 resolver/principal DTOs, add static operation tiers and
+      the user/bot/schedule admission matrix, and extend the single daemon-side
+      safety chokepoint to every M3 Write/Destructive descriptor
+- [ ] Add neutral TD request/update DTOs, strict M3 results/errors/plans, and
+      direct-response/auth-update/deadline arbitration without exposing
+      `td_api.h` outside daemon implementation translation units
+- [ ] Add audit schema v2 common/per-command/checkpoint/recovery records,
+      legal stage ordering, mixed-v1/v2 recovery, contradiction handling,
+      rotation/retention, and durable intent/outcome enforcement
+- [ ] Add canonical JSON and complete per-operation fingerprints plus the
+      idempotency store: quota/reservations, locked insert-if-absent, exact
+      pending/completed/conflict/replay states, crash-cutpoint repair, and
+      raw-key/invite sentinel gates
+- [ ] Add shared direct and single-message coordinators with immutable plans,
+      schedule ceiling/boundary rechecks, strict timeout oneOf, exact terminal
+      ordering, and no post-dispatch cancellation claim
+- [ ] Implement `tgcli send` text/Markdown/HTML/reply/forum-topic/silent/
+      schedule paths, wait for authoritative final send state, and return the
+      exact `MessageWriteResult`
+- [ ] Implement `tgcli msg edit|react|pin|unpin` with exact property
+      validation, reaction availability, plan, audit, timeout and idempotency
+      behavior
+- [ ] Implement destructive `tgcli msg delete` and `tgcli chat leave`,
+      including confirmation of the immutable plan on new invocation and
+      completed replay, plus `completed_unchanged` replay-confirmation timeout
+- [ ] Implement the ordered `tgcli msg forward` vector coordinator with one
+      strict `ForwardItem` across success/error/timeout/audit/store, partial
+      outcomes, deleted-before-confirmation handling and 429 aggregation
+- [ ] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
+      with exact direct-call state machines, invite secrecy and
+      notification-setting plans
+- [ ] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel
+      acceptance matrix and the no-skip Saved text-send TestDC flow with
+      immediately registered confirmed cleanup
 - [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
 
 ## M4 — Files & media
 
 - [ ] `tgcli download` with progress frames (stderr bar / NDJSON); transfers
       unlimited by default, `--timeout` opt-in
-- [ ] `tgcli send --file` uploads (photos/video/voice/documents autodetect), --caption, albums
-- [ ] `tgcli saved attach <message-id> <PATH> [--caption TEXT]`: user-only
-      single-file reply in Saved Messages, preserving the original and
-      delegating to normal send; add its result-only manifest entry and strict
-      Draft 2020-12 schema, with contract tests validating actual result data
-      and coverage for final-id output, NOT_AUTHED/BOT_UNSUPPORTED preflight,
-      NOT_FOUND/USAGE, write gate, dry-run, audit, timeout, and idempotency
+- [ ] Add the two-pass file snapshot/spool coordinator: pass-1 full identity
+      and digest, winner-only post-intent pass 2, private fsynced spool,
+      durable `spool_ready`, complete crash-cutpoint cleanup and startup repair
+- [ ] Implement `tgcli saved attach <message-id> <PATH> [--caption TEXT]` as a
+      user-only, single-file Saved reply adapter preserving the original;
+      enforce saved/null topic inheritance and the shared plan/audit/timeout/
+      idempotency contract, and return the exact `MessageWriteResult`
+- [ ] Add `saved attach` result-only manifest/schema and contract coverage for
+      final id, NOT_AUTHED/BOT_UNSUPPORTED, NOT_FOUND/USAGE, gate/dry-run,
+      two-pass source races, quota/CAS cutpoints, audit, timeout and replay
 - [ ] `TGCLI_MEDIA_DIR` handling
 - [ ] Add a supported M4 media flow to the test-DC E2E milestone gate
 - [ ] Review gate: M4 diff vs DESIGN.md
@@ -247,5 +274,7 @@ before the milestone is closed.
 - [ ] MCP server mode (`tgcli mcp` over stdio)
 - [ ] Offline search: client-side filtering over prefetched local history
 - [ ] Secret chats
+- [ ] General `tgcli send --file` media autodetection, captions, albums and
+      spoilers
 - [ ] Scheduled-message management
 - [ ] Message translation
