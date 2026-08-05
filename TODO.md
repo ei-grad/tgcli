@@ -236,11 +236,29 @@ before the milestone is closed.
 
 ## M5 — Streaming
 
-- [ ] Update-bus subscriptions with filters, multiplexed to any number of clients
-- [ ] `tgcli listen` (--chat, --types, --count, --timeout; NDJSON; planned expiry → exit 0)
-- [ ] `tgcli wait-for` (--chat, --from, --regex, --after for race-free
-      send-then-wait — requires --chat, --timeout → exit 7)
-- [ ] Add a supported M5 streaming flow to the test-DC E2E milestone gate
+- [ ] Add strict `listen` item, `wait-for` result, and stream error schemas plus
+      the separate exact stream catalog/package bijection
+- [ ] Land the shared M2 resolver, MessageSummary/ChatIdentity/ChatSummary DTOs,
+      sender matching, int53 handling, and local-history components M5 reuses
+- [ ] Integrate the measured google/re2 `2022-12-01` full-commit archive as a
+      static runtime dependency; lock its archive/tree hashes, BSD and embedded
+      Lucent notices, offline staging, and no-ICU/PCRE/Abseil provenance checks
+- [ ] Add tagged unlimited/finite deadlines and stop-aware wait helpers without
+      a maximum-time sentinel
+- [ ] Add generation-scoped metadata bootstrap, the bounded ordered-normalization
+      barrier, curated update/reaction/chat normalization, and explicit metadata
+      capacity failures
+- [ ] Add the fixed 32-slot sequentially consistent ingress registry, bounded
+      per-subscription SPSC queues, polling workers, overflow causes, and proven
+      deferred reclamation
+- [ ] Add RequestSession item/terminal ordering, complete-write counting,
+      transactional activity promotion, teardown, and first-cause arbitration
+- [ ] Implement exact `listen`/`wait-for` parsing, setup precedence, filters,
+      retained `--after` scan/deduplication, bot behavior, and command handlers
+- [ ] Add silent internal `listen` Result handling, checked per-item stdout
+      write/flush, output-failure cancellation, and daemon/no-daemon parity
+- [ ] Add schema, fake/native, TSan, integration, release-provenance, and no-skip
+      Saved TestDC coverage for the complete M5 acceptance matrix
 - [ ] Review gate: M5 diff vs DESIGN.md
 
 ## M6 — Long tail

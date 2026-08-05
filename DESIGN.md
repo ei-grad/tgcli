@@ -161,8 +161,10 @@ tgcli wait-for [--chat <c>] [--from <user>] [--regex <re>]
               blocks until one matching message arrives, prints it, exits 0;
               exits 7 (TIMEOUT) otherwise. --after <id> also matches messages
               that arrived after that id but before the call (checked in the
-              local DB behind the subscription) — so `send`, then
-              `wait-for --after <sent-id>`, is race-free by construction.
+              continuous local prefix behind the already-published subscription).
+              This closes the retained scan/live race for one client generation,
+              not daemon downtime, an unknown local gap, or absolute Telegram
+              delivery (§4.6.8).
               --after requires --chat (message ids are ordered per chat;
               exit 2 without it)
 
@@ -1877,6 +1879,961 @@ v1 не заявляет:
 При unknown outcome tgcli не пытается «догадаться» или автоматически повторить
 mutation.
 
+### 4.6 M5 streaming contract
+
+This section closes the M5 `listen` / `wait-for` contract only. It does not activate
+M6 or M7 syntax.
+
+#### 4.6.1 Verified current constraints
+
+- The existing update bus invokes every handler synchronously on TDLib's receive
+  thread while holding its bus mutex (`src/core/update_bus.hpp:11-38`). A handler
+  cannot block, query TDLib, subscribe, unsubscribe, or write a socket.
+- Connection writes are synchronous and may wait five seconds
+  (`src/daemon/server.cpp:43-55`). Current item delivery ignores the boolean write
+  result (`src/daemon/server.cpp:76-80`).
+- RequestSession gates Result/Error but not Item (`src/daemon/request_session.cpp:695-754`).
+  M5 therefore requires a new item/terminal ordering seam.
+- An absent timeout currently becomes 60 seconds (`src/proto/frame.cpp:601-618`),
+  contrary to the documented unlimited stream default.
+- The client prints every Result and does not flush each item
+  (`src/cli/client.cpp:83-102`). `listen` needs a silent internal terminal and
+  checked per-item flush.
+- Request activity can be promoted to subscription activity, but hub registration and
+  promotion are not one transaction (`src/daemon/request_session.cpp:559-562`).
+- TDLib drops old client-generation events before publication and stamps accepted
+  events with a process-local receive sequence (`src/core/td_client.cpp:745-804`).
+  That sequence is ordering metadata only, never a public cursor.
+- M2 `MessageSummary`, `ChatIdentity`, `ChatSummary`, resolver, sender, int53, and
+  local-history components are specified but not yet implemented. M5 depends on
+  those shared implementations and must not duplicate them.
+
+Pinned TDLib source establishes the following exact update surface:
+
+- `updateNewMessage` contains incoming or outgoing messages
+  (`td_api.tl:10119-10120`).
+- `updateMessageContent` and `updateMessageEdited` are separate updates
+  (`td_api.tl:10140-10148`).
+- User accounts receive `updateMessageInteractionInfo`, whose reactions are a
+  nullable current snapshot (`td_api.tl:10153-10154`, `2894-2914`).
+- Bots instead receive `updateMessageReaction`, a public-reaction per-actor old/new
+  delta, and `updateMessageReactions`, an anonymous-reaction count snapshot
+  (`td_api.tl:10904-10918`). These are not interchangeable with
+  `updateMessageInteractionInfo`.
+- Chat counters also arrive on `updateMessageMentionRead`,
+  `updateMessageUnreadReactions`, and `updateMessageContainsUnreadPollVotes`, not
+  only on their `updateChat*Count` counterparts (`td_api.tl:10159-10174`).
+- Deletion is a batch (`td_api.tl:10404-10409`).
+- `getChatHistory` is user-only (`td/telegram/Requests.cpp:3568-3571`), returns
+  decreasing message IDs, accepts `limit <= 100`, may return fewer than requested,
+  and is offline for `only_local=true` (`td_api.tl:11492-11500`).
+
+These are source facts, not claims about delivery by Telegram in every deployment.
+
+#### 4.6.2 CLI grammar, defaults, and validation
+
+```text
+tgcli listen
+  [--chat <chat>]...
+  [--types <comma-list>]
+  [--count <N>]
+  [--timeout <S>]
+
+tgcli wait-for
+  [--chat <chat>]
+  [--from <user>]
+  [--regex <pattern>]
+  [--after <message-id>]
+  [--timeout <S>]
+```
+
+Exact rules:
+
+- `listen --chat` accepts zero through 64 occurrences. All selectors resolve before
+  activation. Resolved duplicate chat IDs are collapsed. Any failure is atomic and
+  produces no stdout.
+- `wait-for --chat` accepts zero or one occurrence.
+- `--types` occurs at most once and contains a nonempty comma-separated subset of
+  exactly `message`, `edit`, `delete`, `reaction`, `chat`. Empty tokens, whitespace,
+  duplicates, and unknown tokens are `USAGE/invalid_argument`. Default is all five.
+- `--count` is `listen`-only and accepts canonical decimal integers
+  `1..1000000`.
+- `--after` accepts a positive TDLib int53, `1..9007199254740991`, and requires
+  `--chat`.
+- Explicit `--timeout` accepts finite seconds in `0.001..31536000` inclusive.
+  Fractional values round upward to the next monotonic-clock tick.
+- No timeout means unlimited for both commands. `listen` without count or timeout is
+  indefinite.
+- `listen` count or active-stream deadline expiry is planned exit 0.
+- `wait-for` deadline expiry is `TIMEOUT`, exit 7.
+- `--cursor`, `--full`, `--dry-run`, `--idempotency-key`, `--local`, and write-tier
+  flags are unsupported on these read commands.
+- `listen` always emits compact NDJSON, one item per line, in human and JSON modes.
+
+CLI syntax and pure local validation happen before the protocol request. Daemon setup
+precedence is exact:
+
+1. account/config admission;
+2. selected-account Ready check;
+3. `getMe` and account-kind classification;
+4. bot `wait-for --after` rejection;
+5. chat resolution using the accepted M2 resolver;
+6. sender resolution using the accepted M2 resolver;
+7. subscription activation;
+8. local scan, if requested, then live processing.
+
+Authorization loss at any stage wins over a later RPC result. A bot `--after` trace is
+Ready, `getMe`, `BOT_UNSUPPORTED`; it performs no chat-history request. Local selector
+syntax is already validated, but remote selector calls are not made after that bot
+rejection.
+
+The command owns one absolute deadline beginning at daemon request admission. A
+deadline during M2 resolution remains the accepted resolver `TIMEOUT` with
+`operation:"resolve"`; it is not rewritten as a stream error or planned listen
+expiry. Once activation succeeds, listen expiry is planned success and wait-for
+expiry is `TIMEOUT` with `operation:"wait_for"`.
+
+#### 4.6.3 Finite and unlimited deadlines
+
+Unlimited is a tag, never `steady_clock::time_point::max()`:
+
+```cpp
+struct RequestDeadline {
+    std::optional<Clock::time_point> expires_at; // nullopt is unlimited
+};
+```
+
+- `request_deadline(timeout, Default60)` preserves the ordinary-command default.
+- `request_deadline(timeout, Unlimited)` serves streams, fetch, and transfers.
+- Every wait helper accepts `RequestDeadline` plus a stop token.
+- Expired means `expires_at && now >= *expires_at`.
+- Conversion rejects overflow and rounds up so the requested duration is never
+  shortened.
+- APIs requiring an unconditional concrete point are extended; no max-time adapter
+  sentinel is permitted.
+
+#### 4.6.4 Closed public item union
+
+`event` is the discriminator. No raw TDLib object, type ID, receive sequence, client
+generation, or resume metadata is exposed.
+
+##### 4.6.4.1 Message and edits
+
+```json
+{"event":"message","message":<MessageSummary>}
+```
+
+`MessageSummary` is exactly the shared M2 DTO.
+
+```json
+{
+  "event":"edit_content",
+  "chat_id":-1001,
+  "message_id":123,
+  "content":{"type":"text","text":"replacement"}
+}
+```
+
+Content `type` and `text` use the exact M2 projection.
+
+```json
+{
+  "event":"edit_metadata",
+  "chat_id":-1001,
+  "message_id":123,
+  "edit_date":"2026-08-05T10:00:00Z",
+  "has_reply_markup":false
+}
+```
+
+`edit_date` is RFC 3339 UTC at second precision or null for TDLib zero. Content and
+metadata edits are never merged or inferred.
+
+##### 4.6.4.2 User-account reaction snapshot
+
+```json
+{
+  "event":"reaction_snapshot",
+  "chat_id":-1001,
+  "message_id":123,
+  "reactions":{
+    "items":[{
+      "reaction":{"type":"emoji","emoji":"🧪"},
+      "total_count":3,
+      "is_chosen":true,
+      "used_sender":{"type":"user","id":42},
+      "recent_senders":[{"type":"user","id":42}]
+    }],
+    "are_tags":false,
+    "can_get_added_reactions":true
+  }
+}
+```
+
+`reactions` is null when interaction info or its reactions are null. This is the
+current list snapshot, not a delta and not the complete interaction-info object.
+
+##### 4.6.4.3 Bot public-reaction delta
+
+```json
+{
+  "event":"bot_reaction_change",
+  "chat_id":-1001,
+  "message_id":123,
+  "actor":{"type":"user","id":42},
+  "date":"2026-08-05T10:00:00Z",
+  "old_reactions":[{"type":"emoji","emoji":"👍"}],
+  "new_reactions":[{"type":"emoji","emoji":"🧪"}]
+}
+```
+
+This maps one `updateMessageReaction`. Arrays preserve TDLib order and are not a
+whole-message count snapshot.
+
+##### 4.6.4.4 Bot anonymous-reaction snapshot
+
+```json
+{
+  "event":"bot_reaction_snapshot",
+  "chat_id":-1001,
+  "message_id":123,
+  "date":"2026-08-05T10:00:00Z",
+  "reactions":[
+    {"reaction":{"type":"emoji","emoji":"🧪"},"total_count":3}
+  ]
+}
+```
+
+This maps one `updateMessageReactions`. It is an anonymous count snapshot and has no
+actor, chosen flag, tag flag, or added-reaction capability.
+
+All reaction items use the closed ReactionRef union:
+
+```json
+{"type":"emoji","emoji":"🧪"}
+{"type":"custom","custom_emoji_id":"123456789"}
+{"type":"paid"}
+```
+
+Custom IDs are canonical positive int64 decimal strings. Sender values reuse
+`MessageSenderRef`. Reaction arrays preserve TDLib order. `--types reaction` selects
+all three account-appropriate reaction event variants. No default bot selection is
+silently weakened.
+
+##### 4.6.4.5 Delete batch
+
+```json
+{
+  "event":"delete_batch",
+  "chat_id":-1001,
+  "message_ids":[123,124],
+  "is_permanent":true,
+  "from_cache":false
+}
+```
+
+One TDLib deletion update is one item and counts once. Deleted content is not
+reconstructed.
+
+##### 4.6.4.6 Closed chat-change union
+
+```json
+{"event":"chat_change","change":"new","chat":<ChatSummary>}
+{"event":"chat_change","change":"identity","chat":<ChatIdentity>}
+{"event":"chat_change","change":"title","chat_id":-1001,"title":"New title"}
+{"event":"chat_change","change":"last_message","chat_id":-1001,"last_message":<MessageSummary|null>}
+{"event":"chat_change","change":"list_added","chat_id":-1001,"list":<ChatListRef>}
+{"event":"chat_change","change":"list_removed","chat_id":-1001,"list":<ChatListRef>}
+{"event":"chat_change","change":"read_inbox","chat_id":-1001,"last_read_inbox_message_id":123,"unread_count":2}
+{"event":"chat_change","change":"unread_mention_count","chat_id":-1001,"unread_mention_count":1}
+{"event":"chat_change","change":"unread_reaction_count","chat_id":-1001,"unread_reaction_count":1}
+{"event":"chat_change","change":"unread_poll_vote_count","chat_id":-1001,"unread_poll_vote_count":1}
+{"event":"chat_change","change":"marked_unread","chat_id":-1001,"is_marked_unread":true}
+```
+
+ChatListRef is exactly:
+
+```json
+{"type":"main"}
+{"type":"archive"}
+{"type":"folder","folder_id":2}
+```
+
+Counter mapping is source-independent:
+
+- `updateMessageMentionRead` and `updateChatUnreadMentionCount` both produce
+  `unread_mention_count`.
+- `updateMessageUnreadReactions` and `updateChatUnreadReactionCount` both produce
+  `unread_reaction_count`.
+- `updateMessageContainsUnreadPollVotes` and `updateChatUnreadPollVoteCount` both
+  produce `unread_poll_vote_count`.
+
+Each accepted raw update remains an item even when two consecutive snapshots contain
+the same count. There is no undocumented coalescing. The message-level message ID is
+not exposed in a chat-count item because the public item represents the resulting
+ChatSummary counter.
+
+`identity` is emitted only when folding an entity update changes the exact derived
+ChatIdentity for a known non-secret chat. `updateChatTitle` uses the explicit `title`
+variant and does not also emit `identity`. Photo, permissions, position, read-outbox,
+draft, theme, notification, action-bar, and all other TDLib chat changes are excluded.
+Secret-chat items are excluded through M6; selecting one is
+`USAGE/unsupported_chat_type`.
+
+Known malformed supported payloads terminate affected streams with `INTERNAL` before
+schema-invalid stdout. Unsupported update variants are ignored because the union is
+closed.
+
+#### 4.6.5 Generation-scoped metadata bootstrap
+
+M5 needs ChatIdentity/ChatSummary data without callback-time TDLib requests.
+
+Each TdClient generation owns a new empty `StreamGenerationState`. Before that
+generation accepts a subscription:
+
+1. Install the metadata fold and raw-event buffer before public update publication.
+2. Issue one core-owned `getCurrentState`; never issue it from an update callback.
+3. While it is outstanding, normalize identity/chat deltas into a preallocated
+   bootstrap buffer.
+4. At the response receive-sequence barrier, fold the returned current-state updates
+   as the base, then fold buffered deltas strictly after that barrier in receive order.
+5. Mark the generation stream-ready and only then admit M5 subscriptions.
+6. For every later receive event, fold metadata before making that same event visible
+   to subscription slots.
+
+The barrier, state-ready transition, and slot publication share the hub's generation
+state machine. A subscriber receives one immutable metadata snapshot and then every
+later eligible receive event; there is no gap between its installed snapshot and live
+publication. Bootstrap updates themselves are state restoration, not historical
+`listen` items.
+
+Entity-to-chat mappings consume `updateUser`, `updateBasicGroup`,
+`updateSupergroup`, and `updateNewChat`. Unknown entity order is tolerated by storing
+the entity and chat halves until both exist. `updateNewChat` seeds ChatSummary.
+Derived identity is recomputed after either half changes. State is destroyed on
+client-generation replacement; no old identity can leak into a new generation.
+
+After stream-ready, publication uses one generation-wide ordered-normalization FIFO.
+Every supported update that can produce a public item is assigned its receive
+sequence before any later update is considered. A complete candidate is materialized
+as immutable compact JSON using the metadata state immediately after its own fold. An
+`updateNewChat` whose private/basic-group/supergroup entity half is absent instead
+stores the frozen chat half plus the exact missing entity key; it must not emit a
+schema-incomplete `new` item.
+
+The first incomplete candidate opens the ordering barrier. It and every later
+public-capable candidate, including otherwise complete candidates for unrelated
+chats, are appended in receive order. Metadata-only updates continue to fold. When a
+missing entity arrives, it completes the earlier frozen `new` candidate; an
+`identity` candidate caused by that entity update remains at the entity update's own
+later sequence. The receive thread drains complete candidates only from the FIFO
+head, offering each to subscription slots before the next. It stops at the first
+still-incomplete head. Thus chat-before-entity produces `new` before the later
+`identity`, and no later public item overtakes either one. Later metadata changes
+never rewrite an already materialized or frozen earlier candidate.
+
+No subscription slot is published while this FIFO is nonempty. Admission waits off
+the receive thread until the barrier drains, the request deadline/authorization wins,
+or the generation fails. At the first receive-loop boundary after drain, the sole
+receive owner copies the current immutable metadata snapshot into the dormant slot
+and `memory_order_seq_cst`-publishes that slot before accepting the next receive event. This prevents
+a newly admitted subscriber from receiving a candidate whose receive sequence
+predates its activation snapshot or missing the first later event.
+
+The bootstrap delta buffer has exact bounds of 4,096 deltas and 16,777,216 logical
+bytes. Persistent metadata has exact bounds of 65,536 chats, 131,072 entities, and a
+67,108,864-byte string arena. A delta's logical byte charge is 64 bytes plus the UTF-8
+length of every string copied into it; each persistent string consumes its UTF-8
+length plus one terminator byte, without an alignment charge. Storage is allocated
+before publication. Bootstrap delta exhaustion occurs only before stream-ready and
+rejects the waiting admission. Persistent map/arena exhaustion during bootstrap does
+the same; after stream-ready it marks the generation Failed, terminates active
+subscriptions, and rejects later admissions with explicit `STREAM_CAPACITY`. No
+metadata delta is skipped while a stream continues.
+
+The ordered FIFO is separately preallocated for exactly 4,096 candidates and
+16,777,216 candidate bytes; one candidate may consume at most 262,144 bytes. A
+complete candidate is charged its compact public JSON length plus one newline. An
+incomplete `new` reserves exactly 262,144 bytes until completion, then changes to the
+actual compact-JSON-plus-newline charge without increasing. A completed item larger
+than that reservation fails as `metadata_item_bytes`.
+Crossing any of these three bounds atomically marks the generation Failed. Every
+active subscription claims `STREAM_CAPACITY` with its own operation and the exact
+resource/measurements from §4.6.9; if none is active, the cause is retained.
+Queued but unstarted items are discarded under the ordinary terminal rule, and all
+later admissions fail with that retained cause. The rejected update is therefore not
+silently skipped in a continuing stream. No callback performs a TDLib call, heap
+allocation, mutex acquisition, syscall, notification, or wait.
+
+The gap-free claim is only relative to updates accepted by this one TDLib generation.
+It is not a claim about Telegram delivery, daemon downtime, or earlier generations.
+
+#### 4.6.6 Nonblocking multiplexing and bounded storage
+
+One hub serves one TdClient generation. It has exactly 32 simultaneous M5 subscription
+slots across `listen` and `wait-for`.
+
+The receive path uses:
+
+- a fixed array of 32 lock-free atomic raw-pointer slots;
+- one receive-thread producer;
+- one preallocated 256 KiB normalization scratch buffer;
+- a preallocated SPSC descriptor ring and byte ring per subscription;
+- lock-free fixed-width indices with compile-time and startup lock-free checks;
+- one lock-free `std::atomic<uint32_t>` publisher count for deferred reclamation.
+
+Registration reserves and initializes an unpublished slot off the receive thread.
+The receive-loop owner fills every immutable filter and metadata-snapshot field before
+publishing the slot with `slot.store(pointer, memory_order_seq_cst)` at the §4.6.5
+activation boundary. No slot registry operation uses a weaker memory order.
+Immediately before its first slot load, every receive callback executes
+`publisher_count.fetch_add(1, memory_order_seq_cst)`, whose acquire half precedes the
+load. It then scans all 32 slots with `slot.load(memory_order_seq_cst)`, applies cheap
+immutable type/chat prefilters, and performs a bounded SPSC copy. An RAII guard executes
+`publisher_count.fetch_sub(1, memory_order_seq_cst)`, whose release half follows the
+final pointer use, including the final enqueue attempt; every exit path crosses that
+guard. The pinned
+TdClient receive loop has one non-reentrant publisher, so the count is exactly zero or
+one. The scan has fixed maximum work; it uses no mutex, condition wait, syscall,
+notification, heap, regex, TDLib request, shared_ptr refcount, or callback-time
+teardown.
+
+The slot pointer, publisher count, descriptor producer/consumer indices, byte
+producer/consumer indices, and terminal-cause atomics must each satisfy both
+`is_always_lock_free` at compile time and `is_lock_free()` during hub construction.
+The first failing atomic kind is reported by the exact `lock_free_ingress` schema
+branch in §4.6.9. M5 fails closed at admission; it must not substitute a mutex or
+lossy `try_lock`. Therefore callback lock contention is impossible in the conforming
+implementation. A try-lock miss or silent callback skip is forbidden.
+
+Each subscription queue has exact limits:
+
+- 1,024 descriptors;
+- 8,388,608 serialized data bytes;
+- 262,144 bytes for one normalized item.
+
+Byte accounting is compact item JSON plus its stdout newline. Enqueue succeeds only
+when all three bounds remain valid. Producer counters use checked monotonic arithmetic;
+counter exhaustion is an overflow cause.
+
+Each published subscription has one worker and an absolute monotonic 2 ms poll
+schedule. After an empty poll with no terminal, the worker advances `next_poll` by
+2 ms, skips rather than replays already elapsed ticks, and calls
+`std::this_thread::sleep_until(next_poll)`; a finite request deadline replaces
+`next_poll` when earlier. It does not spin and has no condition-variable notifier.
+When not inside an already-started sink write, it reads terminal state and queue
+indices on every scheduled poll. This permits at most 500 empty state probes per
+second per subscription and 16,000 across 32 subscriptions; nonempty work is bounded
+by admitted items. Scheduling delay is not represented as a real-time delivery
+guarantee, but a runnable non-writing worker observes a claim at its first scheduled
+poll after the claim. Callback code never wakes or notifies the worker.
+
+On queue overflow, the receive thread performs one compare-exchange from Open to the
+exact overflow cause and closes admission. It does not notify, unsubscribe, clear,
+wait, or send. On its next poll, the worker discards unsent queued items and exchanges
+its registry slot to null with `slot.exchange(nullptr, memory_order_seq_cst)`. It then polls
+`publisher_count.load(memory_order_seq_cst)` off the receive path at the same 2 ms
+period. Only after observing zero may it emit the overflow terminal and reclaim slot,
+queue, filter, and metadata-snapshot storage. The slot exchange is also the point after
+which no new callback can acquire that pointer; a callback guarded before the exchange
+keeps the count nonzero until its last use. That slot cannot be reserved again
+before reclamation. The control terminal has separate reserved storage and cannot be
+crowded out by data.
+
+The reclamation proof uses the single C++ sequentially consistent order. Let `P` be
+slot publication, `I` the publisher-count increment, `L` a slot load, `D` the
+publisher-count decrement after the reader's final pointer use, `X` the exchange to
+null, and `Z` a reclaimer count load that observes zero. Program order requires
+`I < L < D` for a callback and `X < Z` for a reclaimer; all six operations participate
+in the same `seq_cst` order.
+
+- Initialization of the slot object and immutable metadata snapshot is sequenced
+  before `P`. If `L` reads the pointer stored by `P`, the release/acquire semantics of
+  the `seq_cst` store/load publish every initialized field to the reader.
+- If `L < X`, then `I < L < X`. Because `D` is after the reader's final use, a `Z`
+  ordered before `D` cannot observe a zero count contributed by that reader. The first
+  admissible `Z` that observes zero is after `D`, so reclamation follows the last use.
+- If `X < L`, sequential consistency makes `L` observe null: no `P` for that slot is
+  allowed between `X` and reclamation. The subcase `I < X < L` merely delays
+  reclamation until its null-reading callback executes `D`.
+
+Therefore no callback can obtain the removed pointer after `X`, and every callback
+that obtained it before `X` completes its final pointer and metadata-snapshot use
+before `Z` permits reclamation. Reuse/publication of that slot is forbidden until
+after reclamation, excluding ABA.
+
+No silent drop, oldest-drop, sampling, coalescing, spill, or retry exists. Subscribers
+have independent queues and failures. A slow subscriber cannot block another or the
+TDLib receive thread.
+
+#### 4.6.7 Filtering, ordering, and count
+
+The logical order is:
+
+1. normalize a supported update;
+2. fold generation metadata;
+3. exclude secret chats;
+4. apply `--types`;
+5. apply resolved chat IDs;
+6. enqueue without waiting;
+7. on the subscription worker, apply resolved sender;
+8. apply regex;
+9. check terminal/deadline state;
+10. completely send and flush the item frame;
+11. increment count after complete delivery;
+12. after the Nth complete item, claim planned success.
+
+Live FIFO order is TDLib receive order for one generation. Delete batches count once;
+both edit variants select as `edit`; all three reaction variants select as `reaction`.
+No ordering is claimed across processes or generations.
+
+`--from` resolves once through M2. It matches only
+`MessageSenderRef{"type":"user","id":resolved_id}`; chat senders do not match.
+
+Regex is RE2 UTF-8, case-sensitive, unanchored `RE2::PartialMatch`. Pattern bytes are
+valid UTF-8 and `1..4096`. Options are `log_errors=false`, `max_mem=1048576`, no ICU,
+and no capture extraction. Matching uses exactly `MessageSummary.text`, including
+captions and the empty string for other content. Invalid syntax or compile resource
+failure is pre-activation `USAGE/invalid_argument`.
+
+#### 4.6.8 `wait-for --after` local scan
+
+After all setup and live-slot publication, a user-account `--after` scan uses only
+these exact tuples:
+
+```text
+getChatHistory(chat_id, 0,            0, 100, true)  # first page
+getChatHistory(chat_id, last_raw_id,  0, 100, true)  # following pages
+```
+
+Each following response includes its anchor when available. Remove exactly one first
+element equal to `last_raw_id`; record the last newly consumed raw ID before filters.
+New raw IDs must be unique and strictly decreasing. An out-of-order, duplicate, or
+otherwise malformed advancing response is `PAGINATION_INVALID` with
+`operation:"wait_for"`. An anchor-only, empty, or null-only local response after
+anchor removal is the accepted `local_boundary`. A short successful page is not EOF;
+continue from its last new raw ID. Stop after consuming the first ID `<= after`; it is
+not eligible. There is no raw scan cap; deadline and explicit memory bounds remain.
+
+Concurrent live message events enter the same bounded 1,024-item / 8 MiB wait queue.
+Local candidates also count against those bounds. History scan keeps only the current
+smallest eligible matching candidate plus bounded live overlap metadata; it does not
+materialize an unbounded page set.
+
+Deduplication precedes sender/regex filtering for an overlap key
+`(chat_id,message_id)`. When history and buffered live DTOs differ, the history DTO
+wins because it was returned by the later local query and is the current retained
+snapshot; filters are then evaluated on that selected DTO. A history record checks
+and marks any matching buffered live key before it can be emitted. A later live event
+for an already-consumed history key is suppressed. The bounded overlap index uses the
+same queue limits; exhaustion is `STREAM_OVERFLOW`, never duplicate or loss.
+
+After the scan:
+
+- return the smallest matching retained message ID greater than `after`, if any;
+- otherwise drain unmatched/undeduplicated buffered live messages in receive order;
+- then continue live until match, timeout, or another terminal.
+
+Without `--after`, no history request occurs and eligibility begins at successful slot
+publication.
+
+The retained catch-up guarantee applies only to a matching message available in
+TDLib's continuous local prefix or received in the subscription's live window. It
+does not cover deleted/expired messages, an unknown local gap, daemon downtime,
+messages TDLib never observed, or a prior generation. A durable local journal might
+change some coverage but is neither claimed necessary nor sufficient for an absolute
+Telegram-delivery guarantee.
+
+#### 4.6.9 Errors and strict schemas
+
+Command setup preserves accepted M1/M2 errors and their original operations. In
+particular, resolver errors retain `operation:"resolve"`; M5 does not rewrite them to
+`listen` or `wait_for`.
+
+M5 adds:
+
+```json
+{
+  "error":{
+    "code":"STREAM_OVERFLOW",
+    "message":"stream buffer capacity was exceeded",
+    "details":{
+      "operation":"wait_for",
+      "cause":"queue_bytes",
+      "limit_items":1024,
+      "limit_bytes":8388608,
+      "queued_items":800,
+      "queued_bytes":8380000,
+      "incoming_bytes":12000
+    }
+  }
+}
+```
+
+`cause` is exactly `queue_items`, `queue_bytes`, `item_bytes`,
+`history_overlap`, or `counter_exhausted`. `operation` is `listen` or `wait_for`.
+All numeric values are nonnegative integers; limits are the constants above. This
+error is exit 1.
+
+```json
+{
+  "error":{
+    "code":"STREAM_CAPACITY",
+    "message":"stream service capacity is unavailable",
+    "details":{
+      "operation":"listen",
+      "phase":"admission",
+      "resource":"subscriber_slots",
+      "limit":32
+    }
+  }
+}
+```
+
+`stream.error.schema.json` defines `STREAM_CAPACITY.details` as a strict `oneOf`.
+Every branch has `additionalProperties:false`, requires `operation` exactly
+`listen|wait_for`, and then requires exactly the following fields and constants:
+
+| `resource` | `phase` | exact remaining fields |
+|---|---|---|
+| `subscriber_slots` | `admission` | `limit:32` |
+| `lock_free_ingress` | `admission` | `atomic`, exactly `slot_pointer`, `publisher_count`, `descriptor_index`, `byte_index`, or `terminal_cause`; no numeric field |
+| `metadata_bootstrap_items` | `bootstrap` | `limit_items:4096`, `used_items:0..4096`, `incoming_items:1` |
+| `metadata_bootstrap_bytes` | `bootstrap` | `limit_bytes:16777216`, `used_bytes:0..16777216`, positive `incoming_bytes` |
+| `metadata_chats` | `bootstrap\|active` | `limit:65536`, `used:0..65536`, `incoming:1` |
+| `metadata_entities` | `bootstrap\|active` | `limit:131072`, `used:0..131072`, `incoming:1` |
+| `metadata_bytes` | `bootstrap\|active` | `limit_bytes:67108864`, `used_bytes:0..67108864`, positive `incoming_bytes` |
+| `metadata_order_items` | `active` | `limit_items:4096`, `used_items:0..4096`, `incoming_items:1` |
+| `metadata_order_bytes` | `active` | `limit_bytes:16777216`, `used_bytes:0..16777216`, positive `incoming_bytes` |
+| `metadata_item_bytes` | `active` | `limit_bytes:262144`, `incoming_bytes` with minimum 262145 |
+
+For every byte/item/map occupancy branch, the reported values are those immediately
+before the rejected insertion and must prove that insertion would exceed the stated
+constant. `bootstrap` happens before any slot can be active and rejects the admission
+that is waiting for stream-ready. `subscriber_slots` and `lock_free_ingress` reject
+only the current admission. An `active` metadata failure is generation-wide: it
+claims the same retained cause for every open subscription using that subscription's
+operation, and a later admission receives the retained measurements with its requested
+operation. First terminal cause still wins independently for a stream. This error is
+exit 1.
+
+Other exact branches are inherited rather than narrowed:
+
+- `USAGE` and existing selector ambiguity/not-found shapes;
+- `NOT_AUTHED` with account/state/reason;
+- `BOT_UNSUPPORTED` with the operation that actually rejected the call;
+- `TDLIB_ERROR`, `RATE_LIMITED`, `TIMEOUT`, and `PAGINATION_INVALID` with
+  `resolve` where M2 resolution emitted them and `listen|wait_for` where the stream
+  itself emitted them;
+- `DAEMON_SHUTDOWN` and `INTERNAL`.
+
+Add these self-contained strict Draft 2020-12 files:
+
+- `listen.item.schema.json`, an exact `oneOf` over all eight event discriminators and
+  the closed chat-change variants;
+- `wait-for.result.schema.json`, exact M2 MessageSummary;
+- `stream.error.schema.json`, including inherited valid branches and the two new
+  capacity branches;
+- `stream-manifest.json`, separate from the result-only manifest:
+
+```json
+{
+  "schemaDialect":"https://json-schema.org/draft/2020-12/schema",
+  "commands":{
+    "listen":{"item":"listen.item.schema.json","error":"stream.error.schema.json"},
+    "wait-for":{"result":"wait-for.result.schema.json","error":"stream.error.schema.json"}
+  }
+}
+```
+
+`wait-for.result.schema.json` also appears under `wait-for` in the existing
+result-only manifest. `listen` has no result schema and no result-manifest entry.
+Packaging and schema tests require exact stream-manifest/file bijection. The later
+`schema` command must consult both catalogs; its M6 CLI presentation is intentionally
+not activated here.
+
+#### 4.6.10 Terminal, delivery, stdout, and lifecycle
+
+Terminal handling has two levels:
+
+1. an atomic nonblocking cause claim closes event admission;
+2. one writer serializes already-started frame completion and the claimed terminal.
+
+A cause callback only compare-exchanges state; it performs no wake or notification.
+The worker observes the claim on its §4.6.6 poll schedule. The callback never waits
+for the socket lock. After a terminal claim, queued frames that have not begun are
+discarded. A frame whose write already began is allowed to finish before the terminal.
+
+Item delivery succeeds only after the complete protocol frame, including newline, is
+written. Only then does count increment. A failed or partial write changes the session
+to disconnected, shuts down that exact connection, cancels/unsubscribes, releases
+activity, sends no terminal, and does not increment count. Terminal write failure is
+also disconnect without retry.
+
+If an external terminal is claimed while an item write is in progress, a successful
+item may precede that terminal; its count increments, but the already-claimed cause
+wins over count completion. If count completion claims first, later timeout/auth-loss
+cannot replace its planned success. First atomic cause claim wins exactly once.
+
+Planned `listen` completion sends internal `Result{}` for protocol/activity closure.
+The client consumes it without stdout. `wait-for` success prints its MessageSummary
+Result. Errors print no stdout.
+
+For every Item in daemon and `--no-daemon` modes, the client writes the complete JSON
+line, checks the write result, calls `fflush(stdout)`, and checks `ferror(stdout)`.
+Failure closes/cancels the request and exits 1 with a client-local output diagnostic;
+it does not fabricate a daemon terminal. Tests cover full buffering, EPIPE, short
+write, and flush failure. SIGPIPE remains ignored. The in-process ResponseSink returns
+delivery status so the same cancellation path applies.
+
+Disconnect emits no observable terminal. Daemon shutdown emits one
+`DAEMON_SHUTDOWN` unless another cause won. Ready-to-nonready emits one `NOT_AUTHED`
+with `authorization_lost` and the first non-ready state. Unexpected TDLib Closed ends
+that generation's streams; replacement does not resume them. Late old-generation,
+queued, and post-terminal events are discarded.
+
+Subscription activation is transactional:
+
+1. reserve and initialize a dormant hub slot while the existing request activity
+   token still prevents idle exit;
+2. under the RequestSession lifecycle gate, verify Open and promote the request token
+   to Subscription;
+3. publish the already-initialized slot with the same lifecycle decision;
+4. if Open was lost before promotion, release the dormant slot and leave normal
+   terminal handling to release the request token;
+5. no fallible operation occurs after promotion and before publication.
+
+Terminal/disconnect teardown removes the slot and releases the promoted token exactly
+once after the final send attempt. Unlimited active subscriptions therefore keep
+`subscriptions > 0` and prevent idle exit. Promotion failure, registry-capacity
+failure, setup error, and publish rollback each have tests proving zero leaked or
+double-released activity.
+
+There is no reconnect, automatic resubscribe, replay, resume token, public sequence,
+gapless claim, or delivery acknowledgment after socket failure.
+
+#### 4.6.11 Bot behavior
+
+- Ready bots support `listen` and live-only `wait-for` for updates Telegram delivers
+  to them.
+- `--types reaction` maps bot updates to `bot_reaction_change` and
+  `bot_reaction_snapshot`; it never waits for suppressed user-account interaction
+  snapshots.
+- `wait-for --after` is rejected before `getChatHistory` because the pinned function
+  carries `CHECK_IS_USER`.
+- Exact numeric and bot-capable public resolver branches remain allowed. Branches
+  requiring user-only dialog lists, contacts, invite checks, Saved Messages, or other
+  `CHECK_IS_USER` functions retain M2 `BOT_UNSUPPORTED` ordering.
+- A global display-name `--from` that requires contacts is unsupported for bots;
+  exact numeric and permitted public username/profile forms remain usable.
+- No contract claims receipt of messages or reactions Telegram does not send to the
+  bot.
+
+#### 4.6.12 Persistence prohibition
+
+M5 creates no event store, cursor/checkpoint store, wait registry, queue spill, resume
+journal, filter persistence, or stream replay state. Queue, bootstrap, regex, and
+overlap state are memory-only and generation-scoped. TDLib's database remains the only
+message persistence. Standard test-harness evidence files are outside the product
+runtime and do not alter this rule.
+
+#### 4.6.13 RE2 dependency gate
+
+The selected upstream is google/re2 tag `2022-12-01`, full commit
+`4be240789d5b322df9f02b7e19c8651f3ccbf205`. The local official-origin checkout, the
+official GitHub tag-ref/tag-object/commit API responses, and the extracted codeload
+tree agree exactly: annotated tag object
+`1834cd0cb196b1c6f7225df97c0550cf00f7f8e2` points to that full commit, whose Git tree
+is `6cabea768fe9e69c1b7d4d410a2fdaa57057d881`. Tag and commit are unsigned; a tag/full
+SHA mismatch would reject the candidate, but none exists here.
+
+The exact runtime lock entry must use:
+
+- source archive
+  `https://codeload.github.com/google/re2/tar.gz/4be240789d5b322df9f02b7e19c8651f3ccbf205`;
+- HTTP 200 `application/x-gzip`, 382,881 bytes, archive SHA-256
+  `da5c23ecdb9a55c82d6802ee55812dfb99a035a4838287c0b7c0051bd0fdb9fc`;
+- top-level directory `re2-4be240789d5b322df9f02b7e19c8651f3ccbf205`;
+- repository-normalized extracted tree SHA-256
+  `6d3942bcd96377f18ec60a7b190d1b217d037ff0132ff6ae8dc463347c067046`;
+- `version:"2022-12-01"`, the full immutable ref above, `scope:"runtime"`, and
+  `integration:"fetchcontent"`.
+
+Extraction used the repository archive policy: at most 100,000 members, 256 MiB per
+member, and 512 MiB expanded. It produced 128 regular files, no symlinks, no
+`.gitmodules`, and no Git mode-160000 entries. Its normalized tree hash equals an
+independent `git archive` export of the pinned commit, and `diff -qr` is empty.
+
+The upstream `LICENSE` is exactly 1,558 bytes/27 lines, Git blob
+`09e5ec1c74c187adc8fde6c74308c3492ef31f77`, SHA-256
+`6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449`, SPDX
+`BSD-3-Clause`. The exact bytes are the pinned archive's top-level `LICENSE` and must be copied unchanged to `release/licenses/RE2.txt`.
+
+There is also one runtime embedded component: the Plan 9 UTF routines in
+`util/rune.cc` and `util/utf.h`, by Rob Pike and Ken Thompson, Copyright (c) 2002
+Lucent Technologies. `util/rune.cc` is in `RE2_SOURCES`; this is not test-only. The
+notice is not asserted to match a standard SPDX identifier and must be locked as
+`LicenseRef-RE2-Lucent-2002`. `release/licenses/RE2-Lucent-UTF.txt` must contain the
+first 14 lines of the pinned `util/rune.cc` byte-for-byte, including comment markers
+and final newline: 752 bytes, SHA-256
+`8af3194d846fcddce0f5e8d4ae6c404744d9b7922a24f23415bd15a9cfe5e6ee`. The RE2 lock
+entry records an embedded component with those two source paths and that notice.
+
+The pinned CMake project has exactly `BUILD_SHARED_LIBS`, `USEPCRE`, and
+`RE2_BUILD_TESTING` options; it has no `RE2_USE_ICU` CMake option. Passing
+`-DRE2_USE_ICU=OFF` is therefore forbidden because CMake can ignore it while creating
+false assurance. Configure with exactly `BUILD_SHARED_LIBS=OFF`,
+`RE2_BUILD_TESTING=OFF`, and `USEPCRE=OFF`. The release verifier must additionally
+reject `RE2_USE_ICU` in compile definitions/commands and reject ICU, PCRE, Abseil,
+test, benchmark, or shared RE2 artifacts in the resolved target, link commands,
+provenance, SBOM, and package. `re2/mimics_pcre.cc` is an internal RE2 implementation
+source and does not link PCRE; `util/pcre.cc` is excluded with testing off.
+
+Measured configure/build/install with those three options succeeded and produced
+static `libre2.a`. CMake and the installed target expose only platform
+`Threads::Threads`; no vendored/submodule dependency exists and no other runtime
+transitive was found.
+
+The external evidence gate is closed. Merge/release remains fail-closed until the
+measured lock fields, both notices, `TGCLI_RE2_REV`/resolved-revision assertions,
+static `re2::re2` integration, staged offline archive, and dependency/source-tree/
+provenance/SBOM/notices/Linux/macOS/artifact verifiers are implemented and prove a
+network-disabled configure/build/test. These are implementation prerequisites, not an
+open behavioral-contract decision.
+
+#### 4.6.14 Acceptance matrix
+
+Fake/native tests must cover:
+
+- parser defaults and every bound, including the 65th chat, count, timeout, after,
+  types, and regex limits;
+- exact Ready/getMe/bot/selector/deadline precedence and TD request traces;
+- bot `--after` sends no history call;
+- every strict item branch, unknown-property rejection, and malformed supported
+  update termination;
+- native conversion of user interaction snapshots, bot public deltas, bot anonymous
+  snapshots, and all ReactionRef/sender variants;
+- both message-level and chat-level sources for all three unread counters;
+- generation bootstrap, entity-before-chat, chat-before-entity, frozen-candidate
+  semantics, global later-item retention, head-only drain, admission during a live
+  barrier, derived identity changes, generation reset, and every exact metadata
+  capacity branch in bootstrap and active phases;
+- fixed subscriber cap; compile-time/startup lock-free rejection for every named
+  atomic; publisher acquire-before-slot/release-after-final-use; null-then-zero
+  reclamation; 2 ms worker polling bounds; and no mutex/heap/syscall/notification/TD
+  call from callbacks;
+- queue item/byte/single-item/counter overflow for both operations, atomic first
+  overflow, reserved control delivery, deferred teardown, and no silent loss;
+- multi-subscriber isolation and a blocked sink not delaying receive publication;
+- exact filter order, incoming/outgoing messages, batch count, edit mapping, and all
+  reaction mappings;
+- first and subsequent exact getChatHistory tuples, inclusive anchor removal,
+  decreasing progress, short-page continuation, anchor-only/local boundary,
+  malformed progress, deadline, and no network-capable history call;
+- history/live dedup with different DTOs, history-wins filtering, retained ordering,
+  and bounded overlap overflow;
+- item-versus-count/timeout/auth-loss/shutdown/overflow races under the two-level state;
+- count only after complete send, and no count/terminal after partial or failed send;
+- silent listen Result in daemon/no-daemon paths;
+- per-item stdout flush, EPIPE/short-write/flush failure cancellation, and no fabricated
+  terminal;
+- transactional activity promotion, every rollback, unlimited idle suppression, and
+  exact-once release;
+- old-generation and post-terminal rejection, no reconnect/resume claim;
+- stream/result/error schema validation, strict stream catalog bijection, and packaged
+  discoverability;
+- strict `STREAM_CAPACITY` oneOf validation for every resource, operation, phase,
+  required constant/measurement, unknown-field rejection, and retained active cause;
+- RE2 tag/full-SHA equivalence, archive/tree corruption rejection, both license
+  notices, offline staged build, absent ICU compile definition/linkage, absent
+  PCRE/Abseil/tests/benchmarks/shared artifact, and Threads-only runtime closure;
+- no product persistence or spill.
+
+TSan fake coverage is required for slot publication, queue indices, terminal claim,
+publisher reclamation, activity promotion, and generation bootstrap.
+The slot test must force each `P/I/L/D/X/Z` ordering case above for every slot, assert
+that no post-`X` load returns the removed pointer, poison freed slot/snapshot storage,
+and stress at least 1,000,000 publish/scan/remove/reuse cycles under TSan without a
+use-after-free, data race, ABA observation, or premature zero-count reclamation.
+
+#### 4.6.15 TestDC M5 flow
+
+Prerequisites are the isolated `TGCLI_TEST_DC=1` account, Ready user auth, implemented
+M2 resolve/DTOs, implemented M3 send, and an explicit write grant. Missing M3/write
+surface is a failed milestone prerequisite, not a silent skip.
+
+The flow is:
+
+1. Resolve the test user's Saved Messages numeric chat ID and current user ID.
+2. Generate 32 lowercase hexadecimal characters from the harness CSPRNG. Define exact
+   ASCII strings `tgcli-m5-anchor-<hex>` and `tgcli-m5-target-<hex>`. They contain no
+   RE2 metacharacters.
+3. Run `tgcli --json --allow-write --account <user> send <saved-id> <anchor>` and
+   record final ID `B`.
+4. Run `tgcli --json --allow-write --account <user> send <saved-id> <target>` and
+   record final ID `T`; require `T > B`.
+5. Run:
+
+```text
+tgcli --json --timeout 30 --account <user> wait-for \
+  --chat <saved-id> \
+  --from <self-user-id> \
+  --after <B> \
+  --regex '^tgcli-m5-target-<exact-hex>$'
+```
+
+6. Require exit 0, empty stderr, exactly one stdout object matching the result schema,
+   and exact `id == T`, chat, sender, and text.
+
+This exercises the retained subscribe-before-scan path without a readiness sleep.
+Fake tests cover the exact concurrent live interleaving and listen activation.
+
+M5 has no supported delete command, so the harness must not pretend to clean these two
+messages. They remain only in the isolated, periodically wiped Telegram TestDC and its
+isolated TDLib database. The harness writes a non-secret test result record containing
+the account alias, chat ID, B, T, and target prefix so later cleanup tooling can locate
+them once a supported delete surface exists. Test failure does not invoke raw or a
+production account.
+
+#### 4.6.16 Implementation dependency slices
+
+Bottom-up order:
+
+1. Add strict schemas/catalog, including retained-prefix and
+   subscriber-cap corrections.
+2. Land shared M2 resolver/DTO/history components.
+3. Close the RE2 archive integrity gate and release dependency integration.
+4. Add tagged deadlines and wait helpers.
+5. Add generation metadata bootstrap and curated update normalization.
+6. Add fixed-slot ingress, bounded queues, and capacity errors.
+7. Add RequestSession two-level output/terminal and transactional activity activation.
+8. Implement parser and handlers.
+9. Add client silent Result, checked item write/flush, and cancellation propagation.
+10. Add schema, fake/native, TSan, integration, TestDC, and release-provenance tests.
+
+#### 4.6.17 Review ledger closure
+
+| finding | closure | status |
+|---|---|---|
+| H1 bot reactions | Separate bot delta/snapshot event variants, default reaction selection, and native fake matrix are exact. | closed in contract |
+| H2 counters/identity | A bounded generation-wide ordered-normalization FIFO freezes incomplete `new`, retains every later public candidate, drains only a complete head, blocks activation while nonempty, and fails the generation explicitly on capacity. | closed in contract |
+| H3 no-block ingress | The publisher count acquires before the first slot load and releases after final use; every guard atomic is checked lock-free; null-then-zero reclamation and fixed 2 ms worker polling require no callback wake/syscall. | closed in contract |
+| H4 wait buffer | Wait live, history candidate, and overlap state use the same explicit item/byte limits and `wait_for` overflow schema. | closed in contract |
+| H5 setup errors | Ready/getMe/bot/resolver ordering, `resolve` error preservation, deadline precedence, and forbidden-history trace are exact. | closed in contract |
+| M6 after pagination | Exact tuples, anchor removal, progress, short-page behavior, boundary, and history-wins dedup/filter order are exact. | closed in contract |
+| M7 absolute guarantee | Contract is limited to retained continuous prefix plus live window and makes no journal necessity/sufficiency claim. | closed in contract |
+| M8 delivery/terminal | Atomic cause plus ordered writer, complete-send counting, and disconnect on partial failure are exact. | closed in contract |
+| M9 stdout flush | Per-item checked write/flush and local cancellation are required in both modes. | closed in contract |
+| M10 activity | Dormant reservation, gated promotion/publication, rollback, idle suppression, and exact-once release are exact. | closed in contract |
+| M11 RE2 | Official tag/full-SHA and immutable archive/tree hashes are measured; the absent ICU option, Threads-only link closure, and Lucent runtime notice are explicit. Repository lock/integration/verifier work remains a fail-closed implementation prerequisite. | evidence gate closed |
+| M12 TestDC | Write prerequisites, RE2-safe nonce, exact assertions, retained-data record, and no fake cleanup are exact. | closed in contract |
+| L13 schema discovery | Separate strict stream catalog is packaged/tested; no fake listen result; later schema CLI presentation remains M6. | closed in contract |
+
+No further user-level product decision is required under the accepted no-persistence
+direction. No external evidence gate remains; M5 must not be declared complete until
+the fail-closed RE2 repository integration and the rest of this contract are
+implemented and verified.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result
@@ -2495,8 +3452,8 @@ Layer responsibilities:
   code. Owns the TTY: challenge frames (login secrets, destructive
   confirmations) are prompted client-side and answered back over the socket.
 - **dispatch** — the daemon-side protocol endpoint: frames in/out, concurrent
-  requests, subscription multiplexing (many `listen`/`wait-for` clients over
-  one update bus).
+  requests, subscription multiplexing (up to 32 `listen`/`wait-for` clients
+  over one update bus; §4.6.6).
 - **core (`TdClient`)** — owns the tdlib `ClientManager` receive loop on a
   dedicated thread. Its public boundary is
   `send(TdValue) → future<TdValue>`: `TdValue` is move-only type erasure, so
@@ -3006,8 +3963,9 @@ Hard tdlib constraint: **one tdlib database directory — one client process**.
 tgcli embraces it instead of working around it: the tdlib client lives in a
 per-account daemon from day one, and every invocation is a thin client over
 the account's unix socket. Consequences: ~zero CLI startup latency (no tdlib
-DB open per command), safe concurrent invocations, any number of simultaneous
-`listen`/`wait-for` subscribers, and a local DB that stays continuously warm.
+DB open per command), safe concurrent ordinary invocations, up to 32 simultaneous
+`listen`/`wait-for` subscribers, and a local DB that stays continuously warm
+(§4.6.6).
 
 - **Exact routing and auto-spawn.** Account client-local commands `login`,
   `logout`, `me`, the normal `doctor` probe, and M3/M4 write dry-runs route to
@@ -3509,8 +4467,9 @@ What makes tgcli specifically LLM-agent-friendly:
 - Destructive actions are non-interactive-safe: without a TTY they fail
   closed (exit 6) unless `--yes` is explicit in the call.
 - `send` returns the sent message id; `wait-for --after <that-id> --regex
-  --timeout` turns "message someone and await the reply" into one race-free
-  blocking call with a deterministic timeout exit code.
+  --timeout` turns "message someone and await a retained/local-or-live reply"
+  into one blocking call with a deterministic timeout exit code; §4.6.8 states
+  the local-prefix and generation limits.
 - `listen --json --count N --timeout S` gives bounded streaming reads that
   exit 0 on planned expiry.
 - `--idempotency-key` provides the bounded retry semantics in §4.5.7.
