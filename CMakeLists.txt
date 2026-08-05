@@ -14,10 +14,6 @@ option(TGCLI_SYSTEM_TDLIB
 option(TGCLI_BUILD_TESTS "Build tests" ON)
 option(TGCLI_WERROR "Treat compiler warnings as errors" OFF)
 
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static third-party libraries" FORCE)
-set(RE2_BUILD_TESTING OFF CACHE BOOL "Disable RE2 tests and benchmarks" FORCE)
-set(USEPCRE OFF CACHE BOOL "Disable RE2 PCRE test support" FORCE)
-
 # These exact source commits are mirrored in release/dependencies.lock.json.
 # A TDLib bump is a contract-change-class PR (REVIEW.md §7).
 set(TGCLI_TDLIB_REV a17f87c4cff7b90b278d12b91ba0614383aaee82)
@@ -39,6 +35,7 @@ tgcli_assert_dependency_lock(tomlplusplus ${TGCLI_TOMLPLUSPLUS_REV})
 tgcli_assert_tdlib_build_script(${TGCLI_TDLIB_REV})
 
 include(FetchContent)
+include(cmake/Re2Dependency.cmake)
 
 FetchContent_Declare(cli11
     GIT_REPOSITORY https://github.com/CLIUtils/CLI11
@@ -55,7 +52,8 @@ FetchContent_Declare(fmt
 FetchContent_Declare(tomlplusplus
     GIT_REPOSITORY https://github.com/marzer/tomlplusplus
     GIT_TAG ${TGCLI_TOMLPLUSPLUS_REV})
-FetchContent_MakeAvailable(cli11 re2 nlohmann_json fmt tomlplusplus)
+tgcli_make_re2_available()
+FetchContent_MakeAvailable(cli11 nlohmann_json fmt tomlplusplus)
 tgcli_assert_resolved_git_revision(cli11 "${cli11_SOURCE_DIR}" ${TGCLI_CLI11_REV})
 tgcli_assert_resolved_git_revision(re2 "${re2_SOURCE_DIR}" ${TGCLI_RE2_REV})
 tgcli_assert_resolved_git_revision(
@@ -83,6 +81,21 @@ endif()
 if(TARGET testing OR TARGET regexp_benchmark)
     message(FATAL_ERROR "Pinned RE2 tests and benchmarks must remain disabled")
 endif()
+file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/re2-target-evidence.json"
+    CONTENT "{\n\
+  \"archive\": \"$<TARGET_FILE:re2>\",\n\
+  \"archive_name\": \"$<TARGET_FILE_NAME:re2>\",\n\
+  \"configured_options\": {\n\
+    \"BUILD_SHARED_LIBS\": false,\n\
+    \"RE2_BUILD_TESTING\": false,\n\
+    \"USEPCRE\": false\n\
+  },\n\
+  \"runtime_libraries\": [\"Threads::Threads\"],\n\
+  \"schema_version\": 1,\n\
+  \"target\": \"re2::re2\",\n\
+  \"target_type\": \"$<TARGET_PROPERTY:re2,TYPE>\"\n\
+}\n")
 
 if(TGCLI_SYSTEM_TDLIB)
     find_package(Td REQUIRED)

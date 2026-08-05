@@ -4,12 +4,24 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
+
+from verify_re2_build import Re2VerificationError, validate_build_evidence
 
 
 class ProvenanceError(RuntimeError):
     pass
+
+
+SBOM_FORMAT = "tgcli-release-sbom"
+SBOM_PLATFORMS = {
+    "linux-x86_64-musl",
+    "macos-arm64",
+    "macos-universal",
+    "macos-x86_64",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -120,6 +132,387 @@ def sha256_file(file: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def file_identity(file: pathlib.Path) -> dict:
+    require(file.is_file(), f"identity input is missing: {file}")
+    require(not file.is_symlink(), f"identity input cannot be a symlink: {file}")
+    return {"sha256": sha256_file(file), "size": file.stat().st_size}
+
+
+def artifact_identity(artifact: pathlib.Path) -> dict:
+    identity = file_identity(artifact)
+    return {"path": artifact.name, **identity}
+
+
+def validate_re2_evidence(document: object) -> dict:
+    try:
+        return validate_build_evidence(document)
+    except Re2VerificationError as error:
+        raise ProvenanceError(str(error)) from error
+
+
+def validate_license_evidence(repo_root: pathlib.Path, evidence: object) -> list[dict]:
+    require(
+        isinstance(evidence, list) and evidence,
+        "SBOM component license evidence is missing",
+    )
+    validated: list[dict] = []
+    for item in evidence:
+        require(
+            isinstance(item, dict) and set(item) == {"path", "sha256"},
+            "SBOM component license evidence is invalid",
+        )
+        relative = pathlib.PurePosixPath(item["path"])
+        require(
+            not relative.is_absolute()
+            and ".." not in relative.parts
+            and item["path"].startswith("release/licenses/"),
+            "SBOM component license path is unsafe",
+        )
+        license_file = repo_root.joinpath(*relative.parts)
+        require(
+            license_file.is_file() and not license_file.is_symlink(),
+            f"SBOM component license file is missing or unsafe: {item['path']}",
+        )
+        require(
+            sha256_file(license_file) == item["sha256"],
+            f"SBOM component license digest differs: {item['path']}",
+        )
+        validated.append({"path": item["path"], "sha256": item["sha256"]})
+    return sorted(validated, key=lambda item: item["path"])
+
+
+def embedded_component_record(repo_root: pathlib.Path, component: object) -> dict:
+    require(isinstance(component, dict), "embedded SBOM component is invalid")
+    required = {
+        "id",
+        "license_expression",
+        "license_files",
+        "name",
+        "source_path",
+        "version",
+    }
+    require(set(component) == required, "embedded SBOM component schema differs")
+    return {
+        "id": component["id"],
+        "license_expression": component["license_expression"],
+        "license_files": validate_license_evidence(
+            repo_root, component["license_files"]
+        ),
+        "name": component["name"],
+        "source_path": component["source_path"],
+        "version": component["version"],
+    }
+
+
+def component_record(repo_root: pathlib.Path, component: object) -> dict:
+    require(isinstance(component, dict), "SBOM component is invalid")
+    required = {
+        "archive_sha256",
+        "archive_size",
+        "embedded_components",
+        "id",
+        "immutable_ref",
+        "license_expression",
+        "license_files",
+        "name",
+        "scope",
+        "source_archive",
+        "source_repository",
+        "version",
+    }
+    require(required <= set(component), "SBOM component lock fields are incomplete")
+    embedded = component["embedded_components"]
+    require(isinstance(embedded, list), "embedded SBOM component list is invalid")
+    return {
+        "archive_sha256": component["archive_sha256"],
+        "archive_size": component["archive_size"],
+        "embedded_components": sorted(
+            (embedded_component_record(repo_root, item) for item in embedded),
+            key=lambda item: item["id"],
+        ),
+        "generated_source_tree_sha256": component.get("generated_source_tree_sha256"),
+        "id": component["id"],
+        "immutable_ref": component["immutable_ref"],
+        "license_expression": component["license_expression"],
+        "license_files": validate_license_evidence(
+            repo_root, component["license_files"]
+        ),
+        "name": component["name"],
+        "scope": component["scope"],
+        "source_archive": component["source_archive"],
+        "source_repository": component["source_repository"],
+        "source_tree_sha256": component.get("source_tree_sha256"),
+        "version": component["version"],
+    }
+
+
+def resolved_sbom_components(
+    lock: dict, repo_root: pathlib.Path, platform: str
+) -> list[dict]:
+    components = lock.get("components")
+    require(isinstance(components, list), "dependency lock components are missing")
+    if platform == "linux-x86_64-musl":
+        selected = [
+            item
+            for item in components
+            if isinstance(item, dict)
+            and item.get("scope") in {"runtime", "release-runtime"}
+        ]
+    else:
+        selected = [
+            item
+            for item in components
+            if isinstance(item, dict)
+            and (item.get("scope") == "runtime" or item.get("id") == "openssl")
+        ]
+    records = sorted(
+        (component_record(repo_root, item) for item in selected),
+        key=lambda item: item["id"],
+    )
+    ids = [item["id"] for item in records]
+    require(len(ids) == len(set(ids)), "SBOM component IDs are not unique")
+    require("re2" in ids, "SBOM runtime component inventory omits RE2")
+    return records
+
+
+def validate_sbom_shape(document: object, lock: dict, repo_root: pathlib.Path) -> dict:
+    require(isinstance(document, dict), "SBOM must contain a JSON object")
+    require(
+        set(document)
+        == {
+            "artifact",
+            "builds",
+            "components",
+            "dependency_lock",
+            "format",
+            "platform",
+            "provenance",
+            "schema_version",
+            "slice_sboms",
+        }
+        and document["format"] == SBOM_FORMAT
+        and document["schema_version"] == 1
+        and document["platform"] in SBOM_PLATFORMS,
+        "SBOM schema is invalid",
+    )
+    artifact = document["artifact"]
+    require(
+        isinstance(artifact, dict)
+        and set(artifact) == {"path", "sha256", "size"}
+        and isinstance(artifact["path"], str)
+        and artifact["path"]
+        and pathlib.PurePosixPath(artifact["path"]).name == artifact["path"]
+        and isinstance(artifact["sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"]) is not None
+        and type(artifact["size"]) is int
+        and artifact["size"] > 0,
+        "SBOM artifact identity is invalid",
+    )
+    dependency_lock = document["dependency_lock"]
+    require(
+        isinstance(dependency_lock, dict)
+        and set(dependency_lock) == {"path", "sha256"}
+        and dependency_lock["path"] == "release/dependencies.lock.json"
+        and dependency_lock["sha256"]
+        == sha256_file(repo_root / "release/dependencies.lock.json"),
+        "SBOM dependency lock identity is invalid",
+    )
+    provenance = document["provenance"]
+    require(
+        isinstance(provenance, dict)
+        and set(provenance) == {"sha256", "size"}
+        and isinstance(provenance["sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", provenance["sha256"]) is not None
+        and type(provenance["size"]) is int
+        and provenance["size"] > 0,
+        "SBOM provenance identity is invalid",
+    )
+    expected_components = resolved_sbom_components(
+        lock, repo_root, document["platform"]
+    )
+    require(
+        document["components"] == expected_components,
+        "SBOM component inventory differs from the dependency lock",
+    )
+    builds = document["builds"]
+    require(isinstance(builds, list) and builds, "SBOM build inventory is missing")
+    observed_platforms: list[str] = []
+    for build in builds:
+        require(
+            isinstance(build, dict) and set(build) == {"platform", "re2"},
+            "SBOM build record schema is invalid",
+        )
+        require(
+            build["platform"] in {"linux-x86_64-musl", "macos-arm64", "macos-x86_64"},
+            "SBOM build record platform is invalid",
+        )
+        validate_re2_evidence(build["re2"])
+        observed_platforms.append(build["platform"])
+    require(
+        observed_platforms == sorted(set(observed_platforms)),
+        "SBOM build records must be unique and sorted",
+    )
+    expected_build_platforms = (
+        ["macos-arm64", "macos-x86_64"]
+        if document["platform"] == "macos-universal"
+        else [document["platform"]]
+    )
+    require(
+        observed_platforms == expected_build_platforms,
+        "SBOM build inventory differs from its platform",
+    )
+    slice_sboms = document["slice_sboms"]
+    require(isinstance(slice_sboms, list), "SBOM slice inventory is invalid")
+    if document["platform"] == "macos-universal":
+        require(
+            len(slice_sboms) == 2
+            and [item.get("platform") for item in slice_sboms]
+            == ["macos-arm64", "macos-x86_64"],
+            "universal SBOM slice inventory is invalid",
+        )
+        for item in slice_sboms:
+            require(
+                isinstance(item, dict)
+                and set(item) == {"platform", "sha256", "size"}
+                and isinstance(item["sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is not None
+                and type(item["size"]) is int
+                and item["size"] > 0,
+                "universal SBOM slice identity is invalid",
+            )
+    else:
+        require(not slice_sboms, "architecture SBOM cannot contain slice identities")
+    return document
+
+
+def build_sbom_document(
+    artifact: pathlib.Path,
+    lock_file: pathlib.Path,
+    provenance_file: pathlib.Path,
+    platform: str,
+    slice_sboms: dict[str, pathlib.Path],
+) -> dict:
+    require(platform in SBOM_PLATFORMS, "SBOM platform is unsupported")
+    lock = load_json(lock_file, "dependency lock")
+    provenance = load_json(provenance_file, "build provenance")
+    repo_root = lock_file.resolve().parent.parent
+    artifact_record = artifact_identity(artifact)
+    require(
+        provenance.get("artifact") == artifact_record,
+        "SBOM provenance does not identify the artifact",
+    )
+    if platform.startswith("macos-"):
+        require(
+            provenance.get("platform") == platform,
+            "SBOM provenance has an unexpected macOS platform",
+        )
+
+    slice_records: list[dict] = []
+    if platform == "macos-universal":
+        require(
+            set(slice_sboms) == {"macos-arm64", "macos-x86_64"},
+            "universal SBOM requires both architecture SBOMs",
+        )
+        provenance_slices = provenance.get("slices")
+        require(
+            isinstance(provenance_slices, dict),
+            "universal provenance slices are missing",
+        )
+        builds: list[dict] = []
+        for slice_platform in sorted(slice_sboms):
+            slice_file = slice_sboms[slice_platform]
+            slice_document = validate_sbom_shape(
+                load_json(slice_file, f"{slice_platform} SBOM"), lock, repo_root
+            )
+            require(
+                slice_document["platform"] == slice_platform,
+                "architecture SBOM has an unexpected platform",
+            )
+            arch = slice_platform.removeprefix("macos-")
+            slice_identity = file_identity(slice_file)
+            require(
+                isinstance(provenance_slices.get(arch), dict)
+                and provenance_slices[arch].get("sbom_sha256")
+                == slice_identity["sha256"],
+                "universal provenance does not bind an architecture SBOM",
+            )
+            builds.extend(slice_document["builds"])
+            slice_records.append({"platform": slice_platform, **slice_identity})
+        builds.sort(key=lambda item: item["platform"])
+    else:
+        require(not slice_sboms, "architecture SBOM cannot contain slice inputs")
+        re2_build = provenance.get("re2_build")
+        validate_re2_evidence(re2_build)
+        builds = [{"platform": platform, "re2": re2_build}]
+
+    document = {
+        "artifact": artifact_record,
+        "builds": builds,
+        "components": resolved_sbom_components(lock, repo_root, platform),
+        "dependency_lock": {
+            "path": "release/dependencies.lock.json",
+            "sha256": sha256_file(lock_file),
+        },
+        "format": SBOM_FORMAT,
+        "platform": platform,
+        "provenance": file_identity(provenance_file),
+        "schema_version": 1,
+        "slice_sboms": slice_records,
+    }
+    return validate_sbom_shape(document, lock, repo_root)
+
+
+def parse_slice_sboms(values: list[str]) -> dict[str, pathlib.Path]:
+    parsed: dict[str, pathlib.Path] = {}
+    for value in values:
+        platform, separator, filename = value.partition("=")
+        require(
+            separator == "="
+            and platform in {"macos-arm64", "macos-x86_64"}
+            and filename
+            and platform not in parsed,
+            "slice SBOM argument is invalid",
+        )
+        parsed[platform] = pathlib.Path(filename).resolve()
+    return parsed
+
+
+def write_json_new(output: pathlib.Path, document: dict, owner: str) -> None:
+    require(
+        not output.exists() and not output.is_symlink(),
+        f"{owner} output already exists: {output}",
+    )
+    require(output.parent.is_dir(), f"{owner} output parent is missing")
+    try:
+        with output.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    except OSError as error:
+        raise ProvenanceError(f"cannot write {owner}: {error}") from error
+
+
+def write_sbom(args: argparse.Namespace) -> None:
+    document = build_sbom_document(
+        args.artifact.resolve(),
+        args.lock.resolve(),
+        args.provenance.resolve(),
+        args.platform,
+        parse_slice_sboms(args.slice_sbom),
+    )
+    write_json_new(args.output.resolve(), document, "SBOM")
+
+
+def verify_sbom(args: argparse.Namespace) -> None:
+    expected = build_sbom_document(
+        args.artifact.resolve(),
+        args.lock.resolve(),
+        args.provenance.resolve(),
+        args.platform,
+        parse_slice_sboms(args.slice_sbom),
+    )
+    actual = load_json(args.sbom.resolve(), "SBOM")
+    require(actual == expected, "SBOM differs from its artifact, lock, or provenance")
+
+
 def validate_artifact_evidence(
     artifact: pathlib.Path, inspection: dict
 ) -> tuple[str, int]:
@@ -219,6 +612,9 @@ def write_provenance(args: argparse.Namespace) -> None:
     inspection = load_json(args.inspection.resolve(), "artifact inspection evidence")
     runtime = load_json(args.runtime_selection.resolve(), "runtime selection evidence")
     tests = load_json(args.test_evidence.resolve(), "release test evidence")
+    re2_build = load_json(
+        args.re2_build_evidence.resolve(), "RE2 build verification evidence"
+    )
 
     lock_sha256 = sha256_file(lock_file)
     contract_sha256 = sha256_file(contract_file)
@@ -235,6 +631,7 @@ def write_provenance(args: argparse.Namespace) -> None:
     artifact_sha256, artifact_size = validate_artifact_evidence(artifact, inspection)
     validate_runtime_evidence(runtime)
     validate_test_evidence(tests)
+    validate_re2_evidence(re2_build)
 
     components = lock.get("components")
     require(isinstance(components, list), "dependency lock components are missing")
@@ -261,10 +658,11 @@ def write_provenance(args: argparse.Namespace) -> None:
         "dependency_lock_sha256": lock_sha256,
         "inspection": inspection,
         "recipe_sha256": recipe_sha256,
+        "re2_build": re2_build,
         "release_contract_sha256": contract_sha256,
         "resolved_dependencies": resolved_dependencies,
         "runtime_selection": runtime,
-        "schema_version": 2,
+        "schema_version": 3,
         "source": identity,
         "source_sha": identity["commit"],
         "tests": tests,
@@ -298,11 +696,24 @@ def parse_args() -> argparse.Namespace:
     write.add_argument("--inspection", type=pathlib.Path, required=True)
     write.add_argument("--runtime-selection", type=pathlib.Path, required=True)
     write.add_argument("--test-evidence", type=pathlib.Path, required=True)
+    write.add_argument("--re2-build-evidence", type=pathlib.Path, required=True)
     write.add_argument("--output", type=pathlib.Path, required=True)
     write.add_argument("--image", required=True)
     write.add_argument("--cmake-version", required=True)
     write.add_argument("--compiler-version", required=True)
     write.add_argument("--ninja-version", required=True)
+
+    for command in ("write-sbom", "verify-sbom"):
+        sbom = subparsers.add_parser(command)
+        sbom.add_argument("--artifact", type=pathlib.Path, required=True)
+        sbom.add_argument("--lock", type=pathlib.Path, required=True)
+        sbom.add_argument("--provenance", type=pathlib.Path, required=True)
+        sbom.add_argument("--platform", choices=sorted(SBOM_PLATFORMS), required=True)
+        sbom.add_argument("--slice-sbom", action="append", default=[])
+        if command == "write-sbom":
+            sbom.add_argument("--output", type=pathlib.Path, required=True)
+        else:
+            sbom.add_argument("--sbom", type=pathlib.Path, required=True)
     return parser.parse_args()
 
 
@@ -316,8 +727,12 @@ def main() -> int:
                     sort_keys=True,
                 )
             )
-        else:
+        elif args.command == "write":
             write_provenance(args)
+        elif args.command == "write-sbom":
+            write_sbom(args)
+        else:
+            verify_sbom(args)
     except (ProvenanceError, OSError, UnicodeError, json.JSONDecodeError) as error:
         print(f"release provenance verification failed: {error}", file=sys.stderr)
         return 1

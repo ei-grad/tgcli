@@ -18,6 +18,7 @@ env:
   DEPENDENCY_LOCK_SCHEMA: release/dependencies.lock.schema.json
   DEPENDENCY_LOCK_VERIFIER: scripts/verify_dependency_lock.py
   LINUX_BUILD_PROVENANCE: build/release-static/release-build-provenance.json
+  LINUX_SBOM: build/release-static/SBOM.json
   LINUX_BUILD_RECIPE: scripts/release/build-linux-musl.sh
   LINUX_TOOLCHAIN_CONTRACT: release/linux-musl-toolchain.json
   PYTHONDONTWRITEBYTECODE: '1'
@@ -327,6 +328,7 @@ jobs:
           bash scripts/check-release-artifact.sh verify-linux-build \
             build/release-static/tgcli \
             "$LINUX_BUILD_PROVENANCE" \
+            "$LINUX_SBOM" \
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
             "$TOOLCHAIN_IMAGE"
@@ -343,6 +345,7 @@ jobs:
           install -m 0755 build/release-static/tgcli "dist/$package/tgcli"
           install -m 0644 LICENSE README.md THIRD_PARTY_NOTICES.md "dist/$package/"
           install -m 0644 "$LINUX_BUILD_PROVENANCE" "dist/$package/PROVENANCE.json"
+          install -m 0644 "$LINUX_SBOM" "dist/$package/SBOM.json"
           install -Dm0644 "$DEPENDENCY_LOCK" "dist/$package/$DEPENDENCY_LOCK"
           install -Dm0644 "$DEPENDENCY_LOCK_SCHEMA" \
             "dist/$package/$DEPENDENCY_LOCK_SCHEMA"
@@ -369,6 +372,7 @@ jobs:
           expected_files=(
             LICENSE
             PROVENANCE.json
+            SBOM.json
             README.md
             THIRD_PARTY_NOTICES.md
             "$DEPENDENCY_LOCK"
@@ -389,6 +393,12 @@ jobs:
             echo "Linux release package has an unexpected or unverifiable file set" >&2
             exit 1
           fi
+          python3 scripts/release/build_provenance.py verify-sbom \
+            --artifact "dist/$package/tgcli" \
+            --lock "dist/$package/$DEPENDENCY_LOCK" \
+            --provenance "dist/$package/PROVENANCE.json" \
+            --platform linux-x86_64-musl \
+            --sbom "dist/$package/SBOM.json"
           find "dist/$package" -exec touch -d "@$SOURCE_EPOCH" {} +
           tar \
             --sort=name \
@@ -571,7 +581,8 @@ jobs:
       - name: Verify the pinned static RE2 build
         run: |
           python3 scripts/release/verify_re2_build.py \
-            --build-directory build/release
+            --build-directory build/release \
+            --output build/release/re2-build-evidence.json
 
       - name: Reverify source identity after the macOS build
         env:
@@ -734,9 +745,10 @@ jobs:
                 }
               ' "$DEPENDENCY_LOCK"
             )" \
-            --slurpfile dependency_lock "$DEPENDENCY_LOCK" '
+            --slurpfile dependency_lock "$DEPENDENCY_LOCK" \
+            --slurpfile re2_build build/release/re2-build-evidence.json '
               {
-                schema_version: 1,
+                schema_version: 2,
                 artifact: {
                   path: "tgcli",
                   sha256: $artifact_sha256,
@@ -775,13 +787,21 @@ jobs:
                   build_tdlib_sha256: $tdlib_build_script_sha256,
                   release_workflow_sha256: $release_workflow_sha256
                 },
+                re2_build: $re2_build[0],
                 locked_openssl: $locked_openssl,
                 resolved_dependencies: $dependencies
               }
             ' > build/release/PROVENANCE.json
+          python3 scripts/release/build_provenance.py write-sbom \
+            --artifact build/release/tgcli \
+            --lock "$DEPENDENCY_LOCK" \
+            --provenance build/release/PROVENANCE.json \
+            --platform "macos-$ARCH" \
+            --output build/release/SBOM.json
           bash scripts/check-release-artifact.sh verify-macos-build \
             build/release/tgcli \
             build/release/PROVENANCE.json \
+            build/release/SBOM.json \
             "macos-$ARCH" \
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
@@ -795,7 +815,8 @@ jobs:
           install -d dist
           install -m 0755 build/release/tgcli dist/tgcli
           install -m 0644 build/release/PROVENANCE.json dist/PROVENANCE.json
-          gtouch -d "@$SOURCE_EPOCH" dist/tgcli dist/PROVENANCE.json
+          install -m 0644 build/release/SBOM.json dist/SBOM.json
+          gtouch -d "@$SOURCE_EPOCH" dist/tgcli dist/PROVENANCE.json dist/SBOM.json
 
       - name: Upload the architecture slice
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -803,6 +824,7 @@ jobs:
           name: macos-${{ matrix.arch }}-slice
           path: |
             dist/PROVENANCE.json
+            dist/SBOM.json
             dist/tgcli
           if-no-files-found: error
           retention-days: 1
@@ -866,7 +888,7 @@ jobs:
           SOURCE_TREE: ${{ needs.metadata.outputs.source_tree }}
         run: |
           set -euo pipefail
-          expected_listing=$'PROVENANCE.json\ntgcli'
+          expected_listing=$'PROVENANCE.json\nSBOM.json\ntgcli'
           arm64_listing="$(find components/arm64 -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
           x86_64_listing="$(find components/x86_64 -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
           if [[ "$arm64_listing" != "$expected_listing" || \
@@ -881,6 +903,7 @@ jobs:
           bash scripts/check-release-artifact.sh verify-macos-build \
             components/arm64/tgcli \
             components/arm64/PROVENANCE.json \
+            components/arm64/SBOM.json \
             macos-arm64 \
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
@@ -888,6 +911,7 @@ jobs:
           bash scripts/check-release-artifact.sh verify-macos-build \
             components/x86_64/tgcli \
             components/x86_64/PROVENANCE.json \
+            components/x86_64/SBOM.json \
             macos-x86_64 \
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
@@ -923,10 +947,14 @@ jobs:
             --arg arm64_binary_sha256 "$(shasum -a 256 components/arm64/tgcli | awk '{print $1}')" \
             --arg arm64_provenance_sha256 \
               "$(shasum -a 256 components/arm64/PROVENANCE.json | awk '{print $1}')" \
+            --arg arm64_sbom_sha256 \
+              "$(shasum -a 256 components/arm64/SBOM.json | awk '{print $1}')" \
             --arg x86_64_binary_sha256 \
               "$(shasum -a 256 components/x86_64/tgcli | awk '{print $1}')" \
             --arg x86_64_provenance_sha256 \
               "$(shasum -a 256 components/x86_64/PROVENANCE.json | awk '{print $1}')" \
+            --arg x86_64_sbom_sha256 \
+              "$(shasum -a 256 components/x86_64/SBOM.json | awk '{print $1}')" \
             --slurpfile dependency_lock "$DEPENDENCY_LOCK" '
               {
                 schema_version: 1,
@@ -960,26 +988,39 @@ jobs:
                 slices: {
                   arm64: {
                     binary_sha256: $arm64_binary_sha256,
-                    provenance_sha256: $arm64_provenance_sha256
+                    provenance_sha256: $arm64_provenance_sha256,
+                    sbom_sha256: $arm64_sbom_sha256
                   },
                   x86_64: {
                     binary_sha256: $x86_64_binary_sha256,
-                    provenance_sha256: $x86_64_provenance_sha256
+                    provenance_sha256: $x86_64_provenance_sha256,
+                    sbom_sha256: $x86_64_sbom_sha256
                   }
                 }
               }
             ' > dist/PROVENANCE.json
+          python3 scripts/release/build_provenance.py write-sbom \
+            --artifact dist/tgcli \
+            --lock "$DEPENDENCY_LOCK" \
+            --provenance dist/PROVENANCE.json \
+            --platform macos-universal \
+            --slice-sbom macos-arm64=components/arm64/SBOM.json \
+            --slice-sbom macos-x86_64=components/x86_64/SBOM.json \
+            --output dist/SBOM.json
           bash scripts/check-release-artifact.sh verify-macos-build \
             dist/tgcli \
             dist/PROVENANCE.json \
+            dist/SBOM.json \
             macos-universal \
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
             "$DEPENDENCY_LOCK" \
             components/arm64/tgcli \
             components/arm64/PROVENANCE.json \
+            components/arm64/SBOM.json \
             components/x86_64/tgcli \
-            components/x86_64/PROVENANCE.json
+            components/x86_64/PROVENANCE.json \
+            components/x86_64/SBOM.json
 
       - name: Package the universal binary
         env:
@@ -995,6 +1036,7 @@ jobs:
           install -m 0755 dist/tgcli "package/$package/tgcli"
           install -m 0644 LICENSE README.md THIRD_PARTY_NOTICES.md "package/$package/"
           install -m 0644 dist/PROVENANCE.json "package/$package/"
+          install -m 0644 dist/SBOM.json "package/$package/"
           install -m 0644 components/arm64/PROVENANCE.json \
             "package/$package/PROVENANCE-arm64.json"
           install -m 0644 components/x86_64/PROVENANCE.json \
@@ -1030,6 +1072,7 @@ jobs:
             PROVENANCE-arm64.json
             PROVENANCE-x86_64.json
             PROVENANCE.json
+            SBOM.json
             README.md
             THIRD_PARTY_NOTICES.md
             "$DEPENDENCY_LOCK"
@@ -1053,14 +1096,17 @@ jobs:
           bash scripts/check-release-artifact.sh verify-macos-build \
             "package/$package/tgcli" \
             "package/$package/PROVENANCE.json" \
+            "package/$package/SBOM.json" \
             macos-universal \
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
-            "$DEPENDENCY_LOCK" \
+            "package/$package/$DEPENDENCY_LOCK" \
             components/arm64/tgcli \
             components/arm64/PROVENANCE.json \
+            components/arm64/SBOM.json \
             components/x86_64/tgcli \
-            components/x86_64/PROVENANCE.json
+            components/x86_64/PROVENANCE.json \
+            components/x86_64/SBOM.json
           find "package/$package" -exec gtouch -d "@$SOURCE_EPOCH" {} +
           gtar \
             --sort=name \

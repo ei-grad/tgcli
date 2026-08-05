@@ -238,6 +238,7 @@ expect_failure(
     --lock-file "${drifted_re2_archive_lock}")
 
 file(READ "${REPO_ROOT}/CMakeLists.txt" cmake_text)
+file(READ "${REPO_ROOT}/cmake/Re2Dependency.cmake" re2_cmake_text)
 set(ignored_icu_cmake "${TEST_OUTPUT_DIR}/ignored-icu.cmake")
 file(WRITE "${ignored_icu_cmake}" "${cmake_text}\nset(RE2_USE_ICU OFF)\n")
 expect_failure(
@@ -246,17 +247,15 @@ expect_failure(
     --repo-root "${REPO_ROOT}"
     --cmake-file "${ignored_icu_cmake}")
 
-string(REPLACE
-    "set(USEPCRE OFF CACHE BOOL \"Disable RE2 PCRE test support\" FORCE)"
-    "set(USEPCRE ON CACHE BOOL \"Enable forbidden RE2 PCRE test support\" FORCE)"
-    pcre_cmake_text "${cmake_text}")
-set(enabled_pcre_cmake "${TEST_OUTPUT_DIR}/enabled-pcre.cmake")
-file(WRITE "${enabled_pcre_cmake}" "${pcre_cmake_text}")
+string(REPLACE "set(USEPCRE OFF)" "set(USEPCRE ON CACHE BOOL \"leak\" FORCE)"
+    enabled_pcre_text "${re2_cmake_text}")
+set(enabled_pcre_cmake "${TEST_OUTPUT_DIR}/enabled-pcre-helper.cmake")
+file(WRITE "${enabled_pcre_cmake}" "${enabled_pcre_text}")
 expect_failure(
-    "enabled RE2 PCRE support" "must force USEPCRE=OFF exactly once"
+    "enabled RE2 PCRE support" "must scope USEPCRE=OFF to RE2 without cache leakage"
     "${PYTHON_EXECUTABLE}" "${verifier}"
     --repo-root "${REPO_ROOT}"
-    --cmake-file "${enabled_pcre_cmake}")
+    --re2-cmake-file "${enabled_pcre_cmake}")
 
 set(extra_cmake "${TEST_OUTPUT_DIR}/extra-fetchcontent.cmake")
 file(WRITE "${extra_cmake}" "${cmake_text}\n"

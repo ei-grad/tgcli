@@ -703,11 +703,13 @@ def validate_repo_consistency(
     repo_root: Path,
     by_id: dict[str, dict],
     cmake_file: Path,
+    re2_cmake_file: Path,
     build_script_file: Path,
     notices_file: Path,
 ) -> None:
     try:
         cmake = cmake_file.read_text(encoding="utf-8")
+        re2_cmake = re2_cmake_file.read_text(encoding="utf-8")
         build_script = build_script_file.read_text(encoding="utf-8")
         notices = notices_file.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
@@ -790,20 +792,45 @@ def validate_repo_consistency(
         ignored_icu_option is None and injected_icu_definition is None,
         "CMake must not use the nonexistent RE2_USE_ICU option",
     )
+    require(
+        len(re.findall(r"(?m)^include\(cmake/Re2Dependency\.cmake\)$", cmake)) == 1
+        and len(re.findall(r"(?m)^tgcli_make_re2_available\(\)$", cmake)) == 1,
+        "CMake must configure RE2 through the scoped dependency helper",
+    )
+    require(
+        re.search(r"FetchContent_MakeAvailable\([^)]*\bre2\b[^)]*\)", cmake) is None,
+        "top-level CMake must not configure RE2 outside its scoped helper",
+    )
+    helper_match = re.search(
+        r"function\(tgcli_make_re2_available\)(?P<body>.*?)endfunction\(\)",
+        re2_cmake,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    require(helper_match is not None, "RE2 scoped dependency helper is missing")
+    helper_body = helper_match.group("body")
+    require(
+        re.search(r"cmake_policy\(SET[ \t]+CMP0077[ \t]+NEW\)", helper_body) is not None
+        and re.search(r"FetchContent_MakeAvailable\([ \t]*re2[ \t]*\)", helper_body)
+        is not None,
+        "RE2 helper must preserve caller options with CMP0077",
+    )
     for option in ("BUILD_SHARED_LIBS", "RE2_BUILD_TESTING", "USEPCRE"):
+        root_assignments = re.findall(
+            rf"(?m)^[ \t]*set\({option}\b[^\n]*\)[ \t]*(?:#[^\n]*)?$", cmake
+        )
         assignments = re.findall(
             rf"(?m)^[ \t]*set\({option}\b[^\n]*\)[ \t]*(?:#[^\n]*)?$",
-            cmake,
+            helper_body,
         )
         require(
-            len(assignments) == 1
+            not root_assignments
+            and len(assignments) == 1
             and re.fullmatch(
-                rf"[ \t]*set\({option}[ \t]+OFF[ \t]+CACHE[ \t]+BOOL\b"
-                rf"[^\n]*[ \t]+FORCE\)[ \t]*(?:#[^\n]*)?",
+                rf"[ \t]*set\({option}[ \t]+OFF\)[ \t]*(?:#[^\n]*)?",
                 assignments[0],
             )
             is not None,
-            f"CMake must force {option}=OFF exactly once for RE2",
+            f"CMake must scope {option}=OFF to RE2 without cache leakage",
         )
     daemon_link = re.search(
         r"target_link_libraries\(tgcli_daemon\b(?P<body>.*?)\)",
@@ -1140,6 +1167,11 @@ def parse_args() -> argparse.Namespace:
         help="CMakeLists override used by fail-closed tests",
     )
     parser.add_argument(
+        "--re2-cmake-file",
+        type=Path,
+        help="RE2 CMake helper override used by fail-closed tests",
+    )
+    parser.add_argument(
         "--build-script-file",
         type=Path,
         help="build-tdlib.sh override used by fail-closed tests",
@@ -1195,6 +1227,9 @@ def main() -> int:
         args.lock_file or repo_root / "release/dependencies.lock.json"
     ).resolve()
     cmake_file = (args.cmake_file or repo_root / "CMakeLists.txt").resolve()
+    re2_cmake_file = (
+        args.re2_cmake_file or repo_root / "cmake/Re2Dependency.cmake"
+    ).resolve()
     build_script_file = (
         args.build_script_file or repo_root / "scripts/build-tdlib.sh"
     ).resolve()
@@ -1221,7 +1256,12 @@ def main() -> int:
         )
         by_id, release_toolchain = validate_lock_document(document, repo_root)
         validate_repo_consistency(
-            repo_root, by_id, cmake_file, build_script_file, notices_file
+            repo_root,
+            by_id,
+            cmake_file,
+            re2_cmake_file,
+            build_script_file,
+            notices_file,
         )
         validate_release_contract(
             repo_root,

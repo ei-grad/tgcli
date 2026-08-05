@@ -158,8 +158,10 @@ python3 - \
     "$fixture_root" \
     "$source_sha" \
     "$source_tree" \
-    "$toolchain_image" <<'PY'
+    "$toolchain_image" \
+    "$root" <<'PY'
 import hashlib
+import importlib
 import json
 import pathlib
 import sys
@@ -179,7 +181,12 @@ root = pathlib.Path(sys.argv[1])
 source_sha = sys.argv[2]
 source_tree = sys.argv[3]
 image = sys.argv[4]
+repo_root = pathlib.Path(sys.argv[5])
+sys.path.insert(0, str(repo_root / "scripts/release"))
+provenance_tool = importlib.import_module("build_provenance")
+re2_verifier = importlib.import_module("verify_re2_build")
 (root / "release").mkdir(parents=True)
+(root / "release/licenses").mkdir(parents=True)
 (root / "scripts/release").mkdir(parents=True)
 (root / "build").mkdir(parents=True)
 
@@ -194,35 +201,70 @@ runtime = {
     "path": "sysroot/usr/lib/libc.a",
     "sha256": "d" * 64,
 }
+for name, content in {
+    "Fixture.txt": b"fixture license\n",
+    "RE2.txt": b"fixture RE2 BSD license\n",
+    "RE2-Lucent-UTF.txt": b"fixture Lucent license\n",
+}.items():
+    (root / "release/licenses" / name).write_bytes(content)
+
+
+def license_evidence(name: str) -> list[dict]:
+    file = root / "release/licenses" / name
+    return [{"path": f"release/licenses/{name}", "sha256": sha256_file(file)}]
+
+
+def component(
+    component_id: str,
+    archive_sha256: str,
+    archive_size: int,
+    immutable_ref: str,
+    scope: str,
+) -> dict:
+    return {
+        "archive_sha256": archive_sha256,
+        "archive_size": archive_size,
+        "embedded_components": [],
+        "id": component_id,
+        "immutable_ref": immutable_ref,
+        "license_expression": "MIT",
+        "license_files": license_evidence("Fixture.txt"),
+        "name": component_id,
+        "scope": scope,
+        "source_archive": f"https://example.invalid/{component_id}.tar.gz",
+        "source_repository": f"https://example.invalid/{component_id}",
+        "source_tree_sha256": "f" * 64,
+        "version": "1.0",
+    }
+
+
 components = [
-    {
-        "archive_sha256": "1" * 64,
-        "archive_size": 11,
-        "id": "libc",
-        "immutable_ref": "v1",
-        "scope": "release-runtime",
-        "source_repository": "https://example.invalid/libc",
-    },
-    {
-        "archive_sha256": "2" * 64,
-        "archive_size": 22,
-        "id": "tdlib",
-        "immutable_ref": "e" * 40,
-        "scope": "runtime",
-        "source_repository": "https://example.invalid/tdlib",
-    },
-    {
-        "archive_sha256": "3" * 64,
-        "archive_size": 33,
-        "id": "openssl",
-        "immutable_ref": "openssl-3.5.2",
-        "scope": "runtime",
-        "source_archive": "https://example.invalid/openssl-3.5.2.tar.gz",
-        "source_repository": "https://example.invalid/openssl",
-        "source_tree_sha256": "4" * 64,
-        "version": "3.5.2",
-    },
+    component("libc", "1" * 64, 11, "v1", "release-runtime"),
+    component("tdlib", "2" * 64, 22, "e" * 40, "runtime"),
+    component("openssl", "3" * 64, 33, "openssl-3.5.2", "runtime"),
+    component("re2", "4" * 64, 44, "d" * 40, "runtime"),
 ]
+components[2]["version"] = "3.5.2"
+components[2]["source_archive"] = "https://example.invalid/openssl-3.5.2.tar.gz"
+components[2]["source_tree_sha256"] = "5" * 64
+components[3].update(
+    {
+        "embedded_components": [
+            {
+                "id": "re2-plan9-utf",
+                "license_expression": "LicenseRef-RE2-Lucent-2002",
+                "license_files": license_evidence("RE2-Lucent-UTF.txt"),
+                "name": "Plan 9 UTF routines",
+                "source_path": "util/rune.cc and util/utf.h",
+                "version": "2002",
+            }
+        ],
+        "license_expression": "BSD-3-Clause",
+        "license_files": license_evidence("RE2.txt"),
+        "source_tree_sha256": "6" * 64,
+        "version": "2022-12-01",
+    }
+)
 lock = {
     "components": components,
     "release_toolchains": [{"runtime_files": [runtime]}],
@@ -250,6 +292,36 @@ artifact_evidence = {
     "sha256": sha256_file(artifact),
     "size": artifact.stat().st_size,
 }
+re2_build = {
+    "archive": {
+        "path": "_deps/re2-build/libre2.a",
+        "sha256": "7" * 64,
+        "size": 777,
+    },
+    "checks": {
+        "abseil_absent": True,
+        "benchmarks_absent": True,
+        "icu_absent": True,
+        "pcre_absent": True,
+        "shared_re2_absent": True,
+        "tests_absent": True,
+    },
+    "compile_sources": sorted(re2_verifier.RE2_RUNTIME_SOURCES),
+    "configured_options": {
+        "BUILD_SHARED_LIBS": False,
+        "RE2_BUILD_TESTING": False,
+        "USEPCRE": False,
+    },
+    "final_link": {
+        "archive": "_deps/re2-build/libre2.a",
+        "command_sha256": "8" * 64,
+    },
+    "link_map": None,
+    "runtime_libraries": ["Threads::Threads"],
+    "schema_version": 1,
+    "target": "re2::re2",
+    "target_type": "STATIC_LIBRARY",
+}
 resolved_dependencies = sorted(
     (
         {
@@ -273,13 +345,14 @@ provenance = {
         "schema_version": 1,
     },
     "recipe_sha256": sha256_file(recipe),
+    "re2_build": re2_build,
     "release_contract_sha256": sha256_file(contract_file),
     "resolved_dependencies": resolved_dependencies,
     "runtime_selection": {
         "schema_version": 1,
         "selected_runtime_files": [runtime],
     },
-    "schema_version": 2,
+    "schema_version": 3,
     "source": {"commit": source_sha, "tree": source_tree, "type": "git"},
     "source_sha": source_sha,
     "tests": {"argv": ["ctest"], "passed": True},
@@ -287,6 +360,16 @@ provenance = {
     "toolchain_image": image,
 }
 write_json(root / "build/provenance.json", provenance)
+write_json(
+    root / "build/SBOM.json",
+    provenance_tool.build_sbom_document(
+        artifact,
+        lock_file,
+        root / "build/provenance.json",
+        "linux-x86_64-musl",
+        {},
+    ),
+)
 
 source = {"epoch": 1700000000, "sha": source_sha, "tree": source_tree}
 dependency_lock = {
@@ -320,11 +403,27 @@ for arch in ("arm64", "x86_64"):
             "dependency_lock": dependency_lock,
             "locked_openssl": locked_openssl,
             "platform": f"macos-{arch}",
-            "schema_version": 1,
+            "re2_build": re2_build,
+            "recipes": {},
+            "resolved_dependencies": [],
+            "runner": {},
+            "schema_version": 2,
             "source": source,
+            "tools": {},
         },
     )
-    macos[arch] = (binary, architecture_provenance)
+    architecture_sbom = root / f"build/macos-{arch}-SBOM.json"
+    write_json(
+        architecture_sbom,
+        provenance_tool.build_sbom_document(
+            binary,
+            lock_file,
+            architecture_provenance,
+            f"macos-{arch}",
+            {},
+        ),
+    )
+    macos[arch] = (binary, architecture_provenance, architecture_sbom)
 
 universal = root / "build/macos-universal"
 universal.write_bytes(b"macOS universal release fixture\n")
@@ -339,22 +438,39 @@ write_json(
         },
         "dependency_lock": dependency_lock,
         "platform": "macos-universal",
+        "runner": {},
         "schema_version": 1,
         "slices": {
             arch: {
                 "binary_sha256": sha256_file(macos[arch][0]),
                 "provenance_sha256": sha256_file(macos[arch][1]),
+                "sbom_sha256": sha256_file(macos[arch][2]),
             }
             for arch in ("arm64", "x86_64")
         },
         "source": source,
+        "tools": {},
     },
+)
+write_json(
+    root / "build/macos-universal-SBOM.json",
+    provenance_tool.build_sbom_document(
+        universal,
+        lock_file,
+        root / "build/macos-universal-provenance.json",
+        "macos-universal",
+        {
+            f"macos-{arch}": macos[arch][2]
+            for arch in ("arm64", "x86_64")
+        },
+    ),
 )
 PY
 
 bash "$checker" verify-linux-build \
     "$fixture_root/build/tgcli" \
     "$fixture_root/build/provenance.json" \
+    "$fixture_root/build/SBOM.json" \
     "$source_sha" \
     "$source_tree" \
     "$toolchain_image" \
@@ -367,6 +483,7 @@ expect_failure_message symlink-linux-artifact 'artifact cannot be a symlink' \
     bash "$checker" verify-linux-build \
         "$fixture_root/build/tgcli-link" \
         "$fixture_root/build/provenance.json" \
+        "$fixture_root/build/SBOM.json" \
         "$source_sha" \
         "$source_tree" \
         "$toolchain_image" \
@@ -376,6 +493,39 @@ expect_failure_message symlink-linux-provenance 'Linux build provenance cannot b
     bash "$checker" verify-linux-build \
         "$fixture_root/build/tgcli" \
         "$fixture_root/build/provenance-link.json" \
+        "$fixture_root/build/SBOM.json" \
+        "$source_sha" \
+        "$source_tree" \
+        "$toolchain_image" \
+        "$fixture_root"
+ln -s SBOM.json "$fixture_root/build/SBOM-link.json"
+expect_failure_message symlink-linux-sbom 'Linux SBOM cannot be a symlink' \
+    bash "$checker" verify-linux-build \
+        "$fixture_root/build/tgcli" \
+        "$fixture_root/build/provenance.json" \
+        "$fixture_root/build/SBOM-link.json" \
+        "$source_sha" \
+        "$source_tree" \
+        "$toolchain_image" \
+        "$fixture_root"
+
+python3 - "$fixture_root/build/SBOM.json" "$fixture_root/build/SBOM-extra-component.json" <<'PY'
+import json
+import pathlib
+import sys
+
+document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+document["components"].append({"id": "icu", "license_expression": "ICU"})
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
+expect_failure_message extra-linux-sbom-component \
+    'SBOM differs from its artifact, lock, or provenance' \
+    bash "$checker" verify-linux-build \
+        "$fixture_root/build/tgcli" \
+        "$fixture_root/build/provenance.json" \
+        "$fixture_root/build/SBOM-extra-component.json" \
         "$source_sha" \
         "$source_tree" \
         "$toolchain_image" \
@@ -385,6 +535,7 @@ for arch in arm64 x86_64; do
     bash "$checker" verify-macos-build \
         "$fixture_root/build/macos-$arch" \
         "$fixture_root/build/macos-$arch-provenance.json" \
+        "$fixture_root/build/macos-$arch-SBOM.json" \
         "macos-$arch" \
         "$source_sha" \
         "$source_tree" \
@@ -393,18 +544,31 @@ done
 bash "$checker" verify-macos-build \
     "$fixture_root/build/macos-universal" \
     "$fixture_root/build/macos-universal-provenance.json" \
+    "$fixture_root/build/macos-universal-SBOM.json" \
     macos-universal \
     "$source_sha" \
     "$source_tree" \
     "$fixture_root/release/dependencies.lock.json" \
     "$fixture_root/build/macos-arm64" \
     "$fixture_root/build/macos-arm64-provenance.json" \
+    "$fixture_root/build/macos-arm64-SBOM.json" \
     "$fixture_root/build/macos-x86_64" \
-    "$fixture_root/build/macos-x86_64-provenance.json"
+    "$fixture_root/build/macos-x86_64-provenance.json" \
+    "$fixture_root/build/macos-x86_64-SBOM.json"
 
 ln -s macos-arm64 "$fixture_root/build/macos-arm64-link"
 expect_failure_message symlink-macos-inspection 'not an executable regular file' \
     bash "$checker" inspect-macos "$fixture_root/build/macos-arm64-link"
+ln -s macos-arm64-SBOM.json "$fixture_root/build/macos-arm64-SBOM-link.json"
+expect_failure_message symlink-macos-sbom 'macOS SBOM cannot be a symlink' \
+    bash "$checker" verify-macos-build \
+        "$fixture_root/build/macos-arm64" \
+        "$fixture_root/build/macos-arm64-provenance.json" \
+        "$fixture_root/build/macos-arm64-SBOM-link.json" \
+        macos-arm64 \
+        "$source_sha" \
+        "$source_tree" \
+        "$fixture_root/release/dependencies.lock.json"
 
 printf 'tampered slice\n' >> "$fixture_root/build/macos-arm64"
 expect_failure_message tampered-macos-architecture \
@@ -412,6 +576,7 @@ expect_failure_message tampered-macos-architecture \
     bash "$checker" verify-macos-build \
         "$fixture_root/build/macos-arm64" \
         "$fixture_root/build/macos-arm64-provenance.json" \
+        "$fixture_root/build/macos-arm64-SBOM.json" \
         macos-arm64 \
         "$source_sha" \
         "$source_tree" \
@@ -421,14 +586,17 @@ expect_failure_message tampered-macos-slice \
     bash "$checker" verify-macos-build \
         "$fixture_root/build/macos-universal" \
         "$fixture_root/build/macos-universal-provenance.json" \
+        "$fixture_root/build/macos-universal-SBOM.json" \
         macos-universal \
         "$source_sha" \
         "$source_tree" \
         "$fixture_root/release/dependencies.lock.json" \
         "$fixture_root/build/macos-arm64" \
         "$fixture_root/build/macos-arm64-provenance.json" \
+        "$fixture_root/build/macos-arm64-SBOM.json" \
         "$fixture_root/build/macos-x86_64" \
-        "$fixture_root/build/macos-x86_64-provenance.json"
+        "$fixture_root/build/macos-x86_64-provenance.json" \
+        "$fixture_root/build/macos-x86_64-SBOM.json"
 
 printf 'tampered universal\n' >> "$fixture_root/build/macos-universal"
 expect_failure_message tampered-macos-universal \
@@ -436,20 +604,24 @@ expect_failure_message tampered-macos-universal \
     bash "$checker" verify-macos-build \
         "$fixture_root/build/macos-universal" \
         "$fixture_root/build/macos-universal-provenance.json" \
+        "$fixture_root/build/macos-universal-SBOM.json" \
         macos-universal \
         "$source_sha" \
         "$source_tree" \
         "$fixture_root/release/dependencies.lock.json" \
         "$fixture_root/build/macos-arm64" \
         "$fixture_root/build/macos-arm64-provenance.json" \
+        "$fixture_root/build/macos-arm64-SBOM.json" \
         "$fixture_root/build/macos-x86_64" \
-        "$fixture_root/build/macos-x86_64-provenance.json"
+        "$fixture_root/build/macos-x86_64-provenance.json" \
+        "$fixture_root/build/macos-x86_64-SBOM.json"
 
 printf 'tampered\n' >> "$fixture_root/build/tgcli"
 expect_failure_message tampered-linux-provenance 'does not identify the artifact' \
     bash "$checker" verify-linux-build \
         "$fixture_root/build/tgcli" \
         "$fixture_root/build/provenance.json" \
+        "$fixture_root/build/SBOM.json" \
         "$source_sha" \
         "$source_tree" \
         "$toolchain_image" \
@@ -627,6 +799,10 @@ required = [
     "-DOPENSSL_USE_STATIC_LIBS=TRUE",
     "verify-macos-build",
     "verify_re2_build.py",
+    "write-sbom",
+    "verify-sbom",
+    "SBOM.json",
+    "sbom_sha256",
     "verify-remote-tag",
     "classify-release-state",
     'gh release create "$TAG_NAME"',

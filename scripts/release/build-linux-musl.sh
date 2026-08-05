@@ -240,6 +240,7 @@ write_build_provenance() {
         --inspection "$WORK_DIRECTORY/artifact-inspection.json" \
         --runtime-selection "$WORK_DIRECTORY/toolchain-runtime-selection.json" \
         --test-evidence "$WORK_DIRECTORY/test-evidence.json" \
+        --re2-build-evidence "$WORK_DIRECTORY/re2-build-evidence.json" \
         --output "$OUTPUT_DIRECTORY/release-build-provenance.json" \
         --image "$PINNED_IMAGE" \
         --cmake-version "$cmake_version" \
@@ -410,7 +411,8 @@ build_release() {
     sed -n '1,240p' "$WORK_DIRECTORY/ctest.log"
     python3 "$RE2_BUILD_VERIFIER" \
         --build-directory "$WORK_DIRECTORY/app" \
-        --link-map "$WORK_DIRECTORY/app/tgcli.link.map"
+        --link-map "$WORK_DIRECTORY/app/tgcli.link.map" \
+        --output "$WORK_DIRECTORY/re2-build-evidence.json"
     python3 "$PROVENANCE_TOOL" source-identity \
         --repo-root "$REPO_ROOT" \
         --expected-commit "$TGCLI_SOURCE_SHA" >/dev/null
@@ -447,9 +449,16 @@ PY
         --artifact "$OUTPUT_DIRECTORY/tgcli" \
         --output "$WORK_DIRECTORY/artifact-inspection.json"
     write_build_provenance
+    python3 "$PROVENANCE_TOOL" write-sbom \
+        --artifact "$OUTPUT_DIRECTORY/tgcli" \
+        --lock "$LOCK_FILE" \
+        --provenance "$OUTPUT_DIRECTORY/release-build-provenance.json" \
+        --platform linux-x86_64-musl \
+        --output "$OUTPUT_DIRECTORY/SBOM.json"
     touch -d "@$SOURCE_DATE_EPOCH" \
         "$OUTPUT_DIRECTORY/tgcli" \
-        "$OUTPUT_DIRECTORY/release-build-provenance.json"
+        "$OUTPUT_DIRECTORY/release-build-provenance.json" \
+        "$OUTPUT_DIRECTORY/SBOM.json"
 }
 
 export CCACHE_DISABLE=1

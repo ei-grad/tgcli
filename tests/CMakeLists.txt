@@ -69,6 +69,12 @@ add_test(
         -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/dependency_lock_enforcement_test.cmake")
 add_test(
+    NAME re2-cmake-scope
+    COMMAND "${CMAKE_COMMAND}"
+        -DREPO_ROOT=${CMAKE_SOURCE_DIR}
+        -DTEST_OUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/re2-cmake-scope
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/re2_cmake_scope_test.cmake")
+add_test(
     NAME release-toolchain-helpers
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/release_toolchain_helpers_test.py"

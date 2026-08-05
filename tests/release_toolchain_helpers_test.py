@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -394,7 +395,7 @@ def re2_build_verifier_tests(base: pathlib.Path) -> None:
             raise AssertionError(f"RE2 verifier unexpectedly accepted {diagnostic}")
 
     valid_cache = "".join(
-        f"{option}:BOOL=OFF\n"
+        f"{option}:BOOL=ON\n"
         for option in ("BUILD_SHARED_LIBS", "RE2_BUILD_TESTING", "USEPCRE")
     )
     verifier.validate_cache(valid_cache)
@@ -432,14 +433,57 @@ def re2_build_verifier_tests(base: pathlib.Path) -> None:
     build = base / "re2-build-contract"
     re2_build = build / "_deps/re2-build"
     re2_build.mkdir(parents=True)
-    (re2_build / "libre2.a").write_bytes(b"static re2")
-    verifier.validate_build_artifacts(build)
-    verifier.validate_link_commands("c++ /build/_deps/re2-build/libre2.a -o tgcli\n")
-    verifier.validate_link_map("LOAD /build/_deps/re2-build/libre2.a\n")
+    archive = re2_build / "libre2.a"
+    archive.write_bytes(b"static re2")
+    verified_archive = verifier.validate_build_artifacts(build)
+    if verified_archive != archive.resolve():
+        raise AssertionError("RE2 artifact verifier returned a non-canonical archive")
+    verifier.validate_link_commands(
+        "c++ _deps/re2-build/libre2.a -o tgcli\n", build, archive
+    )
+    verifier.validate_link_map("LOAD _deps/re2-build/libre2.a\n", build, archive)
+
+    absolute_decoy = pathlib.Path("/untrusted/decoy/libre2.a")
+    relative_decoy = "untrusted/decoy/libre2.a"
+    for decoy in (str(absolute_decoy), relative_decoy):
+        expect_re2_failure(
+            lambda decoy=decoy: verifier.validate_link_commands(
+                f"c++ {decoy} -o tgcli\n", build, archive
+            ),
+            "canonical RE2 archive",
+        )
+        expect_re2_failure(
+            lambda decoy=decoy: verifier.validate_link_map(
+                f"LOAD {decoy}\n", build, archive
+            ),
+            "canonical RE2 archive",
+        )
+        expect_re2_failure(
+            lambda decoy=decoy: verifier.validate_link_commands(
+                f"c++ _deps/re2-build/libre2.a {decoy} -o tgcli\n",
+                build,
+                archive,
+            ),
+            "canonical RE2 archive",
+        )
+        expect_re2_failure(
+            lambda decoy=decoy: verifier.validate_link_map(
+                f"LOAD _deps/re2-build/libre2.a\nLOAD {decoy}\n", build, archive
+            ),
+            "canonical RE2 archive",
+        )
+    expect_re2_failure(
+        lambda: verifier.validate_link_commands(
+            "c++ /untrusted/libre2.a.backup -o tgcli\n", build, archive
+        ),
+        "canonical RE2 archive",
+    )
     for library in ("icuuc", "pcre", "absl_strings"):
         expect_re2_failure(
             lambda library=library: verifier.validate_link_commands(
-                f"c++ /build/_deps/re2-build/libre2.a -l{library} -o tgcli\n"
+                f"c++ _deps/re2-build/libre2.a -l{library} -o tgcli\n",
+                build,
+                archive,
             ),
             "forbidden runtime library",
         )
@@ -453,6 +497,316 @@ def re2_build_verifier_tests(base: pathlib.Path) -> None:
         lambda: verifier.validate_build_artifacts(shared_build),
         "shared or unexpected RE2 artifact",
     )
+
+
+def re2_evidence_document() -> dict:
+    verifier = import_script("verify_re2_build_evidence", RE2_BUILD_VERIFIER)
+    return {
+        "archive": {
+            "path": "_deps/re2-build/libre2.a",
+            "sha256": "a" * 64,
+            "size": 1234,
+        },
+        "checks": {
+            "abseil_absent": True,
+            "benchmarks_absent": True,
+            "icu_absent": True,
+            "pcre_absent": True,
+            "shared_re2_absent": True,
+            "tests_absent": True,
+        },
+        "compile_sources": sorted(verifier.RE2_RUNTIME_SOURCES),
+        "configured_options": {
+            "BUILD_SHARED_LIBS": False,
+            "RE2_BUILD_TESTING": False,
+            "USEPCRE": False,
+        },
+        "final_link": {
+            "archive": "_deps/re2-build/libre2.a",
+            "command_sha256": "b" * 64,
+        },
+        "link_map": None,
+        "runtime_libraries": ["Threads::Threads"],
+        "schema_version": 1,
+        "target": "re2::re2",
+        "target_type": "STATIC_LIBRARY",
+    }
+
+
+def sbom_tests(base: pathlib.Path) -> None:
+    package = base / "sbom-package"
+    (package / "release").mkdir(parents=True)
+    shutil.copy2(
+        REPO_ROOT / "release/dependencies.lock.json",
+        package / "release/dependencies.lock.json",
+    )
+    shutil.copytree(REPO_ROOT / "release/licenses", package / "release/licenses")
+    lock = package / "release/dependencies.lock.json"
+
+    def write_platform_inputs(platform: str) -> tuple[pathlib.Path, pathlib.Path]:
+        artifact = package / f"{platform}/tgcli"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(f"{platform} artifact\n".encode())
+        provenance = artifact.parent / "PROVENANCE.json"
+        write_json(
+            provenance,
+            {
+                "artifact": {
+                    "path": "tgcli",
+                    "sha256": sha256(artifact),
+                    "size": artifact.stat().st_size,
+                },
+                "platform": platform,
+                "re2_build": re2_evidence_document(),
+            },
+        )
+        return artifact, provenance
+
+    def write_sbom(
+        platform: str,
+        artifact: pathlib.Path,
+        provenance: pathlib.Path,
+        output: pathlib.Path,
+        slices: list[str] | None = None,
+    ) -> None:
+        command = [
+            sys.executable,
+            str(PROVENANCE),
+            "write-sbom",
+            "--artifact",
+            str(artifact),
+            "--lock",
+            str(lock),
+            "--provenance",
+            str(provenance),
+            "--platform",
+            platform,
+            "--output",
+            str(output),
+        ]
+        for item in slices or []:
+            command.extend(["--slice-sbom", item])
+        run(command)
+
+    def verify_sbom(
+        platform: str,
+        artifact: pathlib.Path,
+        provenance: pathlib.Path,
+        sbom: pathlib.Path,
+        slices: list[str] | None = None,
+        expected: int = 0,
+    ) -> subprocess.CompletedProcess:
+        command = [
+            sys.executable,
+            str(PROVENANCE),
+            "verify-sbom",
+            "--artifact",
+            str(artifact),
+            "--lock",
+            str(lock),
+            "--provenance",
+            str(provenance),
+            "--platform",
+            platform,
+            "--sbom",
+            str(sbom),
+        ]
+        for item in slices or []:
+            command.extend(["--slice-sbom", item])
+        return run(command, expected=expected)
+
+    linux_artifact, linux_provenance = write_platform_inputs("linux-x86_64-musl")
+    linux_sbom = linux_artifact.parent / "SBOM.json"
+    duplicate_sbom = linux_artifact.parent / "SBOM-duplicate.json"
+    write_sbom("linux-x86_64-musl", linux_artifact, linux_provenance, linux_sbom)
+    write_sbom("linux-x86_64-musl", linux_artifact, linux_provenance, duplicate_sbom)
+    if linux_sbom.read_bytes() != duplicate_sbom.read_bytes():
+        raise AssertionError("identical SBOM inputs produced different bytes")
+    verify_sbom("linux-x86_64-musl", linux_artifact, linux_provenance, linux_sbom)
+
+    document = json.loads(linux_sbom.read_text(encoding="utf-8"))
+    re2 = next(item for item in document["components"] if item["id"] == "re2")
+    if (
+        re2["license_expression"] != "BSD-3-Clause"
+        or re2["source_tree_sha256"]
+        != "6d3942bcd96377f18ec60a7b190d1b217d037ff0132ff6ae8dc463347c067046"
+        or re2["embedded_components"]
+        != [
+            {
+                "id": "re2-plan9-utf",
+                "license_expression": "LicenseRef-RE2-Lucent-2002",
+                "license_files": [
+                    {
+                        "path": "release/licenses/RE2-Lucent-UTF.txt",
+                        "sha256": "8af3194d846fcddce0f5e8d4ae6c404744d9b7922a24f23415bd15a9cfe5e6ee",
+                    }
+                ],
+                "name": "Plan 9 UTF routines",
+                "source_path": "util/rune.cc and util/utf.h",
+                "version": "2002",
+            }
+        ]
+    ):
+        raise AssertionError("SBOM lost locked RE2 or Lucent license evidence")
+    if "re2/mimics_pcre.cc" not in document["builds"][0]["re2"]["compile_sources"]:
+        raise AssertionError("valid RE2 mimics_pcre runtime source was rejected")
+
+    tampered_sbom = linux_artifact.parent / "SBOM-tampered.json"
+    tampered_document = json.loads(linux_sbom.read_text(encoding="utf-8"))
+    tampered_document["components"].append(
+        {"id": "abseil", "license_expression": "Apache-2.0"}
+    )
+    write_json(tampered_sbom, tampered_document)
+    verify_sbom(
+        "linux-x86_64-musl",
+        linux_artifact,
+        linux_provenance,
+        tampered_sbom,
+        expected=1,
+    )
+
+    for index, mutate in enumerate(
+        (
+            lambda sbom, component: sbom["artifact"].__setitem__("sha256", "0" * 64),
+            lambda sbom, component: component.__setitem__("archive_sha256", "0" * 64),
+            lambda sbom, component: component.__setitem__(
+                "source_tree_sha256", "0" * 64
+            ),
+            lambda sbom, component: component["license_files"][0].__setitem__(
+                "sha256", "0" * 64
+            ),
+        )
+    ):
+        identity_document = json.loads(linux_sbom.read_text(encoding="utf-8"))
+        identity_re2 = next(
+            item for item in identity_document["components"] if item["id"] == "re2"
+        )
+        mutate(identity_document, identity_re2)
+        identity_sbom = linux_artifact.parent / f"SBOM-identity-tamper-{index}.json"
+        write_json(identity_sbom, identity_document)
+        verify_sbom(
+            "linux-x86_64-musl",
+            linux_artifact,
+            linux_provenance,
+            identity_sbom,
+            expected=1,
+        )
+
+    license_file = package / "release/licenses/RE2-Lucent-UTF.txt"
+    license_bytes = license_file.read_bytes()
+    license_file.write_bytes(b"tampered Lucent notice\n")
+    failure = verify_sbom(
+        "linux-x86_64-musl",
+        linux_artifact,
+        linux_provenance,
+        linux_sbom,
+        expected=1,
+    )
+    if "license digest differs" not in failure.stderr:
+        raise AssertionError("packaged license tamper lacked the expected diagnostic")
+    license_file.write_bytes(license_bytes)
+
+    bad_evidence_cases = []
+    for check in ("abseil_absent", "icu_absent", "pcre_absent"):
+        evidence = re2_evidence_document()
+        evidence["checks"][check] = False
+        bad_evidence_cases.append(evidence)
+    shared = re2_evidence_document()
+    shared["target_type"] = "SHARED_LIBRARY"
+    bad_evidence_cases.append(shared)
+    tests = re2_evidence_document()
+    tests["compile_sources"].append("util/test.cc")
+    bad_evidence_cases.append(tests)
+    benchmarks = re2_evidence_document()
+    benchmarks["compile_sources"].append("util/benchmark.cc")
+    bad_evidence_cases.append(benchmarks)
+    pcre_option = re2_evidence_document()
+    pcre_option["configured_options"]["USEPCRE"] = True
+    bad_evidence_cases.append(pcre_option)
+    for index, evidence in enumerate(bad_evidence_cases):
+        bad_provenance = linux_artifact.parent / f"bad-provenance-{index}.json"
+        bad_document = json.loads(linux_provenance.read_text(encoding="utf-8"))
+        bad_document["re2_build"] = evidence
+        write_json(bad_provenance, bad_document)
+        failure = run(
+            [
+                sys.executable,
+                str(PROVENANCE),
+                "write-sbom",
+                "--artifact",
+                str(linux_artifact),
+                "--lock",
+                str(lock),
+                "--provenance",
+                str(bad_provenance),
+                "--platform",
+                "linux-x86_64-musl",
+                "--output",
+                str(linux_artifact.parent / f"bad-sbom-{index}.json"),
+            ],
+            expected=1,
+        )
+        if "required static runtime closure" not in failure.stderr:
+            raise AssertionError("forbidden RE2 evidence lacked fail-closed diagnostic")
+
+    slices: dict[str, tuple[pathlib.Path, pathlib.Path, pathlib.Path]] = {}
+    for platform in ("macos-arm64", "macos-x86_64"):
+        artifact, provenance = write_platform_inputs(platform)
+        sbom = artifact.parent / "SBOM.json"
+        write_sbom(platform, artifact, provenance, sbom)
+        verify_sbom(platform, artifact, provenance, sbom)
+        slices[platform] = artifact, provenance, sbom
+    universal_artifact = package / "macos-universal/tgcli"
+    universal_artifact.parent.mkdir(parents=True)
+    universal_artifact.write_bytes(b"macOS universal artifact\n")
+    universal_provenance = universal_artifact.parent / "PROVENANCE.json"
+    write_json(
+        universal_provenance,
+        {
+            "artifact": {
+                "path": "tgcli",
+                "sha256": sha256(universal_artifact),
+                "size": universal_artifact.stat().st_size,
+            },
+            "platform": "macos-universal",
+            "slices": {
+                platform.removeprefix("macos-"): {"sbom_sha256": sha256(values[2])}
+                for platform, values in slices.items()
+            },
+        },
+    )
+    slice_arguments = [
+        f"{platform}={values[2]}" for platform, values in sorted(slices.items())
+    ]
+    universal_sbom = universal_artifact.parent / "SBOM.json"
+    write_sbom(
+        "macos-universal",
+        universal_artifact,
+        universal_provenance,
+        universal_sbom,
+        slice_arguments,
+    )
+    verify_sbom(
+        "macos-universal",
+        universal_artifact,
+        universal_provenance,
+        universal_sbom,
+        slice_arguments,
+    )
+    slices["macos-arm64"][2].write_text(
+        slices["macos-arm64"][2].read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+    failure = verify_sbom(
+        "macos-universal",
+        universal_artifact,
+        universal_provenance,
+        universal_sbom,
+        slice_arguments,
+        expected=1,
+    )
+    if "does not bind an architecture SBOM" not in failure.stderr:
+        raise AssertionError("tampered architecture SBOM lacked binding diagnostic")
 
 
 def swapped_artifact_test(base: pathlib.Path) -> None:
@@ -526,6 +880,8 @@ def swapped_artifact_test(base: pathlib.Path) -> None:
             "working_directory": ".tgcli-build",
         },
     )
+    re2_evidence = build / "re2-build-evidence.json"
+    write_json(re2_evidence, re2_evidence_document())
     artifact.write_bytes(b"artifact B")
     expect_failure(
         [
@@ -550,6 +906,8 @@ def swapped_artifact_test(base: pathlib.Path) -> None:
             str(runtime),
             "--test-evidence",
             str(tests),
+            "--re2-build-evidence",
+            str(re2_evidence),
             "--output",
             str(build / "provenance.json"),
             "--image",
@@ -582,6 +940,7 @@ def main() -> int:
         partial_cleanup_test(base)
         runtime_decoy_test(base)
         re2_build_verifier_tests(base)
+        sbom_tests(base)
         swapped_artifact_test(base)
     final_cache_entries = local_cache_entries()
     if final_cache_entries != INITIAL_LOCAL_CACHE_ENTRIES:
