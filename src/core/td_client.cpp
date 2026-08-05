@@ -87,7 +87,11 @@ class TdClient::Impl {
         : runtime_(std::move(runtime)),
           event_now_(event_hooks.now ? std::move(event_hooks.now)
                                      : [] { return TdEventClock::now(); }),
-          after_event_observed_(std::move(event_hooks.after_observed)) {
+          after_event_observed_(std::move(event_hooks.after_observed)),
+          before_lifecycle_callback_drain_wait_(
+              std::move(event_hooks.before_lifecycle_callback_drain_wait)),
+          before_closed_decisions_drain_wait_(
+              std::move(event_hooks.before_closed_decisions_drain_wait)) {
         if (runtime_ == nullptr) {
             throw std::invalid_argument("TdClient runtime must not be null");
         }
@@ -770,13 +774,15 @@ class TdClient::Impl {
         return result;
     }
 
-    static void claim_lifecycle_event(const std::shared_ptr<TdClosedDecision::State>& state,
-                                      TdClosedDecisionStatus accepted_status,
-                                      std::uint64_t query_id = 0) {
+    void claim_lifecycle_event(const std::shared_ptr<TdClosedDecision::State>& state,
+                               TdClosedDecisionStatus accepted_status, std::uint64_t query_id = 0) {
         std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim;
         std::chrono::steady_clock::time_point committed_at;
         {
             std::unique_lock lock(state->mutex);
+            if (before_lifecycle_callback_drain_wait_) {
+                before_lifecycle_callback_drain_wait_();
+            }
             state->callbacks_done.wait(lock, [&] { return state->callbacks_in_flight == 0; });
             if (state->released || state->status != TdClosedDecisionStatus::Pending ||
                 (accepted_status == TdClosedDecisionStatus::Error &&
@@ -809,15 +815,15 @@ class TdClient::Impl {
         state->callbacks_done.notify_all();
     }
 
-    static void note_expected_transition(const std::shared_ptr<Generation>& generation) {
+    void note_expected_transition(const std::shared_ptr<Generation>& generation) {
         for (const auto& state : active_closed_decisions(generation)) {
             claim_lifecycle_event(state, TdClosedDecisionStatus::Pending);
         }
     }
 
-    static void resolve_lifecycle_event(const std::shared_ptr<Generation>& generation,
-                                        TdClosedDecisionStatus accepted_status,
-                                        std::uint64_t query_id = 0) {
+    void resolve_lifecycle_event(const std::shared_ptr<Generation>& generation,
+                                 TdClosedDecisionStatus accepted_status,
+                                 std::uint64_t query_id = 0) {
         if (accepted_status == TdClosedDecisionStatus::Closed) {
             const std::lock_guard lock(generation->closed_decision_mutex);
             generation->closed_committed = true;
@@ -833,16 +839,33 @@ class TdClient::Impl {
             if (!event.has_value()) {
                 continue;
             }
-            const std::unique_lock publication_lock(event_publication_mutex_);
-            const auto observed_at = event_now_();
-            if (after_event_observed_) {
-                after_event_observed_(observed_at);
-            }
-            handle_event(std::move(*event), observed_at);
+            handle_event(std::move(*event));
         }
     }
 
-    void handle_event(TdRuntimeEvent event, TdEventClock::time_point observed_at) {
+    struct EventPublication {
+        std::unique_lock<std::mutex> lock;
+        TdEventClock::time_point observed_at;
+    };
+
+    struct AuthPublication {
+        std::shared_ptr<const AuthStateSnapshot> snapshot;
+        std::deque<TdValue> pending_updates;
+        bool close_requested = false;
+    };
+
+    // Publication lock order is gate -> auth_commit -> outbound or query registry.
+    // Lifecycle coordination, TD sends, and subscriber callbacks run after release.
+    EventPublication begin_event_publication() {
+        std::unique_lock lock(event_publication_mutex_);
+        const auto observed_at = event_now_();
+        if (after_event_observed_) {
+            after_event_observed_(observed_at);
+        }
+        return {std::move(lock), observed_at};
+    }
+
+    void handle_event(TdRuntimeEvent event) {
         std::shared_ptr<Generation> generation;
         {
             const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -858,7 +881,6 @@ class TdClient::Impl {
             close_generation_admission(generation);
         }
         const auto receive_event_sequence = next_receive_event_sequence_++;
-        event.object.set_receive_event_metadata(receive_event_sequence, observed_at);
 
         if (event.authorization_state) {
             if (event.authorization_state->state == AuthState::LoggingOut ||
@@ -873,34 +895,52 @@ class TdClient::Impl {
         }
 
         if (event.query_id == 0) {
-            handle_update(generation, std::move(event), receive_event_sequence, observed_at);
+            handle_update(generation, std::move(event), receive_event_sequence);
             return;
         }
 
+        bool install_response = false;
         if (event.query_id == 1 && event.authorization_state.has_value()) {
-            bool install_response = false;
-            {
-                const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
-                install_response =
-                    !generation->accepted_auth_update && !generation->initial_state_installed;
-            }
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            install_response =
+                !generation->accepted_auth_update && !generation->initial_state_installed;
+        }
+        const bool installed_closed = install_response && closes_generation;
+
+        std::optional<AuthPublication> auth_publication;
+        {
+            auto publication = begin_event_publication();
+            event.object.set_receive_event_metadata(receive_event_sequence,
+                                                    publication.observed_at);
             if (install_response) {
-                install_auth_state(generation, *event.authorization_state, false,
-                                   receive_event_sequence, observed_at);
-                if (event.authorization_state->state == AuthState::Closed) {
-                    handle_closed(generation);
-                }
+                auth_publication.emplace(commit_auth_state(generation, *event.authorization_state,
+                                                           false, receive_event_sequence,
+                                                           publication.observed_at));
+            }
+            static_cast<void>(generation->queries.fulfill(event.query_id, std::move(event.object)));
+        }
+        if (auth_publication) {
+            finish_auth_publication(generation, *auth_publication);
+            if (installed_closed) {
+                handle_closed(generation);
             }
         }
-        static_cast<void>(generation->queries.fulfill(event.query_id, std::move(event.object)));
     }
 
     void handle_update(const std::shared_ptr<Generation>& generation, TdRuntimeEvent event,
-                       std::uint64_t receive_event_sequence, TdEventClock::time_point observed_at) {
+                       std::uint64_t receive_event_sequence) {
         if (event.authorization_state.has_value()) {
             const auto closed = event.authorization_state->state == AuthState::Closed;
-            install_auth_state(generation, *event.authorization_state, true, receive_event_sequence,
-                               observed_at);
+            AuthPublication auth_publication;
+            {
+                auto publication = begin_event_publication();
+                event.object.set_receive_event_metadata(receive_event_sequence,
+                                                        publication.observed_at);
+                auth_publication =
+                    commit_auth_state(generation, *event.authorization_state, true,
+                                      receive_event_sequence, publication.observed_at);
+            }
+            finish_auth_publication(generation, auth_publication);
             updates_.publish(event.object);
             if (closed) {
                 handle_closed(generation);
@@ -909,6 +949,9 @@ class TdClient::Impl {
         }
 
         {
+            auto publication = begin_event_publication();
+            event.object.set_receive_event_metadata(receive_event_sequence,
+                                                    publication.observed_at);
             const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
             if (!generation->initial_state_installed) {
                 generation->pending_updates.push_back(std::move(event.object));
@@ -918,16 +961,11 @@ class TdClient::Impl {
         updates_.publish(event.object);
     }
 
-    void install_auth_state(const std::shared_ptr<Generation>& generation,
-                            const AuthStateData& state, bool from_update,
-                            std::uint64_t receive_event_sequence,
-                            TdEventClock::time_point observed_at) {
-        if (state.state == AuthState::Closed) {
-            close_generation_admission(generation);
-        }
-
-        std::shared_ptr<const AuthStateSnapshot> snapshot;
-        std::deque<TdValue> pending_updates;
+    AuthPublication commit_auth_state(const std::shared_ptr<Generation>& generation,
+                                      const AuthStateData& state, bool from_update,
+                                      std::uint64_t receive_event_sequence,
+                                      TdEventClock::time_point observed_at) {
+        AuthPublication publication;
         {
             const std::lock_guard<std::mutex> commit_lock(generation->auth_commit_mutex);
             const std::lock_guard<std::mutex> outbound_lock(generation->outbound_mutex);
@@ -936,28 +974,34 @@ class TdClient::Impl {
                 previous != nullptr && previous->client_generation == generation->number
                     ? previous->auth_sequence + 1
                     : 1;
-            snapshot = std::make_shared<const AuthStateSnapshot>(
+            publication.snapshot = std::make_shared<const AuthStateSnapshot>(
                 AuthStateSnapshot{.client_id = generation->client_id,
                                   .client_generation = generation->number,
                                   .auth_sequence = sequence,
                                   .receive_event_sequence = receive_event_sequence,
                                   .data = state,
                                   .receive_observed_at = observed_at});
-            auth_state_.store(snapshot, std::memory_order_release);
+            auth_state_.store(publication.snapshot, std::memory_order_release);
             generation->initial_state_installed = true;
             generation->accepted_auth_update |= from_update;
             if (state.state != AuthState::Closed) {
-                if (generation->close_requested) {
-                    send_close_locked(generation);
-                }
-                pending_updates.swap(generation->pending_updates);
+                publication.close_requested = generation->close_requested;
+                publication.pending_updates.swap(generation->pending_updates);
             }
         }
+        return publication;
+    }
 
-        for (const auto& update : pending_updates) {
+    void finish_auth_publication(const std::shared_ptr<Generation>& generation,
+                                 const AuthPublication& publication) {
+        if (publication.close_requested) {
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            send_close_locked(generation);
+        }
+        for (const auto& update : publication.pending_updates) {
             updates_.publish(update);
         }
-        auth_states_.publish(snapshot);
+        auth_states_.publish(publication.snapshot);
     }
 
     static void close_generation_admission(const std::shared_ptr<Generation>& generation) {
@@ -976,6 +1020,9 @@ class TdClient::Impl {
     void handle_closed(const std::shared_ptr<Generation>& generation) {
         {
             std::unique_lock lock(generation->closed_decision_mutex);
+            if (before_closed_decisions_drain_wait_) {
+                before_closed_decisions_drain_wait_();
+            }
             generation->closed_decision_cv.wait(
                 lock, [&] { return generation->pending_closed_decisions == 0; });
         }
@@ -1011,6 +1058,8 @@ class TdClient::Impl {
     std::unique_ptr<TdRuntime> runtime_;
     std::function<TdEventClock::time_point()> event_now_;
     std::function<void(TdEventClock::time_point)> after_event_observed_;
+    std::function<void()> before_lifecycle_callback_drain_wait_;
+    std::function<void()> before_closed_decisions_drain_wait_;
     mutable std::mutex event_publication_mutex_;
     mutable std::mutex state_mutex_;
     std::shared_ptr<Generation> current_;

@@ -1,4 +1,5 @@
 #include "daemon/dispatch.hpp"
+#include "daemon/logout_commands.hpp"
 #include "daemon/ready_read.hpp"
 #include "daemon/request_session.hpp"
 #include "support/scripted_td_runtime.hpp"
@@ -41,6 +42,16 @@ class ManualClock {
 
 class PollBarrier {
   public:
+    ~PollBarrier() {
+        release();
+    }
+
+    PollBarrier() = default;
+    PollBarrier(const PollBarrier&) = delete;
+    PollBarrier& operator=(const PollBarrier&) = delete;
+    PollBarrier(PollBarrier&&) = delete;
+    PollBarrier& operator=(PollBarrier&&) = delete;
+
     void wait() {
         std::unique_lock lock(mutex_);
         entered_ = true;
@@ -64,6 +75,23 @@ class PollBarrier {
     std::condition_variable cv_;
     bool entered_ = false;
     bool released_ = false;
+};
+
+class BarrierReleaseGuard {
+  public:
+    explicit BarrierReleaseGuard(PollBarrier& barrier) : barrier_(barrier) {}
+
+    ~BarrierReleaseGuard() {
+        barrier_.release();
+    }
+
+    BarrierReleaseGuard(const BarrierReleaseGuard&) = delete;
+    BarrierReleaseGuard& operator=(const BarrierReleaseGuard&) = delete;
+    BarrierReleaseGuard(BarrierReleaseGuard&&) = delete;
+    BarrierReleaseGuard& operator=(BarrierReleaseGuard&&) = delete;
+
+  private:
+    PollBarrier& barrier_;
 };
 
 class PublicationProbe {
@@ -152,6 +180,43 @@ class CallProbe {
     std::size_t count_ = 0;
 };
 
+class AuditedSession {
+  public:
+    explicit AuditedSession(tgcli::daemon::RequestSession::Clock::time_point deadline) {
+        sink_ = std::make_unique<tgcli::daemon::CallbackSink>(
+            [](const nlohmann::json&) {}, [](const nlohmann::json&) {},
+            [](const nlohmann::json&) {},
+            [](const std::string&, const std::string&, const nlohmann::json&, int) {});
+        tgcli::proto::Request request("main");
+        request.id = 2;
+        request.command = {"logout"};
+        request.context.timeout_seconds = 10.0;
+        request.context.cwd = "/";
+        session_ = std::make_unique<tgcli::daemon::RequestSession>(
+            std::move(request), *sink_, 0, tgcli::daemon::RequestSession::NonceGenerator{},
+            tgcli::daemon::ActivityTracker::Token{}, nullptr, deadline);
+        REQUIRE(session_->begin_audited_terminal() ==
+                tgcli::daemon::AuditedTerminalStatus::Designated);
+    }
+
+    ~AuditedSession() {
+        session_->audit_fatal();
+    }
+
+    AuditedSession(const AuditedSession&) = delete;
+    AuditedSession& operator=(const AuditedSession&) = delete;
+    AuditedSession(AuditedSession&&) = delete;
+    AuditedSession& operator=(AuditedSession&&) = delete;
+
+    tgcli::daemon::RequestSession& session() {
+        return *session_;
+    }
+
+  private:
+    std::unique_ptr<tgcli::daemon::CallbackSink> sink_;
+    std::unique_ptr<tgcli::daemon::RequestSession> session_;
+};
+
 class ReadyReadHarness {
   public:
     using Clock = tgcli::core::TdEventClock;
@@ -165,7 +230,10 @@ class ReadyReadHarness {
             tgcli::core::TdClientEventHooks{
                 .now = [this] { return clock_.now(); },
                 .after_observed =
-                    [this](Clock::time_point observed_at) { publication_.observe(observed_at); }});
+                    [this](Clock::time_point observed_at) { publication_.observe(observed_at); },
+                .before_lifecycle_callback_drain_wait =
+                    [this] { lifecycle_callback_wait_.notify(); },
+                .before_closed_decisions_drain_wait = [this] { closed_decisions_wait_.notify(); }});
         REQUIRE(runtime_->wait_for_sent(1));
         REQUIRE(runtime_->clients().size() == 1);
         td_client_ = runtime_->clients().front();
@@ -199,6 +267,22 @@ class ReadyReadHarness {
         if (result_.valid()) {
             result_.wait();
         }
+        const auto current = client_->auth_state();
+        if (current && current->data.state == tgcli::core::AuthState::Closed) {
+            static_cast<void>(runtime_->wait_for_clients(current->client_generation + 1));
+        }
+        const auto bootstrap = client_->auth_state();
+        if (bootstrap && bootstrap->auth_sequence == 0) {
+            const auto clients = runtime_->clients();
+            if (!clients.empty()) {
+                const auto replacement = clients.back();
+                runtime_->push_response(
+                    replacement, 1, {},
+                    tgcli::core::AuthStateData{tgcli::core::AuthState::WaitPhoneNumber});
+                static_cast<void>(wait_auth(replacement.client_generation, 1));
+            }
+        }
+        client_->close();
     }
 
     ReadyReadHarness(const ReadyReadHarness&) = delete;
@@ -236,9 +320,13 @@ class ReadyReadHarness {
 
     void push_auth(tgcli::core::AuthState state, Clock::time_point observed_at) {
         const auto expected = publication_.count() + 1;
+        enqueue_auth(state, observed_at);
+        REQUIRE(publication_.await_count(expected));
+    }
+
+    void enqueue_auth(tgcli::core::AuthState state, Clock::time_point observed_at) {
         clock_.set(observed_at);
         runtime_->push_update(td_client_, {}, tgcli::core::AuthStateData{state});
-        REQUIRE(publication_.await_count(expected));
     }
 
     void pause_response(Clock::time_point observed_at) {
@@ -313,12 +401,51 @@ class ReadyReadHarness {
         return publication_.last_observed_at();
     }
 
+    tgcli::core::TdClient& client() {
+        return *client_;
+    }
+
+    tgcli::test::ScriptedTdRuntime& runtime() {
+        return *runtime_;
+    }
+
+    bool await_lifecycle_callback_wait(std::size_t expected) {
+        return lifecycle_callback_wait_.await_count(expected);
+    }
+
+    bool await_closed_decisions_wait(std::size_t expected) {
+        return closed_decisions_wait_.await_count(expected);
+    }
+
+    [[nodiscard]] std::size_t lifecycle_callback_wait_count() const {
+        return lifecycle_callback_wait_.count();
+    }
+
+    [[nodiscard]] std::size_t closed_decisions_wait_count() const {
+        return closed_decisions_wait_.count();
+    }
+
+    bool wait_auth(std::uint64_t generation, std::uint64_t sequence) const {
+        const auto until = Clock::now() + 2s;
+        while (Clock::now() < until) {
+            const auto snapshot = client_->auth_state();
+            if (snapshot->client_generation == generation && snapshot->auth_sequence >= sequence) {
+                return true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        const auto snapshot = client_->auth_state();
+        return snapshot->client_generation == generation && snapshot->auth_sequence >= sequence;
+    }
+
   private:
     Clock::time_point deadline_;
     ManualClock clock_;
     PollBarrier barrier_;
     PublicationProbe publication_;
     CallProbe arbitration_;
+    CallProbe lifecycle_callback_wait_;
+    CallProbe closed_decisions_wait_;
     tgcli::test::ScriptedTdRuntime* runtime_ = nullptr;
     tgcli::test::ScriptedClient td_client_{};
     std::unique_ptr<tgcli::core::TdClient> client_;
@@ -439,6 +566,74 @@ TEST_CASE("Ready read preserves eligible response and authorization event orderi
         REQUIRE(harness.wait_auth_sequence(3));
         harness.release_before_deadline();
         CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::Response);
+    }
+}
+
+TEST_CASE("Ready read deadline arbitration excludes blocking lifecycle drains",
+          "[ready-read][lifecycle][deadline][fake-boundary]") {
+    const auto deadline = tgcli::core::TdEventClock::now() + 5s;
+
+    SECTION("an in-flight lifecycle callback does not hold the publication gate") {
+        ReadyReadHarness harness(deadline);
+        harness.start();
+        AuditedSession lifecycle(tgcli::daemon::RequestSession::Clock::now() + 5s);
+        PollBarrier terminal_claim;
+        CallProbe terminal_claims;
+        auto decision = tgcli::daemon::LogoutLifecycle::begin(
+            harness.client(), harness.client().auth_state(), lifecycle.session(), [&] {
+                terminal_claims.notify();
+                terminal_claim.wait();
+            });
+        REQUIRE(decision);
+        auto settlement =
+            std::async(std::launch::async, [&] { return decision.settle_terminal(); });
+        const BarrierReleaseGuard release_terminal_claim(terminal_claim);
+        REQUIRE(terminal_claim.await_entry());
+
+        harness.enqueue_auth(tgcli::core::AuthState::Closing, deadline - 1ns);
+        REQUIRE(harness.await_lifecycle_callback_wait(1));
+        harness.release_at_deadline();
+        CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::TimedOut);
+
+        terminal_claim.release();
+        CHECK(settlement.get() == tgcli::core::TdClosedDecisionStatus::Pending);
+        REQUIRE(harness.wait_auth(1, 2));
+        const auto snapshot = harness.client().auth_state();
+        CHECK(snapshot->data.state == tgcli::core::AuthState::Closing);
+        CHECK(snapshot->auth_sequence == 2);
+        REQUIRE(snapshot->receive_observed_at);
+        CHECK(*snapshot->receive_observed_at == deadline);
+        CHECK(terminal_claims.count() == 2);
+        CHECK(harness.lifecycle_callback_wait_count() == 1);
+    }
+
+    SECTION("a pending closed decision does not hold the publication gate") {
+        ReadyReadHarness harness(deadline);
+        harness.start();
+        AuditedSession lifecycle(tgcli::daemon::RequestSession::Clock::now() + 5s);
+        auto decision = tgcli::daemon::LogoutLifecycle::begin(
+            harness.client(), harness.client().auth_state(), lifecycle.session());
+        REQUIRE(decision);
+
+        harness.enqueue_auth(tgcli::core::AuthState::Closed, deadline);
+        REQUIRE(harness.await_closed_decisions_wait(1));
+        harness.release_at_deadline();
+        CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::TimedOut);
+        CHECK(decision.status() == tgcli::core::TdClosedDecisionStatus::Rejected);
+        const auto closed = harness.client().auth_state();
+        CHECK(closed->data.state == tgcli::core::AuthState::Closed);
+        REQUIRE(closed->receive_observed_at);
+        CHECK(*closed->receive_observed_at == deadline);
+
+        decision = tgcli::core::TdClosedDecision{};
+        REQUIRE(harness.runtime().wait_for_clients(2));
+        const auto clients = harness.runtime().clients();
+        REQUIRE(clients.size() == 2);
+        harness.runtime().push_response(
+            clients.back(), 1, {},
+            tgcli::core::AuthStateData{tgcli::core::AuthState::WaitPhoneNumber});
+        REQUIRE(harness.wait_auth(2, 1));
+        CHECK(harness.closed_decisions_wait_count() == 1);
     }
 }
 

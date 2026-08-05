@@ -25,6 +25,8 @@ struct TdClientEventHooks {
     std::function<TdEventClock::time_point()> now;
     // Runs under the publication gate after stamping and before any auth/response publication.
     std::function<void(TdEventClock::time_point)> after_observed;
+    std::function<void()> before_lifecycle_callback_drain_wait;
+    std::function<void()> before_closed_decisions_drain_wait;
 };
 
 class TdOwnerLease {
