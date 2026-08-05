@@ -109,8 +109,8 @@ Global flags:
 --full                 M7: include underlying td_api object under a raw key
 --allow-write          per-call write grant; §6 covers env/config grants and
                        the deny override
---dry-run              resolve and validate, print the plan, call nothing;
-                       needs no write grant (§6)
+--dry-run              resolve and validate, print the plan without a
+                       Telegram mutation; M3/M4 dry-runs are auth-bound (§6)
 --yes                  non-interactive approval of destructive actions
 --timeout <sec>        per-command deadline (default 60; streams, file
                        transfers and fetch: unlimited unless set)
@@ -922,10 +922,10 @@ encode these shapes without adding td_api fields. A `UserSummary` is:
 | `account show main` | `{"account":"main","default":true,"allow_write":false,"idle_exit":null,"credentials":{"api_id":"value","api_hash":"value","db_key":"none","password":"interactive","bot_token":"interactive"},"paths":{"data":"/…/tgcli/accounts/main","state":"/…/tgcli/accounts/main","socket":"/…/main.sock"}}` |
 | `account use work` | `{"default_account":"work","previous_default":"main"}`; `previous_default` is null only when none was configured |
 | `account remove work` | `{"account":"work","removed":true,"remote_logout":"confirmed","default_account":"main"}`; `remote_logout` is exactly `confirmed`, `not_present`, or `kept`, and `default_account` is string or null |
-| `daemon status` (running) | `{"account":"main","running":true,"pid":123,"version":"0.1.0","protocol":2,"socket":"/…/main.sock"}` |
+| `daemon status` (running) | `{"account":"main","running":true,"pid":123,"version":"0.1.0","protocol":3,"socket":"/…/main.sock"}` |
 | `daemon status` (absent) | `{"account":"main","running":false,"socket":"/…/main.sock"}` |
 | `daemon stop` | the existing M0 object `{"stopping":true}` |
-| `daemon restart` | `{"account":"main","restarted":true,"pid":124,"version":"0.1.0","protocol":2,"socket":"/…/main.sock"}` |
+| `daemon restart` | `{"account":"main","restarted":true,"pid":124,"version":"0.1.0","protocol":3,"socket":"/…/main.sock"}` |
 
 In `account show`, `api_id`/`api_hash` are exactly `value`, `command`, or
 `missing`; `db_key` is `command` or `none`; and `password`/`bot_token` are
@@ -1392,11 +1392,29 @@ writes, not against a hostile process running as the same uid (§10).
 
 Supporting mechanisms:
 
-- **`--dry-run`** — performs resolution and validation, prints the exact plan
-  (resolved ids, message preview, td_api request type), calls nothing. It
-  needs no write grant and no `--yes` — it exists precisely so plans can be
-  made without authority. M1 supports it for `logout` and `account remove`;
-  general command planners land in M3.
+- **`--dry-run`** — performs Ready/getMe principal binding, bot preflight,
+  caller-input parsing and hashing, exact resolution/property validation and
+  immutable planning, then returns `{"dry_run":true,"plan":...}`. It needs
+  no write grant or `--yes`, performs no confirmation, and writes no tgcli
+  config, general audit, idempotency store or spool. It calls no
+  Write/Destructive TD API and makes no Telegram-side mutation. The closed TD
+  read allowlist is:
+
+  ```text
+  getMe, getChat, searchPublicChat, getInternalLinkType, getMessageLinkInfo,
+  checkChatInviteLink, getSupergroupFullInfo, createPrivateChat,
+  getMessage, getMessages, getMessageProperties, getOption,
+  getMessageAvailableReactions, parseTextEntities
+  ```
+
+  `createPrivateChat` is allowed only as
+  `createPrivateChat(me.id,false)` for Saved materialization; `getOption` is
+  allowed only for `"unix_time"`. Local file open/stat/read/SHA-256 is
+  allowed. These reads may access Telegram and mutate only TDLib's internal
+  cache/database; any other TD function is a contract-test failure. M1
+  `logout` and `account remove` dry-runs retain their client-local/no-spawn
+  behavior. M3/M4 write dry-runs are auth-bound: an absent daemon is spawned,
+  while `--no-daemon` creates an isolated in-process client.
 - **Audit log** — M3 applies the intent/outcome record pair to its general
   write kernel. In M1 it applies only to actual `logout` and `account remove`
   execution. Normalized
@@ -1969,16 +1987,17 @@ DB open per command), safe concurrent invocations, any number of simultaneous
 `listen`/`wait-for` subscribers, and a local DB that stays continuously warm.
 
 - **Exact routing and auto-spawn.** Account client-local commands `login`,
-  `logout`, `me` and the normal `doctor` probe route to the selected account
-  daemon and auto-spawn it when absent; `doctor` uses its existing local result
-  only if connection/spawn is unavailable. `account remove <name>` routes only
-  to the positional target:
+  `logout`, `me`, the normal `doctor` probe, and M3/M4 write dry-runs route to
+  the selected account daemon and auto-spawn it when absent; `doctor` uses its
+  existing local result only if connection/spawn is unavailable. M1 `logout`
+  and `account remove` dry-runs retain their client-local/no-spawn behavior.
+  `account remove <name>` routes only to the positional target:
   default removal auto-spawns that target only when it must inspect/revoke a
   possible remote session; `--keep-session` never spawns and instead quiesces
   the target if it is already running. `account add|list|show|use`,
-  `daemon status`, `daemon stop`, and every `--dry-run` are config/control-
-  global and never auto-spawn an account daemon. `daemon restart` is the sole
-  control operation that starts an absent daemon. `daemon run` stays in the
+  `daemon status` and `daemon stop` are config/control-global and never
+  auto-spawn an account daemon. `daemon restart` is the sole control operation
+  that starts an absent daemon. `daemon run` stays in the
   foreground and is never client-dispatched. A command in the spawn set that
   finds no live socket forks and re-execs `tgcli daemon run --account <name>`,
   waits for a readiness handshake, and proceeds. Spawn races are settled by an
@@ -2016,20 +2035,28 @@ DB open per command), safe concurrent invocations, any number of simultaneous
   already idle, its new duration is measured from the most recent transition
   to zero, so shortening it may request immediate graceful shutdown. Missing
   `idle_exit` disables idle shutdown.
-- **Protocol.** Main protocol version 2 is JSONL over a `SOCK_STREAM` unix
+- **Protocol.** Main protocol version 3 is JSONL over a `SOCK_STREAM` unix
   socket. Every normal Request frame has exactly the six top-level fields
   `type`, `id`, `account`, `command`, `args`, and `context`; no extension
-  fields are accepted. For example:
+  fields are accepted. Client and daemon each send Hello as the first frame in
+  their direction, with the frozen exact encoding:
 
   ```json
-  {"type":"request","id":42,"account":"work","command":["me"],"args":{},"context":{"tty":false,"json":true,"yes":false,"dry_run":false,"timeout":60,"cwd":"/srv/agent","media_dir":null,"write_authority":"unset"}}
+  {"type":"hello","binary_version":"0.1.0","protocol_version":3}
+  ```
+
+  No normal Request or Answer is sent before an exact v3 Hello match. A v3
+  Request is, for example:
+
+  ```json
+  {"type":"request","id":42,"account":"work","command":["me"],"args":{},"context":{"tty":false,"json":true,"yes":false,"dry_run":false,"timeout":60,"cwd":"/srv/agent","media_dir":null,"write_authority":"unset","idempotency_key":null}}
   ```
 
   `account` is the already-resolved routed account name, as a top-level string;
   it is never supplied through `args` or `context`. It must satisfy §11's
   account-name grammar during strict frame parsing. A missing `account`, an
   unknown top-level field, a non-string `account`, or a syntactically invalid
-  account makes the whole v2 Request a malformed protocol frame: the parser
+  account makes the whole v3 Request a malformed protocol frame: the parser
   does not produce a Request, the server sends the existing connection-scoped
   `USAGE` error with frame id 0 and exact empty details, and the server closes
   the connection. This path never becomes `ACCOUNT_NOT_FOUND` or
@@ -2037,18 +2064,23 @@ DB open per command), safe concurrent invocations, any number of simultaneous
 
   Strict frame parsing does not establish connection-sequence eligibility. A
   syntactically valid Request received before the client has completed a
-  matching v2 Hello is rejected by the existing Hello-first sequence gate with
+  matching v3 Hello is rejected by the existing Hello-first sequence gate with
   connection-scoped `USAGE`, frame id 0, exact empty details and connection
   close. That gate runs before account comparison, so even a pre-Hello Request
   whose valid `account` differs from the daemon is not `ACCOUNT_MISMATCH`.
 
   The remaining Request fields are the uint64 id, command path, normalized
-  args, and client context — TTY-ness, `--json`, `--yes`, `--dry-run`, timeout,
-  the client's cwd and `TGCLI_MEDIA_DIR` (for output paths), and a **tri-state
-  write-authority field** (`grant` / `deny` / `unset`): the client folds
-  `--allow-write` and `TGCLI_ALLOW_WRITE` into it, because the daemon cannot
-  see the invoking shell's environment, and the daemon combines it with the
-  account config per §6 (explicit deny > any grant > default deny). Response
+  args, and a strict client context with exactly nine fields: TTY-ness,
+  `--json`, `--yes`, `--dry-run`, timeout, the client's cwd,
+  `TGCLI_MEDIA_DIR` (for output paths), a **tri-state write-authority field**
+  (`grant` / `deny` / `unset`), and `idempotency_key`. The key is null or
+  ASCII matching `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`; `--dry-run` with a key
+  is `USAGE`/`mutually_exclusive`, and a non-null key outside the M3/M4
+  idempotent allowlist is `USAGE`/`unsupported_mode`. The client folds
+  `--allow-write` and `TGCLI_ALLOW_WRITE` into the write-authority field,
+  because the daemon cannot see the invoking shell's environment, and the
+  daemon combines it with the account config per §6 (explicit deny > any grant
+  > default deny). Response
   frames: `result`,
   `error`, `item` (streams), `progress`, and `challenge`. Interactive flows
   are challenge/response: the daemon asks (login values or destructive
@@ -2071,7 +2103,7 @@ DB open per command), safe concurrent invocations, any number of simultaneous
   from another shell.
 
   A daemon freezes its one valid account name from `daemon run --account` at
-  startup. Only after a matching v2 Hello and the existing connection-sequence
+  startup. Only after a matching v3 Hello and the existing connection-sequence
   checks accept the parsed frame as the connection's next Request does the
   daemon compare `request.account` with that frozen name; the comparison is
   then the first request-specific action. It occurs before any request-caused
@@ -2114,20 +2146,32 @@ DB open per command), safe concurrent invocations, any number of simultaneous
   "credential":credential,"tdlib_code":integer}` and contains no submitted
   value or tdlib message.
 - **Version handshake.** The connect handshake carries binary and protocol
-  versions from both sides. Protocol v2 is the first main-protocol version
-  whose Request carries the required routed `account`; v1 Request frames do
-  not satisfy the v2 parser, and v2 frames are never sent after a v1 Hello.
-  On any mismatch the client — freshly exec'd, so authoritative — asks the
-  daemon to shut down gracefully and respawns it from the new binary; streams
-  on the old daemon receive a terminal error frame. A v1↔v2 protocol mismatch,
-  whether or not the binary versions also differ, is recovered only through
-  the frozen lock plus authenticated `.ctl` token-stop path below, before any
-  normal Request is sent. Thus an old daemon remains replaceable without
-  accepting a v2 Request, and a v2 daemon remains replaceable by a v1 client
-  that cannot construct one. A same-protocol v2 binary mismatch may use a
-  normal `daemon stop` Request only when its `account` is the same routing
-  value that selected the socket; the frozen control path remains valid.
-  Frames and curated schemas are never mixed across versions.
+  versions from both sides. Protocol v2 was the first main-protocol version
+  whose Request carried the required routed `account`; v3 retains the same
+  six top-level fields and adds only the ninth strict context field
+  `idempotency_key`. The v1/v2 parsers do not accept a v3 Request, the v3
+  parser does not accept a v1/v2 Request, and frames or curated schemas are
+  never mixed across versions.
+
+  Frozen `tgcli-lock-v1` and the authenticated datagram `.ctl` contract below
+  are unchanged and mandatory for v1→v3, v2→v3, v3→v1 and v3→v2 replacement.
+  A mismatched client sends no normal Request in the foreign dialect. After
+  verifying the old owner, it stops that owner only through the frozen
+  token-stop path. One monotonic deadline covers stop, disappearance of the
+  old lock/main/.ctl identities, spawn, and exact replacement Hello.
+
+  An ordinary command auto-spawns the current v3 daemon when absent. An
+  ordinary command or M3/M4 dry-run that finds a verified v1/v2 daemon
+  replaces it through frozen control, then retries the original v3 Request
+  exactly once. `daemon status` and `daemon stop` never auto-spawn. Status
+  never replaces a daemon: a verified v1/v2 surface returns `running:true`
+  with its actual binary and protocol versions. Stop uses frozen control on a
+  mismatch. `daemon restart` is the sole control command that starts an absent
+  daemon; it stops a running v1/v2 daemon through frozen control and succeeds
+  only after a v3 Hello. A same-protocol v3 binary mismatch may use a normal
+  v3 stop only after exact account routing; frozen control remains the
+  fail-closed fallback. A malformed, foreign, replaced or ambiguous surface
+  remains `DAEMON_CONTROL_FAILED` and is never silently removed or restarted.
 - **Frozen bootstrap/control contract.** Main-protocol evolution must not be
   required to stop an older daemon. This contract starts at the v1
   pre-release baseline and remains readable and operational across all later
@@ -2477,16 +2521,20 @@ What makes tgcli specifically LLM-agent-friendly:
     centrally, not per command.
   - Unit tests only for real logic (resolver matching, tier evaluation,
     frame codec, cursors, idempotency replay); no mock-verification tests.
-  - Protocol-v2 routed-account acceptance is one central frame/transport/
+  - Protocol-v3 routed-account and upgrade acceptance is one central frame/transport/
     routing suite, not repeated per command. It must prove all of the
     following exact cases:
     1. A Request round-trip preserves a valid top-level `account` and emits
-       exactly the six v2 top-level fields. Removing `account`, adding an
+       exactly the six v3 top-level fields and nine context fields, including
+       a null or grammar-valid `idempotency_key`. Removing `account`, adding an
        unknown top-level field, changing `account` to a non-string, or using
        each invalid name class (empty, longer than 32 ASCII bytes, a character
        outside `[A-Za-z0-9_-]`, or non-ASCII) fails strict parsing without
-       producing a Request. After a matching v2 Hello, the server classifies
-       each as malformed-frame `USAGE` with id 0 and `{}`, then EOF; none is
+       producing a Request. A missing/unknown context field, non-ASCII or
+       grammar-invalid key, `--dry-run` plus key, or key outside the M3/M4
+       allowlist is rejected with the specified `USAGE` reason. After a
+       matching v3 Hello, the server classifies each malformed frame as
+       `USAGE` with id 0 and `{}`, then EOF; none is
        `ACCOUNT_NOT_FOUND` or `ACCOUNT_MISMATCH`.
     2. A routing-capture test covers explicit `--account`, `TGCLI_ACCOUNT`,
        configured default and implicit `main`, and asserts that each resolved
@@ -2498,7 +2546,7 @@ What makes tgcli specifically LLM-agent-friendly:
        `account:"work"` sent over `main.sock` yields connection-scoped `USAGE`
        with id 0 and exact `{}`, followed by EOF. It never yields
        `ACCOUNT_MISMATCH` and triggers none of the observations in case 5.
-    4. After a matching v2 Hello, sending a syntactically valid Request for
+    4. After a matching v3 Hello, sending a syntactically valid Request for
        `work` over `main.sock` yields one and only one terminal for its id:
        `ACCOUNT_MISMATCH`, exit 4, exact details
        `{"requested_account":"work","daemon_account":"main"}`, followed
@@ -2514,14 +2562,23 @@ What makes tgcli specifically LLM-agent-friendly:
        Requests in both directions as above. Subsequent correctly routed
        Requests still reach only their own daemon and return only their own
        account data.
-    7. Upgrade fixtures cover v2 client→v1 daemon and v1 client→v2 daemon,
-       with both equal and unequal binary-version strings. Every protocol-
-       mismatch case authenticates and uses the frozen `.ctl` stop surface,
-       sends no normal Request in the mismatched dialect, waits for the old
-       lock and both socket identities to disappear, completes the replacement
-       Hello, and then successfully retries the original command. A binary-
-       only v2 mismatch additionally proves that any normal stop Request uses
-       the same account that selected its socket.
+    7. Upgrade fixtures cover v1→v3, v2→v3, v3→v1 and v3→v2 clients/daemons,
+       with both equal and unequal binary-version strings. Every protocol
+       mismatch verifies and uses the frozen `.ctl` stop surface, sends no
+       normal Request in the mismatched dialect, waits for the old lock and
+       both socket identities to disappear, completes the exact replacement
+       Hello, and retries the original command exactly once. A same-protocol
+       v3 binary mismatch proves that any normal stop Request uses the same
+       account that selected its socket.
+    8. Lifecycle fixtures prove ordinary and auth-bound M3/M4 dry-run
+       autospawn/replacement, status reporting the actual verified v1/v2
+       version without replacement, stop without autospawn, restart as the
+       only absent-daemon-starting control command, one shared monotonic
+       deadline, and `DAEMON_CONTROL_FAILED` for every unverified surface.
+       Dry-run fakes admit only the closed read allowlist and local file hash
+       operations; they observe no Telegram mutation and no tgcli
+       audit/store/spool/config mutation, while TDLib cache/database effects
+       are permitted.
   - Golden files for human renderers.
   - E2E: a small opt-in suite (`TGCLI_TEST_DC=1`) against Telegram's **test
     DC** (`use_test_dc`), which provides synthetic phone numbers with fixed
