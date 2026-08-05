@@ -1,6 +1,7 @@
 #include "daemon/account_removal.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/request_session.hpp"
+#include "schema_matcher.hpp"
 
 #include <array>
 #include <filesystem>
@@ -307,6 +308,12 @@ TEST_CASE("remote uncertainty writes a failure outcome and preserves all local s
     REQUIRE(terminal.error);
     CHECK(terminal.error->code == "REMOTE_LOGOUT_UNCONFIRMED");
     CHECK(terminal.error->details["reason"] == "timeout");
+    const nlohmann::json error_document{{"error",
+                                         {{"code", terminal.error->code},
+                                          {"message", terminal.error->message},
+                                          {"details", terminal.error->details}}}};
+    CHECK_THAT(error_document,
+               tgcli::test::matches_json_schema("account-remove.error.schema.json"));
     CHECK(std::filesystem::exists(temp.data_root()));
     CHECK(std::filesystem::exists(temp.state_root()));
     CHECK(store.load().snapshot->accounts.contains("work"));
@@ -315,6 +322,13 @@ TEST_CASE("remote uncertainty writes a failure outcome and preserves all local s
     const auto presence = journal.audit_presence("ffeeddccbbaa99887766554433221100", failure);
     REQUIRE(presence);
     CHECK(presence->outcome);
+    const auto outcome = journal.audit_outcome("ffeeddccbbaa99887766554433221100", failure);
+    REQUIRE(outcome);
+    CHECK_THAT(*outcome, tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+    const auto tombstone = journal.load("ffeeddccbbaa99887766554433221100", failure);
+    REQUIRE(tombstone);
+    CHECK_THAT(serialize(*tombstone),
+               tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
 }
 
 TEST_CASE("remote return without its durable proof checkpoint fails closed",

@@ -317,7 +317,7 @@
               "additionalProperties": false,
               "required": ["request_id", "reason"],
               "properties": {
-                "request_id": { "type": "integer", "minimum": 0 },
+                "request_id": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
                 "reason": { "enum": ["future_sequence", "nonce_mismatch", "generation_mismatch", "malformed", "unknown_request"] }
               }
             }

@@ -1,0 +1,2503 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli destructive audit outcome",
+  "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "state": {
+      "enum": [
+        "unknown",
+        "wait_tdlib_parameters",
+        "wait_phone_number",
+        "wait_premium_purchase",
+        "wait_email_address",
+        "wait_email_code",
+        "wait_code",
+        "wait_other_device_confirmation",
+        "wait_registration",
+        "wait_password",
+        "ready",
+        "logging_out",
+        "closing",
+        "closed"
+      ]
+    },
+    "nullableState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/state"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "auditStage": {
+      "enum": [
+        "planned",
+        "intent_synced",
+        "logout_send_started",
+        "logout_closed_confirmed",
+        "remote_logout_send_started",
+        "remote_confirmed",
+        "remote_not_present",
+        "remote_kept",
+        "client_close_started",
+        "client_closed",
+        "config_remove_started",
+        "config_removed",
+        "data_remove_started",
+        "data_removed",
+        "state_remove_started",
+        "state_removed",
+        "outcome_synced"
+      ]
+    },
+    "invocationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]+)?Z$"
+    },
+    "configSnapshot": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64};dev:(0|[1-9][0-9]*);ino:(0|[1-9][0-9]*);size:(0|[1-9][0-9]*);ctime_ns:(0|[1-9][0-9]*)$"
+    },
+    "configSnapshotOrMissing": {
+      "type": "string",
+      "pattern": "^(missing|sha256:[0-9a-f]{64};dev:(0|[1-9][0-9]*);ino:(0|[1-9][0-9]*);size:(0|[1-9][0-9]*);ctime_ns:(0|[1-9][0-9]*))$"
+    },
+    "rootIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "device",
+        "inode",
+        "owner"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "device": {
+          "$ref": "#/$defs/uint64"
+        },
+        "inode": {
+          "$ref": "#/$defs/uint64"
+        },
+        "owner": {
+          "$ref": "#/$defs/uint64"
+        }
+      }
+    },
+    "logoutPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "remote_logout",
+        "tdlib_request"
+      ],
+      "properties": {
+        "operation": {
+          "const": "logout"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "remote_logout": {
+          "const": true
+        },
+        "tdlib_request": {
+          "const": "logOut"
+        }
+      }
+    },
+    "remoteLogoutPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "remote_logout",
+        "keep_session",
+        "delete_paths",
+        "config_path",
+        "config_snapshot",
+        "data_root",
+        "state_root",
+        "reassign_default"
+      ],
+      "properties": {
+        "operation": {
+          "const": "account_remove"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "remote_logout": {
+          "const": true
+        },
+        "keep_session": {
+          "const": false
+        },
+        "delete_paths": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "config_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshot"
+        },
+        "data_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reassign_default": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "keepSessionPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "remote_logout",
+        "keep_session",
+        "delete_paths",
+        "config_path",
+        "config_snapshot",
+        "data_root",
+        "state_root",
+        "reassign_default"
+      ],
+      "properties": {
+        "operation": {
+          "const": "account_remove"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "remote_logout": {
+          "const": false
+        },
+        "keep_session": {
+          "const": true
+        },
+        "delete_paths": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "config_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshot"
+        },
+        "data_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reassign_default": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "logoutStructuredError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "REMOTE_LOGOUT_UNCONFIRMED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "state": {
+                  "$ref": "#/$defs/state"
+                },
+                "reason": {
+                  "enum": [
+                    "tdlib_error",
+                    "timeout",
+                    "generation_lost",
+                    "transport_lost",
+                    "state_unproven"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUTH_FUNCTION_DENIED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "function"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "state": {
+                  "$ref": "#/$defs/state"
+                },
+                "function": {
+                  "const": "logOut"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "logout"
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "logout"
+                },
+                "tdlib_code": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "logout"
+                },
+                "state": {
+                  "$ref": "#/$defs/nullableState"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_SHUTDOWN"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "daemon_shutdown"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "logout"
+                },
+                "reason": {
+                  "const": "internal_error"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "removalStructuredError": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/removalRemoteStructuredError"
+        },
+        {
+          "$ref": "#/$defs/removalKeepStructuredError"
+        }
+      ]
+    },
+    "removalRemoteStructuredError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIG_INVALID"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "enum": [
+                    "path_invalid",
+                    "wrong_owner",
+                    "wrong_type",
+                    "wrong_mode",
+                    "wrong_link_count",
+                    "too_large",
+                    "parse_error",
+                    "type_error",
+                    "invalid_default",
+                    "conflicting_credentials",
+                    "io_error",
+                    "sync_error"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIG_CONFLICT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "expected",
+                "current"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "expected": {
+                  "$ref": "#/$defs/configSnapshot"
+                },
+                "current": {
+                  "$ref": "#/$defs/configSnapshotOrMissing"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "REMOTE_LOGOUT_UNCONFIRMED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "state": {
+                  "$ref": "#/$defs/state"
+                },
+                "reason": {
+                  "enum": [
+                    "tdlib_error",
+                    "timeout",
+                    "generation_lost",
+                    "transport_lost",
+                    "state_unproven"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "LOCAL_CLEANUP_FAILED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "reason",
+                "removed",
+                "retained"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "reason": {
+                  "enum": [
+                    "path_changed",
+                    "path_invalid",
+                    "mount_boundary",
+                    "io_error",
+                    "sync_error"
+                  ]
+                },
+                "removed": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "retained": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUTH_FUNCTION_DENIED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "function"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "state": {
+                  "$ref": "#/$defs/state"
+                },
+                "function": {
+                  "enum": [
+                    "logOut",
+                    "close"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_CONTROL_FAILED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "operation": {
+                  "const": "stop"
+                },
+                "reason": {
+                  "enum": [
+                    "surface_invalid",
+                    "identity_changed",
+                    "handshake_failed",
+                    "shutdown_failed",
+                    "replacement_failed"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "tdlib_code": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "state": {
+                  "$ref": "#/$defs/nullableState"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_SHUTDOWN"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "daemon_shutdown"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "reason": {
+                  "const": "internal_error"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "removalKeepStructuredError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIG_INVALID"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "enum": [
+                    "path_invalid",
+                    "wrong_owner",
+                    "wrong_type",
+                    "wrong_mode",
+                    "wrong_link_count",
+                    "too_large",
+                    "parse_error",
+                    "type_error",
+                    "invalid_default",
+                    "conflicting_credentials",
+                    "io_error",
+                    "sync_error"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIG_CONFLICT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "expected",
+                "current"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "expected": {
+                  "$ref": "#/$defs/configSnapshot"
+                },
+                "current": {
+                  "$ref": "#/$defs/configSnapshotOrMissing"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "LOCAL_CLEANUP_FAILED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "reason",
+                "removed",
+                "retained"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "reason": {
+                  "enum": [
+                    "path_changed",
+                    "path_invalid",
+                    "mount_boundary",
+                    "io_error",
+                    "sync_error"
+                  ]
+                },
+                "removed": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "retained": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUTH_FUNCTION_DENIED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "function"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "state": {
+                  "$ref": "#/$defs/state"
+                },
+                "function": {
+                  "const": "close"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_CONTROL_FAILED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "operation": {
+                  "const": "stop"
+                },
+                "reason": {
+                  "enum": [
+                    "surface_invalid",
+                    "identity_changed",
+                    "handshake_failed",
+                    "shutdown_failed",
+                    "replacement_failed"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "tdlib_code": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "state": {
+                  "$ref": "#/$defs/nullableState"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_SHUTDOWN"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "daemon_shutdown"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "account_remove"
+                },
+                "reason": {
+                  "const": "internal_error"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "logoutSuccessResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "logged_out"
+      ],
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "logged_out": {
+          "const": true
+        }
+      }
+    },
+    "removalConfirmedResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "removed",
+        "remote_logout",
+        "default_account"
+      ],
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "removed": {
+          "const": true
+        },
+        "remote_logout": {
+          "const": "confirmed"
+        },
+        "default_account": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "removalNotPresentResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "removed",
+        "remote_logout",
+        "default_account"
+      ],
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "removed": {
+          "const": true
+        },
+        "remote_logout": {
+          "const": "not_present"
+        },
+        "default_account": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "removalKeptResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "removed",
+        "remote_logout",
+        "default_account"
+      ],
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "removed": {
+          "const": true
+        },
+        "remote_logout": {
+          "const": "kept"
+        },
+        "default_account": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "success",
+        "mutation_state",
+        "completed_stages",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "phase": {
+          "const": "outcome"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/invocationId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "command": {
+          "enum": [
+            "logout",
+            "account_remove"
+          ]
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "mutation_state": {
+          "enum": [
+            "none",
+            "possible",
+            "confirmed"
+          ]
+        },
+        "completed_stages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/auditStage"
+          }
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/logoutSuccessResult"
+            },
+            {
+              "$ref": "#/$defs/removalConfirmedResult"
+            },
+            {
+              "$ref": "#/$defs/removalNotPresentResult"
+            },
+            {
+              "$ref": "#/$defs/removalKeptResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/logoutStructuredError"
+            },
+            {
+              "$ref": "#/$defs/removalStructuredError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "logout"
+            },
+            "success": {
+              "const": true
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "const": [
+                "intent_synced",
+                "logout_send_started",
+                "logout_closed_confirmed"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/logoutSuccessResult"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "logout"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "none"
+            },
+            "completed_stages": {
+              "const": [
+                "intent_synced"
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/logoutStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "logout"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "possible"
+            },
+            "completed_stages": {
+              "const": [
+                "intent_synced",
+                "logout_send_started"
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/logoutStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "logout"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "const": [
+                "intent_synced",
+                "logout_send_started",
+                "logout_closed_confirmed"
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/logoutStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": true
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "const": [
+                "planned",
+                "intent_synced",
+                "remote_logout_send_started",
+                "remote_confirmed",
+                "client_close_started",
+                "client_closed",
+                "config_remove_started",
+                "config_removed",
+                "data_remove_started",
+                "data_removed",
+                "state_remove_started",
+                "state_removed"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/removalConfirmedResult"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": true
+            },
+            "mutation_state": {
+              "const": "possible"
+            },
+            "completed_stages": {
+              "const": [
+                "planned",
+                "intent_synced",
+                "remote_logout_send_started",
+                "remote_not_present",
+                "client_close_started",
+                "client_closed",
+                "config_remove_started",
+                "config_removed",
+                "data_remove_started",
+                "data_removed",
+                "state_remove_started",
+                "state_removed"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/removalNotPresentResult"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": true
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "const": [
+                "planned",
+                "intent_synced",
+                "remote_not_present",
+                "client_close_started",
+                "client_closed",
+                "config_remove_started",
+                "config_removed",
+                "data_remove_started",
+                "data_removed",
+                "state_remove_started",
+                "state_removed"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/removalNotPresentResult"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": true
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "const": [
+                "planned",
+                "intent_synced",
+                "remote_kept",
+                "client_close_started",
+                "client_closed",
+                "config_remove_started",
+                "config_removed",
+                "data_remove_started",
+                "data_removed",
+                "state_remove_started",
+                "state_removed"
+              ]
+            },
+            "result": {
+              "$ref": "#/$defs/removalKeptResult"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "none"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "none"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalRemoteStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "none"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalKeepStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "possible"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started",
+                  "state_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalRemoteStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "possible"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalKeepStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_logout_send_started",
+                  "remote_confirmed",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started",
+                  "state_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_not_present",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started",
+                  "state_removed"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalRemoteStructuredError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "phase",
+            "invocation_id",
+            "timestamp",
+            "account",
+            "command",
+            "success",
+            "mutation_state",
+            "completed_stages",
+            "result",
+            "error"
+          ],
+          "properties": {
+            "schema_version": true,
+            "phase": true,
+            "invocation_id": true,
+            "timestamp": true,
+            "account": true,
+            "command": {
+              "const": "account_remove"
+            },
+            "success": {
+              "const": false
+            },
+            "mutation_state": {
+              "const": "confirmed"
+            },
+            "completed_stages": {
+              "enum": [
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed"
+                ],
+                [
+                  "planned",
+                  "intent_synced",
+                  "remote_kept",
+                  "client_close_started",
+                  "client_closed",
+                  "config_remove_started",
+                  "config_removed",
+                  "data_remove_started",
+                  "data_removed",
+                  "state_remove_started",
+                  "state_removed"
+                ]
+              ]
+            },
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/removalKeepStructuredError"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

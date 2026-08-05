@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -237,6 +239,43 @@ TEST_CASE("response frames round-trip", "[proto]") {
         auto a = std::get<Answer>(round_trip(Answer{9, json(answer)}));
         CHECK(a.answer == answer);
     }
+}
+
+TEST_CASE("every request id frame preserves uint64 maximum and rejects overflow",
+          "[proto][request-id]") {
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    const auto check = [maximum](Frame frame) {
+        auto encoded = serialize(frame);
+        const auto marker = std::string{"\"id\":"} + std::to_string(maximum);
+        const auto position = encoded.find(marker);
+        REQUIRE(position != std::string::npos);
+
+        std::string error;
+        const auto parsed = parse(encoded, error);
+        INFO(error);
+        REQUIRE(parsed);
+        CHECK(json::parse(serialize(*parsed))["id"] == maximum);
+
+        encoded.replace(position, marker.size(), "\"id\":18446744073709551616");
+        error.clear();
+        CHECK_FALSE(parse(encoded, error));
+        CHECK_FALSE(error.empty());
+    };
+
+    auto request = make_request();
+    request.id = maximum;
+    check(Frame{std::move(request)});
+    check(Frame{Result{maximum, json{{"ok", true}}}});
+    check(Frame{Item{maximum, json{{"text", "item"}}}});
+    check(Frame{Progress{maximum, json{{"done", 1}}}});
+    check(Frame{Error{maximum, "INTERNAL", "failed", json::object(), 1}});
+    check(Frame{Challenge{maximum, destructive_challenge("logout", logout_target())}});
+    check(Frame{Answer{maximum,
+                       {{"nonce", "00112233445566778899aabbccddeeff"},
+                        {"sequence", 1},
+                        {"client_generation", nullptr},
+                        {"auth_sequence", nullptr},
+                        {"value", true}}}});
 }
 
 TEST_CASE("challenge payloads enforce closed kinds, details, and secrecy", "[proto][challenge]") {

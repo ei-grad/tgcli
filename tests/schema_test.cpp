@@ -1,6 +1,8 @@
 #include "schema_matcher.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <set>
 #include <string>
 #include <string_view>
@@ -174,6 +176,48 @@ std::vector<SchemaCase> schema_cases() {
     };
 }
 
+json removal_plan(bool keep_session = false) {
+    return {{"operation", "account_remove"},
+            {"account", "work"},
+            {"remote_logout", !keep_session},
+            {"keep_session", keep_session},
+            {"delete_paths", json::array({"/data/work", "/state/work"})},
+            {"config_path", "/config/tgcli/config.toml"},
+            {"config_snapshot",
+             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;"
+             "dev:1;ino:2;size:3;ctime_ns:4"},
+            {"data_root",
+             {{"path", "/data/work"},
+              {"device", std::uint64_t{1}},
+              {"inode", std::uint64_t{2}},
+              {"owner", std::uint64_t{1000}}}},
+            {"state_root", nullptr},
+            {"reassign_default", "main"}};
+}
+
+json logout_plan() {
+    return {{"operation", "logout"},
+            {"account", "main"},
+            {"remote_logout", true},
+            {"tdlib_request", "logOut"}};
+}
+
+json audit_identity(std::string phase, std::string command, std::string account) {
+    return {{"schema_version", 1},
+            {"phase", std::move(phase)},
+            {"invocation_id", "00112233445566778899aabbccddeeff"},
+            {"timestamp", "2026-08-04T10:11:12Z"},
+            {"account", std::move(account)},
+            {"command", std::move(command)}};
+}
+
+json terminal_error(std::string code, json details) {
+    return {{"error",
+             {{"code", std::move(code)},
+              {"message", "contract error"},
+              {"details", std::move(details)}}}};
+}
+
 } // namespace
 
 TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]") {
@@ -241,6 +285,207 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(auth_error);
     const auto daemon_error = tgcli::test::load_schema_document("daemon.error.schema.json");
     check_schema_node(daemon_error);
+    for (const auto* filename : {"logout.error.schema.json", "account-remove.error.schema.json",
+                                 "audit-intent.schema.json", "audit-checkpoint.schema.json",
+                                 "audit-outcome.schema.json", "removal-tombstone.schema.json"}) {
+        const auto schema = tgcli::test::load_schema_document(filename);
+        REQUIRE(schema.contains("$schema"));
+        CHECK(schema["$schema"] == kDialect);
+        check_schema_node(schema);
+    }
+}
+
+TEST_CASE("destructive error schemas close command shapes and uint64 request ids",
+          "[schema][destructive][error]") {
+    const auto logout_confirmation =
+        terminal_error("CONFIRMATION_REQUIRED",
+                       {{"account", "main"}, {"action", "logout"}, {"target", logout_plan()}});
+    CHECK_THAT(logout_confirmation, tgcli::test::matches_json_schema("logout.error.schema.json"));
+
+    const auto removal_confirmation = terminal_error(
+        "CONFIRMATION_REQUIRED",
+        {{"account", "work"}, {"action", "account_remove"}, {"target", removal_plan()}});
+    CHECK_THAT(removal_confirmation,
+               tgcli::test::matches_json_schema("account-remove.error.schema.json"));
+
+    auto cross_command = logout_confirmation;
+    cross_command["error"]["details"]["action"] = "account_remove";
+    cross_command["error"]["details"]["target"] = removal_plan();
+    CHECK_THAT(cross_command, !tgcli::test::matches_json_schema("logout.error.schema.json"));
+
+    auto missing = removal_confirmation;
+    missing["error"].erase("message");
+    CHECK_THAT(missing, !tgcli::test::matches_json_schema("account-remove.error.schema.json"));
+
+    auto additional = logout_confirmation;
+    additional["error"]["details"]["answer"] = true;
+    CHECK_THAT(additional, !tgcli::test::matches_json_schema("logout.error.schema.json"));
+
+    auto invalid_enum =
+        terminal_error("WRITE_DENIED", {{"account", "work"}, {"reason", "administrator_override"}});
+    CHECK_THAT(invalid_enum, !tgcli::test::matches_json_schema("account-remove.error.schema.json"));
+
+    const auto maximum = terminal_error(
+        "PROTOCOL_ANSWER_INVALID",
+        {{"request_id", std::numeric_limits<std::uint64_t>::max()}, {"reason", "malformed"}});
+    CHECK_THAT(maximum, tgcli::test::matches_json_schema("logout.error.schema.json"));
+    CHECK_THAT(maximum, tgcli::test::matches_json_schema("account-remove.error.schema.json"));
+    CHECK_THAT(maximum, tgcli::test::matches_json_schema("auth.error.schema.json"));
+
+    const auto overflow = json::parse(
+        R"({"error":{"code":"PROTOCOL_ANSWER_INVALID","message":"bad","details":{"request_id":18446744073709551616,"reason":"malformed"}}})");
+    CHECK_THAT(overflow, !tgcli::test::matches_json_schema("logout.error.schema.json"));
+    CHECK_THAT(overflow, !tgcli::test::matches_json_schema("account-remove.error.schema.json"));
+    CHECK_THAT(overflow, !tgcli::test::matches_json_schema("auth.error.schema.json"));
+
+    const auto incomplete = terminal_error(
+        "AUDIT_INCOMPLETE",
+        {{"account", "main"},
+         {"path", "/state/main/audit.log"},
+         {"mutation_state", "possible"},
+         {"completed_stages", json::array({"intent_synced", "logout_send_started"})}});
+    CHECK_THAT(incomplete, tgcli::test::matches_json_schema("logout.error.schema.json"));
+    auto wrong_mutation = incomplete;
+    wrong_mutation["error"]["details"]["mutation_state"] = "confirmed";
+    CHECK_THAT(wrong_mutation, !tgcli::test::matches_json_schema("logout.error.schema.json"));
+}
+
+TEST_CASE("audit schemas enforce command result and durable-stage relationships",
+          "[schema][destructive][audit]") {
+    auto logout_intent = audit_identity("intent", "logout", "main");
+    logout_intent.update({{"arguments", json::object()},
+                          {"plan", logout_plan()},
+                          {"config_snapshot", "missing"},
+                          {"authority_source", "request"},
+                          {"confirmation_source", "yes"}});
+    CHECK_THAT(logout_intent, tgcli::test::matches_json_schema("audit-intent.schema.json"));
+
+    auto removal_intent = audit_identity("intent", "account_remove", "work");
+    removal_intent.update({{"arguments", {{"keep_session", false}, {"reassign_default", "main"}}},
+                           {"plan", removal_plan()},
+                           {"config_snapshot", removal_plan()["config_snapshot"]},
+                           {"authority_source", "config"},
+                           {"confirmation_source", "tty"}});
+    CHECK_THAT(removal_intent, tgcli::test::matches_json_schema("audit-intent.schema.json"));
+
+    auto wrong_intent = removal_intent;
+    wrong_intent["command"] = "logout";
+    CHECK_THAT(wrong_intent, !tgcli::test::matches_json_schema("audit-intent.schema.json"));
+    wrong_intent = removal_intent;
+    wrong_intent["unexpected"] = true;
+    CHECK_THAT(wrong_intent, !tgcli::test::matches_json_schema("audit-intent.schema.json"));
+    wrong_intent = removal_intent;
+    wrong_intent["arguments"]["keep_session"] = true;
+    CHECK_THAT(wrong_intent, !tgcli::test::matches_json_schema("audit-intent.schema.json"));
+
+    auto checkpoint = audit_identity("checkpoint", "logout", "main");
+    checkpoint["stage"] = "logout_send_started";
+    CHECK_THAT(checkpoint, tgcli::test::matches_json_schema("audit-checkpoint.schema.json"));
+    checkpoint["stage"] = "remote_logout_send_started";
+    CHECK_THAT(checkpoint, !tgcli::test::matches_json_schema("audit-checkpoint.schema.json"));
+
+    auto logout_outcome = audit_identity("outcome", "logout", "main");
+    logout_outcome.update({{"success", true},
+                           {"mutation_state", "confirmed"},
+                           {"completed_stages", json::array({"intent_synced", "logout_send_started",
+                                                             "logout_closed_confirmed"})},
+                           {"result", {{"account", "main"}, {"logged_out", true}}},
+                           {"error", nullptr}});
+    CHECK_THAT(logout_outcome, tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+
+    auto failure = logout_outcome;
+    failure["success"] = false;
+    failure["mutation_state"] = "possible";
+    failure["completed_stages"] = json::array({"intent_synced", "logout_send_started"});
+    failure["result"] = nullptr;
+    failure["error"] = {{"code", "TIMEOUT"},
+                        {"details", {{"operation", "logout"}, {"state", "ready"}}}};
+    CHECK_THAT(failure, tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+    auto cross_command_error = failure;
+    cross_command_error["error"]["details"]["operation"] = "account_remove";
+    CHECK_THAT(cross_command_error, !tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+
+    auto success_with_error = logout_outcome;
+    success_with_error["error"] = failure["error"];
+    CHECK_THAT(success_with_error, !tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+
+    auto removal_outcome = audit_identity("outcome", "account_remove", "work");
+    removal_outcome.update(
+        {{"success", true},
+         {"mutation_state", "possible"},
+         {"completed_stages",
+          json::array({"planned", "intent_synced", "remote_logout_send_started",
+                       "remote_not_present", "client_close_started", "client_closed",
+                       "config_remove_started", "config_removed", "data_remove_started",
+                       "data_removed", "state_remove_started", "state_removed"})},
+         {"result",
+          {{"account", "work"},
+           {"removed", true},
+           {"remote_logout", "not_present"},
+           {"default_account", "main"}}},
+         {"error", nullptr}});
+    CHECK_THAT(removal_outcome, tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+
+    auto wrong_remote = removal_outcome;
+    wrong_remote["result"]["remote_logout"] = "confirmed";
+    CHECK_THAT(wrong_remote, !tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+    auto wrong_removal_mutation = removal_outcome;
+    wrong_removal_mutation["mutation_state"] = "confirmed";
+    CHECK_THAT(wrong_removal_mutation,
+               !tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+
+    auto kept_failure = removal_outcome;
+    kept_failure["success"] = false;
+    kept_failure["mutation_state"] = "none";
+    kept_failure["completed_stages"] = json::array({"planned", "intent_synced", "remote_kept"});
+    kept_failure["result"] = nullptr;
+    kept_failure["error"] = {
+        {"code", "REMOTE_LOGOUT_UNCONFIRMED"},
+        {"details", {{"account", "work"}, {"state", "unknown"}, {"reason", "state_unproven"}}}};
+    CHECK_THAT(kept_failure, !tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+    kept_failure["error"] = {
+        {"code", "INTERNAL"},
+        {"details", {{"operation", "account_remove"}, {"reason", "internal_error"}}}};
+    CHECK_THAT(kept_failure, tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+}
+
+TEST_CASE("removal tombstone schema binds policy stage prefix and next stage",
+          "[schema][destructive][removal]") {
+    auto tombstone = json{{"schema_version", 1},
+                          {"invocation_id", "00112233445566778899aabbccddeeff"},
+                          {"account", "work"},
+                          {"stage", "intent_synced"},
+                          {"completed_stages", json::array({"planned", "intent_synced"})},
+                          {"next_stage", nullptr},
+                          {"plan", removal_plan()},
+                          {"config_snapshot", removal_plan()["config_snapshot"]},
+                          {"data_root", removal_plan()["data_root"]},
+                          {"state_root", nullptr}};
+    tombstone["data_root"]["device"] = std::numeric_limits<std::uint64_t>::max();
+    CHECK_THAT(tombstone, tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
+
+    auto wrong_next = tombstone;
+    wrong_next["next_stage"] = "remote_logout_send_started";
+    CHECK_THAT(wrong_next, !tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
+
+    auto wrong_policy = tombstone;
+    wrong_policy["plan"] = removal_plan(true);
+    CHECK_THAT(wrong_policy, !tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
+
+    auto overflow = tombstone;
+    overflow["data_root"]["device"] = json::parse("18446744073709551616");
+    CHECK_THAT(overflow, !tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
+
+    auto missing = tombstone;
+    missing.erase("stage");
+    CHECK_THAT(missing, !tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
+
+    auto outcome_without_intent = tombstone;
+    outcome_without_intent["stage"] = "outcome_synced";
+    outcome_without_intent["completed_stages"] = json::array({"planned", "outcome_synced"});
+    outcome_without_intent["next_stage"] = nullptr;
+    CHECK_THAT(outcome_without_intent,
+               !tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
 }
 
 TEST_CASE("auth function denial has a closed exact detail schema", "[schema][auth]") {

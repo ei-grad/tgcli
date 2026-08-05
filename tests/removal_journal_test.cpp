@@ -1,4 +1,5 @@
 #include "daemon/removal_journal.hpp"
+#include "schema_matcher.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -152,6 +153,7 @@ TEST_CASE("removal tombstone has the exact schema and durable ordered transition
     CHECK(document.size() == 10);
     CHECK(document["plan"] == tgcli::proto::serialize(removal));
     CHECK(document["data_root"].is_null());
+    CHECK_THAT(document, tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
 
     advance_not_present(journal, kFirst);
     REQUIRE(journal.advance(std::string(kFirst), AuditStage::OutcomeSynced, failure));
@@ -159,6 +161,8 @@ TEST_CASE("removal tombstone has the exact schema and durable ordered transition
     REQUIRE(loaded);
     CHECK(loaded->stage == AuditStage::OutcomeSynced);
     CHECK_FALSE(loaded->next_stage);
+    CHECK_THAT(serialize(*loaded),
+               tgcli::test::matches_json_schema("removal-tombstone.schema.json"));
 
     struct stat directory {};
     struct stat tombstone {};
@@ -200,7 +204,10 @@ TEST_CASE("global removal audit binds exact intent outcome and tombstone complet
     const auto removal = plan();
     RemovalJournalFailure failure;
     REQUIRE(journal.create(std::string(kFirst), removal, failure));
-    REQUIRE(journal.append_intent(intent(std::string(kFirst), removal), failure));
+    const auto intent_record = intent(std::string(kFirst), removal);
+    CHECK_THAT(serialize(intent_record),
+               tgcli::test::matches_json_schema("audit-intent.schema.json"));
+    REQUIRE(journal.append_intent(intent_record, failure));
     REQUIRE(journal.advance(std::string(kFirst), AuditStage::IntentSynced, failure));
 
     auto presence = journal.audit_presence(kFirst, failure);
@@ -212,6 +219,9 @@ TEST_CASE("global removal audit binds exact intent outcome and tombstone complet
     REQUIRE(presence);
     CHECK(presence->intent);
     CHECK(presence->outcome);
+    const auto stored_outcome = journal.audit_outcome(kFirst, failure);
+    REQUIRE(stored_outcome);
+    CHECK_THAT(*stored_outcome, tgcli::test::matches_json_schema("audit-outcome.schema.json"));
 
     advance_not_present(journal, kFirst);
     auto inspection = journal.inspect_account("work");

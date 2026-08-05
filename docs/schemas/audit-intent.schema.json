@@ -1,0 +1,500 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli destructive audit intent",
+  "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "state": {
+      "enum": [
+        "unknown",
+        "wait_tdlib_parameters",
+        "wait_phone_number",
+        "wait_premium_purchase",
+        "wait_email_address",
+        "wait_email_code",
+        "wait_code",
+        "wait_other_device_confirmation",
+        "wait_registration",
+        "wait_password",
+        "ready",
+        "logging_out",
+        "closing",
+        "closed"
+      ]
+    },
+    "nullableState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/state"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "auditStage": {
+      "enum": [
+        "planned",
+        "intent_synced",
+        "logout_send_started",
+        "logout_closed_confirmed",
+        "remote_logout_send_started",
+        "remote_confirmed",
+        "remote_not_present",
+        "remote_kept",
+        "client_close_started",
+        "client_closed",
+        "config_remove_started",
+        "config_removed",
+        "data_remove_started",
+        "data_removed",
+        "state_remove_started",
+        "state_removed",
+        "outcome_synced"
+      ]
+    },
+    "invocationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]+)?Z$"
+    },
+    "configSnapshot": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64};dev:(0|[1-9][0-9]*);ino:(0|[1-9][0-9]*);size:(0|[1-9][0-9]*);ctime_ns:(0|[1-9][0-9]*)$"
+    },
+    "configSnapshotOrMissing": {
+      "type": "string",
+      "pattern": "^(missing|sha256:[0-9a-f]{64};dev:(0|[1-9][0-9]*);ino:(0|[1-9][0-9]*);size:(0|[1-9][0-9]*);ctime_ns:(0|[1-9][0-9]*))$"
+    },
+    "rootIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "device",
+        "inode",
+        "owner"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "device": {
+          "$ref": "#/$defs/uint64"
+        },
+        "inode": {
+          "$ref": "#/$defs/uint64"
+        },
+        "owner": {
+          "$ref": "#/$defs/uint64"
+        }
+      }
+    },
+    "logoutPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "remote_logout",
+        "tdlib_request"
+      ],
+      "properties": {
+        "operation": {
+          "const": "logout"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "remote_logout": {
+          "const": true
+        },
+        "tdlib_request": {
+          "const": "logOut"
+        }
+      }
+    },
+    "remoteLogoutPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "remote_logout",
+        "keep_session",
+        "delete_paths",
+        "config_path",
+        "config_snapshot",
+        "data_root",
+        "state_root",
+        "reassign_default"
+      ],
+      "properties": {
+        "operation": {
+          "const": "account_remove"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "remote_logout": {
+          "const": true
+        },
+        "keep_session": {
+          "const": false
+        },
+        "delete_paths": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "config_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshot"
+        },
+        "data_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reassign_default": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "keepSessionPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "remote_logout",
+        "keep_session",
+        "delete_paths",
+        "config_path",
+        "config_snapshot",
+        "data_root",
+        "state_root",
+        "reassign_default"
+      ],
+      "properties": {
+        "operation": {
+          "const": "account_remove"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "remote_logout": {
+          "const": false
+        },
+        "keep_session": {
+          "const": true
+        },
+        "delete_paths": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "config_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshot"
+        },
+        "data_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state_root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reassign_default": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "arguments",
+        "plan",
+        "config_snapshot",
+        "authority_source",
+        "confirmation_source"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "phase": {
+          "const": "intent"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/invocationId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "authority_source": {
+          "enum": [
+            "request",
+            "config"
+          ]
+        },
+        "confirmation_source": {
+          "enum": [
+            "yes",
+            "tty"
+          ]
+        },
+        "command": {
+          "const": "logout"
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {}
+        },
+        "plan": {
+          "$ref": "#/$defs/logoutPlan"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshotOrMissing"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "arguments",
+        "plan",
+        "config_snapshot",
+        "authority_source",
+        "confirmation_source"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "phase": {
+          "const": "intent"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/invocationId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "authority_source": {
+          "enum": [
+            "request",
+            "config"
+          ]
+        },
+        "confirmation_source": {
+          "enum": [
+            "yes",
+            "tty"
+          ]
+        },
+        "command": {
+          "const": "account_remove"
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "keep_session",
+            "reassign_default"
+          ],
+          "properties": {
+            "keep_session": {
+              "const": false
+            },
+            "reassign_default": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/account"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "plan": {
+          "$ref": "#/$defs/remoteLogoutPlan"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshot"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "arguments",
+        "plan",
+        "config_snapshot",
+        "authority_source",
+        "confirmation_source"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "phase": {
+          "const": "intent"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/invocationId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "authority_source": {
+          "enum": [
+            "request",
+            "config"
+          ]
+        },
+        "confirmation_source": {
+          "enum": [
+            "yes",
+            "tty"
+          ]
+        },
+        "command": {
+          "const": "account_remove"
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "keep_session",
+            "reassign_default"
+          ],
+          "properties": {
+            "keep_session": {
+              "const": true
+            },
+            "reassign_default": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/account"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "plan": {
+          "$ref": "#/$defs/keepSessionPlan"
+        },
+        "config_snapshot": {
+          "$ref": "#/$defs/configSnapshot"
+        }
+      }
+    }
+  ]
+}

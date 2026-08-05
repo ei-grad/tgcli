@@ -6,6 +6,7 @@
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/request_session.hpp"
+#include "schema_matcher.hpp"
 #include "support/scripted_td_runtime.hpp"
 
 #include <algorithm>
@@ -433,6 +434,10 @@ TEST_CASE("logout waits for correlated Closed after its ok response",
     CHECK(records[2]["stage"] == "logout_closed_confirmed");
     CHECK(records[3]["phase"] == "outcome");
     CHECK(records[3]["mutation_state"] == "confirmed");
+    CHECK_THAT(records[0], tgcli::test::matches_json_schema("audit-intent.schema.json"));
+    CHECK_THAT(records[1], tgcli::test::matches_json_schema("audit-checkpoint.schema.json"));
+    CHECK_THAT(records[2], tgcli::test::matches_json_schema("audit-checkpoint.schema.json"));
+    CHECK_THAT(records[3], tgcli::test::matches_json_schema("audit-outcome.schema.json"));
 }
 
 TEST_CASE("logout accepts Closed before its response and ignores the old late response",
@@ -1376,6 +1381,7 @@ TEST_CASE("logout maps pre-transition TD errors and post-send timeout without cl
         REQUIRE(result.error);
         CHECK(result.exit_code == kRateLimited);
         CHECK((*result.error)["error"]["code"] == "RATE_LIMITED");
+        CHECK_THAT(*result.error, tgcli::test::matches_json_schema("logout.error.schema.json"));
         CHECK((*result.error)["error"]["details"] ==
               json{{"operation", "logout"}, {"tdlib_code", 429}, {"retry_after", 17}});
     }
