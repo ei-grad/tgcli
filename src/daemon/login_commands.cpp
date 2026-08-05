@@ -317,6 +317,17 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
     case TdFunctionKind::TerminateSession:
+    case TdFunctionKind::GetChat:
+    case TdFunctionKind::GetChats:
+    case TdFunctionKind::LoadChats:
+    case TdFunctionKind::SearchPublicChat:
+    case TdFunctionKind::GetInternalLinkType:
+    case TdFunctionKind::GetMessageLinkInfo:
+    case TdFunctionKind::CheckChatInviteLink:
+    case TdFunctionKind::GetUser:
+    case TdFunctionKind::GetSupergroup:
+    case TdFunctionKind::GetSupergroupFullInfo:
+    case TdFunctionKind::CreatePrivateChat:
         return "other";
     }
     return "other";

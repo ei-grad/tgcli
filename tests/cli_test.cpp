@@ -2170,6 +2170,96 @@ TEST_CASE("Saved Messages no-daemon fake boundary preserves stdout and stderr di
     CHECK(scripted->sent_functions().size() == 4);
 }
 
+TEST_CASE("resolve parser exposes its surface and rejects invalid selectors locally",
+          "[cli][resolver][process][schema]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "resolve-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("resolve") != std::string::npos);
+
+    const auto resolve_help = run_binary_captured({"resolve", "--help"}, env, "resolve-help");
+    REQUIRE(resolve_help.exit_code == kOk);
+    CHECK((resolve_help.out + resolve_help.err).find("selector") != std::string::npos);
+
+    const std::vector<std::pair<std::string, std::string>> invalid{
+        {"resolve-zero", "0"},
+        {"resolve-over-int53", "9007199254740992"},
+        {"resolve-empty-username", "@"},
+        {"resolve-invalid-utf8", std::string("\xF0\x28\x8C\x28", 4)},
+    };
+    for (const auto& [stem, selector] : invalid) {
+        const auto outcome = run_binary_captured({"--json", "resolve", selector}, env, stem);
+        INFO(stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        const auto error = json::parse(outcome.err);
+        CHECK(error["error"]["code"] == "USAGE");
+        CHECK(error["error"]["details"] ==
+              json{{"argument", "selector"}, {"reason", "invalid_argument"}});
+        CHECK_THAT(error, test::matches_json_schema("resolve.error.schema.json"));
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("resolve no-daemon fake boundary preserves JSON stream discipline",
+          "[cli][resolver][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    REQUIRE(scripted->clients().size() == 1);
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"resolve"};
+    request.args = {{"selector", "-1001"}};
+    request.context.json = true;
+    request.context.cwd = "/";
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+    REQUIRE(scripted->wait_for_sent(2));
+    auto sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                                    .first_name = "Ada",
+                                                                    .last_name = "",
+                                                                    .usernames = {"ada"},
+                                                                    .phone_number = "12025550123",
+                                                                    .is_bot = false,
+                                                                    .is_premium = false}));
+    REQUIRE(scripted->wait_for_sent(3));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetChat);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdChat{.id = -1001,
+                                                             .title = "Project",
+                                                             .kind = core::TdChatKind::BasicGroup,
+                                                             .related_id = 0,
+                                                             .tdlib_type_id = 1}));
+    const auto outcome = pending.get();
+    CHECK(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    const auto result = json::parse(outcome.out);
+    CHECK(result["chat"]["id"] == -1001);
+    CHECK_THAT(result, test::matches_json_schema("resolve.result.schema.json"));
+}
+
 TEST_CASE("verbose is client-owned diagnostics and leaves command data on stdout",
           "[cli][process][logging]") {
     const IsolatedEnv env;

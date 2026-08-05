@@ -365,6 +365,190 @@ TdValue make_native_terminate_session(std::int64_t session_id) {
                                                                {{"session_id", session_id}}});
 }
 
+td_api::object_ptr<td_api::ChatList> make_chat_list(TdChatListKind list) {
+    switch (list) {
+    case TdChatListKind::Main:
+        return td_api::make_object<td_api::chatListMain>();
+    case TdChatListKind::Archive:
+        return td_api::make_object<td_api::chatListArchive>();
+    }
+    throw std::invalid_argument("unsupported chat list");
+}
+
+std::string_view chat_list_name(TdChatListKind list) {
+    switch (list) {
+    case TdChatListKind::Main:
+        return "main";
+    case TdChatListKind::Archive:
+        return "archive";
+    }
+    return "unknown";
+}
+
+TdChat convert_chat(td_api::chat& chat) {
+    TdChat converted{.id = chat.id_,
+                     .title = std::move(chat.title_),
+                     .kind = TdChatKind::Unknown,
+                     .related_id = 0,
+                     .tdlib_type_id = chat.type_ == nullptr ? 0 : chat.type_->get_id()};
+    if (chat.type_ == nullptr) {
+        return converted;
+    }
+    switch (chat.type_->get_id()) {
+    case td_api::chatTypePrivate::ID:
+        converted.kind = TdChatKind::Private;
+        converted.related_id = static_cast<const td_api::chatTypePrivate&>(*chat.type_).user_id_;
+        break;
+    case td_api::chatTypeBasicGroup::ID:
+        converted.kind = TdChatKind::BasicGroup;
+        converted.related_id =
+            static_cast<const td_api::chatTypeBasicGroup&>(*chat.type_).basic_group_id_;
+        break;
+    case td_api::chatTypeSupergroup::ID: {
+        const auto& type = static_cast<const td_api::chatTypeSupergroup&>(*chat.type_);
+        converted.kind = type.is_channel_ ? TdChatKind::Channel : TdChatKind::Supergroup;
+        converted.related_id = type.supergroup_id_;
+        break;
+    }
+    case td_api::chatTypeSecret::ID:
+        converted.kind = TdChatKind::Secret;
+        converted.related_id = static_cast<const td_api::chatTypeSecret&>(*chat.type_).user_id_;
+        break;
+    default:
+        break;
+    }
+    return converted;
+}
+
+TdTopic convert_topic(const td_api::MessageTopic& topic) {
+    switch (topic.get_id()) {
+    case td_api::messageTopicForum::ID:
+        return {.kind = TdTopicKind::Forum,
+                .id = static_cast<const td_api::messageTopicForum&>(topic).forum_topic_id_,
+                .tdlib_type_id = topic.get_id()};
+    case td_api::messageTopicThread::ID:
+        return {.kind = TdTopicKind::Thread,
+                .id = static_cast<const td_api::messageTopicThread&>(topic).message_thread_id_,
+                .tdlib_type_id = topic.get_id()};
+    case td_api::messageTopicDirectMessages::ID:
+        return {.kind = TdTopicKind::Direct,
+                .id = static_cast<const td_api::messageTopicDirectMessages&>(topic)
+                          .direct_messages_chat_topic_id_,
+                .tdlib_type_id = topic.get_id()};
+    case td_api::messageTopicSavedMessages::ID:
+        return {.kind = TdTopicKind::Saved,
+                .id = static_cast<const td_api::messageTopicSavedMessages&>(topic)
+                          .saved_messages_topic_id_,
+                .tdlib_type_id = topic.get_id()};
+    default:
+        return {.kind = TdTopicKind::Unknown, .id = 0, .tdlib_type_id = topic.get_id()};
+    }
+}
+
+TdInternalLink convert_internal_link(td_api::InternalLinkType& link) {
+    TdInternalLink converted{.kind = TdInternalLinkKind::Unsupported,
+                             .username = {},
+                             .url = {},
+                             .tdlib_type_id = link.get_id()};
+    switch (link.get_id()) {
+    case td_api::internalLinkTypePublicChat::ID:
+        converted.kind = TdInternalLinkKind::PublicChat;
+        converted.username =
+            std::move(static_cast<td_api::internalLinkTypePublicChat&>(link).chat_username_);
+        break;
+    case td_api::internalLinkTypeBotStart::ID:
+        converted.kind = TdInternalLinkKind::BotStart;
+        converted.username =
+            std::move(static_cast<td_api::internalLinkTypeBotStart&>(link).bot_username_);
+        break;
+    case td_api::internalLinkTypeMessage::ID:
+        converted.kind = TdInternalLinkKind::Message;
+        converted.url = std::move(static_cast<td_api::internalLinkTypeMessage&>(link).url_);
+        break;
+    case td_api::internalLinkTypeChatInvite::ID:
+        converted.kind = TdInternalLinkKind::ChatInvite;
+        converted.url =
+            std::move(static_cast<td_api::internalLinkTypeChatInvite&>(link).invite_link_);
+        break;
+    case td_api::internalLinkTypeDirectMessagesChat::ID:
+        converted.kind = TdInternalLinkKind::DirectMessagesChat;
+        converted.username = std::move(
+            static_cast<td_api::internalLinkTypeDirectMessagesChat&>(link).channel_username_);
+        break;
+    case td_api::internalLinkTypeSavedMessages::ID:
+        converted.kind = TdInternalLinkKind::SavedMessages;
+        break;
+    default:
+        break;
+    }
+    return converted;
+}
+
+bool is_internal_link_type(std::int32_t type_id) {
+    switch (type_id) {
+    case td_api::internalLinkTypeAttachmentMenuBot::ID:
+    case td_api::internalLinkTypeAuthenticationCode::ID:
+    case td_api::internalLinkTypeBackground::ID:
+    case td_api::internalLinkTypeBotAddToChannel::ID:
+    case td_api::internalLinkTypeBotStart::ID:
+    case td_api::internalLinkTypeBotStartInGroup::ID:
+    case td_api::internalLinkTypeBusinessChat::ID:
+    case td_api::internalLinkTypeCallsPage::ID:
+    case td_api::internalLinkTypeChatAffiliateProgram::ID:
+    case td_api::internalLinkTypeChatBoost::ID:
+    case td_api::internalLinkTypeChatFolderInvite::ID:
+    case td_api::internalLinkTypeChatInvite::ID:
+    case td_api::internalLinkTypeChatSelection::ID:
+    case td_api::internalLinkTypeContactsPage::ID:
+    case td_api::internalLinkTypeDirectMessagesChat::ID:
+    case td_api::internalLinkTypeGame::ID:
+    case td_api::internalLinkTypeGiftAuction::ID:
+    case td_api::internalLinkTypeGiftCollection::ID:
+    case td_api::internalLinkTypeGroupCall::ID:
+    case td_api::internalLinkTypeInstantView::ID:
+    case td_api::internalLinkTypeInvoice::ID:
+    case td_api::internalLinkTypeLanguagePack::ID:
+    case td_api::internalLinkTypeLiveStory::ID:
+    case td_api::internalLinkTypeMainWebApp::ID:
+    case td_api::internalLinkTypeMessage::ID:
+    case td_api::internalLinkTypeMessageDraft::ID:
+    case td_api::internalLinkTypeMyProfilePage::ID:
+    case td_api::internalLinkTypeNewChannelChat::ID:
+    case td_api::internalLinkTypeNewGroupChat::ID:
+    case td_api::internalLinkTypeNewPrivateChat::ID:
+    case td_api::internalLinkTypeNewStory::ID:
+    case td_api::internalLinkTypeOauth::ID:
+    case td_api::internalLinkTypePassportDataRequest::ID:
+    case td_api::internalLinkTypePhoneNumberConfirmation::ID:
+    case td_api::internalLinkTypePremiumFeaturesPage::ID:
+    case td_api::internalLinkTypePremiumGiftCode::ID:
+    case td_api::internalLinkTypePremiumGiftPurchase::ID:
+    case td_api::internalLinkTypeProxy::ID:
+    case td_api::internalLinkTypePublicChat::ID:
+    case td_api::internalLinkTypeQrCodeAuthentication::ID:
+    case td_api::internalLinkTypeRequestManagedBot::ID:
+    case td_api::internalLinkTypeRestorePurchases::ID:
+    case td_api::internalLinkTypeSavedMessages::ID:
+    case td_api::internalLinkTypeSearch::ID:
+    case td_api::internalLinkTypeSettings::ID:
+    case td_api::internalLinkTypeStarPurchase::ID:
+    case td_api::internalLinkTypeStickerSet::ID:
+    case td_api::internalLinkTypeStory::ID:
+    case td_api::internalLinkTypeStoryAlbum::ID:
+    case td_api::internalLinkTypeTextCompositionStyle::ID:
+    case td_api::internalLinkTypeTheme::ID:
+    case td_api::internalLinkTypeUnknownDeepLink::ID:
+    case td_api::internalLinkTypeUpgradedGift::ID:
+    case td_api::internalLinkTypeUserPhoneNumber::ID:
+    case td_api::internalLinkTypeUserToken::ID:
+    case td_api::internalLinkTypeVideoChat::ID:
+    case td_api::internalLinkTypeWebApp::ID:
+        return true;
+    default:
+        return false;
+    }
+}
+
 TdValue convert_response(NativeObjectPtr object) {
     if (object == nullptr) {
         return {};
@@ -390,6 +574,53 @@ TdValue convert_response(NativeObjectPtr object) {
             summary.usernames = std::move(user.usernames_->active_usernames_);
         }
         return TdValue::from(std::move(summary));
+    }
+    case td_api::chat::ID:
+        return TdValue::from(convert_chat(static_cast<td_api::chat&>(*object)));
+    case td_api::chats::ID: {
+        auto& chats = static_cast<td_api::chats&>(*object);
+        return TdValue::from(TdChats{.chat_ids = std::move(chats.chat_ids_)});
+    }
+    case td_api::supergroup::ID: {
+        auto& supergroup = static_cast<td_api::supergroup&>(*object);
+        TdSupergroup converted{
+            .id = supergroup.id_, .usernames = {}, .is_channel = supergroup.is_channel_};
+        if (supergroup.usernames_ != nullptr) {
+            converted.usernames = std::move(supergroup.usernames_->active_usernames_);
+        }
+        return TdValue::from(std::move(converted));
+    }
+    case td_api::internalLinkTypePublicChat::ID:
+    case td_api::internalLinkTypeBotStart::ID:
+    case td_api::internalLinkTypeMessage::ID:
+    case td_api::internalLinkTypeChatInvite::ID:
+    case td_api::internalLinkTypeDirectMessagesChat::ID:
+    case td_api::internalLinkTypeSavedMessages::ID:
+        return TdValue::from(
+            convert_internal_link(static_cast<td_api::InternalLinkType&>(*object)));
+    case td_api::messageLinkInfo::ID: {
+        auto& info = static_cast<td_api::messageLinkInfo&>(*object);
+        TdMessageLinkInfo converted{.is_public = info.is_public_,
+                                    .chat_id = info.chat_id_,
+                                    .message_id = std::nullopt,
+                                    .topic = std::nullopt};
+        if (info.message_ != nullptr) {
+            converted.message_id = info.message_->id_;
+        }
+        if (info.topic_id_ != nullptr) {
+            converted.topic = convert_topic(*info.topic_id_);
+        }
+        return TdValue::from(converted);
+    }
+    case td_api::chatInviteLinkInfo::ID: {
+        const auto& info = static_cast<const td_api::chatInviteLinkInfo&>(*object);
+        return TdValue::from(
+            TdChatInviteLinkInfo{.chat_id = info.chat_id_, .is_public = info.is_public_});
+    }
+    case td_api::supergroupFullInfo::ID: {
+        const auto& info = static_cast<const td_api::supergroupFullInfo&>(*object);
+        return TdValue::from(
+            TdSupergroupFullInfo{.direct_messages_chat_id = info.direct_messages_chat_id_});
     }
     case td_api::savedMessagesTags::ID: {
         auto& tags = static_cast<td_api::savedMessagesTags&>(*object);
@@ -426,6 +657,10 @@ TdValue convert_response(NativeObjectPtr object) {
     case td_api::sessions::ID:
         return convert_sessions(td_api::move_object_as<td_api::sessions>(object));
     default:
+        if (is_internal_link_type(object->get_id())) {
+            return TdValue::from(
+                convert_internal_link(static_cast<td_api::InternalLinkType&>(*object)));
+        }
         return TdValue::from(std::move(object));
     }
 }
@@ -464,6 +699,28 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getActiveSessions::ID;
     case TdFunctionKind::TerminateSession:
         return function.get_id() == td_api::terminateSession::ID;
+    case TdFunctionKind::GetChat:
+        return function.get_id() == td_api::getChat::ID;
+    case TdFunctionKind::GetChats:
+        return function.get_id() == td_api::getChats::ID;
+    case TdFunctionKind::LoadChats:
+        return function.get_id() == td_api::loadChats::ID;
+    case TdFunctionKind::SearchPublicChat:
+        return function.get_id() == td_api::searchPublicChat::ID;
+    case TdFunctionKind::GetInternalLinkType:
+        return function.get_id() == td_api::getInternalLinkType::ID;
+    case TdFunctionKind::GetMessageLinkInfo:
+        return function.get_id() == td_api::getMessageLinkInfo::ID;
+    case TdFunctionKind::CheckChatInviteLink:
+        return function.get_id() == td_api::checkChatInviteLink::ID;
+    case TdFunctionKind::GetUser:
+        return function.get_id() == td_api::getUser::ID;
+    case TdFunctionKind::GetSupergroup:
+        return function.get_id() == td_api::getSupergroup::ID;
+    case TdFunctionKind::GetSupergroupFullInfo:
+        return function.get_id() == td_api::getSupergroupFullInfo::ID;
+    case TdFunctionKind::CreatePrivateChat:
+        return function.get_id() == td_api::createPrivateChat::ID;
     case TdFunctionKind::LogOut:
         return function.get_id() == td_api::logOut::ID;
     case TdFunctionKind::Close:
@@ -873,6 +1130,86 @@ class ProductionTdRuntime final : public TdRuntime {
 
     TdValue make_terminate_session(std::int64_t session_id) override {
         return make_native_terminate_session(session_id);
+    }
+
+    TdValue make_get_chat(std::int64_t chat_id) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getChat>(chat_id);
+        return TdValue::function(std::move(native),
+                                 TdFunctionData{TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
+    }
+
+    TdValue make_get_chats(TdChatListKind list, std::int32_t limit) override {
+        NativeFunctionPtr native =
+            td_api::make_object<td_api::getChats>(make_chat_list(list), limit);
+        return TdValue::function(std::move(native),
+                                 TdFunctionData{TdFunctionKind::GetChats,
+                                                {{"list", std::string(chat_list_name(list))},
+                                                 {"limit", static_cast<std::int64_t>(limit)}}});
+    }
+
+    TdValue make_load_chats(TdChatListKind list, std::int32_t limit) override {
+        NativeFunctionPtr native =
+            td_api::make_object<td_api::loadChats>(make_chat_list(list), limit);
+        return TdValue::function(std::move(native),
+                                 TdFunctionData{TdFunctionKind::LoadChats,
+                                                {{"list", std::string(chat_list_name(list))},
+                                                 {"limit", static_cast<std::int64_t>(limit)}}});
+    }
+
+    TdValue make_search_public_chat(std::string username) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::searchPublicChat>(username);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::SearchPublicChat, {{"username", std::move(username)}}});
+    }
+
+    TdValue make_get_internal_link_type(std::string link) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getInternalLinkType>(link);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::GetInternalLinkType, {{"link", std::move(link)}}});
+    }
+
+    TdValue make_get_message_link_info(std::string url) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getMessageLinkInfo>(url);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::GetMessageLinkInfo, {{"url", std::move(url)}}});
+    }
+
+    TdValue make_check_chat_invite_link(std::string link) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::checkChatInviteLink>(link);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::CheckChatInviteLink, {{"link", std::move(link)}}});
+    }
+
+    TdValue make_get_user(std::int64_t user_id) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getUser>(user_id);
+        return TdValue::function(std::move(native),
+                                 TdFunctionData{TdFunctionKind::GetUser, {{"user_id", user_id}}});
+    }
+
+    TdValue make_get_supergroup(std::int64_t supergroup_id) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getSupergroup>(supergroup_id);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::GetSupergroup, {{"supergroup_id", supergroup_id}}});
+    }
+
+    TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) override {
+        NativeFunctionPtr native =
+            td_api::make_object<td_api::getSupergroupFullInfo>(supergroup_id);
+        return TdValue::function(std::move(native),
+                                 TdFunctionData{TdFunctionKind::GetSupergroupFullInfo,
+                                                {{"supergroup_id", supergroup_id}}});
+    }
+
+    TdValue make_create_private_chat(std::int64_t user_id, bool force) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::createPrivateChat>(user_id, force);
+        return TdValue::function(std::move(native),
+                                 TdFunctionData{TdFunctionKind::CreatePrivateChat,
+                                                {{"user_id", user_id}, {"force", force}}});
     }
 
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,

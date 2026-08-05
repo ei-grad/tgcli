@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/utf8.hpp"
 #include "core/td_client.hpp"
 #include "daemon/dispatch.hpp"
 
@@ -20,7 +21,9 @@ struct SavedReactionSelector {
 };
 
 std::optional<SavedReactionSelector> parse_saved_reaction_selector(std::string_view selector);
-bool valid_utf8(std::string_view value);
+inline bool valid_utf8(std::string_view value) {
+    return common::valid_utf8(value);
+}
 
 struct SavedSearchCursor {
     std::string operation = "saved.search";

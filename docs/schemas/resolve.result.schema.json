@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "int53_nonzero": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    },
+    "chat_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "type", "is_bot", "usernames"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53_nonzero" },
+        "title": { "type": "string" },
+        "type": { "enum": ["private", "basic_group", "supergroup", "channel"] },
+        "is_bot": { "type": "boolean" },
+        "usernames": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "topic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["forum", "thread", "direct", "saved"] },
+        "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "chat", "message_id", "topic", "link_type", "is_public"],
+  "properties": {
+    "kind": { "enum": ["chat", "message", "topic"] },
+    "chat": { "$ref": "#/$defs/chat_identity" },
+    "message_id": {
+      "oneOf": [
+        { "$ref": "#/$defs/int53_nonzero" },
+        { "type": "null" }
+      ]
+    },
+    "topic": {
+      "oneOf": [
+        { "$ref": "#/$defs/topic" },
+        { "type": "null" }
+      ]
+    },
+    "link_type": {
+      "oneOf": [
+        {
+          "enum": [
+            "public_chat",
+            "bot_start",
+            "message",
+            "chat_invite",
+            "direct_messages_chat",
+            "saved_messages"
+          ]
+        },
+        { "type": "null" }
+      ]
+    },
+    "is_public": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    }
+  }
+}

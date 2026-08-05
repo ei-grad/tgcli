@@ -1,6 +1,7 @@
 #include "daemon/saved_commands.hpp"
 
 #include "common/exit_codes.hpp"
+#include "daemon/ready_read.hpp"
 #include "daemon/request_session.hpp"
 
 #include <algorithm>
@@ -89,179 +90,6 @@ bool exact_fields(const json& value, const std::set<std::string>& expected) {
                                [&](const std::string& name) { return value.contains(name); });
 }
 
-enum class ReadyChangeKind { None, Advanced, Lost };
-
-struct ReadyChange {
-    ReadyChangeKind kind = ReadyChangeKind::None;
-    std::shared_ptr<const AuthStateSnapshot> snapshot;
-};
-
-class AuthTracker {
-  public:
-    AuthTracker(core::TdClient& client, RequestSession& session)
-        : client_(client), session_(session) {
-        subscription_ = client_.subscribe_auth_states(
-            [this](const std::shared_ptr<const AuthStateSnapshot>& snapshot) {
-                observe(snapshot);
-            });
-        observe(client_.auth_state());
-    }
-
-    ~AuthTracker() {
-        client_.unsubscribe_auth_states(subscription_);
-    }
-
-    AuthTracker(const AuthTracker&) = delete;
-    AuthTracker& operator=(const AuthTracker&) = delete;
-    AuthTracker(AuthTracker&&) = delete;
-    AuthTracker& operator=(AuthTracker&&) = delete;
-
-    std::shared_ptr<const AuthStateSnapshot> current() const {
-        const std::lock_guard lock(mutex_);
-        return latest_;
-    }
-
-    ReadyChange ready_change_after(const AuthStateSnapshot& sent) {
-        observe(client_.auth_state());
-        const std::lock_guard lock(mutex_);
-        const auto after_sent = [&](const auto& candidate) {
-            return candidate && std::tie(candidate->client_generation, candidate->auth_sequence) >
-                                    std::tie(sent.client_generation, sent.auth_sequence);
-        };
-        const auto lost = std::ranges::find_if(pending_, [&](const auto& candidate) {
-            return after_sent(candidate) && candidate->data.state != AuthState::Ready;
-        });
-        if (lost != pending_.end()) {
-            return {ReadyChangeKind::Lost, *lost};
-        }
-        if (after_sent(latest_) && latest_->data.state == AuthState::Ready) {
-            return {ReadyChangeKind::Advanced, latest_};
-        }
-        return {};
-    }
-
-  private:
-    bool record(const std::shared_ptr<const AuthStateSnapshot>& snapshot) {
-        const std::lock_guard lock(mutex_);
-        if (!snapshot ||
-            (latest_ && std::tie(snapshot->client_generation, snapshot->auth_sequence) <=
-                            std::tie(latest_->client_generation, latest_->auth_sequence))) {
-            return false;
-        }
-        latest_ = snapshot;
-        pending_.push_back(snapshot);
-        return true;
-    }
-
-    void observe(const std::shared_ptr<const AuthStateSnapshot>& snapshot) {
-        if (record(snapshot)) {
-            session_.supersede(snapshot->client_generation, snapshot->auth_sequence);
-        }
-    }
-
-    core::TdClient& client_;
-    RequestSession& session_;
-    mutable std::mutex mutex_;
-    std::shared_ptr<const AuthStateSnapshot> latest_;
-    std::deque<std::shared_ptr<const AuthStateSnapshot>> pending_;
-    std::uint64_t subscription_ = 0;
-};
-
-enum class WaitKind { Response, Updated, ReadyAdvanced, TimedOut, Cancelled, Failed };
-
-struct WaitResult {
-    WaitKind kind = WaitKind::Failed;
-    core::TdValue value;
-    std::optional<core::TdAuthorizationFailure> authorization_failure;
-    std::shared_ptr<const AuthStateSnapshot> snapshot;
-};
-
-WaitResult consume_ready_response(std::future<core::TdValue>& response,
-                                  const AuthStateSnapshot& sent, AuthTracker& tracker) {
-    try {
-        auto value = response.get();
-        const auto change = tracker.ready_change_after(sent);
-        if (change.kind == ReadyChangeKind::Lost && change.snapshot &&
-            change.snapshot->receive_event_sequence != 0 &&
-            (value.receive_event_sequence() == 0 ||
-             change.snapshot->receive_event_sequence < value.receive_event_sequence())) {
-            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
-        }
-        return {WaitKind::Response, std::move(value), std::nullopt, nullptr};
-    } catch (const core::TdAuthorizationError& error) {
-        const auto change = tracker.ready_change_after(sent);
-        if (change.kind == ReadyChangeKind::Lost) {
-            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
-        }
-        if (change.kind == ReadyChangeKind::Advanced) {
-            return {WaitKind::ReadyAdvanced, {}, std::nullopt, change.snapshot};
-        }
-        return {WaitKind::Failed, {}, error.failure(), nullptr};
-    } catch (const std::exception&) {
-        const auto change = tracker.ready_change_after(sent);
-        if (change.kind == ReadyChangeKind::Lost) {
-            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
-        }
-        if (change.kind == ReadyChangeKind::Advanced) {
-            return {WaitKind::ReadyAdvanced, {}, std::nullopt, change.snapshot};
-        }
-        return {WaitKind::Failed, {}, std::nullopt, nullptr};
-    }
-}
-
-WaitResult wait_ready_response(std::future<core::TdValue>& response, const AuthStateSnapshot& sent,
-                               AuthTracker& tracker, RequestSession& session) {
-    for (;;) {
-        if (response.wait_for(0ms) == std::future_status::ready) {
-            return consume_ready_response(response, sent, tracker);
-        }
-        const auto change = tracker.ready_change_after(sent);
-        if (change.kind == ReadyChangeKind::Lost) {
-            return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
-        }
-        if (RequestSession::Clock::now() >= session.deadline()) {
-            return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
-        }
-        if (session.cancellation_requested() &&
-            session.in_flight_state() != InFlightState::Orphaned) {
-            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-}
-
-using ReadyRead =
-    std::function<std::future<core::TdValue>(const std::shared_ptr<const AuthStateSnapshot>&)>;
-
-WaitResult wait_ready_read(const ReadyRead& start, AuthTracker& tracker, RequestSession& session,
-                           std::shared_ptr<const AuthStateSnapshot>& snapshot) {
-    for (;;) {
-        if (RequestSession::Clock::now() >= session.deadline()) {
-            return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
-        }
-        if (!session.reserve_direct_in_flight()) {
-            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
-        }
-        if (RequestSession::Clock::now() >= session.deadline()) {
-            session.settle_in_flight();
-            return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
-        }
-        auto response = start(snapshot);
-        auto waited = wait_ready_response(response, *snapshot, tracker, session);
-        session.settle_in_flight();
-        if (waited.kind != WaitKind::ReadyAdvanced) {
-            return waited;
-        }
-        if (session.cancellation_requested()) {
-            return {WaitKind::Cancelled, {}, std::nullopt, nullptr};
-        }
-        if (!waited.snapshot || waited.snapshot->data.state != AuthState::Ready) {
-            return {WaitKind::Failed, {}, std::nullopt, nullptr};
-        }
-        snapshot = std::move(waited.snapshot);
-    }
-}
-
 std::int32_t retry_after(std::string_view message) {
     static const std::regex pattern(
         R"((?:^|[^[:alnum:]_])(?:retry[[:space:]]+after[[:space:]]*|FLOOD_WAIT_)([0-9]+))",
@@ -333,28 +161,27 @@ void malformed_reaction(RequestSession& session, std::string_view operation,
 
 std::optional<std::shared_ptr<const AuthStateSnapshot>>
 user_preflight(core::TdClient& client, std::string_view account, std::string_view operation,
-               AuthTracker& tracker, RequestSession& session) {
-    auto snapshot = tracker.current();
+               ReadyReadSession& reads, RequestSession& session) {
+    auto snapshot = reads.current();
     if (!snapshot || snapshot->data.state != AuthState::Ready) {
         not_authed(session, account, snapshot, "not_ready");
         return std::nullopt;
     }
-    auto waited = wait_ready_read([&](const auto& current) { return client.get_me(current); },
-                                  tracker, session, snapshot);
-    if (waited.kind == WaitKind::Updated) {
+    auto waited = reads.read([&](const auto& current) { return client.get_me(current); }, snapshot);
+    if (waited.status == ReadyReadStatus::AuthorizationLost) {
         if (!session.cancellation_requested()) {
             not_authed(session, account, waited.snapshot, "authorization_lost");
         }
         return std::nullopt;
     }
-    if (waited.kind == WaitKind::TimedOut) {
+    if (waited.status == ReadyReadStatus::TimedOut) {
         if (!session.cancellation_requested()) {
-            timeout(session, operation, tracker.current());
+            timeout(session, operation, reads.current());
         }
         return std::nullopt;
     }
-    if (waited.kind != WaitKind::Response || session.cancellation_requested()) {
-        if (waited.kind == WaitKind::Failed && !session.cancellation_requested()) {
+    if (waited.status != ReadyReadStatus::Response || session.cancellation_requested()) {
+        if (waited.status == ReadyReadStatus::Failed && !session.cancellation_requested()) {
             unexpected_response(session, operation);
         }
         return std::nullopt;
@@ -376,25 +203,25 @@ user_preflight(core::TdClient& client, std::string_view account, std::string_vie
     return snapshot;
 }
 
-std::optional<WaitResult> send_and_wait(const ReadyRead& start,
-                                        std::shared_ptr<const AuthStateSnapshot>& snapshot,
-                                        std::string_view account, std::string_view operation,
-                                        AuthTracker& tracker, RequestSession& session) {
-    auto waited = wait_ready_read(start, tracker, session, snapshot);
-    if (waited.kind == WaitKind::Updated) {
+std::optional<ReadyReadResult> send_and_wait(const ReadyReadStart& start,
+                                             std::shared_ptr<const AuthStateSnapshot>& snapshot,
+                                             std::string_view account, std::string_view operation,
+                                             ReadyReadSession& reads, RequestSession& session) {
+    auto waited = reads.read(start, snapshot);
+    if (waited.status == ReadyReadStatus::AuthorizationLost) {
         if (!session.cancellation_requested()) {
             not_authed(session, account, waited.snapshot, "authorization_lost");
         }
         return std::nullopt;
     }
-    if (waited.kind == WaitKind::TimedOut) {
+    if (waited.status == ReadyReadStatus::TimedOut) {
         if (!session.cancellation_requested()) {
-            timeout(session, operation, tracker.current());
+            timeout(session, operation, reads.current());
         }
         return std::nullopt;
     }
-    if (waited.kind != WaitKind::Response || session.cancellation_requested()) {
-        if (waited.kind == WaitKind::Failed && !session.cancellation_requested()) {
+    if (waited.status != ReadyReadStatus::Response || session.cancellation_requested()) {
+        if (waited.status == ReadyReadStatus::Failed && !session.cancellation_requested()) {
             unexpected_response(session, operation);
         }
         return std::nullopt;
@@ -522,45 +349,6 @@ std::optional<SavedSearchCursor> saved_search_state(const proto::Request& reques
 
 } // namespace
 
-bool valid_utf8(std::string_view value) {
-    for (std::size_t index = 0; index < value.size();) {
-        const auto first = static_cast<unsigned char>(value[index]);
-        std::size_t length = 0;
-        std::uint32_t codepoint = 0;
-        if (first <= 0x7F) {
-            length = 1;
-            codepoint = first;
-        } else if (first >= 0xC2 && first <= 0xDF) {
-            length = 2;
-            codepoint = first & 0x1FU;
-        } else if (first >= 0xE0 && first <= 0xEF) {
-            length = 3;
-            codepoint = first & 0x0FU;
-        } else if (first >= 0xF0 && first <= 0xF4) {
-            length = 4;
-            codepoint = first & 0x07U;
-        } else {
-            return false;
-        }
-        if (index + length > value.size()) {
-            return false;
-        }
-        for (std::size_t continuation = 1; continuation < length; ++continuation) {
-            const auto byte = static_cast<unsigned char>(value[index + continuation]);
-            if ((byte & 0xC0U) != 0x80U) {
-                return false;
-            }
-            codepoint = (codepoint << 6U) | (byte & 0x3FU);
-        }
-        if ((length == 3 && codepoint < 0x800U) || (length == 4 && codepoint < 0x10000U) ||
-            (codepoint >= 0xD800U && codepoint <= 0xDFFFU) || codepoint > 0x10FFFFU) {
-            return false;
-        }
-        index += length;
-    }
-    return true;
-}
-
 std::optional<SavedReactionSelector> parse_saved_reaction_selector(std::string_view selector) {
     constexpr std::string_view prefix = "custom:";
     if (selector.starts_with(prefix)) {
@@ -654,14 +442,14 @@ void SavedCoordinator::tags(const proto::Request& request, RequestSession& sessi
         return;
     }
     constexpr std::string_view operation = "saved_tags";
-    AuthTracker tracker(client_.get(), session);
-    auto snapshot = user_preflight(client_.get(), account_, operation, tracker, session);
+    ReadyReadSession reads(client_.get(), session);
+    auto snapshot = user_preflight(client_.get(), account_, operation, reads, session);
     if (!snapshot) {
         return;
     }
     auto waited = send_and_wait(
         [&](const auto& current) { return client_.get().get_saved_messages_tags(current, 0); },
-        *snapshot, account_, operation, tracker, session);
+        *snapshot, account_, operation, reads, session);
     if (!waited) {
         return;
     }
@@ -698,8 +486,8 @@ void SavedCoordinator::search(const proto::Request& request, RequestSession& ses
     }
 
     constexpr std::string_view operation = "saved_search";
-    AuthTracker tracker(client_.get(), session);
-    auto snapshot = user_preflight(client_.get(), account_, operation, tracker, session);
+    ReadyReadSession reads(client_.get(), session);
+    auto snapshot = user_preflight(client_.get(), account_, operation, reads, session);
     if (!snapshot) {
         return;
     }
@@ -715,7 +503,7 @@ void SavedCoordinator::search(const proto::Request& request, RequestSession& ses
         [&](const auto& current) {
             return client_.get().search_saved_messages(current, td_request);
         },
-        *snapshot, account_, operation, tracker, session);
+        *snapshot, account_, operation, reads, session);
     if (!waited) {
         return;
     }

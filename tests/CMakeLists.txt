@@ -25,6 +25,7 @@ add_executable(tgcli_unit_tests
     update_bus_test.cpp
     dispatch_test.cpp
     request_session_test.cpp
+    resolver_test.cpp
     routing_test.cpp
     server_test.cpp
     saved_commands_test.cpp

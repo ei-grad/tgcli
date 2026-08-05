@@ -38,6 +38,17 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
+    case TdFunctionKind::GetChat:
+    case TdFunctionKind::GetChats:
+    case TdFunctionKind::LoadChats:
+    case TdFunctionKind::SearchPublicChat:
+    case TdFunctionKind::GetInternalLinkType:
+    case TdFunctionKind::GetMessageLinkInfo:
+    case TdFunctionKind::CheckChatInviteLink:
+    case TdFunctionKind::GetUser:
+    case TdFunctionKind::GetSupergroup:
+    case TdFunctionKind::GetSupergroupFullInfo:
+    case TdFunctionKind::CreatePrivateChat:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::TerminateSession:
     case TdFunctionKind::LogOut:

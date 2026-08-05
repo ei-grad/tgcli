@@ -313,7 +313,13 @@ TEST_CASE("read functions require Ready in every authorization state",
         for (const auto function :
              {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
               core::TdFunctionKind::GetSavedMessagesTags, core::TdFunctionKind::SearchSavedMessages,
-              core::TdFunctionKind::GetActiveSessions}) {
+              core::TdFunctionKind::GetActiveSessions,
+              core::TdFunctionKind::GetChat, core::TdFunctionKind::GetChats,
+              core::TdFunctionKind::LoadChats, core::TdFunctionKind::SearchPublicChat,
+              core::TdFunctionKind::GetInternalLinkType, core::TdFunctionKind::GetMessageLinkInfo,
+              core::TdFunctionKind::CheckChatInviteLink, core::TdFunctionKind::GetUser,
+              core::TdFunctionKind::GetSupergroup, core::TdFunctionKind::GetSupergroupFullInfo,
+              core::TdFunctionKind::CreatePrivateChat}) {
             const core::TdFunctionData function_data{function};
             const auto denied = core::authorize_td_send(
                 descriptor_for(snapshot, function, core::DescriptorKind::Read,
@@ -382,6 +388,17 @@ TEST_CASE("TdClient read admission is an exact closed function allowlist",
         Entry{core::TdFunctionKind::SearchSavedMessages, true},
         Entry{core::TdFunctionKind::GetActiveSessions, true},
         Entry{core::TdFunctionKind::TerminateSession, false},
+        Entry{core::TdFunctionKind::GetChat, true},
+        Entry{core::TdFunctionKind::GetChats, true},
+        Entry{core::TdFunctionKind::LoadChats, true},
+        Entry{core::TdFunctionKind::SearchPublicChat, true},
+        Entry{core::TdFunctionKind::GetInternalLinkType, true},
+        Entry{core::TdFunctionKind::GetMessageLinkInfo, true},
+        Entry{core::TdFunctionKind::CheckChatInviteLink, true},
+        Entry{core::TdFunctionKind::GetUser, true},
+        Entry{core::TdFunctionKind::GetSupergroup, true},
+        Entry{core::TdFunctionKind::GetSupergroupFullInfo, true},
+        Entry{core::TdFunctionKind::CreatePrivateChat, true},
         Entry{core::TdFunctionKind::LogOut, false},
         Entry{core::TdFunctionKind::Close, false},
     };

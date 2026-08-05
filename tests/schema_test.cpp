@@ -191,6 +191,20 @@ std::vector<SchemaCase> schema_cases() {
           {"next", "tgcli.saved.v1.cursor"}},
          "items",
          true},
+        {"resolve.result.schema.json",
+         {{"kind", "message"},
+          {"chat",
+           {{"id", -1001},
+            {"title", "Project"},
+            {"type", "supergroup"},
+            {"is_bot", false},
+            {"usernames", json::array({"project"})}}},
+          {"message_id", 123},
+          {"topic", {{"kind", "forum"}, {"id", 7}}},
+          {"link_type", "message"},
+          {"is_public", true}},
+         "kind",
+         true},
     };
 }
 
@@ -255,6 +269,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"login", {{"result", "login.result.schema.json"}}},
           {"logout", {{"result", "logout.result.schema.json"}}},
           {"me", {{"result", "me.result.schema.json"}}},
+          {"resolve", {{"result", "resolve.result.schema.json"}}},
           {"saved search", {{"result", "saved-search.result.schema.json"}}},
           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
           {"session list", {{"result", "session-list.result.schema.json"}}},
@@ -262,7 +277,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 18);
+    CHECK(manifest["commands"].size() == 19);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -313,6 +328,8 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(saved_error);
     const auto session_error = tgcli::test::load_schema_document("session.error.schema.json");
     check_schema_node(session_error);
+    const auto resolve_error = tgcli::test::load_schema_document("resolve.error.schema.json");
+    check_schema_node(resolve_error);
     for (const auto* filename : {"logout.error.schema.json", "account-remove.error.schema.json",
                                  "audit-intent.schema.json", "audit-checkpoint.schema.json",
                                  "audit-outcome.schema.json", "removal-tombstone.schema.json"}) {
@@ -321,6 +338,40 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
         CHECK(schema["$schema"] == kDialect);
         check_schema_node(schema);
     }
+}
+
+TEST_CASE("resolver errors have exact command-specific shapes", "[schema][resolver][error]") {
+    const std::vector<json> errors{
+        terminal_error("USAGE", {{"argument", "selector"}, {"reason", "invalid_argument"}}),
+        terminal_error(
+            "NOT_AUTHED",
+            {{"account", "main"}, {"state", "wait_code"}, {"reason", "authorization_lost"}}),
+        terminal_error("BOT_UNSUPPORTED", {{"operation", "resolve"}}),
+        terminal_error("NOT_FOUND", {{"selector", "@missing"}}),
+        terminal_error("NOT_FOUND", {{"selector", "@missing"}, {"scope", "local_materialized"}}),
+        terminal_error("AMBIGUOUS",
+                       {{"selector", "Project"},
+                        {"scope", "active_dialogs"},
+                        {"candidates", json::array({json{{"id", -1},
+                                                         {"title", "Project"},
+                                                         {"type", "basic_group"},
+                                                         {"is_bot", false},
+                                                         {"usernames", json::array()}}})},
+                        {"truncated", false}}),
+        terminal_error("RATE_LIMITED",
+                       {{"operation", "resolve"}, {"tdlib_code", 429}, {"retry_after", 5}}),
+        terminal_error("TDLIB_ERROR", {{"operation", "resolve"}, {"tdlib_code", 400}}),
+        terminal_error("TIMEOUT", {{"operation", "resolve"}, {"state", "ready"}}),
+        terminal_error("INTERNAL", {{"operation", "resolve"}, {"reason", "internal_error"}}),
+    };
+    for (const auto& error : errors) {
+        INFO(error.dump());
+        CHECK_THAT(error, tgcli::test::matches_json_schema("resolve.error.schema.json"));
+    }
+
+    auto unknown = errors.front();
+    unknown["error"]["details"]["extra"] = true;
+    CHECK_THAT(unknown, !tgcli::test::matches_json_schema("resolve.error.schema.json"));
 }
 
 TEST_CASE("Saved Messages errors have exact command-specific shapes", "[schema][saved][error]") {

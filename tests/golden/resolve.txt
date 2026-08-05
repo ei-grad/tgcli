@@ -1,0 +1,11 @@
+kind: message
+chat:
+  id: -1001
+  title: "Project"
+  type: supergroup
+  bot: no
+  usernames: project
+message id: 123
+topic: forum:7
+link type: message
+public: yes

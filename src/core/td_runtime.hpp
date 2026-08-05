@@ -34,6 +34,17 @@ enum class TdFunctionKind {
     SearchSavedMessages,
     GetActiveSessions,
     TerminateSession,
+    GetChat,
+    GetChats,
+    LoadChats,
+    SearchPublicChat,
+    GetInternalLinkType,
+    GetMessageLinkInfo,
+    CheckChatInviteLink,
+    GetUser,
+    GetSupergroup,
+    GetSupergroupFullInfo,
+    CreatePrivateChat,
     LogOut,
     Close,
 };
@@ -72,6 +83,28 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getActiveSessions";
     case TdFunctionKind::TerminateSession:
         return "terminateSession";
+    case TdFunctionKind::GetChat:
+        return "getChat";
+    case TdFunctionKind::GetChats:
+        return "getChats";
+    case TdFunctionKind::LoadChats:
+        return "loadChats";
+    case TdFunctionKind::SearchPublicChat:
+        return "searchPublicChat";
+    case TdFunctionKind::GetInternalLinkType:
+        return "getInternalLinkType";
+    case TdFunctionKind::GetMessageLinkInfo:
+        return "getMessageLinkInfo";
+    case TdFunctionKind::CheckChatInviteLink:
+        return "checkChatInviteLink";
+    case TdFunctionKind::GetUser:
+        return "getUser";
+    case TdFunctionKind::GetSupergroup:
+        return "getSupergroup";
+    case TdFunctionKind::GetSupergroupFullInfo:
+        return "getSupergroupFullInfo";
+    case TdFunctionKind::CreatePrivateChat:
+        return "createPrivateChat";
     case TdFunctionKind::LogOut:
         return "logOut";
     case TdFunctionKind::Close:
@@ -651,6 +684,85 @@ struct TdSessionConversionError {
     bool operator==(const TdSessionConversionError&) const = default;
 };
 
+enum class TdChatListKind { Main, Archive };
+
+enum class TdChatKind { Private, BasicGroup, Supergroup, Channel, Secret, Unknown };
+
+struct TdChat {
+    std::int64_t id = 0;
+    std::string title;
+    TdChatKind kind = TdChatKind::Unknown;
+    std::int64_t related_id = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdChat&) const = default;
+};
+
+struct TdChats {
+    std::vector<std::int64_t> chat_ids;
+
+    bool operator==(const TdChats&) const = default;
+};
+
+struct TdSupergroup {
+    std::int64_t id = 0;
+    std::vector<std::string> usernames;
+    bool is_channel = false;
+
+    bool operator==(const TdSupergroup&) const = default;
+};
+
+enum class TdTopicKind { Forum, Thread, Direct, Saved, Unknown };
+
+struct TdTopic {
+    TdTopicKind kind = TdTopicKind::Unknown;
+    std::int64_t id = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdTopic&) const = default;
+};
+
+enum class TdInternalLinkKind {
+    PublicChat,
+    BotStart,
+    Message,
+    ChatInvite,
+    DirectMessagesChat,
+    SavedMessages,
+    Unsupported,
+};
+
+struct TdInternalLink {
+    TdInternalLinkKind kind = TdInternalLinkKind::Unsupported;
+    std::string username;
+    std::string url;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdInternalLink&) const = default;
+};
+
+struct TdMessageLinkInfo {
+    bool is_public = false;
+    std::int64_t chat_id = 0;
+    std::optional<std::int64_t> message_id;
+    std::optional<TdTopic> topic;
+
+    bool operator==(const TdMessageLinkInfo&) const = default;
+};
+
+struct TdChatInviteLinkInfo {
+    std::int64_t chat_id = 0;
+    bool is_public = false;
+
+    bool operator==(const TdChatInviteLinkInfo&) const = default;
+};
+
+struct TdSupergroupFullInfo {
+    std::int64_t direct_messages_chat_id = 0;
+
+    bool operator==(const TdSupergroupFullInfo&) const = default;
+};
+
 enum class TdBuiltinFunction { GetAuthorizationState, LogOut, Close };
 
 struct TdRuntimeEvent {
@@ -684,6 +796,17 @@ class TdRuntime {
     virtual TdValue make_search_saved_messages(TdSearchSavedMessagesRequest request) = 0;
     virtual TdValue make_get_active_sessions() = 0;
     virtual TdValue make_terminate_session(std::int64_t session_id) = 0;
+    virtual TdValue make_get_chat(std::int64_t chat_id) = 0;
+    virtual TdValue make_get_chats(TdChatListKind list, std::int32_t limit) = 0;
+    virtual TdValue make_load_chats(TdChatListKind list, std::int32_t limit) = 0;
+    virtual TdValue make_search_public_chat(std::string username) = 0;
+    virtual TdValue make_get_internal_link_type(std::string link) = 0;
+    virtual TdValue make_get_message_link_info(std::string url) = 0;
+    virtual TdValue make_check_chat_invite_link(std::string link) = 0;
+    virtual TdValue make_get_user(std::int64_t user_id) = 0;
+    virtual TdValue make_get_supergroup(std::int64_t supergroup_id) = 0;
+    virtual TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) = 0;
+    virtual TdValue make_create_private_chat(std::int64_t user_id, bool force) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
                       std::uint64_t query_id, TdValue function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;

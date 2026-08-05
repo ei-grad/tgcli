@@ -149,6 +149,35 @@ class TdClient {
                           TdSearchSavedMessagesRequest request);
     std::future<TdValue>
     get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization);
+    std::future<TdValue> get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int64_t chat_id);
+    std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdChatListKind list, std::int32_t limit);
+    std::future<TdValue> load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    TdChatListKind list, std::int32_t limit);
+    std::future<TdValue>
+    search_public_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       std::string username);
+    std::future<TdValue>
+    get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::string link);
+    std::future<TdValue>
+    get_message_link_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          std::string url);
+    std::future<TdValue>
+    check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::string link);
+    std::future<TdValue> get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int64_t user_id);
+    std::future<TdValue>
+    get_supergroup(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                   std::int64_t supergroup_id);
+    std::future<TdValue>
+    get_supergroup_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             std::int64_t supergroup_id);
+    std::future<TdValue>
+    create_private_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                        std::int64_t user_id, bool force);
 
     [[nodiscard]] bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const;
 

@@ -824,3 +824,128 @@ TEST_CASE("production session conversion rejects malformed input all or nothing"
         CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
     }
 }
+
+TEST_CASE("production converter preserves resolver chat and link metadata",
+          "[core][tdlib][td-runtime-converter][resolver]") {
+    SECTION("chat variants retain the identity relation") {
+        struct ChatCase {
+            td_api::object_ptr<td_api::ChatType> type;
+            TdChatKind expected_kind;
+            std::int64_t related_id;
+        };
+        std::vector<ChatCase> cases;
+        cases.push_back(
+            {td_api::make_object<td_api::chatTypePrivate>(10), TdChatKind::Private, 10});
+        cases.push_back(
+            {td_api::make_object<td_api::chatTypeBasicGroup>(20), TdChatKind::BasicGroup, 20});
+        cases.push_back({td_api::make_object<td_api::chatTypeSupergroup>(30, false),
+                         TdChatKind::Supergroup, 30});
+        cases.push_back(
+            {td_api::make_object<td_api::chatTypeSupergroup>(40, true), TdChatKind::Channel, 40});
+        cases.push_back(
+            {td_api::make_object<td_api::chatTypeSecret>(50, 60), TdChatKind::Secret, 60});
+        for (auto& test_case : cases) {
+            auto chat = td_api::make_object<td_api::chat>();
+            chat->id_ = -100;
+            chat->title_ = "Resolver chat";
+            const auto type_id = test_case.type->get_id();
+            chat->type_ = std::move(test_case.type);
+            auto converted = convert_response(std::move(chat));
+            const auto* value = converted.get_if<TdChat>();
+            REQUIRE(value != nullptr);
+            CHECK(value->id == -100);
+            CHECK(value->title == "Resolver chat");
+            CHECK(value->kind == test_case.expected_kind);
+            CHECK(value->related_id == test_case.related_id);
+            CHECK(value->tdlib_type_id == type_id);
+        }
+
+        auto unknown = td_api::make_object<td_api::chat>();
+        unknown->id_ = -200;
+        unknown->title_ = "Unknown";
+        auto converted = convert_response(std::move(unknown));
+        const auto* value = converted.get_if<TdChat>();
+        REQUIRE(value != nullptr);
+        CHECK(value->kind == TdChatKind::Unknown);
+        CHECK(value->related_id == 0);
+        CHECK(value->tdlib_type_id == 0);
+    }
+
+    SECTION("chat lists and supergroup usernames remain neutral") {
+        auto chats = convert_response(
+            td_api::make_object<td_api::chats>(3, std::vector<std::int64_t>{-1, -2, -3}));
+        const auto* list = chats.get_if<TdChats>();
+        REQUIRE(list != nullptr);
+        CHECK(list->chat_ids == std::vector<std::int64_t>{-1, -2, -3});
+
+        auto usernames = td_api::make_object<td_api::usernames>();
+        usernames->active_usernames_ = {"project", "project_news"};
+        auto supergroup = td_api::make_object<td_api::supergroup>();
+        supergroup->id_ = 55;
+        supergroup->usernames_ = std::move(usernames);
+        supergroup->is_channel_ = true;
+        auto converted = convert_response(std::move(supergroup));
+        const auto* value = converted.get_if<TdSupergroup>();
+        REQUIRE(value != nullptr);
+        CHECK(*value ==
+              TdSupergroup{.id = 55, .usernames = {"project", "project_news"}, .is_channel = true});
+    }
+
+    SECTION("supported and unsupported internal links retain exact branch data") {
+        auto public_chat = td_api::make_object<td_api::internalLinkTypePublicChat>();
+        public_chat->chat_username_ = "project";
+        auto converted_public = convert_response(std::move(public_chat));
+        const auto* public_value = converted_public.get_if<TdInternalLink>();
+        REQUIRE(public_value != nullptr);
+        CHECK(public_value->kind == TdInternalLinkKind::PublicChat);
+        CHECK(public_value->username == "project");
+        CHECK(public_value->tdlib_type_id == td_api::internalLinkTypePublicChat::ID);
+
+        auto message = td_api::make_object<td_api::internalLinkTypeMessage>();
+        message->url_ = "https://t.me/project/123";
+        auto converted_message = convert_response(std::move(message));
+        const auto* message_value = converted_message.get_if<TdInternalLink>();
+        REQUIRE(message_value != nullptr);
+        CHECK(message_value->kind == TdInternalLinkKind::Message);
+        CHECK(message_value->url == "https://t.me/project/123");
+
+        auto unsupported = td_api::make_object<td_api::internalLinkTypeCallsPage>();
+        auto converted_unsupported = convert_response(std::move(unsupported));
+        const auto* unsupported_value = converted_unsupported.get_if<TdInternalLink>();
+        REQUIRE(unsupported_value != nullptr);
+        CHECK(unsupported_value->kind == TdInternalLinkKind::Unsupported);
+        CHECK(unsupported_value->tdlib_type_id == td_api::internalLinkTypeCallsPage::ID);
+    }
+
+    SECTION("message, invite, and full-info metadata is preserved") {
+        auto native_message = td_api::make_object<td_api::message>();
+        native_message->id_ = 123;
+        auto info = td_api::make_object<td_api::messageLinkInfo>();
+        info->is_public_ = true;
+        info->chat_id_ = -1001;
+        info->message_ = std::move(native_message);
+        info->topic_id_ = td_api::make_object<td_api::messageTopicForum>(7);
+        auto converted_info = convert_response(std::move(info));
+        const auto* message_info = converted_info.get_if<TdMessageLinkInfo>();
+        REQUIRE(message_info != nullptr);
+        CHECK(message_info->is_public);
+        CHECK(message_info->chat_id == -1001);
+        CHECK(message_info->message_id == 123);
+        REQUIRE(message_info->topic);
+        CHECK(message_info->topic->kind == TdTopicKind::Forum);
+        CHECK(message_info->topic->id == 7);
+
+        auto invite = td_api::make_object<td_api::chatInviteLinkInfo>();
+        invite->chat_id_ = -7;
+        invite->is_public_ = false;
+        auto converted_invite = convert_response(std::move(invite));
+        CHECK(*converted_invite.get_if<TdChatInviteLinkInfo>() ==
+              TdChatInviteLinkInfo{.chat_id = -7, .is_public = false});
+
+        auto full = td_api::make_object<td_api::supergroupFullInfo>();
+        full->direct_messages_chat_id_ = -8;
+        auto converted_full = convert_response(std::move(full));
+        CHECK(*converted_full.get_if<TdSupergroupFullInfo>() ==
+              TdSupergroupFullInfo{.direct_messages_chat_id = -8});
+    }
+}

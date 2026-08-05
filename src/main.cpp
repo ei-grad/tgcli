@@ -3,6 +3,7 @@
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
 #include "daemon/daemon_run.hpp"
+#include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "proto/frame.hpp"
 #include "proto/operation.hpp"
@@ -387,6 +388,19 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
     return std::nullopt;
 }
 
+std::optional<int> validate_command_arguments(const std::vector<std::string>& command,
+                                              const SavedCliArguments& saved,
+                                              std::string_view resolve_selector) {
+    if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
+        return saved_exit;
+    }
+    if (command == std::vector<std::string>{"resolve"} &&
+        !tgcli::daemon::valid_resolve_selector(resolve_selector)) {
+        return report_usage("resolve selector is invalid", "selector");
+    }
+    return std::nullopt;
+}
+
 nlohmann::json saved_search_request_args(const SavedCliArguments& saved) {
     return {
         {"query",
@@ -421,6 +435,7 @@ int run(int argc, char** argv) {
     bool dry_run = false;
     std::string idempotency_key;
     double timeout_seconds = 0.0;
+    std::string resolve_selector;
     SavedCliArguments saved;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
@@ -454,6 +469,9 @@ int run(int argc, char** argv) {
         login_cmd->add_option("--bot-token", rejected_bot_token, "rejected insecure legacy input");
     app.add_subcommand("me", "show the authenticated account identity");
     app.add_subcommand("logout", "log out the selected account");
+    app.add_subcommand("resolve", "resolve a chat, username, or t.me link")
+        ->add_option("selector", resolve_selector)
+        ->required();
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -520,8 +538,9 @@ int run(int argc, char** argv) {
     if (command.empty()) {
         return report_missing_command();
     }
-    if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
-        return *saved_exit;
+    if (const auto argument_exit = validate_command_arguments(command, saved, resolve_selector);
+        argument_exit) {
+        return *argument_exit;
     }
     if (no_daemon && is_daemon_lifecycle(command)) {
         const nlohmann::json rendered{
@@ -571,6 +590,8 @@ int run(int argc, char** argv) {
     }
     if (command == std::vector<std::string>{"login"}) {
         request_args = {{"qr", login_qr}, {"bot", login_bot}};
+    } else if (command == std::vector<std::string>{"resolve"}) {
+        request_args = {{"selector", resolve_selector}};
     } else if (is_saved_search(command)) {
         request_args = saved_search_request_args(saved);
     }

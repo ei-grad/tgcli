@@ -208,3 +208,17 @@ TEST_CASE("session terminate human renderers match real and dry-run goldens",
     CHECK(rendered.find("ip_address") == std::string::npos);
     CHECK(rendered.find("location") == std::string::npos);
 }
+
+TEST_CASE("resolve human renderer matches its reviewed golden", "[resolver][render][golden]") {
+    CHECK(tgcli::cli::render_human("resolve", {{"kind", "message"},
+                                               {"chat",
+                                                {{"id", -1001},
+                                                 {"title", "Project"},
+                                                 {"type", "supergroup"},
+                                                 {"is_bot", false},
+                                                 {"usernames", json::array({"project"})}}},
+                                               {"message_id", 123},
+                                               {"topic", {{"kind", "forum"}, {"id", 7}}},
+                                               {"link_type", "message"},
+                                               {"is_public", true}}) == golden("resolve.txt"));
+}

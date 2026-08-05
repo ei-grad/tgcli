@@ -113,6 +113,82 @@ core::TdValue ScriptedTdRuntime::make_terminate_session(std::int64_t session_id)
         core::TdFunctionData{core::TdFunctionKind::TerminateSession, {{"session_id", session_id}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_chat(std::int64_t chat_id) {
+    before_make(core::TdFunctionKind::GetChat);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
+}
+
+namespace {
+
+std::string chat_list_name(core::TdChatListKind list) {
+    return list == core::TdChatListKind::Main ? "main" : "archive";
+}
+
+} // namespace
+
+core::TdValue ScriptedTdRuntime::make_get_chats(core::TdChatListKind list, std::int32_t limit) {
+    before_make(core::TdFunctionKind::GetChats);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetChats,
+        {{"list", chat_list_name(list)}, {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_load_chats(core::TdChatListKind list, std::int32_t limit) {
+    before_make(core::TdFunctionKind::LoadChats);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::LoadChats,
+        {{"list", chat_list_name(list)}, {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_search_public_chat(std::string username) {
+    before_make(core::TdFunctionKind::SearchPublicChat);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::SearchPublicChat, {{"username", std::move(username)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_internal_link_type(std::string link) {
+    before_make(core::TdFunctionKind::GetInternalLinkType);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetInternalLinkType, {{"link", std::move(link)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_message_link_info(std::string url) {
+    before_make(core::TdFunctionKind::GetMessageLinkInfo);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetMessageLinkInfo, {{"url", std::move(url)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_check_chat_invite_link(std::string link) {
+    before_make(core::TdFunctionKind::CheckChatInviteLink);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::CheckChatInviteLink, {{"link", std::move(link)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_user(std::int64_t user_id) {
+    before_make(core::TdFunctionKind::GetUser);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetUser, {{"user_id", user_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_supergroup(std::int64_t supergroup_id) {
+    before_make(core::TdFunctionKind::GetSupergroup);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetSupergroup, {{"supergroup_id", supergroup_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_supergroup_full_info(std::int64_t supergroup_id) {
+    before_make(core::TdFunctionKind::GetSupergroupFullInfo);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetSupergroupFullInfo, {{"supergroup_id", supergroup_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_create_private_chat(std::int64_t user_id, bool force) {
+    before_make(core::TdFunctionKind::CreatePrivateChat);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::CreatePrivateChat, {{"user_id", user_id}, {"force", force}}});
+}
+
 void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_generation,
                              std::uint64_t query_id, core::TdValue function) {
     if (!function.function_data().has_value()) {

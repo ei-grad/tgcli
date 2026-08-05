@@ -391,6 +391,17 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::SearchSavedMessages:
     case core::TdFunctionKind::GetActiveSessions:
     case core::TdFunctionKind::TerminateSession:
+    case core::TdFunctionKind::GetChat:
+    case core::TdFunctionKind::GetChats:
+    case core::TdFunctionKind::LoadChats:
+    case core::TdFunctionKind::SearchPublicChat:
+    case core::TdFunctionKind::GetInternalLinkType:
+    case core::TdFunctionKind::GetMessageLinkInfo:
+    case core::TdFunctionKind::CheckChatInviteLink:
+    case core::TdFunctionKind::GetUser:
+    case core::TdFunctionKind::GetSupergroup:
+    case core::TdFunctionKind::GetSupergroupFullInfo:
+    case core::TdFunctionKind::CreatePrivateChat:
     case core::TdFunctionKind::LogOut:
     case core::TdFunctionKind::Close:
         break;

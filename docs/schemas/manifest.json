@@ -37,6 +37,9 @@
     "me": {
       "result": "me.result.schema.json"
     },
+    "resolve": {
+      "result": "resolve.result.schema.json"
+    },
     "saved search": {
       "result": "saved-search.result.schema.json"
     },

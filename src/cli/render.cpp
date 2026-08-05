@@ -273,6 +273,34 @@ std::string render_session_terminate(const nlohmann::json& data) {
                        data.at("session_id").get_ref<const std::string&>());
 }
 
+std::string render_resolve(const nlohmann::json& data) {
+    const auto& chat = data.at("chat");
+    std::string usernames;
+    for (const auto& username : chat.at("usernames")) {
+        if (!usernames.empty()) {
+            usernames += ", ";
+        }
+        usernames += username.get<std::string>();
+    }
+    const std::string message_id =
+        data.at("message_id").is_null() ? "null" : data.at("message_id").dump();
+    std::string topic = "null";
+    if (!data.at("topic").is_null()) {
+        topic = fmt::format("{}:{}", data.at("topic").at("kind").get<std::string>(),
+                            data.at("topic").at("id").get<std::int64_t>());
+    }
+    const std::string link_type =
+        data.at("link_type").is_null() ? "null" : data.at("link_type").get<std::string>();
+    const std::string is_public =
+        data.at("is_public").is_null() ? "null" : yes_no(data.at("is_public").get<bool>());
+    return fmt::format(
+        "kind: {}\nchat:\n  id: {}\n  title: {}\n  type: {}\n  bot: {}\n  usernames: {}\n"
+        "message id: {}\ntopic: {}\nlink type: {}\npublic: {}\n",
+        data.at("kind").get<std::string>(), chat.at("id").get<std::int64_t>(),
+        chat.at("title").dump(), chat.at("type").get<std::string>(),
+        yes_no(chat.at("is_bot").get<bool>()), usernames, message_id, topic, link_type, is_public);
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -326,6 +354,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "session terminate") {
         return render_session_terminate(data);
+    }
+    if (command_key == "resolve") {
+        return render_resolve(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

@@ -16,6 +16,7 @@
 #include "daemon/removal_journal.hpp"
 #include "daemon/removal_recovery.hpp"
 #include "daemon/request_session.hpp"
+#include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "daemon/server.hpp"
 
@@ -248,6 +249,7 @@ int run_daemon(const std::string& account) {
     AccountRemovalCoordinator account_removal(config_store, removal_journal, environment, account,
                                               removal_remote, stop_server, {}, stop_server);
     SavedCoordinator saved(td, account);
+    ResolveCoordinator resolver(td, account);
 
     DaemonContext context;
     context.account = account;
@@ -259,6 +261,7 @@ int run_daemon(const std::string& account) {
     context.logout = &logout;
     context.account_removal = &account_removal;
     context.saved = &saved;
+    context.resolver = &resolver;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -376,6 +379,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     AccountRemovalCoordinator account_removal(config_store, removal_journal, environment, account,
                                               removal_remote);
     SavedCoordinator saved(td, account);
+    ResolveCoordinator resolver(td, account);
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -386,6 +390,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.logout = &logout;
     context.account_removal = &account_removal;
     context.saved = &saved;
+    context.resolver = &resolver;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";

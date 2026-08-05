@@ -132,7 +132,15 @@ class TdClient::Impl {
             (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
              function != TdFunctionKind::GetSavedMessagesTags &&
              function != TdFunctionKind::SearchSavedMessages &&
-             function != TdFunctionKind::GetActiveSessions)) {
+             function != TdFunctionKind::GetActiveSessions && function != TdFunctionKind::GetChat &&
+             function != TdFunctionKind::GetChats && function != TdFunctionKind::LoadChats &&
+             function != TdFunctionKind::SearchPublicChat &&
+             function != TdFunctionKind::GetInternalLinkType &&
+             function != TdFunctionKind::GetMessageLinkInfo &&
+             function != TdFunctionKind::CheckChatInviteLink &&
+             function != TdFunctionKind::GetUser && function != TdFunctionKind::GetSupergroup &&
+             function != TdFunctionKind::GetSupergroupFullInfo &&
+             function != TdFunctionKind::CreatePrivateChat)) {
             return failed_future(TdAuthorizationFailure::FunctionDenied);
         }
         auto owner = issue_owner(TdOwnerKind::Request);
@@ -174,6 +182,77 @@ class TdClient::Impl {
     get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
         return send_read(authorization, TdFunctionKind::GetActiveSessions,
                          runtime_->make_get_active_sessions());
+    }
+
+    std::future<TdValue> get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int64_t chat_id) {
+        return send_read(authorization, TdFunctionKind::GetChat, runtime_->make_get_chat(chat_id));
+    }
+
+    std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdChatListKind list, std::int32_t limit) {
+        return send_read(authorization, TdFunctionKind::GetChats,
+                         runtime_->make_get_chats(list, limit));
+    }
+
+    std::future<TdValue> load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    TdChatListKind list, std::int32_t limit) {
+        return send_read(authorization, TdFunctionKind::LoadChats,
+                         runtime_->make_load_chats(list, limit));
+    }
+
+    std::future<TdValue>
+    search_public_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       std::string username) {
+        return send_read(authorization, TdFunctionKind::SearchPublicChat,
+                         runtime_->make_search_public_chat(std::move(username)));
+    }
+
+    std::future<TdValue>
+    get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::string link) {
+        return send_read(authorization, TdFunctionKind::GetInternalLinkType,
+                         runtime_->make_get_internal_link_type(std::move(link)));
+    }
+
+    std::future<TdValue>
+    get_message_link_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          std::string url) {
+        return send_read(authorization, TdFunctionKind::GetMessageLinkInfo,
+                         runtime_->make_get_message_link_info(std::move(url)));
+    }
+
+    std::future<TdValue>
+    check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::string link) {
+        return send_read(authorization, TdFunctionKind::CheckChatInviteLink,
+                         runtime_->make_check_chat_invite_link(std::move(link)));
+    }
+
+    std::future<TdValue> get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int64_t user_id) {
+        return send_read(authorization, TdFunctionKind::GetUser, runtime_->make_get_user(user_id));
+    }
+
+    std::future<TdValue>
+    get_supergroup(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                   std::int64_t supergroup_id) {
+        return send_read(authorization, TdFunctionKind::GetSupergroup,
+                         runtime_->make_get_supergroup(supergroup_id));
+    }
+
+    std::future<TdValue>
+    get_supergroup_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             std::int64_t supergroup_id) {
+        return send_read(authorization, TdFunctionKind::GetSupergroupFullInfo,
+                         runtime_->make_get_supergroup_full_info(supergroup_id));
+    }
+
+    std::future<TdValue>
+    create_private_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                        std::int64_t user_id, bool force) {
+        return send_read(authorization, TdFunctionKind::CreatePrivateChat,
+                         runtime_->make_create_private_chat(user_id, force));
     }
 
     std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -1104,6 +1183,72 @@ TdClient::search_saved_messages(const std::shared_ptr<const AuthStateSnapshot>& 
 std::future<TdValue>
 TdClient::get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
     return impl_->get_active_sessions(authorization);
+}
+
+std::future<TdValue>
+TdClient::get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                   std::int64_t chat_id) {
+    return impl_->get_chat(authorization, chat_id);
+}
+
+std::future<TdValue>
+TdClient::get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    TdChatListKind list, std::int32_t limit) {
+    return impl_->get_chats(authorization, list, limit);
+}
+
+std::future<TdValue>
+TdClient::load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     TdChatListKind list, std::int32_t limit) {
+    return impl_->load_chats(authorization, list, limit);
+}
+
+std::future<TdValue>
+TdClient::search_public_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             std::string username) {
+    return impl_->search_public_chat(authorization, std::move(username));
+}
+
+std::future<TdValue>
+TdClient::get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                 std::string link) {
+    return impl_->get_internal_link_type(authorization, std::move(link));
+}
+
+std::future<TdValue>
+TdClient::get_message_link_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                std::string url) {
+    return impl_->get_message_link_info(authorization, std::move(url));
+}
+
+std::future<TdValue>
+TdClient::check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                 std::string link) {
+    return impl_->check_chat_invite_link(authorization, std::move(link));
+}
+
+std::future<TdValue>
+TdClient::get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                   std::int64_t user_id) {
+    return impl_->get_user(authorization, user_id);
+}
+
+std::future<TdValue>
+TdClient::get_supergroup(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         std::int64_t supergroup_id) {
+    return impl_->get_supergroup(authorization, supergroup_id);
+}
+
+std::future<TdValue>
+TdClient::get_supergroup_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   std::int64_t supergroup_id) {
+    return impl_->get_supergroup_full_info(authorization, supergroup_id);
+}
+
+std::future<TdValue>
+TdClient::create_private_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                              std::int64_t user_id, bool force) {
+    return impl_->create_private_chat(authorization, user_id, force);
 }
 
 std::future<TdValue>
