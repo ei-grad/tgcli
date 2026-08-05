@@ -696,6 +696,37 @@ TEST_CASE("result schemas reject missing required and unknown properties", "[sch
                !tgcli::test::matches_json_schema("account-list.result.schema.json"));
 }
 
+TEST_CASE("resolve result schema enforces kind-specific topic id bounds",
+          "[schema][resolver][topic]") {
+    const auto cases = schema_cases();
+    const auto resolve =
+        std::ranges::find(cases, std::string{"resolve.result.schema.json"}, &SchemaCase::filename);
+    REQUIRE(resolve != cases.end());
+
+    struct TopicCase {
+        std::string_view kind;
+        std::int64_t maximum;
+    };
+    for (const auto& topic :
+         {TopicCase{"forum", 2147483647}, TopicCase{"thread", 9007199254740991},
+          TopicCase{"direct", 9007199254740991}, TopicCase{"saved", 9007199254740991}}) {
+        DYNAMIC_SECTION(topic.kind) {
+            auto instance = resolve->instance;
+            instance["topic"] = {{"kind", topic.kind}, {"id", 1}};
+            CHECK_THAT(instance, tgcli::test::matches_json_schema("resolve.result.schema.json"));
+
+            instance["topic"]["id"] = topic.maximum;
+            CHECK_THAT(instance, tgcli::test::matches_json_schema("resolve.result.schema.json"));
+
+            instance["topic"]["id"] = 0;
+            CHECK_THAT(instance, !tgcli::test::matches_json_schema("resolve.result.schema.json"));
+
+            instance["topic"]["id"] = topic.maximum + 1;
+            CHECK_THAT(instance, !tgcli::test::matches_json_schema("resolve.result.schema.json"));
+        }
+    }
+}
+
 TEST_CASE("account show nested closure starts from its named valid fixture",
           "[schema][regression]") {
     const auto cases = schema_cases();
