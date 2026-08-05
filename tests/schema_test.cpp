@@ -1,5 +1,6 @@
 #include "schema_matcher.hpp"
 
+#include <algorithm>
 #include <set>
 #include <string>
 #include <string_view>
@@ -340,16 +341,27 @@ TEST_CASE("result schemas reject missing required and unknown properties", "[sch
     list_item_unknown["items"][0]["unexpected"] = true;
     CHECK_THAT(list_item_unknown,
                !tgcli::test::matches_json_schema("account-list.result.schema.json"));
+}
 
-    auto show_credentials_unknown = schema_cases().at(2).instance;
-    show_credentials_unknown["credentials"]["unexpected"] = true;
-    CHECK_THAT(show_credentials_unknown,
+TEST_CASE("account show nested closure starts from its named valid fixture",
+          "[schema][regression]") {
+    const auto cases = schema_cases();
+    const auto account_show = std::ranges::find(
+        cases, std::string{"account-show.result.schema.json"}, &SchemaCase::filename);
+    REQUIRE(account_show != cases.end());
+
+    auto credentials_unknown = account_show->instance;
+    REQUIRE_THAT(credentials_unknown,
+                 tgcli::test::matches_json_schema("account-show.result.schema.json"));
+    credentials_unknown["credentials"]["unexpected"] = true;
+    CHECK_THAT(credentials_unknown,
                !tgcli::test::matches_json_schema("account-show.result.schema.json"));
 
-    auto show_paths_unknown = schema_cases().at(2).instance;
-    show_paths_unknown["paths"]["unexpected"] = true;
-    CHECK_THAT(show_paths_unknown,
-               !tgcli::test::matches_json_schema("account-show.result.schema.json"));
+    auto paths_unknown = account_show->instance;
+    REQUIRE_THAT(paths_unknown,
+                 tgcli::test::matches_json_schema("account-show.result.schema.json"));
+    paths_unknown["paths"]["unexpected"] = true;
+    CHECK_THAT(paths_unknown, !tgcli::test::matches_json_schema("account-show.result.schema.json"));
 }
 
 TEST_CASE("account removal schema accepts only the exact dry-run plan", "[schema][removal]") {
