@@ -2549,7 +2549,7 @@ Add these self-contained strict Draft 2020-12 files:
 `wait-for.result.schema.json` also appears under `wait-for` in the existing
 result-only manifest. `listen` has no result schema and no result-manifest entry.
 Packaging and schema tests require exact stream-manifest/file bijection. The later
-`schema` command must consult both catalogs; its M6 CLI presentation is intentionally
+`schema` command must consult both catalogs; its M7 CLI presentation is intentionally
 not activated here.
 
 #### 4.6.10 Terminal, delivery, stdout, and lifecycle
@@ -2827,7 +2827,7 @@ Bottom-up order:
 | M10 activity | Dormant reservation, gated promotion/publication, rollback, idle suppression, and exact-once release are exact. | closed in contract |
 | M11 RE2 | Official tag/full-SHA and immutable archive/tree hashes are measured; the absent ICU option, Threads-only link closure, and Lucent runtime notice are explicit. Repository lock/integration/verifier work remains a fail-closed implementation prerequisite. | evidence gate closed |
 | M12 TestDC | Write prerequisites, RE2-safe nonce, exact assertions, retained-data record, and no fake cleanup are exact. | closed in contract |
-| L13 schema discovery | Separate strict stream catalog is packaged/tested; no fake listen result; later schema CLI presentation remains M6. | closed in contract |
+| L13 schema discovery | Separate strict stream catalog is packaged/tested; no fake listen result; later schema CLI presentation remains M7. | closed in contract |
 
 No further user-level product decision is required under the accepted no-persistence
 direction. No external evidence gate remains; M5 must not be declared complete until
