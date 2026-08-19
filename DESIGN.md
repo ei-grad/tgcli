@@ -1288,9 +1288,11 @@ existing exact schema_version=1 M1 intent/checkpoint/outcome
 new exact schema_version=2 M3 intent/checkpoint/outcome
 ```
 
-Unknown version/phase/field — contradiction. Group key —
-`(schema_version,invocation_id)`; reuse одного invocation id в двух versions
-или commands — contradiction.
+Before positive v2 recognition, unknown/absent/duplicate/non-integer schema
+version follows the exact `path_invalid`/`parse_error` precedence below. After
+positive recognition, unknown phase/field and a later bounded unsupported
+version are contradictions. Group key — `(schema_version,invocation_id)`;
+reuse одного invocation id в двух versions или commands — contradiction.
 
 v2 common scalar rules: `hex32`/`invocation_id` = 32 lowercase hex;
 `uint32` = 0…4294967295, positive uint32 excludes zero; `uint64` =
@@ -1453,10 +1455,11 @@ append закрывает connection без terminal и включает audit-f
 
 Recovery:
 
-- intent без dispatch → append failure outcome, mutation none; remove pending,
-  cleanup incomplete spool;
-- dispatch без proof → outcome `AUDIT_INCOMPLETE`, mutation possible; key
-  остаётся pending;
+- intent без dispatch → mutation none with the exact spool/outcome/store order
+  below;
+- dispatch без complete proof → outcome `AUDIT_INCOMPLETE`, mutation possible
+  without a sent item or confirmed with any durable sent item; key остаётся
+  pending;
 - `mutation_confirmed` без outcome → reconstruct exact outcome из terminal;
 - full terminal forward_progress без outcome → derive exact success/failure,
   при success item сначала append mutation_confirmed;
@@ -1466,11 +1469,212 @@ Recovery:
   missing pinned generation или impossible success/state combination —
   contradiction, `AUDIT_INCOMPLETE`, no resend.
 
-Rotation не разделяет open v2 group. Audit segment, на который ссылается
-pending store/spool, нельзя overwrite/delete до repair либо entry expiry.
-Если fixed rotation set не имеет unpinned slot, новый intent получает
-`AUDIT_UNAVAILABLE/capacity_exhausted` до mutation. Complete v1 groups
-подчиняются прежнему retention; mixed reader не переинтерпретирует их как v2.
+Recovery-created v2 failure outcomes use one exact StoredTerminal:
+`kind:"error"`, `code:"AUDIT_INCOMPLETE"`, message
+`"a prior audited invocation did not reach a terminal proof"`, exit code 1,
+and the standard exact details containing the group account, canonical
+per-account `audit.log` path, mutation state, and ordered unique completed
+stages. Intent without `dispatch_started` records `none`; after its durable
+outcome and required store/spool cleanup, the inspecting request may continue
+and does not emit the prior terminal. `dispatch_started` without complete
+proof records `possible` when no durable forward item is sent, but records
+`confirmed` when any durable forward_progress contains a sent item, even if
+the vector remains incomplete. After syncing either outcome the inspecting
+request emits the same AUDIT_INCOMPLETE and stops. Neither branch resends.
+Durable proof reconstruction retains the existing rules. Contradiction
+appends nothing and stops with the last trustworthy prefix; an empty prefix
+uses the routed account, canonical audit path, mutation none, and `[]` stages.
+
+Intent-without-dispatch recovery has only this order: when an incomplete or
+`spool_ready` spool exists, delete the invocation spool idempotently and fsync
+the spool root; append and fsync the none/AUDIT_INCOMPLETE outcome; then
+remove/transition and fsync the matching pending store reference. Without a
+spool it begins at outcome. A crash after unlink but before spool-root fsync
+retries missing-is-success deletion and root fsync; after root fsync it starts
+at outcome; after outcome fsync it skips outcome and repairs only store; after
+store fsync it continues. Spool failure before outcome returns current-request
+SPOOL_UNAVAILABLE/1, outcome failure returns current-request
+AUDIT_INCOMPLETE/1, and post-outcome store failure returns current-request
+IDEMPOTENCY_UNAVAILABLE/6. No case creates a current group or emits the prior
+stored terminal on successful repair.
+
+Durable-proof recovery appends/fsyncs a missing mutation proof when required,
+appends/fsyncs the exact outcome only when absent, completes/removes and
+fsyncs the store transition, then performs eligible idempotent spool deletion
+and spool-root fsync. Outcome plus stale store skips proof/outcome; outcome
+plus terminal store skips proof/outcome/store. Cleanup failure after durable
+outcome/store returns current-request SPOOL_UNAVAILABLE/1, preserves those
+bytes, and restart retries cleanup only. A crash at every boundary has the
+same skip rule. Failure to append/fsync a missing proof or outcome returns
+current-request AUDIT_INCOMPLETE/1 from the resulting durable prefix; retry
+reconstructs from that prefix. Store-transition failure returns current-
+request IDEMPOTENCY_UNAVAILABLE/6 and retry skips the durable outcome. These
+are preflight terminals before current intent, not the
+post-intent no-terminal audit-fatal path. Dispatch-ambiguous recovery retains
+store and spool.
+
+Per-account audit mutation occurs only while the existing verified
+`<account-state>/daemon.lock` lifetime lease is held. Exactly one outer
+per-account operation mutex spans pin snapshot, audit inspection/recovery,
+rotation, intent/checkpoints/outcome, required store transition, and spool
+cleanup; helpers take no inner audit mutex. There is no second audit lock file.
+A group is contiguous and never spans segments. A nonempty active file rotates
+exactly once before intent only when
+`active_size + intent_line_size > 33,554,432`; equality does not rotate, and a
+missing/empty active file is used directly. The inode of the synced intent
+segment, losslessly represented as
+uint64, is its opaque `audit_generation`. Same-directory rename preserves it.
+Store pins validate `(audit_generation,invocation_id,request_fingerprint,
+operation)`, not the integer alone. Rotation first chooses the smallest
+missing numbered slot and deletes nothing. Only when every numbered slot is
+occupied does it unlink the largest-suffix proven-unpinned slot. It then
+exclusively renames newer slots toward the selected hole and active to `.1`.
+Pinned inodes may move but are never deleted or overwritten. No unpinned slot means
+`AUDIT_UNAVAILABLE/capacity_exhausted` before mutation. A dangling or
+mismatched pin is contradiction. Complete v1 groups retain v1 interpretation
+and retention.
+
+Across all 16 four-slot occupancy masks, a non-full starting mask has
+`q=1..4` missing numbered slots. Choosing
+the smallest missing suffix performs no unlink. Every exclusive numbered
+rename fills one hole and opens one, so it preserves `q`; active-to-`.1`
+reduces the completed mask to `q-1` holes. Other holes remain. For the full
+mask, the one selected unlink creates one transient hole, numbered renames
+preserve one, and active-to-`.1` returns to zero. A completed rotation never
+increases the starting hole count; there is no at-most-one-hole invariant.
+A crash before active-to-`.1` leaves active present and the same non-full `q`,
+or the full-start transient one; restart validates the observed mask, uses its
+smallest hole, and performs no second unlink. A crash after active-to-`.1`
+but before fresh intent append leaves active absent. No
+invocation is durable or pending for that vanished request. Restart, list,
+and dry-run validate/inspect but leave active absent and cannot recover or
+resume it. Only the next separately authorized real invocation creates active
+and appends its own fresh intent without rotation or numbered-slot deletion.
+
+These are newly reviewed behavioral limits, not non-narrowing claims and not
+Telegram/TDLib producer guarantees. The admitted compact request source
+excluding LF is `P=16,842,751` bytes, derived from the current 16,777,216-byte
+pre-read threshold plus the 65,536-byte chunk minus one. Every otherwise-
+unbounded caller UTF-8 string is at most `P` decoded bytes and all caller
+fields together fit one compact request of at most `P`; daemon and no-daemon
+apply the same admission predicate before handler entry. Existing tighter
+command limits still apply. Above `P`, no Request or command terminal exists:
+the daemon reader closes the connection with its existing oversized-frame
+behavior, and the no-daemon/in-process admission seam reports the same
+transport rejection to its caller without config/audit/store/spool access.
+
+Before confirmation, intent, or mutation, TD conversion is all-or-nothing
+under these exact limits: ChatIdentity title at most 1,048,576 valid UTF-8
+bytes; at most 100 usernames, each 1..32 ASCII bytes; at most 4,096 sessions;
+each session `application_name`, `application_version`, `device_model`,
+`platform`, `system_version`, `ip_address`, and `location` at most 1,048,576
+valid UTF-8 bytes; complete compact SessionListResult at most 16,842,751
+bytes; MessageSummary text/caption at most 4,096 Unicode scalars and 16,384
+UTF-8 bytes; at most 100 forward items; canonical ForwardItem vector at most
+4,194,304 bytes. SessionId remains the full canonical signed-int64 ASCII
+decimal domain, including INT64_MIN, zero, and INT64_MAX, and occupies at most
+20 bytes; it is not uint64. Terminal payload ceilings are 4,194,304 bytes for
+`msg_forward`, 65,536 for `send`, `msg_edit`, and `saved_attach`, and 32,768
+for every other M3 operation and `session_terminate`.
+
+M3 pre-dispatch TD-limit failure returns the current Error terminal
+INTERNAL/1 with exact
+message `"TDLib returned data outside the supported persistence bounds"` and
+exact details `{"operation":<the requested operation>,
+"reason":"internal_error"}`; it creates no intent. Session conversion failure
+retains INTERNAL/1 with exact accepted details
+`{"operation":"session_list"|"session_terminate",
+"reason":"malformed_tdlib_response","tdlib_type_id":integer|null}` and no
+partial result/intent. A correlated oversized post-dispatch success can occur
+only for `send`, `msg_edit`, `saved_attach`, or `msg_forward`; append/fsync a
+mutation_confirmed StoredTerminal INTERNAL/1 with the same exact message and
+details `{"operation":"send"|"msg_edit"|"saved_attach"|"msg_forward",
+"reason":"internal_error"}`, then append/fsync a failure outcome with mutation
+confirmed and perform the required durable store transition. Only then emit
+that same INTERNAL/1 Error as the current terminal. No raw oversized value
+reaches audit, store, diagnostics, or the terminal frame. Failure to persist
+the checkpoint, outcome, or required store transition follows the existing
+no-terminal audit-fatal rule.
+Here the pre-dispatch operation is exactly one of `send`, `msg_edit`,
+`msg_delete`, `msg_forward`, `msg_react`, `msg_pin`, `msg_unpin`,
+`chat_mark_read`, `chat_mute`, `chat_unmute`, `chat_pin`, `chat_unpin`,
+`chat_archive`, `chat_unarchive`, `chat_join`, `chat_leave`, or
+`saved_attach`; no generic/unknown operation string is admitted.
+
+Caller JSON control escapes expand canonically by at most 3x and caller
+material appears at most twice, giving `6P`. One ChatIdentity is bounded by
+`6*1,048,576 + 100*32 + 200 + 99 + 2 + 512 = 6,295,469` bytes. An enforced
+`P` budget covers all other M3 keys, delimiters, hashes, FileSnapshot scalars,
+integers, enums, and envelope bytes. Therefore the worst intent is
+`7P + 2*6,295,469 = 130,490,195 < 134,217,728` JSON bytes. Session intent has
+five persisted descriptive strings and is bounded by
+`5*6*1,048,576 + P = 48,300,031` bytes. These admission checks make the
+arithmetic true; they are not inferred producer bounds.
+
+Exact record ceilings excluding LF are: intent 134,217,728; non-vector
+checkpoint 65,536; terminal/vector payload 4,194,304; fixed canonical
+proof/outcome envelope 4,096; vector/proof/outcome record 4,198,400. Including
+LF they are 134,217,729, 65,537, and 4,198,401. Forward progress advances at
+least one of at most 100 items and repeats at most 100 times. Thus the exact
+maximal group is
+`134,217,729 + 3*65,537 + 102*4,198,401 = 562,651,242` bytes. Its tail is
+`428,433,513`; a nonrotating segment is at most
+`33,554,432 + 428,433,513 = 461,987,945`; a fresh maximal group is
+562,651,242. The exact segment ceiling is therefore 562,651,242 and five
+segments are 2,813,256,210 bytes. Oversized prospective intent is
+AUDIT_UNAVAILABLE/too_large. Only unreachable internal factory overflow after
+intent is audit-fatal schema_error.
+
+The limits are intentionally high relative to ordinary Telegram DTOs but
+finite. They preserve valid UTF-8 and existing public DTO/error shapes, use
+the transport's actual request ceiling, and convert an extreme producer value
+to a stable bounded terminal rather than allocation-dependent failure. This is
+the safety/interoperability justification; producer compliance is not assumed.
+
+A stored segment above 562,651,242 or a first line above the intent ceiling is
+preclassification path_invalid for every version. A bounded complete JSON
+object is positively v2-recognized as soon as it has exactly one top-level
+integer `schema_version:2`, before phase, extra-field, intent, or group
+validation. Checkpoint-before-intent, unknown phase, extra field, and invalid
+v2 intent therefore return empty-prefix AUDIT_INCOMPLETE even above 64 MiB.
+Before positive v2 recognition, unknown/absent/duplicate/non-integer version,
+non-object JSON, and an overall-ceiling line without LF remain unrecognized
+path_invalid; invalid JSON is
+parse_error at/below 64 MiB, while legacy path_invalid wins above 64 MiB until
+positive v2 recognition. After recognition, a later oversized v2 record is
+too_large or the open prefix's AUDIT_INCOMPLETE. After recognition, any later
+bounded complete object with unsupported integer schema_version is first a
+contradiction and returns AUDIT_INCOMPLETE from the last trustworthy open v2
+prefix (or the exact empty prefix when none is open), never path_invalid;
+version classification precedes phase-size and sequence validation. A v1-only
+segment above
+64 MiB retains its existing path_invalid behavior. Inspection streams
+65,536-byte chunks and never loads a segment as one string.
+
+Invocation reuse detection retains no unbounded set. At every intent it
+deterministically rescans all prior segments/bytes and rejects the same
+invocation id in any version or command. The rescan uses the same bounds and
+absolute deadline.
+
+The dormant M3/M6 `AUDIT_UNAVAILABLE` reason enum is exactly:
+
+```text
+path_invalid, wrong_owner, wrong_type, wrong_mode, wrong_link_count,
+too_large, capacity_exhausted, open_failed, lock_failed, read_failed,
+write_failed, sync_failed, rename_failed, directory_sync_failed,
+parse_error, schema_error, contradiction
+```
+
+`rotate_failed` is not a v2 durability reason and is rejected by the M3/M6
+schemas and generator checks. Existing v1 logout/removal `audit_reason` and its
+adapter retain `rotate_failed`; the generator defines the v1 and v2 enums
+separately. V2 unlink/rename failures map to `rename_failed`, and directory
+fsync failures map to `directory_sync_failed`.
+
+Account-audit history contradiction always maps to `AUDIT_INCOMPLETE`, including
+an empty trustworthy prefix; it does not use the `AUDIT_UNAVAILABLE` reason
+branch. The full durability enum remains shared with store/spool failures that
+can report `contradiction` without an audit-group history.
 
 #### 4.5.7 Idempotency store и exact transitions
 
@@ -3320,6 +3524,17 @@ append/sync recovery records for prior invocations; those records belong to the
 prior invocation. List and dry-run create no audit group for their current
 invocation.
 
+Session paths pass an explicit `AbsentByPolicy` audit-pin source; this is not
+an empty pin set and the audit layer never opens `idempotency.db` itself. They
+may reconcile only audit-only groups with null idempotency hash, no pending
+stage, and no spool stage. An incomplete keyed group returns
+AUDIT_INCOMPLETE without append or store/spool I/O. List and dry-run perform no
+capacity operation. A real terminate that does not need rotation may append;
+when rotation is needed it may use a missing numbered slot without deletion,
+but it returns `AUDIT_UNAVAILABLE/capacity_exhausted` rather than delete an
+occupied slot without pin knowledge. Thus no session path reads or writes the
+idempotency store, evicts a possibly pinned M3 segment, or resends.
+
 Every §4.7.5 reconciliation point first applies §4.5.12's account-global v2
 gate. `session list` and `session terminate --dry-run` apply it at step 2
 before Ready; real `session terminate` applies it at step 6 after
@@ -5155,6 +5370,16 @@ TDLib's database remains the only Telegram cache.
 The `.ctl` endpoint and `<account-state-dir>/daemon.lock` form the bootstrap
 compatibility surface described in §10. They are account-scoped even though
 they are not part of the main JSONL protocol.
+
+`daemon.lock` is also the cross-process lifetime lease for the per-account
+audit and idempotency state. Those components share exactly one outer account
+operation mutex inside the lease owner and hold it continuously across every
+durability boundary of an admitted real invocation. The typed lease
+revalidates the held descriptor's device/inode, uid, regular type, 0600 mode,
+link count 1, and open lifetime. No `.audit.lock` or other audit lock path is
+created. Audit inspection/rotation/appends fail `lock_failed` when invoked
+without a valid lease, except pure parsing tests over supplied bytes.
+
 The hidden removal gate uses the same verified `0600` regular-file and
 dual-lock mechanics as `daemon.lock`, but is not a control endpoint. A daemon
 holds it for its lifetime; no-daemon execution and an actual local removal hold

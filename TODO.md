@@ -192,9 +192,17 @@ before the milestone is closed.
 - [ ] Add neutral TD request/update DTOs, strict M3 results/errors/plans, and
       direct-response/auth-update/deadline arbitration without exposing
       `td_api.h` outside daemon implementation translation units
-- [ ] Add audit schema v2 common/per-command/checkpoint/recovery records,
-      legal stage ordering, mixed-v1/v2 recovery, contradiction handling,
-      rotation/retention, and durable intent/outcome enforcement
+- [ ] Add strict mixed-v1/v2 per-account audit schemas, factories, streaming
+      scanner, recovery and pin-aware fixed-slot rotation; preserve v1 APIs and
+      its 64 MiB behavior; freeze AUDIT_INCOMPLETE recovery terminals,
+      sent-forward confirmed recovery, cleanup/outcome/store ordering,
+      inode-backed audit generations, hole-first rotation, bounded global
+      invocation rescans, the continuous daemon.lock-backed outer mutex,
+      external data ceilings, exact v2 record/group/segment limits,
+      oversize precedence, contradiction handling and crash points.
+- [ ] Align session/M3 AUDIT_UNAVAILABLE schemas with the complete accepted
+      durability_reason enum; reject rotate_failed in v2 while retaining the
+      separate v1 audit_reason, and generator-check every runtime audit record.
 - [ ] Add canonical JSON and complete per-operation fingerprints plus the
       idempotency store: quota/reservations, locked insert-if-absent, exact
       pending/completed/conflict/replay states, crash-cutpoint repair, and
@@ -288,10 +296,11 @@ before the milestone is closed.
       `terminateSession` runtime factories/descriptors/native matchers,
       scripted-fake seams and unregistered safety-policy descriptors at pinned
       TDLib 1.8.65 / a17f87c4cff7b90b278d12b91ba0614383aaee82
-- [ ] Extend accepted audit v2 schemas/reconciler with dormant
-      `session_terminate`, direct dispatch/proof/recovery stages,
-      `idempotency_key_hash:null` and prior-group inspection; expose no command
-      and perform no real terminate dispatch yet
+- [ ] Extend the dormant audit-v2 contract with session_terminate,
+      idempotency_key_hash:null and pre-Ready/step-6 prior-group inspection;
+      enforce AbsentByPolicy store access, block keyed incomplete groups, and
+      use only non-evicting capacity without pin knowledge; expose no command
+      and perform no terminate dispatch yet.
 - [x] Add the one-of real/dry-run terminate result schema, list result schema,
       exact self-contained session error schema, manifest entries and
       deterministic human renderers; keep the public `schema` CLI deferred M7
