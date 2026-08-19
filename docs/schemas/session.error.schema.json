@@ -125,7 +125,7 @@
       ],
       "properties": {
         "operation": { "const": "session_terminate" },
-        "account": { "type": "string" },
+        "account": { "$ref": "#/$defs/account" },
         "tdlib_request": { "const": "terminateSession" },
         "session": { "$ref": "#/$defs/sessionTarget" }
       }
@@ -383,31 +383,184 @@
         "code": { "const": "AUDIT_INCOMPLETE" },
         "message": { "type": "string" },
         "details": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["account", "path", "mutation_state", "completed_stages"],
-          "properties": {
-            "account": { "$ref": "#/$defs/account" },
-            "path": { "type": "string" },
-            "mutation_state": { "enum": ["none", "possible", "confirmed"] },
-            "completed_stages": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "enum": [
-                  "intent_synced",
-                  "logout_send_started",
-                  "logout_closed_confirmed",
-                  "idempotency_pending",
-                  "spool_ready",
-                  "dispatch_started",
-                  "temporary_ids_observed",
-                  "forward_progress",
-                  "mutation_confirmed"
-                ]
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "path", "mutation_state", "completed_stages"],
+              "properties": {
+                "account": { "$ref": "#/$defs/account" },
+                "path": { "type": "string" },
+                "mutation_state": { "const": "none" },
+                "completed_stages": { "const": ["intent_synced"] }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "path", "mutation_state", "completed_stages"],
+              "properties": {
+                "account": { "$ref": "#/$defs/account" },
+                "path": { "type": "string" },
+                "mutation_state": { "const": "possible" },
+                "completed_stages": {
+                  "const": ["intent_synced", "logout_send_started"]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "path", "mutation_state", "completed_stages"],
+              "properties": {
+                "account": { "$ref": "#/$defs/account" },
+                "path": { "type": "string" },
+                "mutation_state": { "const": "confirmed" },
+                "completed_stages": {
+                  "const": [
+                    "intent_synced",
+                    "logout_send_started",
+                    "logout_closed_confirmed"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "path", "mutation_state", "completed_stages"],
+              "properties": {
+                "account": { "$ref": "#/$defs/account" },
+                "path": { "type": "string" },
+                "mutation_state": { "const": "none" },
+                "completed_stages": {
+                  "enum": [
+                    [],
+                    ["idempotency_pending"],
+                    ["spool_ready"],
+                    ["idempotency_pending", "spool_ready"],
+                    ["dispatch_started", "forward_progress"],
+                    ["dispatch_started", "temporary_ids_observed", "forward_progress"],
+                    ["idempotency_pending", "dispatch_started", "forward_progress"],
+                    [
+                      "idempotency_pending",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "forward_progress"
+                    ]
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "path", "mutation_state", "completed_stages"],
+              "properties": {
+                "account": { "$ref": "#/$defs/account" },
+                "path": { "type": "string" },
+                "mutation_state": { "const": "possible" },
+                "completed_stages": {
+                  "enum": [
+                    ["dispatch_started"],
+                    ["dispatch_started", "temporary_ids_observed"],
+                    ["idempotency_pending", "dispatch_started"],
+                    ["idempotency_pending", "dispatch_started", "temporary_ids_observed"],
+                    ["spool_ready", "dispatch_started"],
+                    ["spool_ready", "dispatch_started", "temporary_ids_observed"],
+                    ["idempotency_pending", "spool_ready", "dispatch_started"],
+                    [
+                      "idempotency_pending",
+                      "spool_ready",
+                      "dispatch_started",
+                      "temporary_ids_observed"
+                    ],
+                    ["dispatch_started", "forward_progress"],
+                    ["dispatch_started", "temporary_ids_observed", "forward_progress"],
+                    ["idempotency_pending", "dispatch_started", "forward_progress"],
+                    [
+                      "idempotency_pending",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "forward_progress"
+                    ]
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account", "path", "mutation_state", "completed_stages"],
+              "properties": {
+                "account": { "$ref": "#/$defs/account" },
+                "path": { "type": "string" },
+                "mutation_state": { "const": "confirmed" },
+                "completed_stages": {
+                  "enum": [
+                    ["dispatch_started", "mutation_confirmed"],
+                    ["dispatch_started", "temporary_ids_observed", "mutation_confirmed"],
+                    ["idempotency_pending", "dispatch_started", "mutation_confirmed"],
+                    [
+                      "idempotency_pending",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "mutation_confirmed"
+                    ],
+                    ["spool_ready", "dispatch_started", "mutation_confirmed"],
+                    [
+                      "spool_ready",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "mutation_confirmed"
+                    ],
+                    [
+                      "idempotency_pending",
+                      "spool_ready",
+                      "dispatch_started",
+                      "mutation_confirmed"
+                    ],
+                    [
+                      "idempotency_pending",
+                      "spool_ready",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "mutation_confirmed"
+                    ],
+                    ["dispatch_started", "forward_progress"],
+                    ["dispatch_started", "temporary_ids_observed", "forward_progress"],
+                    ["idempotency_pending", "dispatch_started", "forward_progress"],
+                    [
+                      "idempotency_pending",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "forward_progress"
+                    ],
+                    ["dispatch_started", "forward_progress", "mutation_confirmed"],
+                    [
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "forward_progress",
+                      "mutation_confirmed"
+                    ],
+                    [
+                      "idempotency_pending",
+                      "dispatch_started",
+                      "forward_progress",
+                      "mutation_confirmed"
+                    ],
+                    [
+                      "idempotency_pending",
+                      "dispatch_started",
+                      "temporary_ids_observed",
+                      "forward_progress",
+                      "mutation_confirmed"
+                    ]
+                  ]
+                }
               }
             }
-          }
+          ]
         }
       }
     },

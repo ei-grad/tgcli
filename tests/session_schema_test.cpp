@@ -67,6 +67,13 @@ json terminal_error(std::string code, json details, std::string message = "contr
               {"details", std::move(details)}}}};
 }
 
+json audit_incomplete(std::string mutation_state, json completed_stages) {
+    return terminal_error("AUDIT_INCOMPLETE", {{"account", "main"},
+                                               {"path", "/audit"},
+                                               {"mutation_state", std::move(mutation_state)},
+                                               {"completed_stages", std::move(completed_stages)}});
+}
+
 void check_schema_node(const json& schema) {
     std::vector<const json*> pending{&schema};
     while (!pending.empty()) {
@@ -118,6 +125,10 @@ TEST_CASE("session schemas are self-contained strict Draft 2020-12 documents",
     CHECK(list_schema["$defs"]["session"]["required"].size() == 18);
     CHECK(list_schema["$defs"]["deviceType"]["enum"].size() == 17);
     CHECK(list_schema["properties"]["items"]["type"] == "array");
+
+    const auto error_schema = tgcli::test::load_schema_document("session.error.schema.json");
+    CHECK(error_schema["$defs"]["auditIncompleteError"]["properties"]["details"]["oneOf"].size() ==
+          6);
 }
 
 TEST_CASE("session id schemas accept exactly canonical signed int64 strings", "[schema][session]") {
@@ -329,6 +340,160 @@ TEST_CASE("session terminate result is one exact real or redacted dry-run branch
         CHECK_THAT(invalid,
                    !tgcli::test::matches_json_schema("session-terminate.result.schema.json"));
     }
+}
+
+TEST_CASE("session terminate plans enforce the local account-name language", "[schema][session]") {
+    const std::vector<std::string> valid_accounts{"a", std::string(32, 'Z')};
+    for (const auto& account : valid_accounts) {
+        INFO(account);
+        json dry_run{{"dry_run", true}, {"plan", terminate_plan()}};
+        dry_run["plan"]["account"] = account;
+        CHECK_THAT(dry_run,
+                   tgcli::test::matches_json_schema("session-terminate.result.schema.json"));
+
+        auto confirmation = terminal_error(
+            "CONFIRMATION_REQUIRED",
+            {{"account", "main"}, {"action", "session_terminate"}, {"target", terminate_plan()}});
+        confirmation["error"]["details"]["target"]["account"] = account;
+        CHECK_THAT(confirmation, tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    const std::vector<std::string> invalid_accounts{"", std::string(33, 'a'), "work.name",
+                                                    "work/name", "máin"};
+    for (const auto& account : invalid_accounts) {
+        INFO(account);
+        json dry_run{{"dry_run", true}, {"plan", terminate_plan()}};
+        dry_run["plan"]["account"] = account;
+        CHECK_THAT(dry_run,
+                   !tgcli::test::matches_json_schema("session-terminate.result.schema.json"));
+
+        auto confirmation = terminal_error(
+            "CONFIRMATION_REQUIRED",
+            {{"account", "main"}, {"action", "session_terminate"}, {"target", terminate_plan()}});
+        confirmation["error"]["details"]["target"]["account"] = account;
+        CHECK_THAT(confirmation, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    const auto result_schema =
+        tgcli::test::load_schema_document("session-terminate.result.schema.json");
+    CHECK(result_schema["$defs"]["plan"]["properties"]["account"]["$ref"] == "#/$defs/account");
+    const auto error_schema = tgcli::test::load_schema_document("session.error.schema.json");
+    CHECK(error_schema["$defs"]["plan"]["properties"]["account"]["$ref"] == "#/$defs/account");
+}
+
+TEST_CASE("session AUDIT_INCOMPLETE admits every legal v1 and v2 history-state pair",
+          "[schema][session][error]") {
+    struct HistoryCase {
+        std::string mutation_state;
+        json completed_stages;
+    };
+
+    const std::vector<HistoryCase> legal{
+        {"none", json::array({"intent_synced"})},
+        {"possible", json::array({"intent_synced", "logout_send_started"})},
+        {"confirmed",
+         json::array({"intent_synced", "logout_send_started", "logout_closed_confirmed"})},
+
+        {"none", json::array()},
+        {"none", json::array({"idempotency_pending"})},
+        {"none", json::array({"spool_ready"})},
+        {"none", json::array({"idempotency_pending", "spool_ready"})},
+        {"none", json::array({"dispatch_started", "forward_progress"})},
+        {"none", json::array({"dispatch_started", "temporary_ids_observed", "forward_progress"})},
+        {"none", json::array({"idempotency_pending", "dispatch_started", "forward_progress"})},
+        {"none", json::array({"idempotency_pending", "dispatch_started", "temporary_ids_observed",
+                              "forward_progress"})},
+
+        {"possible", json::array({"dispatch_started"})},
+        {"possible", json::array({"dispatch_started", "temporary_ids_observed"})},
+        {"possible", json::array({"idempotency_pending", "dispatch_started"})},
+        {"possible",
+         json::array({"idempotency_pending", "dispatch_started", "temporary_ids_observed"})},
+        {"possible", json::array({"spool_ready", "dispatch_started"})},
+        {"possible", json::array({"spool_ready", "dispatch_started", "temporary_ids_observed"})},
+        {"possible", json::array({"idempotency_pending", "spool_ready", "dispatch_started"})},
+        {"possible", json::array({"idempotency_pending", "spool_ready", "dispatch_started",
+                                  "temporary_ids_observed"})},
+        {"possible", json::array({"dispatch_started", "forward_progress"})},
+        {"possible",
+         json::array({"dispatch_started", "temporary_ids_observed", "forward_progress"})},
+        {"possible", json::array({"idempotency_pending", "dispatch_started", "forward_progress"})},
+        {"possible", json::array({"idempotency_pending", "dispatch_started",
+                                  "temporary_ids_observed", "forward_progress"})},
+
+        {"confirmed", json::array({"dispatch_started", "mutation_confirmed"})},
+        {"confirmed",
+         json::array({"dispatch_started", "temporary_ids_observed", "mutation_confirmed"})},
+        {"confirmed",
+         json::array({"idempotency_pending", "dispatch_started", "mutation_confirmed"})},
+        {"confirmed", json::array({"idempotency_pending", "dispatch_started",
+                                   "temporary_ids_observed", "mutation_confirmed"})},
+        {"confirmed", json::array({"spool_ready", "dispatch_started", "mutation_confirmed"})},
+        {"confirmed", json::array({"spool_ready", "dispatch_started", "temporary_ids_observed",
+                                   "mutation_confirmed"})},
+        {"confirmed", json::array({"idempotency_pending", "spool_ready", "dispatch_started",
+                                   "mutation_confirmed"})},
+        {"confirmed", json::array({"idempotency_pending", "spool_ready", "dispatch_started",
+                                   "temporary_ids_observed", "mutation_confirmed"})},
+        {"confirmed", json::array({"dispatch_started", "forward_progress"})},
+        {"confirmed",
+         json::array({"dispatch_started", "temporary_ids_observed", "forward_progress"})},
+        {"confirmed", json::array({"idempotency_pending", "dispatch_started", "forward_progress"})},
+        {"confirmed", json::array({"idempotency_pending", "dispatch_started",
+                                   "temporary_ids_observed", "forward_progress"})},
+        {"confirmed", json::array({"dispatch_started", "forward_progress", "mutation_confirmed"})},
+        {"confirmed", json::array({"dispatch_started", "temporary_ids_observed", "forward_progress",
+                                   "mutation_confirmed"})},
+        {"confirmed", json::array({"idempotency_pending", "dispatch_started", "forward_progress",
+                                   "mutation_confirmed"})},
+        {"confirmed",
+         json::array({"idempotency_pending", "dispatch_started", "temporary_ids_observed",
+                      "forward_progress", "mutation_confirmed"})},
+    };
+
+    for (const auto& history : legal) {
+        INFO(history.mutation_state << " " << history.completed_stages.dump());
+        CHECK_THAT(audit_incomplete(history.mutation_state, history.completed_stages),
+                   tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+}
+
+TEST_CASE("session AUDIT_INCOMPLETE rejects illegal histories and inconsistent states",
+          "[schema][session][error]") {
+    struct HistoryCase {
+        std::string mutation_state;
+        json completed_stages;
+    };
+    const std::vector<HistoryCase> invalid{
+        {"none", json::array({"dispatch_started"})},
+        {"possible", json::array()},
+        {"confirmed", json::array()},
+        {"confirmed", json::array({"mutation_confirmed", "dispatch_started"})},
+        {"possible", json::array({"logout_send_started", "dispatch_started"})},
+        {"possible", json::array({"dispatch_started", "dispatch_started"})},
+        {"possible", json::array({"temporary_ids_observed"})},
+        {"possible", json::array({"planned"})},
+        {"confirmed", json::array({"intent_synced"})},
+        {"possible", json::array({"intent_synced", "logout_closed_confirmed"})},
+        {"none", json::array({"spool_ready", "idempotency_pending"})},
+        {"possible", json::array({"spool_ready", "temporary_ids_observed"})},
+        {"confirmed",
+         json::array({"dispatch_started", "forward_progress", "temporary_ids_observed"})},
+        {"confirmed", json::array({"dispatch_started", "mutation_confirmed", "forward_progress"})},
+        {"possible", json::array({"dispatch_started", "idempotency_pending"})},
+        {"none", json::array({"dispatch_started", "mutation_confirmed"})},
+        {"possible", json::array({"dispatch_started", "mutation_confirmed"})},
+    };
+
+    for (const auto& history : invalid) {
+        INFO(history.mutation_state << " " << history.completed_stages.dump());
+        CHECK_THAT(audit_incomplete(history.mutation_state, history.completed_stages),
+                   !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    auto additional = audit_incomplete("possible", json::array({"dispatch_started"}));
+    additional["error"]["details"]["unexpected"] = true;
+    CHECK_THAT(additional, !tgcli::test::matches_json_schema("session.error.schema.json"));
 }
 
 TEST_CASE("session error schema admits the exact common and session branches",

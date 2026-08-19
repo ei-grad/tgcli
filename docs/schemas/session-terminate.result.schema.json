@@ -2,6 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "tgcli session terminate result",
   "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
     "sessionId": {
       "oneOf": [
         { "const": "0" },
@@ -97,7 +101,7 @@
       ],
       "properties": {
         "operation": { "const": "session_terminate" },
-        "account": { "type": "string" },
+        "account": { "$ref": "#/$defs/account" },
         "tdlib_request": { "const": "terminateSession" },
         "session": { "$ref": "#/$defs/sessionTarget" }
       }
