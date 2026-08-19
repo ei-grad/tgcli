@@ -291,20 +291,26 @@ class ReadyReadHarness {
     ReadyReadHarness& operator=(ReadyReadHarness&&) = delete;
 
     void start() {
-        result_ = std::async(std::launch::async, [this] {
+        start_with([this](const std::shared_ptr<const tgcli::core::AuthStateSnapshot>& ready) {
+            return client_->get_chat(ready, -1);
+        });
+        REQUIRE(runtime_->wait_for_sent(2));
+        REQUIRE(barrier_.await_entry());
+    }
+
+    void start_with(tgcli::daemon::ReadyReadStart start) {
+        result_ = std::async(std::launch::async, [this, start = std::move(start)] {
             tgcli::daemon::ReadyReadSession reads(
                 *client_, *session_,
                 {.now = [this] { return clock_.now(); },
                  .wait = [this] { barrier_.wait(); },
                  .before_event_arbitration = [this] { arbitration_.notify(); }});
             auto snapshot = reads.current();
-            return reads.read(
-                [this](const std::shared_ptr<const tgcli::core::AuthStateSnapshot>& ready) {
-                    return client_->get_chat(ready, -1);
-                },
-                snapshot);
+            return reads.read(start, snapshot);
         });
-        REQUIRE(runtime_->wait_for_sent(2));
+    }
+
+    void await_wait() {
         REQUIRE(barrier_.await_entry());
     }
 
@@ -465,10 +471,8 @@ TEST_CASE("Ready read uses event observation time at the absolute deadline",
     SECTION("response publisher wins the gate before the deadline claim") {
         ReadyReadHarness harness(deadline);
         harness.start();
-        harness.pause_response(deadline - 1ns);
+        harness.push_response(deadline - 1ns);
         harness.consume_after_deadline();
-        CHECK_FALSE(harness.result_ready_within(0ms));
-        harness.release_publication();
         auto result = harness.result();
         CHECK(result.status == tgcli::daemon::ReadyReadStatus::Response);
         CHECK(result.value.get_if<tgcli::core::TdOk>() != nullptr);
@@ -479,10 +483,8 @@ TEST_CASE("Ready read uses event observation time at the absolute deadline",
     SECTION("authorization publisher wins the gate before the deadline claim") {
         ReadyReadHarness harness(deadline);
         harness.start();
-        harness.pause_auth(tgcli::core::AuthState::WaitCode, deadline - 1ns);
+        harness.push_auth(tgcli::core::AuthState::WaitCode, deadline - 1ns);
         harness.consume_after_deadline();
-        CHECK_FALSE(harness.result_ready_within(0ms));
-        harness.release_publication();
         const auto result = harness.result();
         CHECK(result.status == tgcli::daemon::ReadyReadStatus::AuthorizationLost);
         REQUIRE(result.snapshot != nullptr);
@@ -566,6 +568,144 @@ TEST_CASE("Ready read preserves eligible response and authorization event orderi
         REQUIRE(harness.wait_auth_sequence(3));
         harness.release_before_deadline();
         CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::Response);
+    }
+}
+
+TEST_CASE("Ready read deadline is not blocked by an outbound auth publication prerequisite",
+          "[ready-read][resolver][saved][deadline][outbound][concurrency]") {
+    const auto deadline = tgcli::core::TdEventClock::now() + 5s;
+    ReadyReadHarness harness(deadline);
+    harness.start();
+
+    PollBarrier outbound;
+    const BarrierReleaseGuard release_outbound(outbound);
+    harness.runtime().set_before_send([&](const tgcli::core::TdFunctionData& function) {
+        if (function.has_type("getChat")) {
+            outbound.wait();
+        }
+    });
+    const auto ready = harness.client().auth_state();
+    auto blocked_send =
+        std::async(std::launch::async, [&] { return harness.client().get_chat(ready, -2); });
+    REQUIRE(outbound.await_entry());
+
+    const auto received = harness.runtime().received_count();
+    harness.enqueue_auth(tgcli::core::AuthState::Ready, deadline);
+    REQUIRE(harness.runtime().wait_for_received(received + 1));
+
+    harness.release_at_deadline();
+    const auto deadline_won = harness.result_ready_within(500ms);
+    CHECK(deadline_won);
+    CHECK(blocked_send.wait_for(0ms) != std::future_status::ready);
+    std::optional<tgcli::daemon::ReadyReadResult> result;
+    if (deadline_won) {
+        result = harness.result();
+        CHECK(result->status == tgcli::daemon::ReadyReadStatus::TimedOut);
+    }
+
+    harness.runtime().set_before_send({});
+    outbound.release();
+    auto response = blocked_send.get();
+    REQUIRE(harness.runtime().wait_for_sent(3));
+    const auto sent = harness.runtime().sent_functions();
+    REQUIRE(sent.back().client_id == ready->client_id);
+    harness.runtime().push_response(
+        tgcli::test::ScriptedClient{sent.back().client_id, sent.back().client_generation},
+        sent.back().query_id, tgcli::core::TdValue::from(tgcli::core::TdOk{}));
+    CHECK(response.get().get_if<tgcli::core::TdOk>() != nullptr);
+    REQUIRE(harness.wait_auth_sequence(2));
+    const auto advanced = harness.client().auth_state();
+    CHECK(advanced->data.state == tgcli::core::AuthState::Ready);
+    CHECK(advanced->auth_sequence == 2);
+    REQUIRE(advanced->receive_observed_at);
+    CHECK(*advanced->receive_observed_at == deadline);
+    if (!result) {
+        CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::TimedOut);
+    }
+}
+
+TEST_CASE("Ready read retries only pre-boundary authorization races",
+          "[ready-read][resolver][saved][authorization][retry]") {
+    const auto deadline = tgcli::core::TdEventClock::now() + 5s;
+    const auto ready_value = [deadline] {
+        std::promise<tgcli::core::TdValue> promise;
+        auto future = promise.get_future();
+        auto value = tgcli::core::TdValue::from(tgcli::core::TdOk{});
+        value.set_receive_event_metadata(100, deadline - 1ns);
+        promise.set_value(std::move(value));
+        return future;
+    };
+
+    for (const auto failure : {tgcli::core::TdAuthorizationFailure::GenerationMismatch,
+                               tgcli::core::TdAuthorizationFailure::AuthSequenceMismatch,
+                               tgcli::core::TdAuthorizationFailure::GenerationClosed}) {
+        DYNAMIC_SECTION("retryable " << tgcli::core::authorization_failure_name(failure)) {
+            ReadyReadHarness harness(deadline);
+            std::promise<tgcli::core::TdValue> first;
+            auto first_future = first.get_future();
+            std::size_t attempts = 0;
+            harness.start_with([&](const auto&) mutable {
+                ++attempts;
+                if (attempts == 1) {
+                    return std::move(first_future);
+                }
+                return ready_value();
+            });
+            harness.await_wait();
+            harness.push_ready_sentinel(deadline - 2ns);
+            first.set_exception(
+                std::make_exception_ptr(tgcli::core::TdAuthorizationError(failure)));
+            harness.release_before_deadline();
+            const auto result = harness.result();
+            CHECK(result.status == tgcli::daemon::ReadyReadStatus::Response);
+            CHECK(result.value.get_if<tgcli::core::TdOk>() != nullptr);
+            CHECK(attempts == 2);
+        }
+    }
+
+    for (const auto failure : {tgcli::core::TdAuthorizationFailure::FunctionMismatch,
+                               tgcli::core::TdAuthorizationFailure::TierMismatch,
+                               tgcli::core::TdAuthorizationFailure::OwnerMismatch,
+                               tgcli::core::TdAuthorizationFailure::AuthStateMismatch,
+                               tgcli::core::TdAuthorizationFailure::FunctionDenied}) {
+        DYNAMIC_SECTION("terminal " << tgcli::core::authorization_failure_name(failure)) {
+            ReadyReadHarness harness(deadline);
+            std::promise<tgcli::core::TdValue> first;
+            auto first_future = first.get_future();
+            std::size_t attempts = 0;
+            harness.start_with([&](const auto&) mutable {
+                ++attempts;
+                return std::move(first_future);
+            });
+            harness.await_wait();
+            harness.push_ready_sentinel(deadline - 2ns);
+            first.set_exception(
+                std::make_exception_ptr(tgcli::core::TdAuthorizationError(failure)));
+            harness.release_before_deadline();
+            const auto result = harness.result();
+            CHECK(result.status == tgcli::daemon::ReadyReadStatus::Failed);
+            CHECK(result.authorization_failure == failure);
+            CHECK(attempts == 1);
+        }
+    }
+
+    SECTION("generic runtime error is terminal") {
+        ReadyReadHarness harness(deadline);
+        std::promise<tgcli::core::TdValue> first;
+        auto first_future = first.get_future();
+        std::size_t attempts = 0;
+        harness.start_with([&](const auto&) mutable {
+            ++attempts;
+            return std::move(first_future);
+        });
+        harness.await_wait();
+        harness.push_ready_sentinel(deadline - 2ns);
+        first.set_exception(std::make_exception_ptr(std::runtime_error("scripted failure")));
+        harness.release_before_deadline();
+        const auto result = harness.result();
+        CHECK(result.status == tgcli::daemon::ReadyReadStatus::Failed);
+        CHECK_FALSE(result.authorization_failure.has_value());
+        CHECK(attempts == 1);
     }
 }
 

@@ -727,6 +727,47 @@ TEST_CASE("resolve result schema enforces kind-specific topic id bounds",
     }
 }
 
+TEST_CASE("resolve result schema ties kind to message and topic presence",
+          "[schema][resolver][discriminator]") {
+    const auto cases = schema_cases();
+    const auto resolve =
+        std::ranges::find(cases, std::string{"resolve.result.schema.json"}, &SchemaCase::filename);
+    REQUIRE(resolve != cases.end());
+
+    auto message = resolve->instance;
+    REQUIRE_THAT(message, tgcli::test::matches_json_schema("resolve.result.schema.json"));
+    message["topic"] = nullptr;
+    CHECK_THAT(message, tgcli::test::matches_json_schema("resolve.result.schema.json"));
+
+    auto topic = resolve->instance;
+    topic["kind"] = "topic";
+    topic["message_id"] = nullptr;
+    CHECK_THAT(topic, tgcli::test::matches_json_schema("resolve.result.schema.json"));
+
+    auto chat = resolve->instance;
+    chat["kind"] = "chat";
+    chat["message_id"] = nullptr;
+    chat["topic"] = nullptr;
+    CHECK_THAT(chat, tgcli::test::matches_json_schema("resolve.result.schema.json"));
+
+    for (const auto& invalid : {
+             nlohmann::json{{"kind", "chat"}, {"message_id", 123}, {"topic", nullptr}},
+             nlohmann::json{{"kind", "topic"}, {"message_id", 123}, {"topic", nullptr}},
+             nlohmann::json{{"kind", "chat"},
+                            {"message_id", nullptr},
+                            {"topic", {{"kind", "forum"}, {"id", 7}}}},
+             nlohmann::json{{"kind", "message"},
+                            {"message_id", nullptr},
+                            {"topic", {{"kind", "forum"}, {"id", 7}}}},
+             nlohmann::json{{"kind", "message"}, {"message_id", nullptr}, {"topic", nullptr}},
+             nlohmann::json{{"kind", "topic"}, {"message_id", nullptr}, {"topic", nullptr}},
+         }) {
+        auto mismatch = resolve->instance;
+        mismatch.update(invalid);
+        CHECK_THAT(mismatch, !tgcli::test::matches_json_schema("resolve.result.schema.json"));
+    }
+}
+
 TEST_CASE("account show nested closure starts from its named valid fixture",
           "[schema][regression]") {
     const auto cases = schema_cases();

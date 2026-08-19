@@ -41,6 +41,22 @@ bool event_precedes_deadline(const std::optional<core::TdEventClock::time_point>
     return observed_at && *observed_at < deadline;
 }
 
+bool ready_retry_failure(core::TdAuthorizationFailure failure) {
+    switch (failure) {
+    case core::TdAuthorizationFailure::GenerationMismatch:
+    case core::TdAuthorizationFailure::AuthSequenceMismatch:
+    case core::TdAuthorizationFailure::GenerationClosed:
+        return true;
+    case core::TdAuthorizationFailure::FunctionMismatch:
+    case core::TdAuthorizationFailure::TierMismatch:
+    case core::TdAuthorizationFailure::OwnerMismatch:
+    case core::TdAuthorizationFailure::AuthStateMismatch:
+    case core::TdAuthorizationFailure::FunctionDenied:
+        return false;
+    }
+    return false;
+}
+
 } // namespace
 
 class ReadyReadSession::Impl {
@@ -174,9 +190,6 @@ class ReadyReadSession::Impl {
                 return {WaitStatus::Failed, {}, std::nullopt, nullptr};
             }
             if (!event_precedes_deadline(observed_at, session_.deadline())) {
-                if (change.kind == ReadyChangeKind::Advanced) {
-                    return {WaitStatus::ReadyAdvanced, {}, std::nullopt, change.snapshot};
-                }
                 return {WaitStatus::TimedOut, {}, std::nullopt, nullptr};
             }
             return {WaitStatus::Response, std::move(value), std::nullopt, nullptr};
@@ -185,20 +198,17 @@ class ReadyReadSession::Impl {
             if (change.kind == ReadyChangeKind::Lost) {
                 return {WaitStatus::AuthorizationLost, {}, std::nullopt, change.snapshot};
             }
-            if (change.kind == ReadyChangeKind::Advanced) {
+            if (change.kind == ReadyChangeKind::Advanced && ready_retry_failure(error.failure())) {
                 return {WaitStatus::ReadyAdvanced, {}, std::nullopt, change.snapshot};
             }
             if (change.kind == ReadyChangeKind::Invalid) {
                 return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};
             }
-            return {WaitStatus::Failed, {}, error.failure(), nullptr};
+            return {WaitStatus::Failed, {}, error.failure(), change.snapshot};
         } catch (const std::exception&) {
             const auto change = ready_change_after(sent);
             if (change.kind == ReadyChangeKind::Lost) {
                 return {WaitStatus::AuthorizationLost, {}, std::nullopt, change.snapshot};
-            }
-            if (change.kind == ReadyChangeKind::Advanced) {
-                return {WaitStatus::ReadyAdvanced, {}, std::nullopt, change.snapshot};
             }
             if (change.kind == ReadyChangeKind::Invalid) {
                 return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};

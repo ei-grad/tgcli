@@ -29,6 +29,68 @@ namespace {
 
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
 
+template <typename... Types> struct TypeList {};
+
+using PinnedInternalLinkTypes =
+    TypeList<td_api::internalLinkTypeAttachmentMenuBot, td_api::internalLinkTypeAuthenticationCode,
+             td_api::internalLinkTypeBackground, td_api::internalLinkTypeBotAddToChannel,
+             td_api::internalLinkTypeBotStart, td_api::internalLinkTypeBotStartInGroup,
+             td_api::internalLinkTypeBusinessChat, td_api::internalLinkTypeCallsPage,
+             td_api::internalLinkTypeChatAffiliateProgram, td_api::internalLinkTypeChatBoost,
+             td_api::internalLinkTypeChatFolderInvite, td_api::internalLinkTypeChatInvite,
+             td_api::internalLinkTypeChatSelection, td_api::internalLinkTypeContactsPage,
+             td_api::internalLinkTypeDirectMessagesChat, td_api::internalLinkTypeGame,
+             td_api::internalLinkTypeGiftAuction, td_api::internalLinkTypeGiftCollection,
+             td_api::internalLinkTypeGroupCall, td_api::internalLinkTypeInstantView,
+             td_api::internalLinkTypeInvoice, td_api::internalLinkTypeLanguagePack,
+             td_api::internalLinkTypeLiveStory, td_api::internalLinkTypeMainWebApp,
+             td_api::internalLinkTypeMessage, td_api::internalLinkTypeMessageDraft,
+             td_api::internalLinkTypeMyProfilePage, td_api::internalLinkTypeNewChannelChat,
+             td_api::internalLinkTypeNewGroupChat, td_api::internalLinkTypeNewPrivateChat,
+             td_api::internalLinkTypeNewStory, td_api::internalLinkTypeOauth,
+             td_api::internalLinkTypePassportDataRequest,
+             td_api::internalLinkTypePhoneNumberConfirmation,
+             td_api::internalLinkTypePremiumFeaturesPage, td_api::internalLinkTypePremiumGiftCode,
+             td_api::internalLinkTypePremiumGiftPurchase, td_api::internalLinkTypeProxy,
+             td_api::internalLinkTypePublicChat, td_api::internalLinkTypeQrCodeAuthentication,
+             td_api::internalLinkTypeRequestManagedBot, td_api::internalLinkTypeRestorePurchases,
+             td_api::internalLinkTypeSavedMessages, td_api::internalLinkTypeSearch,
+             td_api::internalLinkTypeSettings, td_api::internalLinkTypeStarPurchase,
+             td_api::internalLinkTypeStickerSet, td_api::internalLinkTypeStory,
+             td_api::internalLinkTypeStoryAlbum, td_api::internalLinkTypeTextCompositionStyle,
+             td_api::internalLinkTypeTheme, td_api::internalLinkTypeUnknownDeepLink,
+             td_api::internalLinkTypeUpgradedGift, td_api::internalLinkTypeUserPhoneNumber,
+             td_api::internalLinkTypeUserToken, td_api::internalLinkTypeVideoChat,
+             td_api::internalLinkTypeWebApp>;
+
+template <typename... Types>
+std::vector<NativeObjectPtr> make_internal_link_inventory(TypeList<Types...> types) {
+    static_cast<void>(types);
+    std::vector<NativeObjectPtr> inventory;
+    inventory.reserve(sizeof...(Types));
+    (inventory.push_back(td_api::make_object<Types>()), ...);
+    return inventory;
+}
+
+std::optional<TdInternalLinkKind> supported_internal_link_kind(std::int32_t type_id) {
+    switch (type_id) {
+    case td_api::internalLinkTypePublicChat::ID:
+        return TdInternalLinkKind::PublicChat;
+    case td_api::internalLinkTypeBotStart::ID:
+        return TdInternalLinkKind::BotStart;
+    case td_api::internalLinkTypeMessage::ID:
+        return TdInternalLinkKind::Message;
+    case td_api::internalLinkTypeChatInvite::ID:
+        return TdInternalLinkKind::ChatInvite;
+    case td_api::internalLinkTypeDirectMessagesChat::ID:
+        return TdInternalLinkKind::DirectMessagesChat;
+    case td_api::internalLinkTypeSavedMessages::ID:
+        return TdInternalLinkKind::SavedMessages;
+    default:
+        return std::nullopt;
+    }
+}
+
 class UnsupportedAuthorizationState final : public td_api::AuthorizationState {
   public:
     static constexpr std::int32_t ID = 700'000'001;
@@ -891,7 +953,24 @@ TEST_CASE("production converter preserves resolver chat and link metadata",
               TdSupergroup{.id = 55, .usernames = {"project", "project_news"}, .is_channel = true});
     }
 
-    SECTION("supported and unsupported internal links retain exact branch data") {
+    SECTION("pinned internal link inventory is exhaustive and retains exact branch data") {
+        auto inventory = make_internal_link_inventory(PinnedInternalLinkTypes{});
+        REQUIRE(inventory.size() == 57);
+        std::vector<std::int32_t> type_ids;
+        type_ids.reserve(inventory.size());
+        for (auto& native : inventory) {
+            const auto type_id = native->get_id();
+            type_ids.push_back(type_id);
+            auto converted = convert_response(std::move(native));
+            const auto* value = converted.get_if<TdInternalLink>();
+            REQUIRE(value != nullptr);
+            CHECK(value->tdlib_type_id == type_id);
+            const auto supported = supported_internal_link_kind(type_id);
+            CHECK(value->kind == supported.value_or(TdInternalLinkKind::Unsupported));
+        }
+        std::ranges::sort(type_ids);
+        CHECK(std::ranges::adjacent_find(type_ids) == type_ids.end());
+
         auto public_chat = td_api::make_object<td_api::internalLinkTypePublicChat>();
         public_chat->chat_username_ = "project";
         auto converted_public = convert_response(std::move(public_chat));
@@ -909,12 +988,41 @@ TEST_CASE("production converter preserves resolver chat and link metadata",
         CHECK(message_value->kind == TdInternalLinkKind::Message);
         CHECK(message_value->url == "https://t.me/project/123");
 
-        auto unsupported = td_api::make_object<td_api::internalLinkTypeCallsPage>();
+        auto bot_start = td_api::make_object<td_api::internalLinkTypeBotStart>();
+        bot_start->bot_username_ = "helper_bot";
+        auto converted_bot_start = convert_response(std::move(bot_start));
+        const auto* bot_start_value = converted_bot_start.get_if<TdInternalLink>();
+        REQUIRE(bot_start_value != nullptr);
+        CHECK(bot_start_value->kind == TdInternalLinkKind::BotStart);
+        CHECK(bot_start_value->username == "helper_bot");
+
+        auto invite = td_api::make_object<td_api::internalLinkTypeChatInvite>();
+        invite->invite_link_ = "https://t.me/+invite";
+        auto converted_invite = convert_response(std::move(invite));
+        const auto* invite_value = converted_invite.get_if<TdInternalLink>();
+        REQUIRE(invite_value != nullptr);
+        CHECK(invite_value->kind == TdInternalLinkKind::ChatInvite);
+        CHECK(invite_value->url == "https://t.me/+invite");
+
+        auto direct = td_api::make_object<td_api::internalLinkTypeDirectMessagesChat>();
+        direct->channel_username_ = "project";
+        auto converted_direct = convert_response(std::move(direct));
+        const auto* direct_value = converted_direct.get_if<TdInternalLink>();
+        REQUIRE(direct_value != nullptr);
+        CHECK(direct_value->kind == TdInternalLinkKind::DirectMessagesChat);
+        CHECK(direct_value->username == "project");
+
+        auto saved = convert_response(td_api::make_object<td_api::internalLinkTypeSavedMessages>());
+        const auto* saved_value = saved.get_if<TdInternalLink>();
+        REQUIRE(saved_value != nullptr);
+        CHECK(saved_value->kind == TdInternalLinkKind::SavedMessages);
+
+        auto unsupported = td_api::make_object<td_api::internalLinkTypeUnknownDeepLink>();
         auto converted_unsupported = convert_response(std::move(unsupported));
         const auto* unsupported_value = converted_unsupported.get_if<TdInternalLink>();
         REQUIRE(unsupported_value != nullptr);
         CHECK(unsupported_value->kind == TdInternalLinkKind::Unsupported);
-        CHECK(unsupported_value->tdlib_type_id == td_api::internalLinkTypeCallsPage::ID);
+        CHECK(unsupported_value->tdlib_type_id == td_api::internalLinkTypeUnknownDeepLink::ID);
     }
 
     SECTION("message, invite, and full-info metadata is preserved") {

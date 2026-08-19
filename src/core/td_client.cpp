@@ -854,14 +854,20 @@ class TdClient::Impl {
         bool close_requested = false;
     };
 
-    // Publication lock order is gate -> auth_commit -> outbound or query registry.
-    // Lifecycle coordination, TD sends, and subscriber callbacks run after release.
-    EventPublication begin_event_publication() {
-        std::unique_lock lock(event_publication_mutex_);
+    // Auth publication lock order is auth_commit -> outbound -> gate. Response
+    // promises are detached from the query registry before any of those locks.
+    // Clock/test callbacks, lifecycle coordination, TD sends, and subscriber
+    // callbacks stay outside the gate.
+    TdEventClock::time_point observe_event() {
         const auto observed_at = event_now_();
         if (after_event_observed_) {
             after_event_observed_(observed_at);
         }
+        return observed_at;
+    }
+
+    EventPublication begin_event_publication(TdEventClock::time_point observed_at) {
+        std::unique_lock lock(event_publication_mutex_);
         return {std::move(lock), observed_at};
     }
 
@@ -899,9 +905,13 @@ class TdClient::Impl {
             return;
         }
 
+        auto response_promise = generation->queries.take(event.query_id);
+        std::optional<LeaseLocks> auth_locks;
         bool install_response = false;
         if (event.query_id == 1 && event.authorization_state.has_value()) {
-            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            auth_locks.emplace();
+            auth_locks->auth_commit = std::unique_lock<std::mutex>(generation->auth_commit_mutex);
+            auth_locks->outbound = std::unique_lock<std::mutex>(generation->outbound_mutex);
             install_response =
                 !generation->accepted_auth_update && !generation->initial_state_installed;
         }
@@ -909,16 +919,22 @@ class TdClient::Impl {
 
         std::optional<AuthPublication> auth_publication;
         {
-            auto publication = begin_event_publication();
+            const auto observed_at = observe_event();
+            if (install_response) {
+                auth_publication.emplace(prepare_auth_publication(
+                    generation, *event.authorization_state, receive_event_sequence, observed_at));
+            }
+            auto publication = begin_event_publication(observed_at);
             event.object.set_receive_event_metadata(receive_event_sequence,
                                                     publication.observed_at);
             if (install_response) {
-                auth_publication.emplace(commit_auth_state(generation, *event.authorization_state,
-                                                           false, receive_event_sequence,
-                                                           publication.observed_at));
+                commit_auth_state_locked(generation, *auth_publication, false);
             }
-            static_cast<void>(generation->queries.fulfill(event.query_id, std::move(event.object)));
+            if (response_promise) {
+                response_promise->set_value(std::move(event.object));
+            }
         }
+        auth_locks.reset();
         if (auth_publication) {
             finish_auth_publication(generation, *auth_publication);
             if (installed_closed) {
@@ -931,15 +947,19 @@ class TdClient::Impl {
                        std::uint64_t receive_event_sequence) {
         if (event.authorization_state.has_value()) {
             const auto closed = event.authorization_state->state == AuthState::Closed;
-            AuthPublication auth_publication;
+            LeaseLocks locks;
+            locks.auth_commit = std::unique_lock<std::mutex>(generation->auth_commit_mutex);
+            locks.outbound = std::unique_lock<std::mutex>(generation->outbound_mutex);
+            const auto observed_at = observe_event();
+            auto auth_publication = prepare_auth_publication(generation, *event.authorization_state,
+                                                             receive_event_sequence, observed_at);
             {
-                auto publication = begin_event_publication();
+                auto publication = begin_event_publication(observed_at);
                 event.object.set_receive_event_metadata(receive_event_sequence,
                                                         publication.observed_at);
-                auth_publication =
-                    commit_auth_state(generation, *event.authorization_state, true,
-                                      receive_event_sequence, publication.observed_at);
+                commit_auth_state_locked(generation, auth_publication, true);
             }
+            locks = {};
             finish_auth_publication(generation, auth_publication);
             updates_.publish(event.object);
             if (closed) {
@@ -948,48 +968,52 @@ class TdClient::Impl {
             return;
         }
 
+        bool pending = false;
         {
-            auto publication = begin_event_publication();
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            const auto observed_at = observe_event();
+            auto publication = begin_event_publication(observed_at);
             event.object.set_receive_event_metadata(receive_event_sequence,
                                                     publication.observed_at);
-            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
             if (!generation->initial_state_installed) {
                 generation->pending_updates.push_back(std::move(event.object));
-                return;
+                pending = true;
             }
         }
-        updates_.publish(event.object);
+        if (!pending) {
+            updates_.publish(event.object);
+        }
     }
 
-    AuthPublication commit_auth_state(const std::shared_ptr<Generation>& generation,
-                                      const AuthStateData& state, bool from_update,
-                                      std::uint64_t receive_event_sequence,
-                                      TdEventClock::time_point observed_at) {
+    AuthPublication prepare_auth_publication(const std::shared_ptr<Generation>& generation,
+                                             const AuthStateData& state,
+                                             std::uint64_t receive_event_sequence,
+                                             TdEventClock::time_point observed_at) {
         AuthPublication publication;
-        {
-            const std::lock_guard<std::mutex> commit_lock(generation->auth_commit_mutex);
-            const std::lock_guard<std::mutex> outbound_lock(generation->outbound_mutex);
-            const auto previous = auth_state_.load(std::memory_order_acquire);
-            const auto sequence =
-                previous != nullptr && previous->client_generation == generation->number
-                    ? previous->auth_sequence + 1
-                    : 1;
-            publication.snapshot = std::make_shared<const AuthStateSnapshot>(
-                AuthStateSnapshot{.client_id = generation->client_id,
-                                  .client_generation = generation->number,
-                                  .auth_sequence = sequence,
-                                  .receive_event_sequence = receive_event_sequence,
-                                  .data = state,
-                                  .receive_observed_at = observed_at});
-            auth_state_.store(publication.snapshot, std::memory_order_release);
-            generation->initial_state_installed = true;
-            generation->accepted_auth_update |= from_update;
-            if (state.state != AuthState::Closed) {
-                publication.close_requested = generation->close_requested;
-                publication.pending_updates.swap(generation->pending_updates);
-            }
-        }
+        const auto previous = auth_state_.load(std::memory_order_acquire);
+        const auto sequence =
+            previous != nullptr && previous->client_generation == generation->number
+                ? previous->auth_sequence + 1
+                : 1;
+        publication.snapshot = std::make_shared<const AuthStateSnapshot>(
+            AuthStateSnapshot{.client_id = generation->client_id,
+                              .client_generation = generation->number,
+                              .auth_sequence = sequence,
+                              .receive_event_sequence = receive_event_sequence,
+                              .data = state,
+                              .receive_observed_at = observed_at});
         return publication;
+    }
+
+    void commit_auth_state_locked(const std::shared_ptr<Generation>& generation,
+                                  AuthPublication& publication, bool from_update) {
+        auth_state_.store(publication.snapshot, std::memory_order_release);
+        generation->initial_state_installed = true;
+        generation->accepted_auth_update |= from_update;
+        if (publication.snapshot->data.state != AuthState::Closed) {
+            publication.close_requested = generation->close_requested;
+            publication.pending_updates.swap(generation->pending_updates);
+        }
     }
 
     void finish_auth_publication(const std::shared_ptr<Generation>& generation,

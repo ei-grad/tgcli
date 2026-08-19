@@ -4,6 +4,7 @@
 #include <exception>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -25,18 +26,25 @@ template <typename Response> class QueryRegistry {
     // Returns false for an id the registry is not tracking (never reserved,
     // already fulfilled, or failed).
     bool fulfill(std::uint64_t id, Response response) {
-        std::promise<Response> promise;
-        {
-            const std::lock_guard<std::mutex> lock(mutex_);
-            auto it = pending_.find(id);
-            if (it == pending_.end()) {
-                return false;
-            }
-            promise = std::move(it->second);
-            pending_.erase(it);
+        auto promise = take(id);
+        if (!promise) {
+            return false;
         }
-        promise.set_value(std::move(response));
+        promise->set_value(std::move(response));
         return true;
+    }
+
+    // Detaches a tracked promise so callers can acquire the registry mutex
+    // before entering a narrower publication critical section.
+    std::optional<std::promise<Response>> take(std::uint64_t id) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        auto it = pending_.find(id);
+        if (it == pending_.end()) {
+            return std::nullopt;
+        }
+        std::optional<std::promise<Response>> promise(std::in_place, std::move(it->second));
+        pending_.erase(it);
+        return promise;
     }
 
     bool fail(std::uint64_t id, std::exception_ptr error) {

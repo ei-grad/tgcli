@@ -66,6 +66,44 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["kind", "chat", "message_id", "topic", "link_type", "is_public"],
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "message" },
+        "chat": {},
+        "message_id": { "$ref": "#/$defs/int53_nonzero" },
+        "topic": {},
+        "link_type": {},
+        "is_public": {}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "topic" },
+        "chat": {},
+        "message_id": { "type": "null" },
+        "topic": { "$ref": "#/$defs/topic" },
+        "link_type": {},
+        "is_public": {}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "chat" },
+        "chat": {},
+        "message_id": { "type": "null" },
+        "topic": { "type": "null" },
+        "link_type": {},
+        "is_public": {}
+      }
+    }
+  ],
   "properties": {
     "kind": { "enum": ["chat", "message", "topic"] },
     "chat": { "$ref": "#/$defs/chat_identity" },

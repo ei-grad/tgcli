@@ -227,6 +227,8 @@ std::optional<core::TdRuntimeEvent> ScriptedTdRuntime::receive(std::chrono::mill
     }
     auto event = std::move(events_.front());
     events_.pop_front();
+    ++received_count_;
+    cv_.notify_all();
     return event;
 }
 
@@ -252,6 +254,17 @@ void ScriptedTdRuntime::push_update(ScriptedClient client, core::TdValue object,
 bool ScriptedTdRuntime::wait_for_sent(std::size_t count, std::chrono::milliseconds timeout) const {
     std::unique_lock<std::mutex> lock(mutex_);
     return cv_.wait_for(lock, timeout, [this, count] { return sent_.size() >= count; });
+}
+
+bool ScriptedTdRuntime::wait_for_received(std::size_t count,
+                                          std::chrono::milliseconds timeout) const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, count] { return received_count_ >= count; });
+}
+
+std::size_t ScriptedTdRuntime::received_count() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return received_count_;
 }
 
 bool ScriptedTdRuntime::wait_for_clients(std::size_t count,

@@ -23,7 +23,7 @@ class AuthBootstrap;
 
 struct TdClientEventHooks {
     std::function<TdEventClock::time_point()> now;
-    // Runs under the publication gate after stamping and before any auth/response publication.
+    // Runs after publication prerequisites are held but before entering the publication gate.
     std::function<void(TdEventClock::time_point)> after_observed;
     std::function<void()> before_lifecycle_callback_drain_wait;
     std::function<void()> before_closed_decisions_drain_wait;

@@ -65,6 +65,9 @@ class ScriptedTdRuntime final : public core::TdRuntime {
 
     bool wait_for_sent(std::size_t count,
                        std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
+    bool wait_for_received(std::size_t count,
+                           std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
+    [[nodiscard]] std::size_t received_count() const;
     bool wait_for_clients(std::size_t count,
                           std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
     [[nodiscard]] std::vector<SentTdFunction> sent_functions() const;
@@ -89,6 +92,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     bool receive_paused_ = false;
     std::vector<ScriptedClient> clients_;
     std::vector<SentTdFunction> sent_;
+    std::size_t received_count_ = 0;
     std::deque<core::TdRuntimeEvent> events_;
     std::function<void(core::TdFunctionKind)> before_make_;
     std::function<void(const core::TdFunctionData&)> before_send_;
