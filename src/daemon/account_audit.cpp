@@ -2,6 +2,7 @@
 
 #include "common/daemon_lock.hpp"
 #include "common/paths.hpp"
+#include "common/utf8.hpp"
 #include "proto/destructive_plan.hpp"
 
 #include <algorithm>
@@ -123,49 +124,8 @@ bool exact_fields(const json& value, std::initializer_list<std::string_view> nam
     });
 }
 
-bool valid_utf8(std::string_view value) {
-    std::size_t index = 0;
-    while (index < value.size()) {
-        const auto lead = static_cast<unsigned char>(value[index]);
-        std::size_t continuation = 0;
-        std::uint32_t scalar = 0;
-        if (lead <= 0x7f) {
-            ++index;
-            continue;
-        }
-        if (lead >= 0xc2 && lead <= 0xdf) {
-            continuation = 1;
-            scalar = lead & 0x1fU;
-        } else if (lead >= 0xe0 && lead <= 0xef) {
-            continuation = 2;
-            scalar = lead & 0x0fU;
-        } else if (lead >= 0xf0 && lead <= 0xf4) {
-            continuation = 3;
-            scalar = lead & 0x07U;
-        } else {
-            return false;
-        }
-        if (index + continuation >= value.size()) {
-            return false;
-        }
-        for (std::size_t offset = 1; offset <= continuation; ++offset) {
-            const auto byte = static_cast<unsigned char>(value[index + offset]);
-            if ((byte & 0xc0U) != 0x80U) {
-                return false;
-            }
-            scalar = (scalar << 6U) | (byte & 0x3fU);
-        }
-        if ((continuation == 2 && scalar < 0x800U) || (continuation == 3 && scalar < 0x10000U) ||
-            scalar > 0x10ffffU || (scalar >= 0xd800U && scalar <= 0xdfffU)) {
-            return false;
-        }
-        index += continuation + 1;
-    }
-    return true;
-}
-
 std::optional<std::size_t> utf8_scalar_count(std::string_view value) {
-    if (!valid_utf8(value)) {
+    if (!common::valid_utf8(value)) {
         return std::nullopt;
     }
     return static_cast<std::size_t>(std::count_if(value.begin(), value.end(), [](char character) {
@@ -175,7 +135,7 @@ std::optional<std::size_t> utf8_scalar_count(std::string_view value) {
 
 bool valid_string(const json& value, std::uint64_t maximum = kRequestSourceBytes) {
     return value.is_string() && value.get_ref<const std::string&>().size() <= maximum &&
-           valid_utf8(value.get_ref<const std::string&>());
+           common::valid_utf8(value.get_ref<const std::string&>());
 }
 
 bool valid_hex(std::string_view value, std::size_t size) {
