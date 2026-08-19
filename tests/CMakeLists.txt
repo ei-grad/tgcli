@@ -16,6 +16,7 @@ add_executable(tgcli_unit_tests
     dependency_lock_schema_test.cpp
     destructive_contract_test.cpp
     destructive_plan_test.cpp
+    file_spool_test.cpp
     removal_filesystem_test.cpp
     removal_journal_test.cpp
     removal_planner_test.cpp
