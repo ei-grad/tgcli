@@ -1201,31 +1201,84 @@ With none of `--limit`, `--all`, or `--since`, `fetch` targets a depth of 100.
 `--limit` accepts 1 through 1000000 and is mutually exclusive with `--all`;
 `--since` may accompany either. `--since` without a limit means all available
 history down to its inclusive anchor. Fetch has no default deadline; an
-explicit `--timeout` is one absolute deadline across local scan and network
-fill.
+explicit `--timeout` is one finite absolute deadline from daemon request
+admission through config admission, RequestSession construction, removal and
+logout recovery, Ready/getMe, resolution, the optional since probe, local scan,
+and network fill. With no explicit timeout the fetch deadline is tagged
+unlimited; cancellation, disconnect, daemon shutdown and authorization loss
+remain active.
 
 The public tdlib local-history seam exposes only the continuous prefix
 reachable from newest history; it does not label the boundary as a gap or true
-oldest message. Fetch first scans that prefix with
-`getChatHistory(..., only_local=true)`, counts it, and records its boundary.
-Disconnected cached islands below the boundary are never selected as resume
-anchors. It then calls live `getChatHistory` from that boundary, removes the
-inclusive duplicate, and continues until a finite target or since anchor is
-reached, the absolute deadline wins, or tdlib returns no advancing messages.
-A repeated invocation rescans the continuous local prefix and resumes from its
-current boundary; no tgcli resume state is persisted.
+oldest message. Only after §6's removal then logout recovery preflights complete,
+Ready/getMe user-only admission succeeds, and an ActiveDialogs non-secret chat
+is resolved does fetch perform this exact history sequence:
 
-Fetch uses the same rounded `since` cutoff-anchor construction and per-message
-timestamp check as live `read`; it never assumes message-id order is date
-order. A missing older cutoff anchor does not prove completion. If both a
-finite depth and `--since` are supplied, reaching either requested boundary is
-a successful finite target; `--all --since` is likewise finite because of the
-since boundary.
+1. Enter `local_scan`. If `--since` is present and its rounded second is not
+   `INT32_MIN`, make exactly one
+   `getChatMessageByDate(chat_id, since - 1)` call before any `getChatHistory`
+   call. A valid message is the exclusive cutoff anchor. A 404 leaves the
+   anchor absent; other errors use normal M2 mapping. The response must be an
+   exact valid shared `MessageSummary` for `chat_id`, with nonzero date no later
+   than the requested second. Wrong type/chat, zero or too-new date, null or
+   malformed response is `INTERNAL` for `fetch`. At `INT32_MIN` the call is
+   skipped and the cutoff remains absent. The probe is never counted directly.
+2. Scan the continuous local prefix from newest with
+   `getChatHistory(chat_id, from_message_id, 0, 100, true)`. The first call uses
+   zero; every later call uses the oldest counted id and removes one returned
+   inclusive duplicate. After each complete advancing response latch whether
+   the numeric limit and exact since cutoff have been observed. Latches are
+   monotonic request-local facts and emit no terminal yet. Continue through all
+   short advancing responses until one structurally valid response has zero new
+   messages. A deadline may win before that local boundary even after either
+   target condition was latched.
+3. At the sealed local boundary, an observed since latch wins over a numeric
+   latch and returns `since_anchor_reached`; otherwise a numeric latch returns
+   `target_reached`. Only when neither latch is set does fetch switch once to
+   `network_fill` and call
+   `getChatHistory(chat_id, from_message_id, 0, 100, false)` from the local
+   boundary, again removing one inclusive duplicate.
+4. In `network_fill`, incorporate an entire advancing response, update both
+   latches, emit its one progress frame, and immediately evaluate the latches;
+   since wins a same-response tie. If neither is set, continue through every
+   short advancing page. One valid zero-progress response is `tdlib_idle`.
+   There is no retry, poll, short-page inference or remote-EOF claim.
 
-`cached_count` is the number of messages in the final continuous prefix,
-`oldest_message_id` is its oldest message, and `resume_from_message_id` is the
-anchor a later invocation can rediscover. They do not count or point into a
-disconnected cached island.
+The cutoff construction and per-message timestamp classification are exactly
+the live-`read` rules: date zero satisfies no since predicate, a date below
+`since` does not itself stop an id-ordered scan, and only the exact non-null
+cutoff id sets the since latch. A missing cutoff never proves the objective.
+Every raw message returned by TDLib is counted in the invocation-observed cached
+prefix, including page-level overfetch; fetch cannot undo TDLib caching.
+
+Fetch inherits the live/local `read` history-page contract in full. A response
+has nonnegative `total_count` no smaller than its vector length; the count is
+informational only. After optional removal of exactly one leading inclusive
+anchor, every non-null message is a valid shared `MessageSummary` for `chat_id`,
+ids are unique and strictly decreasing, and the first new id is strictly below
+the input anchor when present. A missing anchor is accepted if the first new id
+is strictly older. Empty, null-only and anchor-only responses are valid zero
+progress. A null mixed with a new non-null message, invalid count, wrong chat or
+malformed DTO is `INTERNAL`; repeated, equal or increasing ids are
+`PAGINATION_INVALID` with
+`{"operation":"fetch","reason":"non_advancing_upstream"}`. No partial result
+is emitted.
+
+The prefix is an invocation snapshot, not a transaction over concurrent TDLib
+updates. Its top is the newest message in the first advancing local response,
+or, when local is empty, in the first advancing live response. Subsequent
+anchored pages extend only that prefix downward. Messages arriving above that
+top afterward are excluded; there is no final rescan or terminal-time snapshot
+claim. Anchor deletion is harmless under the strictly-older rule. A later
+invocation starts from newest. Disconnected cached islands below a zero-progress
+local boundary are never selected as anchors. No tgcli cursor, resume file or
+daemon-side fetch state is persisted.
+
+`cached_count` is a checked JSON uint64 count of messages in this snapshot.
+Overflow is `INTERNAL` for `fetch` and emits neither progress for the overflowing
+page nor a result. When count is zero, both boundary ids are null. When positive,
+both fields are serialized from the same `std::int64_t` nonzero-int53 boundary
+value and are therefore numerically equal.
 
 Success is exactly:
 
@@ -1244,25 +1297,97 @@ Success is exactly:
 For an empty prefix, `oldest_message_id` and `resume_from_message_id` are null.
 Within `target`, `limit` is the numeric depth or null, `all` records whether
 `--all` was supplied, and `since` is the rounded UTC RFC 3339 boundary or null;
-the implicit default is `{"limit":100,"all":false,"since":null}`.
-`stop_reason` is `target_reached`, `since_anchor_reached`, or `tdlib_idle`.
-`target_reached` is boolean for a finite limit or since objective and null for
-unbounded `--all`. `--all` means continue public live-history requests until
-`tdlib_idle`; it is not a certificate that remote history is complete. Public
-tdlib can return an empty/non-advancing page during races and exposes no
-remote-EOF proof, so neither `complete` nor `history_end` exists in the result.
-A certified `--all` would require a separately reviewed private/patched tdlib
-seam and a dependency provenance change.
+the only valid target shapes are:
 
-Progress is emitted on stderr as:
+| invocation | exact `target` |
+|---|---|
+| no target flag | `{"limit":100,"all":false,"since":null}` |
+| `--limit N` with optional since | `{"limit":N,"all":false,"since":<time-or-null>}` |
+| `--since TS` only | `{"limit":null,"all":false,"since":<time>}` |
+| `--all` with optional since | `{"limit":null,"all":true,"since":<time-or-null>}` |
+
+`{"limit":null,"all":false,"since":null}` and a non-null limit with
+`all:true` are invalid. A target is finite exactly when limit or since is
+non-null. Bare `--all` is the sole unbounded target.
+
+Terminal target fields have this exact runtime truth table:
+
+| condition | `stop_reason` | `target_reached` |
+|---|---|---|
+| local boundary reached with since latch set | `since_anchor_reached` | `true` |
+| local boundary reached with only numeric latch set | `target_reached` | `true` |
+| live advancing page sets since latch | `since_anchor_reached` | `true` |
+| live advancing page sets only numeric latch | `target_reached` | `true` |
+| live zero progress with finite target unmet | `tdlib_idle` | `false` |
+| live zero progress for bare `--all` | `tdlib_idle` | `null` |
+
+A since latch wins over a numeric latch regardless of the pages on which they
+were set. No local success exists before the zero-progress local boundary.
+A page is incorporated completely before latch evaluation. A response observed
+strictly before a finite deadline may be incorporated; deadline equality or a
+later response makes timeout win. `--all` is not a certificate that remote
+history is complete. Public tdlib exposes no remote-EOF proof, so neither
+`complete` nor `history_end` exists.
+
+The standard Draft 2020-12 result schema asserts every expressible structural
+and cross-property relation:
+
+- exact result/target fields, individual uint64/int53/scalar ranges and real
+  signed-int32 UTC timestamp syntax;
+- the four target shapes above;
+- `cached_count:0` requires both boundary ids null, while
+  `cached_count >= 1` requires both non-null int53 values;
+- `target_reached` and `since_anchor_reached` stop reasons require
+  `target_reached:true`;
+- `tdlib_idle` requires `target_reached:false` for a structurally finite target
+  and null only for bare `--all`;
+- `since_anchor_reached` requires a non-null target since; and
+- `target_reached` stop reason requires a non-null numeric target limit.
+
+The schema cannot compare two properties numerically or inspect coordinator
+history. The exact additional runtime-only semantic rules are therefore:
+
+- the two non-null boundary ids are numerically equal because both are emitted
+  from the same coordinator integer;
+- numeric latch/success requires the committed count to be at least the parsed
+  numeric limit;
+- since latch/success requires observation of the exact probe-derived cutoff id;
+  and
+- local-boundary sealing, phase transitions, latch timing and page incorporation
+  match the coordinator history described above.
+
+Each standard-expressible branch has ordinary-schema positive/negative tests;
+each runtime-only rule has paired runtime accept/reject tests whose base values
+remain schema-valid. Every runtime-accepted output also passes the ordinary
+schema, and runtime never makes a schema-invalid value valid.
+
+Progress is emitted exactly once after each structurally valid local or live
+history response that contributes at least one new raw message, after the whole
+response is incorporated and before any boundary/target terminal. The since
+probe and zero-progress responses emit none. There is no separate initial or
+final progress frame. The protocol progress payload is exactly:
 
 ```json
 {"operation":"fetch","chat_id":-1001,"cached":250,"target":1000,"oldest_message_id":123}
 ```
 
 `target` is null when no numeric depth target exists and `oldest_message_id`
-is null for an empty prefix. Timeout preserves warmed tdlib state and uses the exact
-extended error details in §5.2; it never emits a successful completion claim.
+is null iff `cached` is zero; otherwise it is serialized from the same current
+numeric boundary value as the eventual result fields. In `--json` mode the
+existing client wrapper writes these exact compact bytes plus LF:
+
+```text
+{"progress":{"cached":250,"chat_id":-1001,"oldest_message_id":123,"operation":"fetch","target":1000}}
+```
+
+Human mode writes these exact compact bytes plus LF:
+
+```text
+progress: {"cached":250,"chat_id":-1001,"oldest_message_id":123,"operation":"fetch","target":1000}
+```
+
+There is no TTY-specific alternate rendering in M2. Timeout preserves warmed
+TDLib state and uses §5.2's phase-dependent details; it never emits success.
 
 ### 4.5 M3 write and minimal M4 Saved attachment contract
 
@@ -2884,14 +3009,62 @@ struct RequestDeadline {
 };
 ```
 
-- `request_deadline(timeout, Default60)` preserves the ordinary-command default.
-- `request_deadline(timeout, Unlimited)` serves streams, fetch, and transfers.
-- Every wait helper accepts `RequestDeadline` plus a stop token.
-- Expired means `expires_at && now >= *expires_at`.
-- Conversion rejects overflow and rounds up so the requested duration is never
-  shortened.
-- APIs requiring an unconditional concrete point are extended; no max-time adapter
-  sentinel is permitted.
+`DeadlineDefault` is the closed enum `Default60` or `Unlimited`.
+`request_deadline(timeout, policy, now)` returns invalid conversion or one tag.
+An explicit timeout has identical meaning under both policies: finite, positive,
+representable, and rounded upward to the next monotonic-clock tick. With no
+timeout, Default60 yields `now + 60s`; Unlimited yields null expiry.
+
+The exact Unlimited command set is `fetch`, `download`, `listen`, and
+`wait-for`; recognizing an unregistered path does not activate it. All other
+commands use Default60. The Request frame remains protocol v3 with the same
+number-or-null `context.timeout` and no field/version change.
+
+CLI parsing validates an explicitly supplied timeout before routing or framing.
+No-daemon admission performs the same validation before local dispatch. Failure
+is `USAGE`/exit 2 with exact details
+`{"argument":"--timeout","reason":"invalid_argument"}`. Direct protocol input
+retains the existing stricter framing behavior: a non-finite, non-positive or
+unrepresentable non-null timeout makes the whole Request malformed, produces no
+Request object, and the server sends connection-scoped `USAGE` with id 0 and
+exact `{}` before EOF. It does not become a request-id command terminal.
+
+After strict frame and routed-account acceptance, the server computes one tag at
+request admission. The exact fetch handoff is:
+
+1. config admission receives that tag;
+2. successful config admission constructs `RequestSession` with the same tag;
+3. Dispatcher removal recovery uses the session tag;
+4. successful removal recovery is followed by logout recovery with that tag;
+5. only after both succeed does the fetch handler run.
+
+No layer recomputes or replaces the tag. No-daemon uses the same logical
+sequence with its one locally computed tag. `RequestSession` stores/exposes
+`RequestDeadline`, not an unconditional point. Wait helpers reached by an
+unlimited command accept the tag plus a stop token. Expired means exactly
+`expires_at && now >= *expires_at`; response/update events are eligible only
+when observed strictly before finite expiry. Unlimited waits remain stop-aware
+for disconnect, cancellation, shutdown, authorization loss and generation
+replacement. APIs requiring a concrete point are extended; no max-time
+sentinel, repeated long finite wait or polling substitute is allowed.
+
+Fetch-specific config-admission expiry is the sole pre-RequestSession fetch
+timeout and has exact common details
+`{"operation":"fetch","state":null}`. Every other command retains the existing
+`{"operation":"config_admission","state":null}` timeout. After RequestSession
+construction, recovery owns terminals until both preflights succeed:
+
+- incomplete removal is `REMOVAL_INCOMPLETE`;
+- invalid or unreadable removal journal/state is `AUDIT_UNAVAILABLE`;
+- incomplete or unresolved logout recovery is `AUDIT_INCOMPLETE`;
+- invalid or unreadable logout audit with no recognized incomplete group is
+  `AUDIT_UNAVAILABLE`; and
+- deadline during prior logout state observation is `AUDIT_INCOMPLETE`.
+
+Only then do handler timeout branches apply. Before target resolution they use
+the common fetch shape; after resolution phase is `local_scan`; `network_fill`
+begins only after a sealed local boundary with neither latch. Cancellation never
+becomes timeout and a disconnected owner receives no terminal.
 
 #### 4.6.4 Closed public item union
 
@@ -5138,7 +5311,25 @@ always `read`. Exact common shapes are:
 | `TIMEOUT` | 7 | `{"operation":operation,"state":nullable_state}` |
 | `PAGINATION_INVALID` | 1 | `{"operation":operation,"reason":"non_advancing_upstream"}` |
 
-Fetch timeout replaces the general TIMEOUT details with:
+Fetch common TIMEOUT details are:
+
+```json
+{"operation":"fetch","state":"ready"}
+```
+
+`state` is nullable. Config-admission expiry uses this shape with null before
+RequestSession exists. After recovery completes and before target resolution, a
+fetch-only coordinator adapter rewrites only `ResolverTimeoutError` from
+principal binding or resolution into this shape with the current state. Every
+other ResolverError is emitted unchanged, including accepted `operation:"resolve"`
+attribution on selector TDLib/rate-limit/internal failures.
+
+Between RequestSession construction and successful completion of both recovery
+preflights, fetch TIMEOUT is impossible. Recovery failure/expiry has the exact
+taxonomy and ordering in §4.6.3/§6 and sends zero fetch Ready/getMe/resolver/
+history calls.
+
+Immediately after target resolution, timeout uses the extended form:
 
 ```json
 {
@@ -5152,10 +5343,14 @@ Fetch timeout replaces the general TIMEOUT details with:
 }
 ```
 
-`phase` is `local_scan` or `network_fill`; `state` is a nullable §8 auth state,
-`cached_count` is a nonnegative integer, and the oldest/resume ids are null for
-an empty prefix. The single absolute request deadline and auth-loss precedence
-still apply.
+`local_scan` begins before the optional since probe and remains through the
+zero-progress response sealing the local boundary. A latched target does not
+change phase or defeat a deadline before that boundary. `network_fill` begins
+only before its first live history call. Count and boundary contain only pages
+incorporated before the deadline event. Boundary ids use the same numeric
+optional state as the result. A losing late response may still warm TDLib and is
+rediscovered later, but is absent from these details. Authorization loss and
+cancellation retain their own terminals/stop behavior.
 
 M2 target-not-found details are contextual and closed:
 
@@ -5318,8 +5513,25 @@ M2 fake-boundary contract coverage must include:
   branches, member user/chat senders, and member empty-probe exhaustion without
   trusting approximate totals;
 - fetch with a disconnected cached island below the public local boundary,
-  finite/since/all targets, empty-prefix nulls, live non-advancement reported as
-  `tdlib_idle`, and timeout followed by a resumable repeated invocation; and
+  every target shape and runtime truth-table row, since probe before history,
+  `INT32_MIN`/404 cutoffs, the local latch model including deadline after latch
+  but before boundary, since-over-limit precedence across different pages,
+  empty-prefix nulls, page overfetch, missing anchors, concurrent messages above
+  the frozen top, and live `tdlib_idle`; inherited read-page integrity failures;
+  checked-count overflow; exact progress cadence/wrapper bytes; pre-target and
+  both extended timeout phases; fetch config-admission timeout with null state
+  while other commands retain config_admission; one tagged config → session →
+  removal → logout → handler handoff with no recomputation; the complete
+  REMOVAL_INCOMPLETE/AUDIT_UNAVAILABLE/AUDIT_INCOMPLETE recovery taxonomy and
+  zero fetch calls; the fetch-only ResolverTimeoutError rewrite with every other
+  resolver failure unchanged; direct malformed-timeout id-0 framing versus
+  CLI/no-daemon validation; prior-outcome persistence permitted but zero current
+  fetch audit group or fetch-owned cursor/store/spool/media artifacts; ordinary-
+  schema negatives for every Draft-expressible count/null/stop/target branch and
+  runtime pairs only for numeric id equality, count-vs-limit, observed cutoff
+  and coordinator history; timeout followed by a repeated TDLib-only resume; no
+  fetch error-catalog mapping; and no additional TestDC flow or skip beyond the
+  existing M2 `chats` gate; and
 - strict schema validation of actual result data plus human golden output with
   the same information.
 
@@ -5465,14 +5677,24 @@ Audit inspection is an exact M1 preflight for `login`, `logout`, `me`,
 
 M2 extends, but does not otherwise broaden, that closed preflight surface.
 The accepted selected-account reads `saved tags`, `saved search`, `resolve`,
-`chats`, `msg get`, and `msg link` run both the global account-removal
+`chats`, `msg get`, `msg link`, and `fetch` run both the global account-removal
 tombstone preflight and the selected account's logout-audit preflight before
-Ready/getMe or any command-specific tdlib request. Thus `msg get` and
-`msg link` cannot bypass an existing `REMOVAL_INCOMPLETE` or
-`AUDIT_INCOMPLETE` condition. No other M2 command is admitted to either list by
-this paragraph: in particular, canonical `read` (including the `history` alias)
-does not run either recovery preflight. Registering read must preserve that closed
-dispatcher membership and pin the exclusion in the central preflight test.
+Ready/getMe or any command-specific tdlib request. Removal runs first:
+recognized incomplete state is `REMOVAL_INCOMPLETE`, while invalid or unreadable
+removal journal/state is `AUDIT_UNAVAILABLE`; either owns the terminal and logout
+recovery is not entered. After clean removal, logout recovery runs: recognized
+incomplete/unresolved state, including deadline during prior-logout observation,
+is `AUDIT_INCOMPLETE`; invalid or unreadable logout audit with no recognized
+incomplete group is `AUDIT_UNAVAILABLE`. Every branch uses its existing exact
+§5.1 details/exit and sends zero fetch Ready/getMe/resolver/history calls.
+
+Recovery may append/sync an outcome for a prior invocation; those bytes belong
+to the prior group. Fetch creates no current audit group and no fetch-owned
+persistence. Tests assert absence of fetch-owned cursor, audit group,
+idempotency, spool and media artifacts, not zero audit access or recovery writes.
+No other M2 command is admitted by this paragraph: canonical `read`, including
+`history`, remains excluded from both lists. Central tests pin fetch membership,
+read/history exclusion and removal-before-logout order.
 
 For each
 intent lacking a synced outcome, the reconciler does exactly this: intent with
