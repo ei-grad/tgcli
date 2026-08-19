@@ -209,6 +209,32 @@ TEST_CASE("session terminate human renderers match real and dry-run goldens",
     CHECK(rendered.find("location") == std::string::npos);
 }
 
+TEST_CASE("chats human renderer matches its reviewed golden", "[chats][render][golden]") {
+    CHECK(tgcli::cli::render_human(
+              "chats", {{"items", json::array({json{{"id", -1001},
+                                                    {"title", "Project"},
+                                                    {"type", "supergroup"},
+                                                    {"is_bot", false},
+                                                    {"usernames", json::array({"project"})},
+                                                    {"is_archived", false},
+                                                    {"folder_ids", json::array({2})},
+                                                    {"is_marked_unread", false},
+                                                    {"unread_count", 3},
+                                                    {"unread_mention_count", 1},
+                                                    {"unread_reaction_count", 0},
+                                                    {"unread_poll_vote_count", 0},
+                                                    {"last_message",
+                                                     {{"id", 123},
+                                                      {"chat_id", -1001},
+                                                      {"date", "2026-08-05T10:00:00Z"},
+                                                      {"sender", {{"type", "user"}, {"id", 42}}},
+                                                      {"is_outgoing", false},
+                                                      {"topic", {{"kind", "forum"}, {"id", 7}}},
+                                                      {"type", "text"},
+                                                      {"text", "experiment result"}}}}})},
+                        {"next", "cursor-2"}}) == golden("chats.txt"));
+}
+
 TEST_CASE("resolve human renderer matches its reviewed golden", "[resolver][render][golden]") {
     CHECK(tgcli::cli::render_human("resolve", {{"kind", "message"},
                                                {"chat",

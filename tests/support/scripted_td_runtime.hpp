@@ -44,8 +44,8 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_get_active_sessions() override;
     core::TdValue make_terminate_session(std::int64_t session_id) override;
     core::TdValue make_get_chat(std::int64_t chat_id) override;
-    core::TdValue make_get_chats(core::TdChatListKind list, std::int32_t limit) override;
-    core::TdValue make_load_chats(core::TdChatListKind list, std::int32_t limit) override;
+    core::TdValue make_get_chats(core::TdChatList list, std::int32_t limit) override;
+    core::TdValue make_load_chats(core::TdChatList list, std::int32_t limit) override;
     core::TdValue make_search_public_chat(std::string username) override;
     core::TdValue make_get_internal_link_type(std::string link) override;
     core::TdValue make_get_message_link_info(std::string url) override;

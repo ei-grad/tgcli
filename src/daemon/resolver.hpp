@@ -1,26 +1,16 @@
 #pragma once
 
 #include "core/td_client.hpp"
+#include "daemon/chat_identity.hpp"
 #include "daemon/dispatch.hpp"
 
 #include <functional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace tgcli::daemon {
 
 enum class ResolverScope { ActiveDialogs, LocalMaterialized };
-
-struct ChatIdentity {
-    std::int64_t id = 0;
-    std::string title;
-    std::string type;
-    bool is_bot = false;
-    std::vector<std::string> usernames;
-
-    bool operator==(const ChatIdentity&) const = default;
-};
 
 bool valid_resolve_selector(std::string_view selector);
 

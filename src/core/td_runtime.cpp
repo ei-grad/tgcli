@@ -365,12 +365,19 @@ TdValue make_native_terminate_session(std::int64_t session_id) {
                                                                {{"session_id", session_id}}});
 }
 
-td_api::object_ptr<td_api::ChatList> make_chat_list(TdChatListKind list) {
-    switch (list) {
+td_api::object_ptr<td_api::ChatList> make_chat_list(const TdChatList& list) {
+    switch (list.kind) {
     case TdChatListKind::Main:
         return td_api::make_object<td_api::chatListMain>();
     case TdChatListKind::Archive:
         return td_api::make_object<td_api::chatListArchive>();
+    case TdChatListKind::Folder:
+        if (list.folder_id <= 0) {
+            throw std::invalid_argument("chat folder id must be positive");
+        }
+        return td_api::make_object<td_api::chatListFolder>(list.folder_id);
+    case TdChatListKind::Unknown:
+        break;
     }
     throw std::invalid_argument("unsupported chat list");
 }
@@ -381,8 +388,110 @@ std::string_view chat_list_name(TdChatListKind list) {
         return "main";
     case TdChatListKind::Archive:
         return "archive";
+    case TdChatListKind::Folder:
+        return "folder";
+    case TdChatListKind::Unknown:
+        return "unknown";
     }
     return "unknown";
+}
+
+TdChatList convert_chat_list(const td_api::ChatList* list) {
+    if (list == nullptr) {
+        return {};
+    }
+    switch (list->get_id()) {
+    case td_api::chatListMain::ID:
+        return {.kind = TdChatListKind::Main, .folder_id = 0, .tdlib_type_id = list->get_id()};
+    case td_api::chatListArchive::ID:
+        return {.kind = TdChatListKind::Archive, .folder_id = 0, .tdlib_type_id = list->get_id()};
+    case td_api::chatListFolder::ID:
+        return {.kind = TdChatListKind::Folder,
+                .folder_id = static_cast<const td_api::chatListFolder&>(*list).chat_folder_id_,
+                .tdlib_type_id = list->get_id()};
+    default:
+        return {.kind = TdChatListKind::Unknown, .folder_id = 0, .tdlib_type_id = list->get_id()};
+    }
+}
+
+TdTopic convert_topic(const td_api::MessageTopic& topic);
+
+TdMessageSender convert_message_sender(const td_api::MessageSender* sender) {
+    if (sender == nullptr) {
+        return {};
+    }
+    switch (sender->get_id()) {
+    case td_api::messageSenderUser::ID:
+        return {.kind = TdMessageSenderKind::User,
+                .id = static_cast<const td_api::messageSenderUser&>(*sender).user_id_,
+                .tdlib_type_id = sender->get_id()};
+    case td_api::messageSenderChat::ID:
+        return {.kind = TdMessageSenderKind::Chat,
+                .id = static_cast<const td_api::messageSenderChat&>(*sender).chat_id_,
+                .tdlib_type_id = sender->get_id()};
+    default:
+        return {.kind = TdMessageSenderKind::Unknown, .id = 0, .tdlib_type_id = sender->get_id()};
+    }
+}
+
+std::string formatted_text(const td_api::formattedText* text) {
+    return text == nullptr ? std::string{} : text->text_;
+}
+
+TdMessageSummary convert_message(const td_api::message& message) {
+    TdMessageSummary converted{.id = message.id_,
+                               .chat_id = message.chat_id_,
+                               .date = message.date_,
+                               .sender = convert_message_sender(message.sender_id_.get()),
+                               .is_outgoing = message.is_outgoing_,
+                               .topic = std::nullopt,
+                               .content_kind = TdMessageContentKind::Other,
+                               .text = {}};
+    if (message.topic_id_ != nullptr) {
+        converted.topic = convert_topic(*message.topic_id_);
+    }
+    if (message.content_ == nullptr) {
+        return converted;
+    }
+    switch (message.content_->get_id()) {
+    case td_api::messageText::ID: {
+        const auto& content = static_cast<const td_api::messageText&>(*message.content_);
+        converted.content_kind = TdMessageContentKind::Text;
+        converted.text = formatted_text(content.text_.get());
+        break;
+    }
+    case td_api::messageAnimatedEmoji::ID:
+        converted.content_kind = TdMessageContentKind::Text;
+        converted.text = static_cast<const td_api::messageAnimatedEmoji&>(*message.content_).emoji_;
+        break;
+    case td_api::messagePhoto::ID: {
+        const auto& content = static_cast<const td_api::messagePhoto&>(*message.content_);
+        converted.content_kind = TdMessageContentKind::Photo;
+        converted.text = formatted_text(content.caption_.get());
+        break;
+    }
+    case td_api::messageVideo::ID: {
+        const auto& content = static_cast<const td_api::messageVideo&>(*message.content_);
+        converted.content_kind = TdMessageContentKind::Video;
+        converted.text = formatted_text(content.caption_.get());
+        break;
+    }
+    case td_api::messageDocument::ID: {
+        const auto& content = static_cast<const td_api::messageDocument&>(*message.content_);
+        converted.content_kind = TdMessageContentKind::Document;
+        converted.text = formatted_text(content.caption_.get());
+        break;
+    }
+    case td_api::messageVoiceNote::ID: {
+        const auto& content = static_cast<const td_api::messageVoiceNote&>(*message.content_);
+        converted.content_kind = TdMessageContentKind::Voice;
+        converted.text = formatted_text(content.caption_.get());
+        break;
+    }
+    default:
+        break;
+    }
+    return converted;
 }
 
 TdChat convert_chat(td_api::chat& chat) {
@@ -390,7 +499,31 @@ TdChat convert_chat(td_api::chat& chat) {
                      .title = std::move(chat.title_),
                      .kind = TdChatKind::Unknown,
                      .related_id = 0,
-                     .tdlib_type_id = chat.type_ == nullptr ? 0 : chat.type_->get_id()};
+                     .tdlib_type_id = chat.type_ == nullptr ? 0 : chat.type_->get_id(),
+                     .positions = {},
+                     .chat_lists = {},
+                     .is_marked_unread = chat.is_marked_as_unread_,
+                     .unread_count = chat.unread_count_,
+                     .unread_mention_count = chat.unread_mention_count_,
+                     .unread_reaction_count = chat.unread_reaction_count_,
+                     .unread_poll_vote_count = chat.unread_poll_vote_count_,
+                     .last_message = std::nullopt};
+    converted.positions.reserve(chat.positions_.size());
+    for (const auto& position : chat.positions_) {
+        if (position == nullptr) {
+            converted.positions.push_back({});
+            continue;
+        }
+        converted.positions.push_back(
+            {.list = convert_chat_list(position->list_.get()), .order = position->order_});
+    }
+    converted.chat_lists.reserve(chat.chat_lists_.size());
+    for (const auto& list : chat.chat_lists_) {
+        converted.chat_lists.push_back(convert_chat_list(list.get()));
+    }
+    if (chat.last_message_ != nullptr) {
+        converted.last_message = convert_message(*chat.last_message_);
+    }
     if (chat.type_ == nullptr) {
         return converted;
     }
@@ -1138,22 +1271,28 @@ class ProductionTdRuntime final : public TdRuntime {
                                  TdFunctionData{TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
     }
 
-    TdValue make_get_chats(TdChatListKind list, std::int32_t limit) override {
+    TdValue make_get_chats(TdChatList list, std::int32_t limit) override {
         NativeFunctionPtr native =
             td_api::make_object<td_api::getChats>(make_chat_list(list), limit);
+        std::vector<TdFunctionField> fields{{"list", std::string(chat_list_name(list.kind))},
+                                            {"limit", static_cast<std::int64_t>(limit)}};
+        if (list.kind == TdChatListKind::Folder) {
+            fields.emplace_back("folder_id", static_cast<std::int64_t>(list.folder_id));
+        }
         return TdValue::function(std::move(native),
-                                 TdFunctionData{TdFunctionKind::GetChats,
-                                                {{"list", std::string(chat_list_name(list))},
-                                                 {"limit", static_cast<std::int64_t>(limit)}}});
+                                 TdFunctionData{TdFunctionKind::GetChats, std::move(fields)});
     }
 
-    TdValue make_load_chats(TdChatListKind list, std::int32_t limit) override {
+    TdValue make_load_chats(TdChatList list, std::int32_t limit) override {
         NativeFunctionPtr native =
             td_api::make_object<td_api::loadChats>(make_chat_list(list), limit);
+        std::vector<TdFunctionField> fields{{"list", std::string(chat_list_name(list.kind))},
+                                            {"limit", static_cast<std::int64_t>(limit)}};
+        if (list.kind == TdChatListKind::Folder) {
+            fields.emplace_back("folder_id", static_cast<std::int64_t>(list.folder_id));
+        }
         return TdValue::function(std::move(native),
-                                 TdFunctionData{TdFunctionKind::LoadChats,
-                                                {{"list", std::string(chat_list_name(list))},
-                                                 {"limit", static_cast<std::int64_t>(limit)}}});
+                                 TdFunctionData{TdFunctionKind::LoadChats, std::move(fields)});
     }
 
     TdValue make_search_public_chat(std::string username) override {

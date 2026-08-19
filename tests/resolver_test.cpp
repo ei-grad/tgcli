@@ -184,7 +184,15 @@ tgcli::core::TdChat basic_chat(std::int64_t id, std::string title) {
             .title = std::move(title),
             .kind = tgcli::core::TdChatKind::BasicGroup,
             .related_id = 0,
-            .tdlib_type_id = 1};
+            .tdlib_type_id = 1,
+            .positions = {},
+            .chat_lists = {},
+            .is_marked_unread = false,
+            .unread_count = 0,
+            .unread_mention_count = 0,
+            .unread_reaction_count = 0,
+            .unread_poll_vote_count = 0,
+            .last_message = std::nullopt};
 }
 
 tgcli::core::TdChat private_chat(std::int64_t id, std::int64_t user_id, std::string title) {
@@ -192,7 +200,15 @@ tgcli::core::TdChat private_chat(std::int64_t id, std::int64_t user_id, std::str
             .title = std::move(title),
             .kind = tgcli::core::TdChatKind::Private,
             .related_id = user_id,
-            .tdlib_type_id = 2};
+            .tdlib_type_id = 2,
+            .positions = {},
+            .chat_lists = {},
+            .is_marked_unread = false,
+            .unread_count = 0,
+            .unread_mention_count = 0,
+            .unread_reaction_count = 0,
+            .unread_poll_vote_count = 0,
+            .last_message = std::nullopt};
 }
 
 tgcli::core::TdChat channel_chat(std::int64_t id, std::int64_t supergroup_id, std::string title) {
@@ -200,7 +216,15 @@ tgcli::core::TdChat channel_chat(std::int64_t id, std::int64_t supergroup_id, st
             .title = std::move(title),
             .kind = tgcli::core::TdChatKind::Channel,
             .related_id = supergroup_id,
-            .tdlib_type_id = 3};
+            .tdlib_type_id = 3,
+            .positions = {},
+            .chat_lists = {},
+            .is_marked_unread = false,
+            .unread_count = 0,
+            .unread_mention_count = 0,
+            .unread_reaction_count = 0,
+            .unread_poll_vote_count = 0,
+            .last_message = std::nullopt};
 }
 
 void finish_loaded_lists(FakeResolver& fake, const std::vector<std::int64_t>& main,
@@ -539,7 +563,15 @@ TEST_CASE("resolver rejects closed link and chat classes exactly",
                                          .title = "Secret",
                                          .kind = tgcli::core::TdChatKind::Secret,
                                          .related_id = 10,
-                                         .tdlib_type_id = 4});
+                                         .tdlib_type_id = 4,
+                                         .positions = {},
+                                         .chat_lists = {},
+                                         .is_marked_unread = false,
+                                         .unread_count = 0,
+                                         .unread_mention_count = 0,
+                                         .unread_reaction_count = 0,
+                                         .unread_poll_vote_count = 0,
+                                         .last_message = std::nullopt});
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["code"] == "USAGE");

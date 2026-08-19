@@ -16,6 +16,9 @@
     "account use": {
       "result": "account-use.result.schema.json"
     },
+    "chats": {
+      "result": "chats.result.schema.json"
+    },
     "daemon stop": {
       "result": "daemon-stop.result.schema.json"
     },

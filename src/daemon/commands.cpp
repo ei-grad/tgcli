@@ -2,6 +2,7 @@
 
 #include "common/exit_codes.hpp"
 #include "daemon/account_removal.hpp"
+#include "daemon/chats_commands.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/request_session.hpp"
@@ -40,12 +41,14 @@ json doctor_payload(const DaemonContext& context) {
 bool uses_account_removal_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
-           command == "daemon status" || command == "daemon stop" || command == "daemon restart";
+           command == "chats" || command == "daemon status" || command == "daemon stop" ||
+           command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
-           command == "saved tags" || command == "saved search" || command == "resolve";
+           command == "saved tags" || command == "saved search" || command == "resolve" ||
+           command == "chats";
 }
 
 void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& context) {
@@ -85,6 +88,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.saved != nullptr) {
         register_saved_commands(dispatcher, *context.saved);
+    }
+    if (context.chats != nullptr) {
+        register_chats_command(dispatcher, *context.chats);
     }
     if (context.resolver != nullptr) {
         register_resolve_command(dispatcher, *context.resolver);

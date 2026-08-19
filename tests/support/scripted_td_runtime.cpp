@@ -122,23 +122,41 @@ core::TdValue ScriptedTdRuntime::make_get_chat(std::int64_t chat_id) {
 namespace {
 
 std::string chat_list_name(core::TdChatListKind list) {
-    return list == core::TdChatListKind::Main ? "main" : "archive";
+    switch (list) {
+    case core::TdChatListKind::Main:
+        return "main";
+    case core::TdChatListKind::Archive:
+        return "archive";
+    case core::TdChatListKind::Folder:
+        return "folder";
+    case core::TdChatListKind::Unknown:
+        return "unknown";
+    }
+    return "unknown";
 }
 
 } // namespace
 
-core::TdValue ScriptedTdRuntime::make_get_chats(core::TdChatListKind list, std::int32_t limit) {
+core::TdValue ScriptedTdRuntime::make_get_chats(core::TdChatList list, std::int32_t limit) {
     before_make(core::TdFunctionKind::GetChats);
-    return core::TdValue::scripted_function(core::TdFunctionData{
-        core::TdFunctionKind::GetChats,
-        {{"list", chat_list_name(list)}, {"limit", static_cast<std::int64_t>(limit)}}});
+    std::vector<core::TdFunctionField> fields{{"list", chat_list_name(list.kind)},
+                                              {"limit", static_cast<std::int64_t>(limit)}};
+    if (list.kind == core::TdChatListKind::Folder) {
+        fields.emplace_back("folder_id", static_cast<std::int64_t>(list.folder_id));
+    }
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetChats, std::move(fields)});
 }
 
-core::TdValue ScriptedTdRuntime::make_load_chats(core::TdChatListKind list, std::int32_t limit) {
+core::TdValue ScriptedTdRuntime::make_load_chats(core::TdChatList list, std::int32_t limit) {
     before_make(core::TdFunctionKind::LoadChats);
-    return core::TdValue::scripted_function(core::TdFunctionData{
-        core::TdFunctionKind::LoadChats,
-        {{"list", chat_list_name(list)}, {"limit", static_cast<std::int64_t>(limit)}}});
+    std::vector<core::TdFunctionField> fields{{"list", chat_list_name(list.kind)},
+                                              {"limit", static_cast<std::int64_t>(limit)}};
+    if (list.kind == core::TdChatListKind::Folder) {
+        fields.emplace_back("folder_id", static_cast<std::int64_t>(list.folder_id));
+    }
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::LoadChats, std::move(fields)});
 }
 
 core::TdValue ScriptedTdRuntime::make_search_public_chat(std::string username) {

@@ -273,6 +273,75 @@ std::string render_session_terminate(const nlohmann::json& data) {
                        data.at("session_id").get_ref<const std::string&>());
 }
 
+std::string render_string_array(const nlohmann::json& values) {
+    std::string out;
+    for (const auto& value : values) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += value.dump();
+    }
+    return out.empty() ? "(none)" : out;
+}
+
+std::string render_integer_array(const nlohmann::json& values) {
+    std::string out;
+    for (const auto& value : values) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += value.dump();
+    }
+    return out.empty() ? "(none)" : out;
+}
+
+std::string render_chats(const nlohmann::json& data) {
+    std::string out;
+    const auto& items = data.at("items");
+    if (items.empty()) {
+        out = "chats: (none)\n";
+    }
+    for (const auto& chat : items) {
+        out += fmt::format(
+            "chat:\n  id: {}\n  title: {}\n  type: {}\n  bot: {}\n  usernames: {}\n"
+            "  archived: {}\n  folder ids: {}\n  marked unread: {}\n  unread: {}\n"
+            "  mentions: {}\n  reactions: {}\n  poll votes: {}\n",
+            chat.at("id").get<std::int64_t>(), chat.at("title").dump(),
+            chat.at("type").get<std::string>(), yes_no(chat.at("is_bot").get<bool>()),
+            render_string_array(chat.at("usernames")), yes_no(chat.at("is_archived").get<bool>()),
+            render_integer_array(chat.at("folder_ids")),
+            yes_no(chat.at("is_marked_unread").get<bool>()),
+            chat.at("unread_count").get<std::int32_t>(),
+            chat.at("unread_mention_count").get<std::int32_t>(),
+            chat.at("unread_reaction_count").get<std::int32_t>(),
+            chat.at("unread_poll_vote_count").get<std::int32_t>());
+        const auto& message = chat.at("last_message");
+        if (message.is_null()) {
+            out += "  last message: null\n";
+            continue;
+        }
+        const std::string date =
+            message.at("date").is_null() ? "null" : message.at("date").get<std::string>();
+        const std::string topic =
+            message.at("topic").is_null()
+                ? "null"
+                : fmt::format("{}:{}", message.at("topic").at("kind").get<std::string>(),
+                              message.at("topic").at("id").get<std::int64_t>());
+        out += fmt::format(
+            "  last message:\n    id: {}\n    chat id: {}\n    date: {}\n    sender: {}:{}\n"
+            "    outgoing: {}\n    topic: {}\n    type: {}\n    text: {}\n",
+            message.at("id").get<std::int64_t>(), message.at("chat_id").get<std::int64_t>(), date,
+            message.at("sender").at("type").get<std::string>(),
+            message.at("sender").at("id").get<std::int64_t>(),
+            yes_no(message.at("is_outgoing").get<bool>()), topic,
+            message.at("type").get<std::string>(), message.at("text").dump());
+    }
+    out += data.at("next").is_null()
+               ? "next: null\n"
+               : fmt::format("next: {}\n", data.at("next").get<std::string>());
+    return out;
+}
+
 std::string render_resolve(const nlohmann::json& data) {
     const auto& chat = data.at("chat");
     std::string usernames;
@@ -354,6 +423,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "session terminate") {
         return render_session_terminate(data);
+    }
+    if (command_key == "chats") {
+        return render_chats(data);
     }
     if (command_key == "resolve") {
         return render_resolve(data);

@@ -692,9 +692,59 @@ struct TdSessionConversionError {
     bool operator==(const TdSessionConversionError&) const = default;
 };
 
-enum class TdChatListKind { Main, Archive };
+enum class TdChatListKind { Main, Archive, Folder, Unknown };
+
+struct TdChatList {
+    TdChatListKind kind = TdChatListKind::Unknown;
+    std::int32_t folder_id = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdChatList&) const = default;
+};
 
 enum class TdChatKind { Private, BasicGroup, Supergroup, Channel, Secret, Unknown };
+
+enum class TdTopicKind { Forum, Thread, Direct, Saved, Unknown };
+
+struct TdTopic {
+    TdTopicKind kind = TdTopicKind::Unknown;
+    std::int64_t id = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdTopic&) const = default;
+};
+
+enum class TdMessageSenderKind { User, Chat, Unknown };
+
+struct TdMessageSender {
+    TdMessageSenderKind kind = TdMessageSenderKind::Unknown;
+    std::int64_t id = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdMessageSender&) const = default;
+};
+
+enum class TdMessageContentKind { Text, Photo, Video, Document, Voice, Other };
+
+struct TdMessageSummary {
+    std::int64_t id = 0;
+    std::int64_t chat_id = 0;
+    std::int32_t date = 0;
+    TdMessageSender sender;
+    bool is_outgoing = false;
+    std::optional<TdTopic> topic;
+    TdMessageContentKind content_kind = TdMessageContentKind::Other;
+    std::string text;
+
+    bool operator==(const TdMessageSummary&) const = default;
+};
+
+struct TdChatPosition {
+    TdChatList list;
+    std::int64_t order = 0;
+
+    bool operator==(const TdChatPosition&) const = default;
+};
 
 struct TdChat {
     std::int64_t id = 0;
@@ -702,6 +752,14 @@ struct TdChat {
     TdChatKind kind = TdChatKind::Unknown;
     std::int64_t related_id = 0;
     std::int32_t tdlib_type_id = 0;
+    std::vector<TdChatPosition> positions;
+    std::vector<TdChatList> chat_lists;
+    bool is_marked_unread = false;
+    std::int32_t unread_count = 0;
+    std::int32_t unread_mention_count = 0;
+    std::int32_t unread_reaction_count = 0;
+    std::int32_t unread_poll_vote_count = 0;
+    std::optional<TdMessageSummary> last_message;
 
     bool operator==(const TdChat&) const = default;
 };
@@ -718,16 +776,6 @@ struct TdSupergroup {
     bool is_channel = false;
 
     bool operator==(const TdSupergroup&) const = default;
-};
-
-enum class TdTopicKind { Forum, Thread, Direct, Saved, Unknown };
-
-struct TdTopic {
-    TdTopicKind kind = TdTopicKind::Unknown;
-    std::int64_t id = 0;
-    std::int32_t tdlib_type_id = 0;
-
-    bool operator==(const TdTopic&) const = default;
 };
 
 enum class TdInternalLinkKind {
@@ -805,8 +853,8 @@ class TdRuntime {
     virtual TdValue make_get_active_sessions() = 0;
     virtual TdValue make_terminate_session(std::int64_t session_id) = 0;
     virtual TdValue make_get_chat(std::int64_t chat_id) = 0;
-    virtual TdValue make_get_chats(TdChatListKind list, std::int32_t limit) = 0;
-    virtual TdValue make_load_chats(TdChatListKind list, std::int32_t limit) = 0;
+    virtual TdValue make_get_chats(TdChatList list, std::int32_t limit) = 0;
+    virtual TdValue make_load_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_search_public_chat(std::string username) = 0;
     virtual TdValue make_get_internal_link_type(std::string link) = 0;
     virtual TdValue make_get_message_link_info(std::string url) = 0;

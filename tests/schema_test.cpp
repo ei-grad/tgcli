@@ -92,6 +92,31 @@ std::vector<SchemaCase> schema_cases() {
         {"account-use.result.schema.json",
          {{"default_account", "work"}, {"previous_default", "main"}},
          "default_account"},
+        {"chats.result.schema.json",
+         {{"items", json::array({json{{"id", -1001},
+                                      {"title", "Project"},
+                                      {"type", "supergroup"},
+                                      {"is_bot", false},
+                                      {"usernames", json::array({"project"})},
+                                      {"is_archived", false},
+                                      {"folder_ids", json::array({2})},
+                                      {"is_marked_unread", false},
+                                      {"unread_count", 3},
+                                      {"unread_mention_count", 1},
+                                      {"unread_reaction_count", 0},
+                                      {"unread_poll_vote_count", 0},
+                                      {"last_message",
+                                       {{"id", 123},
+                                        {"chat_id", -1001},
+                                        {"date", "2026-08-05T10:00:00Z"},
+                                        {"sender", {{"type", "user"}, {"id", 42}}},
+                                        {"is_outgoing", false},
+                                        {"topic", {{"kind", "forum"}, {"id", 7}}},
+                                        {"type", "text"},
+                                        {"text", "experiment result"}}}}})},
+          {"next", "cursor-2"}},
+         "items",
+         true},
         {"version.result.schema.json",
          {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}},
          "version"},
@@ -262,6 +287,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"account remove", {{"result", "account-remove.result.schema.json"}}},
           {"account show", {{"result", "account-show.result.schema.json"}}},
           {"account use", {{"result", "account-use.result.schema.json"}}},
+          {"chats", {{"result", "chats.result.schema.json"}}},
           {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
           {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
           {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
@@ -277,7 +303,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 19);
+    CHECK(manifest["commands"].size() == 20);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -337,6 +363,42 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
         REQUIRE(schema.contains("$schema"));
         CHECK(schema["$schema"] == kDialect);
         check_schema_node(schema);
+    }
+}
+
+TEST_CASE("chats schema keeps identity folder and tagged-topic bounds exact", "[schema][chats]") {
+    const auto cases = schema_cases();
+    const auto found = std::ranges::find_if(cases, [](const SchemaCase& test_case) {
+        return test_case.filename == "chats.result.schema.json";
+    });
+    REQUIRE(found != cases.end());
+    auto result = found->instance;
+    CHECK_THAT(result, tgcli::test::matches_json_schema("chats.result.schema.json"));
+
+    result["items"][0]["folder_ids"] = json::array({2, 2});
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("chats.result.schema.json"));
+
+    result = found->instance;
+    result["items"][0]["last_message"]["topic"] = json{{"kind", "forum"}, {"id", 2147483648LL}};
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("chats.result.schema.json"));
+
+    result["items"][0]["last_message"]["topic"]["kind"] = "thread";
+    CHECK_THAT(result, tgcli::test::matches_json_schema("chats.result.schema.json"));
+
+    for (const bool is_bot : {false, true}) {
+        result = found->instance;
+        result["items"][0].update({{"id", 42}, {"type", "private"}, {"is_bot", is_bot}});
+        CHECK_THAT(result, tgcli::test::matches_json_schema("chats.result.schema.json"));
+    }
+
+    for (const std::string_view type : {"basic_group", "supergroup", "channel"}) {
+        result = found->instance;
+        result["items"][0]["type"] = type;
+        result["items"][0]["is_bot"] = false;
+        CHECK_THAT(result, tgcli::test::matches_json_schema("chats.result.schema.json"));
+
+        result["items"][0]["is_bot"] = true;
+        CHECK_THAT(result, !tgcli::test::matches_json_schema("chats.result.schema.json"));
     }
 }
 

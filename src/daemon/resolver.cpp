@@ -137,24 +137,6 @@ std::int32_t retry_after(std::string_view message) {
     return result;
 }
 
-std::string chat_type_name(core::TdChatKind kind) {
-    switch (kind) {
-    case core::TdChatKind::Private:
-        return "private";
-    case core::TdChatKind::BasicGroup:
-        return "basic_group";
-    case core::TdChatKind::Supergroup:
-        return "supergroup";
-    case core::TdChatKind::Channel:
-        return "channel";
-    case core::TdChatKind::Secret:
-        return "secret";
-    case core::TdChatKind::Unknown:
-        return "unknown";
-    }
-    return "unknown";
-}
-
 std::optional<std::string> topic_kind_name(core::TdTopicKind kind) {
     switch (kind) {
     case core::TdTopicKind::Forum:
@@ -169,14 +151,6 @@ std::optional<std::string> topic_kind_name(core::TdTopicKind kind) {
         return std::nullopt;
     }
     return std::nullopt;
-}
-
-json identity_json(const ChatIdentity& identity) {
-    return {{"id", identity.id},
-            {"title", identity.title},
-            {"type", identity.type},
-            {"is_bot", identity.is_bot},
-            {"usernames", identity.usernames}};
 }
 
 std::optional<json> topic_json(const core::TdTopic& topic) {
@@ -205,7 +179,7 @@ std::optional<json> result_json(const ResolveResult& result) {
         kind = "topic";
     }
     return json{{"kind", kind},
-                {"chat", identity_json(result.chat)},
+                {"chat", chat_identity_json(result.chat)},
                 {"message_id", result.message_id ? json(*result.message_id) : json(nullptr)},
                 {"topic", std::move(topic)},
                 {"link_type", result.link_type ? json(*result.link_type) : json(nullptr)},
@@ -362,88 +336,32 @@ class ResolverRun {
         return *chat;
     }
 
-    static bool valid_usernames(const std::vector<std::string>& usernames) {
-        return std::ranges::all_of(usernames, [](const std::string& username) {
-            return !username.empty() && common::valid_utf8(username);
-        });
-    }
-
-    std::optional<ChatIdentity> private_identity(const core::TdChat& chat, ChatIdentity result) {
-        if (!valid_user_id(chat.related_id)) {
-            internal_error();
-            return std::nullopt;
-        }
-        auto response =
-            read([&](const auto& current) { return client_.get_user(current, chat.related_id); });
-        if (!response) {
-            return std::nullopt;
-        }
-        if (const auto* error = response->value.get_if<core::TdError>()) {
-            td_error(*error);
-            return std::nullopt;
-        }
-        const auto* user = response->value.get_if<core::TdUserSummary>();
-        if (user == nullptr || user->id != chat.related_id || !valid_usernames(user->usernames)) {
-            internal_error();
-            return std::nullopt;
-        }
-        result.is_bot = user->is_bot;
-        result.usernames = user->usernames;
-        return result;
-    }
-
-    std::optional<ChatIdentity> supergroup_identity(const core::TdChat& chat, ChatIdentity result) {
-        if (!valid_user_id(chat.related_id)) {
-            internal_error();
-            return std::nullopt;
-        }
-        auto response = read(
-            [&](const auto& current) { return client_.get_supergroup(current, chat.related_id); });
-        if (!response) {
-            return std::nullopt;
-        }
-        if (const auto* error = response->value.get_if<core::TdError>()) {
-            td_error(*error);
-            return std::nullopt;
-        }
-        const auto* supergroup = response->value.get_if<core::TdSupergroup>();
-        const bool expected_channel = chat.kind == core::TdChatKind::Channel;
-        if (supergroup == nullptr || supergroup->id != chat.related_id ||
-            supergroup->is_channel != expected_channel || !valid_usernames(supergroup->usernames)) {
-            internal_error();
-            return std::nullopt;
-        }
-        result.usernames = supergroup->usernames;
-        return result;
-    }
-
     std::optional<ChatIdentity> identity(const core::TdChat& chat, bool reject_secret = true) {
-        if (!common::valid_utf8(chat.title)) {
-            internal_error();
-            return std::nullopt;
-        }
-        if (chat.kind == core::TdChatKind::Secret) {
+        const auto materialized = materialize_chat_identity(
+            client_, chat, [&](const auto& start) { return read(start); });
+        switch (materialized.status) {
+        case ChatIdentityStatus::Success:
+            return materialized.identity;
+        case ChatIdentityStatus::Secret:
             if (reject_secret) {
                 usage("secret chats are not supported", "unsupported_chat_type");
             }
             return std::nullopt;
-        }
-        if (chat.kind == core::TdChatKind::Unknown) {
+        case ChatIdentityStatus::TdError:
+            if (materialized.error) {
+                td_error(*materialized.error);
+            } else {
+                internal_error();
+            }
+            return std::nullopt;
+        case ChatIdentityStatus::Invalid:
             internal_error();
             return std::nullopt;
+        case ChatIdentityStatus::ReadStopped:
+            return std::nullopt;
         }
-        ChatIdentity result{.id = chat.id,
-                            .title = chat.title,
-                            .type = chat_type_name(chat.kind),
-                            .is_bot = false,
-                            .usernames = {}};
-        if (chat.kind == core::TdChatKind::Private) {
-            return private_identity(chat, std::move(result));
-        }
-        if (chat.kind == core::TdChatKind::Supergroup || chat.kind == core::TdChatKind::Channel) {
-            return supergroup_identity(chat, std::move(result));
-        }
-        return result;
+        internal_error();
+        return std::nullopt;
     }
 
     std::optional<ResolveResult> resolve_numeric(std::int64_t chat_id) {
@@ -604,7 +522,7 @@ class ResolverRun {
         }
         json values = json::array();
         for (const auto& candidate : candidates) {
-            values.push_back(identity_json(candidate));
+            values.push_back(chat_identity_json(candidate));
         }
         session_.error("AMBIGUOUS", "multiple chats match the selector",
                        {{"selector", selector_},
@@ -655,7 +573,7 @@ class ResolverRun {
         json candidates = json::array();
         for (std::size_t index = 0; index < std::min(matches.size(), kMaximumAmbiguousCandidates);
              ++index) {
-            candidates.push_back(identity_json(matches[index]));
+            candidates.push_back(chat_identity_json(matches[index]));
         }
         session_.error("AMBIGUOUS", "multiple chats match the selector",
                        {{"selector", selector_},

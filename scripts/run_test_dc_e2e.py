@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import os
 import pty
+import re
 import selectors
 import shlex
 import stat
@@ -36,7 +37,8 @@ from test_dc_contract import (
 USER_ACCOUNT = "test-user"
 BOT_ACCOUNT = "test-bot"
 QR_ACCOUNT = "test-qr"
-REQUIRED_SURFACE = ("logout", "--allow-write", "--yes", "--verbose", "-v")
+REQUIRED_SUBCOMMANDS = ("logout", "chats")
+REQUIRED_OPTIONS = ("--allow-write", "--yes", "--verbose", "-v")
 USER_FIELDS = {
     "id",
     "first_name",
@@ -480,11 +482,10 @@ def _surface_preflight(
                 option_tokens.add(field)
         elif section == "subcommands" and fields:
             subcommands.add(fields[0])
-    missing = [token for token in REQUIRED_SURFACE[1:] if token not in option_tokens]
-    if REQUIRED_SURFACE[0] not in subcommands:
-        missing.append(REQUIRED_SURFACE[0])
+    missing = [token for token in REQUIRED_OPTIONS if token not in option_tokens]
+    missing.extend(token for token in REQUIRED_SUBCOMMANDS if token not in subcommands)
     if completed.returncode != 0 or missing:
-        raise AcceptanceError("tgcli is missing the M1 test-DC runtime surface")
+        raise AcceptanceError("tgcli is missing the test-DC runtime surface")
 
 
 def _approver_preflight(approver: Path | None) -> None:
@@ -734,6 +735,134 @@ def _assert_saved_tags(document: object) -> None:
             raise AcceptanceError("saved tags returned an invalid item")
 
 
+def _int(value: object, minimum: int, maximum: int) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and minimum <= value <= maximum
+    )
+
+
+def _assert_chats_topic(topic: object) -> None:
+    if not isinstance(topic, dict) or set(topic) != {"kind", "id"}:
+        raise AcceptanceError("chats returned an invalid message topic")
+    kind = topic["kind"]
+    maximum = 2_147_483_647 if kind == "forum" else 9_007_199_254_740_991
+    if kind not in {"forum", "thread", "direct", "saved"} or not _int(
+        topic["id"], 1, maximum
+    ):
+        raise AcceptanceError("chats returned an invalid message topic")
+
+
+def _assert_chats_message(message: object, chat_id: int) -> None:
+    fields = {
+        "id",
+        "chat_id",
+        "date",
+        "sender",
+        "is_outgoing",
+        "topic",
+        "type",
+        "text",
+    }
+    if not isinstance(message, dict) or set(message) != fields:
+        raise AcceptanceError("chats returned an invalid last message")
+    if (
+        not _int(message["id"], -9_007_199_254_740_991, 9_007_199_254_740_991)
+        or message["id"] == 0
+        or message["chat_id"] != chat_id
+        or not isinstance(message["is_outgoing"], bool)
+        or message["type"] not in {"text", "photo", "video", "doc", "voice", "other"}
+        or not isinstance(message["text"], str)
+    ):
+        raise AcceptanceError("chats returned an invalid last message")
+    date = message["date"]
+    if date is not None and (
+        not isinstance(date, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", date)
+        is None
+    ):
+        raise AcceptanceError("chats returned an invalid last message date")
+    sender = message["sender"]
+    if not isinstance(sender, dict) or set(sender) != {"type", "id"}:
+        raise AcceptanceError("chats returned an invalid message sender")
+    if sender["type"] == "user":
+        valid_sender = _int(sender["id"], 1, 9_007_199_254_740_991)
+    elif sender["type"] == "chat":
+        valid_sender = (
+            _int(sender["id"], -9_007_199_254_740_991, 9_007_199_254_740_991)
+            and sender["id"] != 0
+        )
+    else:
+        valid_sender = False
+    if not valid_sender:
+        raise AcceptanceError("chats returned an invalid message sender")
+    if message["topic"] is not None:
+        _assert_chats_topic(message["topic"])
+
+
+def _assert_chats(document: object) -> None:
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"items", "next"}
+        or not isinstance(document["items"], list)
+        or len(document["items"]) > 1
+        or (
+            document["next"] is not None
+            and (not isinstance(document["next"], str) or not document["next"])
+        )
+        or (not document["items"] and document["next"] is not None)
+    ):
+        raise AcceptanceError("chats returned an invalid result")
+    for chat in document["items"]:
+        fields = {
+            "id",
+            "title",
+            "type",
+            "is_bot",
+            "usernames",
+            "is_archived",
+            "folder_ids",
+            "is_marked_unread",
+            "unread_count",
+            "unread_mention_count",
+            "unread_reaction_count",
+            "unread_poll_vote_count",
+            "last_message",
+        }
+        if not isinstance(chat, dict) or set(chat) != fields:
+            raise AcceptanceError("chats returned an invalid item")
+        chat_id = chat["id"]
+        folder_ids = chat["folder_ids"]
+        if (
+            not _int(chat_id, -9_007_199_254_740_991, 9_007_199_254_740_991)
+            or chat_id == 0
+            or not isinstance(chat["title"], str)
+            or chat["type"] not in {"private", "basic_group", "supergroup", "channel"}
+            or not isinstance(chat["is_bot"], bool)
+            or (chat["type"] != "private" and chat["is_bot"])
+            or not isinstance(chat["usernames"], list)
+            or not all(isinstance(value, str) and value for value in chat["usernames"])
+            or not isinstance(chat["is_archived"], bool)
+            or not isinstance(folder_ids, list)
+            or not all(_int(value, 1, 2_147_483_647) for value in folder_ids)
+            or folder_ids != sorted(set(folder_ids))
+            or not isinstance(chat["is_marked_unread"], bool)
+            or not all(
+                _int(chat[field], 0, 2_147_483_647)
+                for field in (
+                    "unread_count",
+                    "unread_mention_count",
+                    "unread_reaction_count",
+                    "unread_poll_vote_count",
+                )
+            )
+        ):
+            raise AcceptanceError("chats returned an invalid item")
+        if chat["last_message"] is not None:
+            _assert_chats_message(chat["last_message"], chat_id)
+
+
 def _require_qr_approval(runner: Runner) -> None:
     if runner.qr_approvals < 1:
         raise AcceptanceError("QR login completed without an auth_qr approval")
@@ -823,6 +952,12 @@ def _smoke(
             ["--json", "--account", USER_ACCOUNT, "saved", "tags"],
         ).document
     )
+    _assert_chats(
+        runner.run_json(
+            "chats-user",
+            ["--json", "--account", USER_ACCOUNT, "chats", "-n", "1"],
+        ).document
+    )
 
     logout = runner.run_json(
         "logout-user",
@@ -886,7 +1021,7 @@ def _skip_entries(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the tgcli M1 acceptance flow on test DC"
+        description="Run the tgcli M1 authentication and M2 chats acceptance flow on test DC"
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)

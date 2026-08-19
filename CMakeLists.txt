@@ -184,6 +184,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/request_session.cpp
     src/daemon/account_commands.cpp
     src/daemon/login_commands.cpp
+    src/daemon/chat_identity.cpp
+    src/daemon/chats_commands.cpp
     src/daemon/ready_read.cpp
     src/daemon/resolver.cpp
     src/daemon/saved_commands.cpp

@@ -164,8 +164,12 @@ class TdClient {
                                   std::int64_t chat_id);
     std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    TdChatListKind list, std::int32_t limit);
+    std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdChatList list, std::int32_t limit);
     std::future<TdValue> load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                     TdChatListKind list, std::int32_t limit);
+    std::future<TdValue> load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    TdChatList list, std::int32_t limit);
     std::future<TdValue>
     search_public_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                        std::string username);

@@ -2,6 +2,7 @@
 #include "cli/routing.hpp"
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
+#include "daemon/chats_commands.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
@@ -9,9 +10,11 @@
 #include "proto/operation.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unistd.h>
@@ -343,6 +346,17 @@ struct SavedCliArguments {
     CLI::Option* cursor_option = nullptr;
 };
 
+struct ChatsCliArguments {
+    std::int64_t folder = 0;
+    int limit = tgcli::daemon::kDefaultChatsLimit;
+    bool archived = false;
+    bool unread = false;
+    CLI::Option* folder_option = nullptr;
+    CLI::Option* limit_option = nullptr;
+    CLI::Option* archived_option = nullptr;
+    CLI::Option* unread_option = nullptr;
+};
+
 bool is_saved_tags(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "tags"};
 }
@@ -356,7 +370,8 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
     if (saved.cursor_option->count() != 0 && is_saved_tags(command)) {
         return report_usage("saved tags does not accept --cursor", "--cursor");
     }
-    if (saved.cursor_option->count() != 0 && !is_saved_search(command)) {
+    if (saved.cursor_option->count() != 0 && !is_saved_search(command) &&
+        command != std::vector<std::string>{"chats"}) {
         return report_usage("--cursor is not supported for this command", "--cursor",
                             "unsupported_mode");
     }
@@ -388,17 +403,76 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
     return std::nullopt;
 }
 
+std::optional<int> validate_chats_arguments(const std::vector<std::string>& command,
+                                            const ChatsCliArguments& chats,
+                                            const SavedCliArguments& pagination);
+
 std::optional<int> validate_command_arguments(const std::vector<std::string>& command,
                                               const SavedCliArguments& saved,
+                                              const ChatsCliArguments& chats,
                                               std::string_view resolve_selector) {
     if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
         return saved_exit;
+    }
+    if (const auto chats_exit = validate_chats_arguments(command, chats, saved); chats_exit) {
+        return chats_exit;
     }
     if (command == std::vector<std::string>{"resolve"} &&
         !tgcli::daemon::valid_resolve_selector(resolve_selector)) {
         return report_usage("resolve selector is invalid", "selector");
     }
     return std::nullopt;
+}
+
+std::optional<int> validate_chats_arguments(const std::vector<std::string>& command,
+                                            const ChatsCliArguments& chats,
+                                            const SavedCliArguments& pagination) {
+    if (command != std::vector<std::string>{"chats"}) {
+        return std::nullopt;
+    }
+    const bool cursor = pagination.cursor_option->count() != 0;
+    if (cursor && chats.folder_option->count() != 0) {
+        return report_usage("--folder is not accepted with a continuation cursor", "--folder");
+    }
+    if (cursor && chats.archived_option->count() != 0) {
+        return report_usage("--archived is not accepted with a continuation cursor", "--archived");
+    }
+    if (cursor && chats.unread_option->count() != 0) {
+        return report_usage("--unread is not accepted with a continuation cursor", "--unread");
+    }
+    if (cursor && chats.limit_option->count() != 0) {
+        return report_usage("-n is not accepted with a continuation cursor", "-n");
+    }
+    if (chats.archived_option->count() != 0 && chats.folder_option->count() != 0) {
+        return report_usage("--archived and --folder are mutually exclusive", "--archived/--folder",
+                            "mutually_exclusive");
+    }
+    if (chats.folder_option->count() != 0 &&
+        (chats.folder <= 0 || chats.folder > std::numeric_limits<std::int32_t>::max())) {
+        return report_usage("chat folder id must be a positive int32", "--folder");
+    }
+    if (chats.limit_option->count() != 0 &&
+        (chats.limit < 1 || chats.limit > tgcli::daemon::kMaximumChatsLimit)) {
+        return report_usage("chats limit must be between 1 and 100", "-n");
+    }
+    if (cursor && !tgcli::daemon::decode_chats_cursor(pagination.cursor)) {
+        return report_usage("invalid chats cursor", "--cursor", "invalid_cursor");
+    }
+    return std::nullopt;
+}
+
+nlohmann::json chats_request_args(const ChatsCliArguments& chats,
+                                  const SavedCliArguments& pagination) {
+    return {
+        {"archived", chats.archived},
+        {"cursor", pagination.cursor_option->count() != 0 ? nlohmann::json(pagination.cursor)
+                                                          : nlohmann::json(nullptr)},
+        {"folder", chats.folder_option->count() != 0 ? nlohmann::json(chats.folder)
+                                                     : nlohmann::json(nullptr)},
+        {"limit",
+         chats.limit_option->count() != 0 ? nlohmann::json(chats.limit) : nlohmann::json(nullptr)},
+        {"unread", chats.unread},
+    };
 }
 
 nlohmann::json saved_search_request_args(const SavedCliArguments& saved) {
@@ -412,6 +486,25 @@ nlohmann::json saved_search_request_args(const SavedCliArguments& saved) {
         {"cursor", saved.cursor_option->count() != 0 ? nlohmann::json(saved.cursor)
                                                      : nlohmann::json(nullptr)},
     };
+}
+
+nlohmann::json command_request_args(const std::vector<std::string>& command, bool login_qr,
+                                    bool login_bot, std::string_view resolve_selector,
+                                    const ChatsCliArguments& chats,
+                                    const SavedCliArguments& saved) {
+    if (command == std::vector<std::string>{"login"}) {
+        return {{"qr", login_qr}, {"bot", login_bot}};
+    }
+    if (command == std::vector<std::string>{"resolve"}) {
+        return {{"selector", resolve_selector}};
+    }
+    if (command == std::vector<std::string>{"chats"}) {
+        return chats_request_args(chats, saved);
+    }
+    if (is_saved_search(command)) {
+        return saved_search_request_args(saved);
+    }
+    return nlohmann::json::object();
 }
 
 int run(int argc, char** argv) {
@@ -437,6 +530,7 @@ int run(int argc, char** argv) {
     double timeout_seconds = 0.0;
     std::string resolve_selector;
     SavedCliArguments saved;
+    ChatsCliArguments chats;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -472,6 +566,14 @@ int run(int argc, char** argv) {
     app.add_subcommand("resolve", "resolve a chat, username, or t.me link")
         ->add_option("selector", resolve_selector)
         ->required();
+    CLI::App* chats_cmd = app.add_subcommand("chats", "list chats");
+    chats.archived_option =
+        chats_cmd->add_flag("--archived", chats.archived, "list archived chats");
+    chats.folder_option =
+        chats_cmd->add_option("--folder", chats.folder, "list chats in a folder id");
+    chats.unread_option =
+        chats_cmd->add_flag("--unread", chats.unread, "only include unread chats");
+    chats.limit_option = chats_cmd->add_option("-n", chats.limit, "page size (1-100; default 20)");
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -538,7 +640,8 @@ int run(int argc, char** argv) {
     if (command.empty()) {
         return report_missing_command();
     }
-    if (const auto argument_exit = validate_command_arguments(command, saved, resolve_selector);
+    if (const auto argument_exit =
+            validate_command_arguments(command, saved, chats, resolve_selector);
         argument_exit) {
         return *argument_exit;
     }
@@ -583,17 +686,11 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
-    nlohmann::json request_args = nlohmann::json::object();
+    nlohmann::json request_args =
+        command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved);
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);
-    }
-    if (command == std::vector<std::string>{"login"}) {
-        request_args = {{"qr", login_qr}, {"bot", login_bot}};
-    } else if (command == std::vector<std::string>{"resolve"}) {
-        request_args = {{"selector", resolve_selector}};
-    } else if (is_saved_search(command)) {
-        request_args = saved_search_request_args(saved);
     }
     if (timeout_option->count() != 0) {
         request_context.timeout_seconds = timeout_seconds;

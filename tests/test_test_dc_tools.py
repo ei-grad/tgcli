@@ -366,6 +366,7 @@ class HarnessPreflightTests(unittest.TestCase):
       --yes confirm
 SUBCOMMANDS:
   logout log out
+  chats list chats
 """
 
     def setUp(self) -> None:
@@ -594,10 +595,89 @@ class HarnessInvariantTests(unittest.TestCase):
             {"items": [{"tag": "🧪", "label": "", "count": -1}], "next": None},
         )
         for document in invalid:
-            with self.subTest(document=document), self.assertRaises(
-                acceptance.AcceptanceError
+            with (
+                self.subTest(document=document),
+                self.assertRaises(acceptance.AcceptanceError),
             ):
                 acceptance._assert_saved_tags(document)
+
+    def test_chats_milestone_flow_requires_a_strict_zero_or_one_item_result(
+        self,
+    ) -> None:
+        acceptance._assert_chats({"items": [], "next": None})
+        item = {
+            "id": -1001,
+            "title": "Project",
+            "type": "supergroup",
+            "is_bot": False,
+            "usernames": ["project"],
+            "is_archived": False,
+            "folder_ids": [2],
+            "is_marked_unread": False,
+            "unread_count": 3,
+            "unread_mention_count": 1,
+            "unread_reaction_count": 0,
+            "unread_poll_vote_count": 0,
+            "last_message": {
+                "id": 123,
+                "chat_id": -1001,
+                "date": "2026-08-05T10:00:00Z",
+                "sender": {"type": "user", "id": 42},
+                "is_outgoing": False,
+                "topic": {"kind": "forum", "id": 7},
+                "type": "text",
+                "text": "experiment result",
+            },
+        }
+        acceptance._assert_chats({"items": [item], "next": "cursor"})
+        acceptance._assert_chats(
+            {
+                "items": [
+                    {
+                        **item,
+                        "id": 42,
+                        "type": "private",
+                        "is_bot": True,
+                        "last_message": {**item["last_message"], "chat_id": 42},
+                    }
+                ],
+                "next": None,
+            }
+        )
+        invalid = (
+            {"items": [], "next": "cursor"},
+            {"items": [item, item], "next": None},
+            {"items": [{**item, "is_bot": True}], "next": None},
+            {"items": [{**item, "folder_ids": [3, 2]}], "next": None},
+            {"items": [{**item, "unread_count": True}], "next": None},
+            {
+                "items": [
+                    {
+                        **item,
+                        "last_message": {**item["last_message"], "chat_id": -1002},
+                    }
+                ],
+                "next": None,
+            },
+            {
+                "items": [
+                    {
+                        **item,
+                        "last_message": {
+                            **item["last_message"],
+                            "topic": {"kind": "forum", "id": 2_147_483_648},
+                        },
+                    }
+                ],
+                "next": None,
+            },
+        )
+        for document in invalid:
+            with (
+                self.subTest(document=document),
+                self.assertRaises(acceptance.AcceptanceError),
+            ):
+                acceptance._assert_chats(document)
 
     def test_observed_prompts_map_only_to_their_pinned_auth_states(self) -> None:
         result = acceptance.CommandResult(
@@ -794,7 +874,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("tdlib.log", upload)
         self.assertNotIn(".stderr", upload)
         self.assertNotIn("tgcli-test-dc-fixtures", upload)
-        smoke = workflow.split("name: Run M1 authentication smoke", maxsplit=1)[1]
+        smoke = workflow.split(
+            "name: Run M1 authentication and M2 chats smoke", maxsplit=1
+        )[1]
         self.assertNotIn("TGCLI_TEST_DC_PASSWORD:", smoke)
         self.assertNotIn("TGCLI_TEST_DC_BOT_TOKEN:", smoke)
         for state in (

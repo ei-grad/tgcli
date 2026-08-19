@@ -7,6 +7,7 @@ add_executable(tgcli_unit_tests
     account_cli_test.cpp
     account_commands_test.cpp
     auth_bootstrap_test.cpp
+    chats_td_runtime_conversion_test.cpp
     login_commands_test.cpp
     logout_commands_test.cpp
     config_test.cpp
@@ -27,6 +28,7 @@ add_executable(tgcli_unit_tests
     request_session_test.cpp
     ready_read_test.cpp
     resolver_test.cpp
+    chats_commands_test.cpp
     routing_test.cpp
     server_test.cpp
     saved_commands_test.cpp

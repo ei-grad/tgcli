@@ -141,7 +141,7 @@ before the milestone is closed.
       `read`, `msg get`, `msg link`, `search`, `unread`, `fetch`, `resolve`,
       `chat info`, and `chat members`; validate actual result data and keep
       `history` schema-less as the canonical `read` alias
-- [ ] `tgcli chats`: Main/Archive/numeric-folder growing-prefix scan, exact
+- [x] `tgcli chats`: Main/Archive/numeric-folder growing-prefix scan, exact
       `(position.order, chat_id)` keyset, sparse unread pagination, and
       live-view continuation cases across restart/movement/removal/ties
 - [ ] `tgcli read`/`history`: limits, exclusive `--before`, inclusive
@@ -169,7 +169,7 @@ before the milestone is closed.
 - [x] Landed Saved test-DC flow: after auth smoke, run `tgcli saved tags`,
       validate the unpaginated tag-list result, and retain the exact sorted
       test-DC skip artifact contract
-- [ ] General M2 read test-DC flow: after auth smoke, run
+- [x] General M2 read test-DC flow: after auth smoke, run
       `tgcli chats -n 1 --json` and require exit 0 plus a schema-valid empty or
       non-empty list without a pre-created fixture
 - [ ] Review gate: M2 diff vs DESIGN.md

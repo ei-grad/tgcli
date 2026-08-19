@@ -1,0 +1,23 @@
+chat:
+  id: -1001
+  title: "Project"
+  type: supergroup
+  bot: no
+  usernames: "project"
+  archived: no
+  folder ids: 2
+  marked unread: no
+  unread: 3
+  mentions: 1
+  reactions: 0
+  poll votes: 0
+  last message:
+    id: 123
+    chat id: -1001
+    date: 2026-08-05T10:00:00Z
+    sender: user:42
+    outgoing: no
+    topic: forum:7
+    type: text
+    text: "experiment result"
+next: cursor-2

@@ -198,13 +198,13 @@ class TdClient::Impl {
     }
 
     std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                   TdChatListKind list, std::int32_t limit) {
+                                   TdChatList list, std::int32_t limit) {
         return send_read(authorization, TdFunctionKind::GetChats,
                          runtime_->make_get_chats(list, limit));
     }
 
     std::future<TdValue> load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                    TdChatListKind list, std::int32_t limit) {
+                                    TdChatList list, std::int32_t limit) {
         return send_read(authorization, TdFunctionKind::LoadChats,
                          runtime_->make_load_chats(list, limit));
     }
@@ -1290,12 +1290,24 @@ TdClient::get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization
 std::future<TdValue>
 TdClient::get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                     TdChatListKind list, std::int32_t limit) {
+    return get_chats(authorization, TdChatList{.kind = list}, limit);
+}
+
+std::future<TdValue>
+TdClient::get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization, TdChatList list,
+                    std::int32_t limit) {
     return impl_->get_chats(authorization, list, limit);
 }
 
 std::future<TdValue>
 TdClient::load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                      TdChatListKind list, std::int32_t limit) {
+    return load_chats(authorization, TdChatList{.kind = list}, limit);
+}
+
+std::future<TdValue>
+TdClient::load_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization, TdChatList list,
+                     std::int32_t limit) {
     return impl_->load_chats(authorization, list, limit);
 }
 

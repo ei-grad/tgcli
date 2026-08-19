@@ -2170,6 +2170,134 @@ TEST_CASE("Saved Messages no-daemon fake boundary preserves stdout and stderr di
     CHECK(scripted->sent_functions().size() == 4);
 }
 
+TEST_CASE("chats parser exposes exact filters and rejects invalid combinations locally",
+          "[cli][chats][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "chats-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("chats") != std::string::npos);
+
+    const auto help = run_binary_captured({"chats", "--help"}, env, "chats-help");
+    REQUIRE(help.exit_code == kOk);
+    const auto help_text = help.out + help.err;
+    for (const auto* option : {"--folder", "--archived", "--unread", "-n"}) {
+        CHECK(help_text.find(option) != std::string::npos);
+    }
+
+    struct InvalidCase {
+        std::string stem;
+        std::vector<std::string> arguments;
+        std::optional<std::string> argument;
+        std::string reason;
+    };
+    const std::vector<InvalidCase> cases{
+        {"chats-folder-zero", {"chats", "--folder", "0"}, "--folder", "invalid_argument"},
+        {"chats-folder-high", {"chats", "--folder", "2147483648"}, "--folder", "invalid_argument"},
+        {"chats-mutually-exclusive",
+         {"chats", "--archived", "--folder", "2"},
+         "--archived/--folder",
+         "mutually_exclusive"},
+        {"chats-limit-zero", {"chats", "-n", "0"}, "-n", "invalid_argument"},
+        {"chats-limit-high", {"chats", "-n", "101"}, "-n", "invalid_argument"},
+        {"chats-invalid-cursor",
+         {"chats", "--cursor", "not-a-cursor"},
+         "--cursor",
+         "invalid_cursor"},
+        {"chats-cursor-folder",
+         {"chats", "--cursor", "not-a-cursor", "--folder", "2"},
+         "--folder",
+         "invalid_argument"},
+        {"chats-cursor-archive",
+         {"chats", "--cursor", "not-a-cursor", "--archived"},
+         "--archived",
+         "invalid_argument"},
+        {"chats-cursor-unread",
+         {"chats", "--cursor", "not-a-cursor", "--unread"},
+         "--unread",
+         "invalid_argument"},
+        {"chats-cursor-limit",
+         {"chats", "--cursor", "not-a-cursor", "-n", "20"},
+         "-n",
+         "invalid_argument"},
+    };
+    for (const auto& test_case : cases) {
+        const auto outcome = run_binary_captured(test_case.arguments, env, test_case.stem);
+        INFO(test_case.stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        const auto error = json::parse(outcome.err);
+        CHECK(error["error"]["code"] == "USAGE");
+        CHECK(error["error"]["details"]["argument"] == *test_case.argument);
+        CHECK(error["error"]["details"]["reason"] == test_case.reason);
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("chats no-daemon fake boundary returns a strict empty result",
+          "[cli][chats][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    REQUIRE(scripted->clients().size() == 1);
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"chats"};
+    request.args = {{"archived", false},
+                    {"cursor", nullptr},
+                    {"folder", nullptr},
+                    {"limit", 1},
+                    {"unread", false}};
+    request.context.json = true;
+    request.context.cwd = "/";
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+    REQUIRE(scripted->wait_for_sent(2));
+    auto sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                                    .first_name = "Ada",
+                                                                    .last_name = "",
+                                                                    .usernames = {"ada"},
+                                                                    .phone_number = "12025550123",
+                                                                    .is_bot = false,
+                                                                    .is_premium = false}));
+    REQUIRE(scripted->wait_for_sent(3));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetChats);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdChats{.chat_ids = {}}));
+    REQUIRE(scripted->wait_for_sent(4));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::LoadChats);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdError{404, "Not Found"}));
+
+    const auto outcome = pending.get();
+    CHECK(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    const auto result = json::parse(outcome.out);
+    CHECK(result == json{{"items", json::array()}, {"next", nullptr}});
+    CHECK_THAT(result, test::matches_json_schema("chats.result.schema.json"));
+}
+
 TEST_CASE("resolve parser exposes its surface and rejects invalid selectors locally",
           "[cli][resolver][process][schema]") {
     const IsolatedEnv env;
@@ -2251,7 +2379,15 @@ TEST_CASE("resolve no-daemon fake boundary preserves JSON stream discipline",
                                                              .title = "Project",
                                                              .kind = core::TdChatKind::BasicGroup,
                                                              .related_id = 0,
-                                                             .tdlib_type_id = 1}));
+                                                             .tdlib_type_id = 1,
+                                                             .positions = {},
+                                                             .chat_lists = {},
+                                                             .is_marked_unread = false,
+                                                             .unread_count = 0,
+                                                             .unread_mention_count = 0,
+                                                             .unread_reaction_count = 0,
+                                                             .unread_poll_vote_count = 0,
+                                                             .last_message = std::nullopt}));
     const auto outcome = pending.get();
     CHECK(outcome.exit_code == kOk);
     CHECK(outcome.err.empty());

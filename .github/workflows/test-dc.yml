@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  m1-auth-smoke:
+  m1-auth-m2-chats-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -63,7 +63,7 @@ jobs:
           python3 scripts/materialize_test_dc_fixtures.py
           --output "$RUNNER_TEMP/tgcli-test-dc-fixtures"
 
-      - name: Run M1 authentication smoke
+      - name: Run M1 authentication and M2 chats smoke
         env:
           TGCLI_API_ID: ${{ secrets.TGCLI_TEST_DC_API_ID }}
           TGCLI_API_HASH: ${{ secrets.TGCLI_TEST_DC_API_HASH }}

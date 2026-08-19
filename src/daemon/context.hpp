@@ -9,6 +9,7 @@ class LoginCoordinator;
 class LogoutCoordinator;
 class AccountRemovalCoordinator;
 class SavedCoordinator;
+class ChatsCoordinator;
 class ResolveCoordinator;
 
 // Everything M0 command handlers need. Grows with the milestones (config,
@@ -25,6 +26,7 @@ struct DaemonContext {
     LogoutCoordinator* logout = nullptr;
     AccountRemovalCoordinator* account_removal = nullptr;
     SavedCoordinator* saved = nullptr;
+    ChatsCoordinator* chats = nullptr;
     ResolveCoordinator* resolver = nullptr;
     std::function<std::string()> auth_state = [] { return "unknown"; };
     // Wired by the daemon entrypoint; asks the server to shut down
