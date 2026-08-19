@@ -224,12 +224,37 @@ tgcli version
 
 ### 4.1 Selectors
 
-`<chat>` classification is deterministic and ordered: a signed decimal is a
-tdlib chat id and is never interpreted as a title; `@username` is an exact
-public username; an `https://t.me/...` or bare `t.me/...` value is classified
-with `getInternalLinkType`; every other non-empty value is a case-sensitive UTF-8
-byte substring over `chat.title`. Syntactically valid numeric and username
-selectors therefore never fall back to title matching.
+For every command other than `read --local`, `<chat>` classification remains
+deterministic and ordered: a signed decimal is a tdlib chat id and is never
+interpreted as a title; `@username` is an exact public username; an exact
+lowercase `https://t.me/...` or bare `t.me/...` value is classified with
+`getInternalLinkType`; every other non-empty value is a case-sensitive UTF-8 byte
+substring over `chat.title`. Syntactically valid numeric and username selectors
+never fall back to title matching. No local-read rule below changes that baseline.
+
+`read --local` uses this separate exact ordered preclassification before title
+fallback:
+
+| order | byte class | selector class |
+|---:|---|---|
+| 1 | syntactically valid signed decimal | numeric chat id |
+| 2 | `@` plus a nonempty valid-UTF-8 suffix | exact username |
+| 3 | exact lowercase `https://t.me/` or bare `t.me/` prefix | local t.me grammar below |
+| 4 | URL-like by the predicate below | `InvalidLink` |
+| 5 | every other nonempty valid-UTF-8 value | title substring |
+
+The URL-like predicate is true exactly when either (a) the bytes begin with an
+ASCII scheme matching `^[A-Za-z][A-Za-z0-9+.-]*://`, or (b) under ASCII-only
+case-insensitive comparison they begin with `t.me` or `www.t.me` and the next byte
+is end-of-input, `/`, `:`, `?`, or `#`. Step 3 wins only for its two exact
+case-sensitive prefixes. Consequently `http://t.me/x`, `HTTPS://t.me/x`,
+`https://T.me/x`, `https://www.t.me/x`, `https://user@t.me/x`,
+`https://t.me:443/x`, `https://example.com/x`, `T.ME/x`, `www.t.me/x`, and
+`t.me:443/x` are all `InvalidLink`; none is a title or reaches TDLib.
+`InvalidLink` is pre-Ready `USAGE/invalid_argument` with `argument:"selector"`.
+A value such as `example.com/x`, `notes/http`, or `Development` matches neither
+URL-like predicate and remains a title candidate. This preclassification performs
+no decoding, case folding outside the predicate, resolver call or TDLib call.
 
 Title matching scans active, non-secret chats in **fully loaded Main and
 Archive lists**. Main order precedes Archive order. `searchChats` may optimize
@@ -257,10 +282,45 @@ request start, and a miss is `NOT_FOUND` with exact details
 All other `read --local` selector branches are equally offline: numeric ids use
 local `getChat`; usernames and PublicChat/BotStart links match only active
 usernames already present in the materialized Main+Archive prefix; Saved
-Messages may use local `createPrivateChat(me.id, false)`. Message, invite, and
-direct-message links, or an unseen username, return the same
-`local_materialized` miss instead of calling `searchPublicChat`,
-`getMessageLinkInfo`, `checkChatInviteLink`, or full-info network lookups.
+Messages may use local `createPrivateChat(me.id, false)`.
+
+Local t.me classification is a closed ASCII byte grammar and performs no TDLib
+call. The only prefixes are exact lowercase `https://t.me/` and bare `t.me/`;
+`http`, uppercase or mixed-case scheme/host, `www`, userinfo, a port and every
+other host are invalid link input and never fall back to title matching. A local
+username has 1 through 32 bytes, begins with `[A-Za-z]`, continues with
+`[A-Za-z0-9_]`, contains no `__`, and does not end in `_`; matching preserves its
+exact bytes. Percent escapes, non-ASCII bytes, fragments, an empty/consecutive path
+component and a trailing slash are always malformed. After the prefix, the general
+structural envelope is one or more nonempty `[A-Za-z0-9_+-]+` path components
+separated by one slash and optionally `?key[=value](&key[=value])*`, where key is
+nonempty and key/value use `[A-Za-z0-9_-]*`. Exact recognized forms below take
+precedence; an envelope-valid remainder not matching one is `unsupported_link_type`.
+The only accepted/query-classified forms are:
+
+| exact bytes after either prefix | local class | result |
+|---|---|---|
+| `<username>` | `PublicChat` | match the exact active username |
+| `<username>?start=<parameter>` | `BotStart` | match an exact active private-bot username; never execute the parameter |
+| `<username>/<positive-decimal>` or `c/<positive-decimal>/<positive-decimal>` | `Message` | `NOT_FOUND/local_materialized` |
+| `+<base64url>` or `joinchat/<base64url>` | `ChatInvite` | `NOT_FOUND/local_materialized` |
+| `<username>?direct` | `DirectMessagesChat` | `NOT_FOUND/local_materialized` |
+
+`positive-decimal` is canonical `[1-9][0-9]*`. `base64url` is one or more
+`[A-Za-z0-9_-]` bytes. A BotStart parameter is zero or more of those same bytes
+and has no independent limit below the existing argv/frame bound. Its query is
+exactly one case-sensitive `start` pair: no duplicate, separator, extra key,
+missing `=`, or percent decoding is accepted; a username query beginning with
+`start` but not equal to that form is malformed, not a generic unsupported query.
+An exact prefix followed by an
+empty/invalid component or malformed path/query is `USAGE/invalid_argument`;
+another structurally valid ASCII path/query outside the table is
+`USAGE/unsupported_link_type`. None of these branches calls
+`getInternalLinkType`, `searchPublicChat`, `getMessageLinkInfo`,
+`checkChatInviteLink`, full-info lookup or another network-capable function. The
+existing terminal `resolve` adapter is not a permissible local-read shortcut.
+An unseen PublicChat/BotStart username returns the same
+`NOT_FOUND/local_materialized` miss.
 
 `<user>` accepts a positive tdlib user id, exact `@username`/public profile
 link, or a title substring over the display name. The global title domain is
@@ -294,16 +354,44 @@ invite, the observable sequence is Ready, `getMe`, `getInternalLinkType`, then
 materialization is not a Telegram-side write. Link resolution never joins a
 chat and never executes a bot-start parameter.
 
-`--since`/`--until` accept a valid `YYYY-MM-DD`, an ISO-8601 datetime with a
-UTC suffix, numeric offset or implicit UTC, or a positive relative
-`Nm`/`Nh`/`Nd`, with relative syntax exactly `^[1-9][0-9]*(m|h|d)$`.
-Fractional seconds of any finite precision are accepted.
-Relative values are evaluated once from the request-start wall clock. Date-only
-`since` is day start and date-only `until` is day end. Conversion to tdlib's
-integer seconds uses mathematical ceiling for the inclusive lower bound and
-floor for the inclusive upper bound. If the rounded `since` exceeds `until`,
-or either rounded endpoint does not fit tdlib's signed 32-bit seconds field,
-the command fails with pre-dispatch `USAGE`.
+`--since`/`--until` accept exactly one of these ASCII forms:
+
+```text
+YYYY-MM-DD
+YYYY-MM-DDTHH:MM:SS[.DIGITS](Z|[+-]HH:MM)
+[1-9][0-9]*(m|h|d)
+```
+
+All date/time digits are ASCII. The calendar form has a four-digit year from
+`0001` through `9999` and a real proleptic-Gregorian month/day, including the
+normal Gregorian leap-year rule. Datetime hour is `00` through `23`, minute and
+second are `00` through `59`, uppercase `T` and `Z` are literal, and a numeric
+offset has hour `00` through `23` and minute `00` through `59`. Both signs on a
+zero offset are accepted and denote UTC. Basic ISO forms, lowercase `t`/`z`, a
+space separator, a missing zone, offsets without the colon, leap second `60`,
+`24:00`, and trailing or surrounding bytes are invalid.
+
+If the decimal point is present, `DIGITS` contains one or more ASCII digits.
+There is no smaller fraction-length limit than the existing argv/protocol-frame
+size limit: parsing is linear, accumulates no unbounded integer, and records only
+whether any fractional digit is nonzero. Let `base` be the signed integral Unix
+second after applying the zone and let `fraction` be the parsed value in `[0,1)`.
+The inclusive `since` second is `base` when the fraction is absent or all zeroes
+and `base + 1` otherwise. The inclusive `until` second is always `base`. These are
+mathematical ceiling and floor even when `base` is negative.
+
+Date-only `since` is exact UTC day start. Date-only `until` is the last
+representable whole second before the next UTC day. Relative syntax remains
+exactly `^[1-9][0-9]*(m|h|d)$`; it denotes the request-start wall-clock instant
+minus that many whole minutes, hours, or 24-hour days for either flag and is
+rounded by the same lower/upper rule. The request-start wall clock is sampled
+once, and multiplication, calendar, zone and rounding arithmetic use a checked
+wide intermediate.
+
+If the rounded `since` exceeds `until`, or either rounded endpoint is outside
+tdlib's signed 32-bit seconds field, the command fails with pre-dispatch
+`USAGE`/`invalid_argument`. No rejected timestamp reaches Ready/getMe, resolution,
+or TDLib.
 
 Message ids are **tdlib message ids** everywhere (tdlib's message-id space
 differs from Telegram's server ids). `msg link` / `resolve` convert to/from
@@ -473,8 +561,11 @@ topic variants:
 `kind` is `forum`, `thread`, `direct`, or `saved`. A forum id is a positive
 `int32`; every other id is a positive `int53`. CLI selectors accept
 `forum:123`, `thread:456`, `direct:789`, and `saved:321`. A bare positive
-decimal is exactly an alias for `forum:<id>`; tgcli never guesses topic kind
-from chat type.
+decimal is exactly an alias for `forum:<id>`. The lexical grammar is
+`^(forum|thread|direct|saved):[1-9][0-9]*$` or bare `^[1-9][0-9]*$`, followed by
+the kind-specific numeric range check. A plus sign, minus sign, zero, leading
+zero, empty id, non-ASCII digit, whitespace or trailing byte is
+`USAGE`/`invalid_argument`; tgcli never guesses topic kind from chat type.
 
 Live topic-history dispatch is exact:
 
@@ -487,8 +578,34 @@ Live topic-history dispatch is exact:
 
 `--local` never calls those network-capable functions. It uses
 `getChatHistory(..., only_local=true)` and compares the complete tagged topic
-on each returned message. A `saved` topic paired with any other chat is
-pre-dispatch `USAGE`/`invalid_argument`.
+on each returned message for every admitted local topic; the channel/thread
+cross-chat case has the explicit `unsupported_mode` branch in `read` below.
+
+A `saved:<id>` operand or cursor state performs an exact ownership check after
+principal binding and chat resolution and before any date/history request. Through
+the same `ResolverConsumer` and absolute deadline, tgcli obtains the local result of
+exactly `createPrivateChat(principal.id, false)`. A request-scoped result already
+obtained while resolving a Saved Messages link is reused instead of sending it
+twice. The returned chat must be a structurally valid private chat for the bound
+non-bot principal, and its chat id must equal the resolved target chat id. A
+different target is `USAGE`/`invalid_argument` with `argument:"--topic"`; a TDLib
+error or malformed response uses the normal `read` target-phase error. This call is
+the existing allowed local Saved Messages materialization, not a Telegram-side
+write, and is also allowed under `--local`. No other topic kind performs it.
+
+The shared neutral `TdMessages` representation preserves tdlib's nonnegative
+`total_count`, the response vector including null positions, and each neutral
+`TdMessageSummary`. `MessageSummary` materialization and JSON conversion remain the
+single shared implementation used by `chats`, `read`, `msg get`, and later M2/M5
+consumers; read does not create a parallel message DTO.
+
+The typed boundary also exposes `TdMessageThreadInfo` with exactly
+`history_chat_id`, `history_thread_id`, and the returned vector of neutral starting
+messages from pinned `messageThreadInfo.chat_id`, `message_thread_id`, and
+`messages`. Reply metadata, unread count and draft are not retained. This is the
+only metadata seam for mapping a `thread:<id>` operand to its actual history chat.
+`getMessageThread` is a `DescriptorKind::Read` function admitted only through this
+user-read seam after bot preflight; pinned `Requests.cpp` applies `CHECK_IS_USER`.
 
 A `MessageSenderRef` is exactly `{"type":"user","id":42}` or
 `{"type":"chat","id":-1002}`. `MessageSummary` is:
@@ -583,13 +700,92 @@ below it can repeat, and removal of the anchor is harmless.
 `history` is a parser alias canonicalized to `read` before the protocol frame,
 schema lookup, cursor operation and error details. `--before` is exclusive;
 `--since` and `--until` are inclusive and can be combined with it. Output order
-is decreasing tdlib message id. The result is exactly:
+is decreasing tdlib message id. Contextual message/topic metadata carried by a
+resolved message or topic link is ignored. Only the explicit `--before` and
+`--topic` operands, or their normalized cursor state, govern the read.
+
+The result is exactly:
 
 ```json
 {"items":[],"next":null,"boundary":"local_boundary"}
 ```
 
 Every non-empty `items` element is a `MessageSummary`.
+
+First-page admission and dispatch order is exact:
+
+1. Parse and normalize every argument using the closed grammar above. Invalid
+   syntax stops before Ready/getMe.
+2. Bind Ready and one correlated `getMe` through one `ResolverConsumer` and the
+   request's already-computed absolute deadline.
+3. Reject a bot with `BOT_UNSUPPORTED`/`{"operation":"read"}` before selector or
+   history work.
+4. Resolve the explicit chat under `ActiveDialogs`, or `LocalMaterialized` for
+   `--local`; reject a secret target before a date/history call.
+5. Derive `history_chat_id`. It equals the resolved chat id for no topic, forum,
+   direct and saved topics; saved first performs the exact ownership check above.
+   A live `thread:<id>` instead makes exactly one
+   `getMessageThread(resolved_chat_id, id)` metadata call. The original resolved
+   chat/id remain the arguments later passed to `getMessageThreadHistory`, while
+   the metadata response supplies `history_chat_id`. For local thread reads, no
+   metadata call is allowed: a resolved `supergroup` uses the same chat id; a
+   resolved `channel` is `USAGE/unsupported_mode` because public TDLib exposes no
+   offline cross-chat discussion mapping; private/basic-group targets are
+   `USAGE/invalid_argument`.
+6. For a live first page with `--until`, call
+   `getChatMessageByDate(history_chat_id, until_floor)`. A 404 returns
+   `empty_before_until`. A successful response must be the exact message type,
+   materialize as a valid `MessageSummary`, have `chat_id == history_chat_id`, and
+   have nonzero tdlib date `<= until_floor`; wrong chat, zero/too-new date, null,
+   unknown or malformed response is `INTERNAL` for `read`. It is the inclusive
+   start anchor only when `--before` is absent.
+7. For a live first page with `--since`, call
+   `getChatMessageByDate(history_chat_id, since_ceil - 1)` after the until probe.
+   A successful response has the identical structural/history-chat/nonzero-date
+   checks and its date must be `<= since_ceil - 1`; this is the strongest exact
+   relation promised by pinned `getChatMessageByDate`. Wrong chat, zero/too-new
+   date, null, unknown or malformed response is `INTERNAL` for `read`. Its id is
+   the exclusive lower cutoff anchor. A 404 leaves the cutoff absent and does not
+   prove exhaustion. If `since_ceil == INT32_MIN`, no earlier tdlib second exists:
+   skip this call, leave the cutoff absent, and never synthesize `time_anchor`.
+8. Dispatch `getChatHistory` or the exact topic-history function and scan. A
+   thread call is exactly `getMessageThreadHistory(resolved_chat_id, topic.id,
+   from_message_id, 0, limit)`; every returned message is validated against
+   `history_chat_id`, not necessarily the original resolved chat.
+
+A live `getMessageThread` response is structurally valid only when both ids are
+nonzero int53, it contains at least one non-null valid starting `MessageSummary`,
+all starting messages have `chat_id == history_chat_id` and strictly decreasing
+unique ids, and the last starting-message id equals `history_thread_id`. If
+`history_chat_id == resolved_chat_id`, `history_thread_id` must equal the requested
+`thread:<id>`. If the chat ids differ, the resolved chat must be a `channel`; the
+history thread id may differ from the channel message id because pinned TDLib maps
+comments to the linked supergroup. Any wrong response type, null entry, id/type/chat
+inconsistency or malformed starting message is `INTERNAL` for `read` before a date
+or history call.
+Only that validated live channel/thread mapping may have
+`history_chat_id != resolved_chat_id`; every other admitted branch requires exact
+equality. From this point through page scanning, anchor removal, topic/time
+filtering, cutoff matching and result integrity, the expected message chat is
+always `history_chat_id`.
+
+When both `--before` and `--until` are present, the until call remains the required
+existence probe, but its returned id is not compared with `--before` and is not the
+history start. History starts from explicit `before` and removes it when returned;
+every new raw message is independently required to satisfy `date <= until_floor`
+before output. This implements the exact intersection without assuming any
+relationship between message-id and date order. Without `--before`, a successful
+until probe supplies an inclusive first history anchor and that first message is not
+removed. Without either operand, the first history anchor is zero.
+
+A continuation performs argument/cursor validation, Ready/getMe and bot preflight,
+resolves the cursor's numeric chat id, repeats the Saved ownership check when
+applicable, and starts exclusively after the cursor's raw anchor. A live thread
+continuation repeats exactly one `getMessageThread` metadata call and requires its
+validated `history_chat_id` to equal the cursor field; a mismatch is
+`USAGE/cursor_scope_mismatch`. It does not repeat first-page until/since date probes.
+A syntactically valid same-scope modified cursor remains a new explicit read request
+under §5.2 and carries no proof that tgcli emitted it.
 
 The exact relationship between `boundary` and `next` is:
 
@@ -599,7 +795,7 @@ The exact relationship between `boundary` and `next` is:
 | `time_anchor` | the exact inclusive `--since` cutoff anchor was reached | null |
 | `empty_before_until` | the initial live `getChatMessageByDate` for `--until` returned 404 | null |
 | `local_boundary` | a local invocation consumed no new raw message from its input anchor | null |
-| `tdlib_idle` | a live invocation produced no advancing raw message within the request's idle policy | null |
+| `tdlib_idle` | one structurally valid live history response produced zero new raw messages after optional inclusive-anchor removal | null |
 
 `next` is never the input cursor and is emitted only after strict raw progress.
 Consequently a filtered page may be
@@ -608,29 +804,67 @@ boundary or live idle condition is encountered after raw progress, that
 invocation still returns `page` and its advancing cursor; an unchanged next
 invocation exposes the terminal boundary with null `next`. This preserves the
 resume anchor without allowing a same-state cursor loop. `time_anchor` is
-terminal even when the invocation made raw progress.
+terminal even when the invocation made raw progress. There is no live idle timer,
+poll, retry, or short-page inference: one valid zero-progress response is
+`tdlib_idle`, while every valid short response with progress continues unless the
+output limit or a terminal time anchor was reached.
 
 Live reads use `getChatHistory` or the exact topic-history function above.
-For time filtering, the inclusive `--until` start anchor comes from
-`getChatMessageByDate(chat, until_floor)`, and the lower cutoff anchor from
-`getChatMessageByDate(chat, since_ceil - 1)`. Every returned message is also
-checked by timestamp. A 404 for the until anchor yields
-`empty_before_until`; a 404 for the since cutoff does not prove exhaustion.
-The scan terminates at the cutoff anchor, never merely because the first
-message with an older id has `date < since`.
+Every returned message is checked by timestamp. A zero tdlib date, represented as
+`date:null` in `MessageSummary`, satisfies neither a since nor an until predicate
+and is consumed but filtered when either bound is present. The scan terminates at
+the exact non-null cutoff anchor, before emitting it, never merely because a
+message has `date < since`. With the `INT32_MIN` or 404 no-cutoff branch, live
+termination is `tdlib_idle` unless another exact terminal wins.
 
 Local reads call only `getChatHistory(..., only_local=true)`, apply topic/time
 filters while scanning the entire available continuous prefix, and terminate
 at `local_boundary`; they never call `getChatMessageByDate`. tdlib's public
 local iterator stops where continuity is unknown and does not distinguish a
-gap from the true oldest message.
+gap from the true oldest message. In particular, crossing or filtering below a
+local `since` timestamp does not produce `time_anchor` and does not stop the scan;
+only a live invocation with the exact date-derived cutoff id can do so.
 
-Each history request asks for no more than `remaining + 1`; the inclusive
-anchor is removed. The scanner records the last consumed raw message before
-applying filters and has no bounded raw cap. A repeated/null-only upstream
-marker that claims continuation is `PAGINATION_INVALID`; an ordinary local
-zero-progress result or live idle result is the corresponding successful
-boundary.
+An unanchored or inclusive-until request asks for at most `remaining`; an
+exclusive before/cursor request asks for at most `remaining + 1`. Offset is always
+zero. Remove exactly one first message whose id equals the exclusive input anchor;
+if that anchor disappeared, accept the first strictly older new id and consume at
+most `remaining` entries so no unreturned raw entry is skipped. The scanner records
+the last consumed raw message before applying topic/time filters and has no bounded
+raw cap.
+
+A history response is structurally valid only when `total_count` is nonnegative and
+not smaller than the response vector length. `total_count` is informational and no
+value of it claims continuation: pinned plain-chat history reports a page-derived
+count while topic history may report the whole topic total. Pagination is therefore
+driven only by concrete non-null message ids. An empty vector, a null-only vector,
+or an anchor-only vector is valid zero raw progress regardless of `total_count` and
+produces `local_boundary` or `tdlib_idle` as above. A null mixed with a non-null new
+message is malformed `INTERNAL` because its ordered position cannot be validated.
+
+After optional anchor removal, every non-null raw message must have
+`chat_id == history_chat_id`, a valid shared `MessageSummary`, and a unique id
+strictly below the preceding
+new id and, for an exclusive input anchor, strictly below that anchor. A repeated,
+equal, increasing or otherwise non-advancing raw id is `PAGINATION_INVALID` with
+`{"operation":"read","reason":"non_advancing_upstream"}`. Invalid count,
+mixed-null, `chat_id != history_chat_id` or invalid-DTO responses are `INTERNAL`
+with the normal
+`read` details. Neither failure emits a result or partial stdout.
+
+The implementation dependency order is:
+
+1. land the shared `TopicRef`/`MessageSummary` conversion, `TdMessages` including
+   `total_count` and null positions, strict `TdMessageThreadInfo`, and typed
+   non-terminal `ResolverConsumer`;
+2. add pure timestamp/topic parsing, the exact read cursor and raw-page scanner;
+3. add the seven typed TD boundary calls (`getChatHistory`, `getChatMessageByDate`,
+   `getMessageThread` and four topic-history calls) and fake/native conversion
+   coverage;
+4. add the one `read` coordinator and canonical `history` parser alias; and
+5. add strict result schema/manifest validation, equivalent human goldens and the
+   complete fake/native/gate matrix. No step registers a partially implemented
+   public command.
 
 #### `msg get`, `msg link`, and `resolve`
 
@@ -4773,6 +5007,34 @@ daemon-side state. It contains a version, canonical operation, routed account,
 current `getMe.id`, page size, all normalized scopes/filters/resolved ids, and
 the complete upstream continuation or keyset.
 
+The version-1 `read` cursor contains exactly:
+
+```json
+{"version":1,"operation":"read","account":"main","user_id":42,"limit":20,"chat_id":-1001,"history_chat_id":-1001,"topic":null,"local":false,"since":null,"until":null,"since_cutoff_message_id":null,"from_message_id":123}
+```
+
+`user_id` is positive int53; `chat_id`, `history_chat_id`, and `from_message_id`
+are nonzero int53; `limit` is 1 through 100; `topic` is exact `TopicRef` or null;
+`local` is boolean;
+`since` and `until` are the normalized signed-int32 whole seconds or null; and
+`since_cutoff_message_id` is the exact nonzero int53 cutoff id or null. Local
+cursors always have a null cutoff. A non-null cutoff requires non-null `since` and
+`local:false`. `history_chat_id == chat_id` unless the topic kind is `thread`; a
+local cursor always has equal chat ids. The raw `from_message_id` is the last raw
+message consumed, not the last output match. Original selector spelling,
+`--before`, resolved-link context, the metadata `history_thread_id`, and original
+timestamp strings are absent.
+
+An emitted cursor records the state after first-page metadata/date probes completed;
+an accepted unsigned caller token proves no provenance and is only untrusted explicit
+read input. Continuation does not repeat date probes; it applies the supplied
+normalized filters and cutoff, while live thread metadata is independently
+re-derived as above. The exact object field set, scalar ranges, cross-field rules,
+canonical JSON serialization and canonical unpadded base64url re-encoding are
+validated before target dispatch.
+`history` accepts and emits this same `operation:"read"` token and never has an
+alias-specific cursor.
+
 The token is untrusted read input, not a security capability. A structurally
 valid same-account token that a caller manually changes within the accepted
 schema represents a new explicit read request and is accepted; tgcli does not
@@ -4862,7 +5124,12 @@ Implementation of the remaining M2 commands adds the following strict Draft
 | `chat-members.result.schema.json` | `chat members` |
 
 `history` has no manifest entry or schema because it canonicalizes to `read`.
-`read.result` includes the closed boundary enum and tagged topic definition.
+`read.result` is self-contained and has exactly `items`, `next`, and `boundary`.
+It includes the exact shared `MessageSummary`/tagged-topic definitions, permits zero
+through 100 items, and uses a strict one-of: `boundary:"page"` requires a nonempty
+cursor string, while `time_anchor`, `empty_before_until`, `local_boundary`, and
+`tdlib_idle` require `next:null`. Unknown properties are rejected at every object
+boundary.
 `fetch.result` has nullable `target_reached`, `oldest_message_id`, and
 `resume_from_message_id`, and has no `complete` or `history_end`.
 `msg-get.result.schema.json` has one through 100 exact `MessageSummary` items
@@ -4871,6 +5138,8 @@ and `next` is exactly null. `msg-link.result.schema.json` has exactly
 `link` is a string with `minLength:1` and no pattern, and `is_public` is
 boolean. Human output renders the same fields and matches the exact goldens
 above. Actual JSON data is validated against these strict schemas.
+The read/history slice adds no error schema and no non-stream error-manifest
+mapping; §4.8's fixed M7 error catalog remains unchanged.
 
 This M2 slice adds only those two result schemas and their result-manifest
 entries. It adds no `msg get`/`msg link` error schema and no error-catalog
@@ -4895,9 +5164,46 @@ M2 fake-boundary contract coverage must include:
 - exclusive `--before`, inclusive fractional/date-only time bounds, an
   out-of-order-date page that cannot terminate early, every topic kind, and
   local reads that issue no network-capable topic/date/link request;
+- the closed timestamp and topic lexical grammars, arbitrary finite fraction
+  lengths under the frame bound, mathematical rounding on both sides of epoch,
+  checked zone/relative/calendar arithmetic, date-only edges, `since > until`,
+  signed-int32 endpoints, and the no-subtraction `since == INT32_MIN` branch;
+- the complete local t.me byte table: both exact prefixes, username/start/id/token
+  boundaries, case, malformed scheme/host/port/userinfo, percent/non-ASCII,
+  empty/extra segments, trailing slash, query duplication/extras and fragments;
+  PublicChat/BotStart hits and misses; Message/Invite/Direct local misses; other
+  structurally valid types as unsupported; zero TD calls for malformed/unsupported
+  input; and zero `getInternalLinkType` or other network-capable calls for every
+  locally classified link; ordered `InvalidLink` versus title examples at the
+  initial classifier and byte-identical non-local baseline classification;
+- exact until-then-since-then-history call order; `--before` plus `--until`
+  existence-probe semantics without id/date comparison; inclusive-until versus
+  exclusive-before/cursor anchor removal; both probes' exact response type,
+  history-chat, nonzero-id/date and no-later-than-requested integrity; 404 probes;
+  zero/wrong-chat/too-new/malformed failures; and ignored resolver context;
+- one exact live `getMessageThread` call per thread invocation before date/history,
+  native factory/matcher descriptor fields, strict neutral metadata/start-message
+  conversion with unused reply/unread/draft fields discarded, same-chat identity,
+  channel to linked-supergroup remapping with a different root id, original history
+  call arguments,
+  returned-message validation against `history_chat_id`, continuation revalidation,
+  local supergroup same-chat behavior, and local channel `unsupported_mode` with no
+  metadata/history call;
+- shared scanner injection and every raw/anchor/filter/wrong-chat check using
+  `history_chat_id`, with a cross-chat fixture that would fail if source `chat_id`
+  were used and non-cross fixtures proving exact equality;
+- emitted post-probe cursor state versus fabricated/modified unsigned input with no
+  provenance claim, exact `history_chat_id` field/cross-field rules, live-thread
+  scope mismatch, alias identity, and no repeated first-page date probes;
+- exact Saved-topic ownership success, cached materialization reuse, wrong-chat
+  refusal, malformed/TD error mapping, cursor revalidation, and no other topic
+  making `createPrivateChat`;
 - filtered read pages with raw progress and zero items returning an advancing
   `page` cursor, followed by a zero-progress terminal boundary with null
-  `next`;
+  `next`; one-response live idle; local since always ending at
+  `local_boundary`; short-page continuation; count/vector integrity; empty,
+  anchor-only and null-only zero progress; mixed-null integrity failure; and
+  repeated/equal/increasing ids producing `PAGINATION_INVALID`;
 - the typed `ResolverConsumer` bind/resolve success/error/stop variants without
   a terminal, `read_target` retaining `ReadyReadStatus::Cancelled`, one
   principal binding, Ready/getMe/selector/target attribution, reuse of the same
@@ -5084,8 +5390,10 @@ The accepted selected-account reads `saved tags`, `saved search`, `resolve`,
 tombstone preflight and the selected account's logout-audit preflight before
 Ready/getMe or any command-specific tdlib request. Thus `msg get` and
 `msg link` cannot bypass an existing `REMOVAL_INCOMPLETE` or
-`AUDIT_INCOMPLETE` condition. No other M2 command is admitted to either list
-by this paragraph.
+`AUDIT_INCOMPLETE` condition. No other M2 command is admitted to either list by
+this paragraph: in particular, canonical `read` (including the `history` alias)
+does not run either recovery preflight. Registering read must preserve that closed
+dispatcher membership and pin the exclusion in the central preflight test.
 
 For each
 intent lacking a synced outcome, the reconciler does exactly this: intent with

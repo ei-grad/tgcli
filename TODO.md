@@ -130,30 +130,48 @@ before the milestone is closed.
 - [ ] Resolver: exact id/@username/t.me classification and link/bot matrix;
       arbitrary title substring over fully loaded active Main+Archive, local
       materialized-prefix scope, strict ambiguity candidates, and exact
-      username `NOT_FOUND` normalization
+      username `NOT_FOUND` normalization; the finalized `ResolverConsumer`
+      must provide the no-send local link classification required by `read
+      --local`, never route it through terminal resolve/`getInternalLinkType`
 - [ ] Shared M2 DTOs and parsing: lossless `TopicRef`, `MessageSummary`,
       `ChatIdentity`/`ChatSummary`, member/user/chat sender variants, int53
       boundaries, inclusive rounded timestamps, command-specific limits, and
-      neutral/native top-level message/messages/message-link conversion
+      neutral/native top-level message/messages/message-link/thread-info conversion;
+      `TdMessages` retains nonnegative `total_count`, null positions and shared
+      summaries without treating count as continuation state; strict thread metadata
+      retains history chat/thread ids and starting summaries only
 - [ ] Refactor the accepted resolver into the typed non-terminal
       `ResolverConsumer`: retain the ten-value M2 operation enum, use the
       separate M2-or-frozen-M3/M4 caller attribution, bind Ready/getMe once,
       return immutable contextual result and typed error/stop outcomes, retain
       `ReadyReadStatus::Cancelled` from target reads, and reuse one absolute
-      deadline
+      deadline; expose cached-or-exact local Saved chat materialization for the
+      read topic-ownership check
 - [ ] Output layer: equivalent human/JSON rendering, exact result/error shapes,
       stderr discipline, and self-contained untrusted cursors without a MAC or
       daemon state; reject bad scope and non-advancing upstream markers
 - [ ] Add strict Draft 2020-12 result schemas and manifest entries for `chats`,
       `read`, `search`, `unread`, `fetch`, `resolve`, `chat info`, and `chat
       members`; validate actual result data and keep `history` schema-less as
-      the canonical `read` alias
+      the canonical `read` alias; `read` adds no error-catalog mapping
+- [x] Freeze the `read`/`history` contract: closed ASCII timestamp/topic
+      grammars, exact before/until and signed-int32 since-anchor branches,
+      explicit-operand precedence over resolver context, Saved ownership, live
+      thread history-chat metadata and safe local-thread limits, count/progress/
+      idle/local-boundary rules, unsigned version-1 cursor state, preflight
+      exclusion, schema relation and dependency/test order
 - [x] `tgcli chats`: Main/Archive/numeric-folder growing-prefix scan, exact
       `(position.order, chat_id)` keyset, sparse unread pagination, and
       live-view continuation cases across restart/movement/removal/ties
-- [ ] `tgcli read`/`history`: limits, exclusive `--before`, inclusive
-      `--since`/`--until`, all four topic kinds, offline continuous-prefix
-      behavior, exact `boundary`/`next` mapping, and advancing raw cursors
+- [ ] `tgcli read`/`history`, after shared MessageSummary/TdMessages and
+      ResolverConsumer land: pure timestamp/topic/cursor/scanner foundation;
+      seven typed TD calls including `getMessageThread`; one canonical coordinator
+      plus parser alias; limits,
+      exclusive `--before`, inclusive `--since`/`--until`, all topic kinds,
+      offline continuous-prefix behavior with the explicit local channel/thread
+      refusal, exact `boundary`/`next` mapping and
+      advancing raw cursors; result schema/manifest, human goldens, fake/native
+      coverage and full mechanical gates; no new TestDC flow or skip
 - [ ] `tgcli msg get`, `tgcli msg link`: explicit positional ids govern after
       chat-only consumption of immutable resolver context; atomic ordered batch
       reads, malformed-response integrity precedence, exact link call/result,
