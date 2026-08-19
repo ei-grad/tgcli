@@ -154,6 +154,55 @@ fixture_root="$(mktemp -d)"
 source_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_tree=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 toolchain_image="docker.io/example/toolchain@sha256:$(printf 'c%.0s' {1..64})"
+
+schema_package="$fixture_root/schema-package"
+mkdir -p "$schema_package/docs/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" "$schema_package/docs/schemas/$schema_file"
+done
+bash "$checker" verify-schema-package "$schema_package" "$root/docs/schemas"
+
+missing_schema_package="$fixture_root/missing-schema-package"
+mkdir -p "$missing_schema_package/docs/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json; do
+    cp "$root/docs/schemas/$schema_file" "$missing_schema_package/docs/schemas/$schema_file"
+done
+expect_failure_message missing-packaged-stream-schema 'file set differs' \
+    bash "$checker" verify-schema-package "$missing_schema_package" "$root/docs/schemas"
+
+tampered_schema_package="$fixture_root/tampered-schema-package"
+mkdir -p "$tampered_schema_package/docs/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" "$tampered_schema_package/docs/schemas/$schema_file"
+done
+printf '\n' >> "$tampered_schema_package/docs/schemas/listen.item.schema.json"
+expect_failure_message tampered-packaged-stream-schema 'listen.item.schema.json differs' \
+    bash "$checker" verify-schema-package "$tampered_schema_package" "$root/docs/schemas"
+
+symlink_schema_package="$fixture_root/symlink-schema-package"
+mkdir -p "$symlink_schema_package/docs/schemas"
+for schema_file in \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" "$symlink_schema_package/docs/schemas/$schema_file"
+done
+ln -s "$root/docs/schemas/listen.item.schema.json" \
+    "$symlink_schema_package/docs/schemas/listen.item.schema.json"
+expect_failure_message symlink-packaged-stream-schema 'listen.item.schema.json is missing or unsafe' \
+    bash "$checker" verify-schema-package "$symlink_schema_package" "$root/docs/schemas"
+
 python3 - \
     "$fixture_root" \
     "$source_sha" \
@@ -946,6 +995,7 @@ required = [
     "no-shared",
     "-DOPENSSL_USE_STATIC_LIBS=TRUE",
     "verify-macos-build",
+    "verify-schema-package",
     "verify_re2_build.py",
     "write-sbom",
     "verify-sbom",
@@ -977,6 +1027,19 @@ if metadata.index("Validate the tag source and version") > metadata.index(
 ):
     raise SystemExit("tag source identity must be validated before repository code runs")
 
+linux = workflow.split("\n  linux-musl:\n", 1)[1].split("\n  macos-arch:\n", 1)[0]
+linux_package = linux.split("      - name: Package the Linux artifact\n", 1)[1]
+for schema_file in (
+    "docs/schemas/listen.item.schema.json",
+    "docs/schemas/stream-manifest.json",
+    "docs/schemas/stream.error.schema.json",
+    "docs/schemas/wait-for.result.schema.json",
+):
+    if schema_file not in linux_package:
+        raise SystemExit(f"Linux package is missing stream schema {schema_file}")
+if "verify-schema-package" not in linux_package:
+    raise SystemExit("Linux package does not verify its stream schema catalog")
+
 macos = workflow.split("\n  macos-arch:\n", 1)[1].split(
     "\n  macos-universal:\n", 1
 )[0]
@@ -1005,6 +1068,16 @@ for evidence in (
     if evidence not in universal:
         raise SystemExit(f"universal provenance is missing {evidence}")
 package_step = universal.split("      - name: Package the universal binary\n", 1)[1]
+for schema_file in (
+    "docs/schemas/listen.item.schema.json",
+    "docs/schemas/stream-manifest.json",
+    "docs/schemas/stream.error.schema.json",
+    "docs/schemas/wait-for.result.schema.json",
+):
+    if schema_file not in package_step:
+        raise SystemExit(f"universal package is missing stream schema {schema_file}")
+if "verify-schema-package" not in package_step:
+    raise SystemExit("universal package does not verify its stream schema catalog")
 package_verification = package_step.split(
     "bash scripts/check-release-artifact.sh verify-macos-build \\\n", 1
 )[1].split('          find "package/$package"', 1)[0]

@@ -1,0 +1,13 @@
+{
+  "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "commands": {
+    "listen": {
+      "item": "listen.item.schema.json",
+      "error": "stream.error.schema.json"
+    },
+    "wait-for": {
+      "result": "wait-for.result.schema.json",
+      "error": "stream.error.schema.json"
+    }
+  }
+}

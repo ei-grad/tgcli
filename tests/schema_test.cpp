@@ -256,9 +256,10 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                           {"me", {{"result", "me.result.schema.json"}}},
                           {"saved search", {{"result", "saved-search.result.schema.json"}}},
                           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
-                          {"version", {{"result", "version.result.schema.json"}}}}}};
+                          {"version", {{"result", "version.result.schema.json"}}},
+                          {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 15);
+    CHECK(manifest["commands"].size() == 16);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

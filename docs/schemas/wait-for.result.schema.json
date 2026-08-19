@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli wait-for result",
+  "$defs": {
+    "int53": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    },
+    "positiveInt53": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "timestampOrNull": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "not": { "const": "1970-01-01T00:00:00Z" },
+          "oneOf": [
+            {
+              "pattern": "^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:0[0-7])))Z$"
+            }
+          ]
+        }
+      ]
+    },
+    "sender": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "id"],
+          "properties": {
+            "type": { "const": "user" },
+            "id": { "$ref": "#/$defs/positiveInt53" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "id"],
+          "properties": {
+            "type": { "const": "chat" },
+            "id": { "$ref": "#/$defs/int53" }
+          }
+        }
+      ]
+    },
+    "topic": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "const": "forum" },
+            "id": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "enum": ["thread", "direct", "saved"] },
+            "id": { "$ref": "#/$defs/positiveInt53" }
+          }
+        }
+      ]
+    },
+    "messageSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "chat_id",
+        "date",
+        "sender",
+        "is_outgoing",
+        "topic",
+        "type",
+        "text"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53" },
+        "chat_id": { "$ref": "#/$defs/int53" },
+        "date": { "$ref": "#/$defs/timestampOrNull" },
+        "sender": { "$ref": "#/$defs/sender" },
+        "is_outgoing": { "type": "boolean" },
+        "topic": {
+          "oneOf": [
+            { "$ref": "#/$defs/topic" },
+            { "type": "null" }
+          ]
+        },
+        "type": { "enum": ["text", "photo", "video", "doc", "voice", "other"] },
+        "text": { "type": "string" }
+      }
+    }
+  },
+  "$ref": "#/$defs/messageSummary"
+}

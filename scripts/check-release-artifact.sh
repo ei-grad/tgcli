@@ -822,6 +822,102 @@ verify_remote_tag() {
     fi
 }
 
+verify_schema_package() {
+    local package_root="$1"
+    local source_directory="$2"
+
+    python3 - "$package_root" "$source_directory" <<'PY'
+import json
+import pathlib
+import sys
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"stream schema package verification failed: {message}")
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        fail(message)
+
+
+package_root = pathlib.Path(sys.argv[1])
+source_directory = pathlib.Path(sys.argv[2])
+package_directory = package_root / "docs/schemas"
+expected_catalog = {
+    "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
+    "commands": {
+        "listen": {
+            "item": "listen.item.schema.json",
+            "error": "stream.error.schema.json",
+        },
+        "wait-for": {
+            "result": "wait-for.result.schema.json",
+            "error": "stream.error.schema.json",
+        },
+    },
+}
+expected_files = {
+    "listen.item.schema.json",
+    "stream-manifest.json",
+    "stream.error.schema.json",
+    "wait-for.result.schema.json",
+}
+
+require(package_root.is_dir() and not package_root.is_symlink(), "package root is missing or unsafe")
+require(
+    package_directory.is_dir() and not package_directory.is_symlink(),
+    "packaged schema directory is missing or unsafe",
+)
+require(
+    source_directory.is_dir() and not source_directory.is_symlink(),
+    "source schema directory is missing or unsafe",
+)
+
+actual_entries = {entry.name for entry in package_directory.iterdir()}
+require(actual_entries == expected_files, "packaged stream schema file set differs")
+
+for filename in sorted(expected_files):
+    packaged_file = package_directory / filename
+    source_file = source_directory / filename
+    require(
+        packaged_file.is_file() and not packaged_file.is_symlink(),
+        f"packaged {filename} is missing or unsafe",
+    )
+    require(
+        source_file.is_file() and not source_file.is_symlink(),
+        f"source {filename} is missing or unsafe",
+    )
+    require(packaged_file.read_bytes() == source_file.read_bytes(), f"packaged {filename} differs")
+
+try:
+    catalog = json.loads((package_directory / "stream-manifest.json").read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    fail(f"stream manifest is invalid: {error}")
+require(catalog == expected_catalog, "stream manifest contract differs")
+
+referenced = {
+    filename
+    for contracts in catalog["commands"].values()
+    for filename in contracts.values()
+}
+require(
+    referenced == expected_files - {"stream-manifest.json"},
+    "stream manifest and packaged schemas are not bijective",
+)
+for filename in sorted(referenced):
+    try:
+        schema = json.loads((package_directory / filename).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        fail(f"packaged {filename} is invalid: {error}")
+    require(
+        isinstance(schema, dict)
+        and schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema",
+        f"packaged {filename} has an invalid dialect",
+    )
+PY
+}
+
 staged_archive_name() {
     python3 - "$1" "$2" <<'PY'
 import pathlib
@@ -931,6 +1027,7 @@ usage() {
     printf '       %s verify-release-bundle|verify-signed-layout <version> <directory>\n' "$0" >&2
     printf '       %s classify-release-state <version> <directory> <tag> <source-sha> <release-json>\n' "$0" >&2
     printf '       %s verify-remote-tag <source-sha> <owner/repository> <tag>\n' "$0" >&2
+    printf '       %s verify-schema-package <package-root> <source-schema-directory>\n' "$0" >&2
     printf '       %s staged-archive-name <component-id> <source-url>\n' "$0" >&2
     printf '       %s classify-linux|classify-macos\n' "$0" >&2
     return 2
@@ -972,6 +1069,10 @@ case "${1:-}" in
     verify-remote-tag)
         [[ "$#" -eq 4 ]] || usage
         verify_remote_tag "$2" "$3" "$4"
+        ;;
+    verify-schema-package)
+        [[ "$#" -eq 3 ]] || usage
+        verify_schema_package "$2" "$3"
         ;;
     staged-archive-name)
         [[ "$#" -eq 3 ]] || usage

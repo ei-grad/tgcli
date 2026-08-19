@@ -45,6 +45,9 @@
     },
     "version": {
       "result": "version.result.schema.json"
+    },
+    "wait-for": {
+      "result": "wait-for.result.schema.json"
     }
   }
 }

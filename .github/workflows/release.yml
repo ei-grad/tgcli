@@ -349,6 +349,15 @@ jobs:
           install -Dm0644 "$DEPENDENCY_LOCK" "dist/$package/$DEPENDENCY_LOCK"
           install -Dm0644 "$DEPENDENCY_LOCK_SCHEMA" \
             "dist/$package/$DEPENDENCY_LOCK_SCHEMA"
+          stream_schema_files=(
+            docs/schemas/listen.item.schema.json
+            docs/schemas/stream-manifest.json
+            docs/schemas/stream.error.schema.json
+            docs/schemas/wait-for.result.schema.json
+          )
+          for schema_file in "${stream_schema_files[@]}"; do
+            install -Dm0644 "$schema_file" "dist/$package/$schema_file"
+          done
           runtime_license_files=()
           while IFS= read -r license_file; do
             runtime_license_files+=("$license_file")
@@ -378,6 +387,7 @@ jobs:
             "$DEPENDENCY_LOCK"
             "$DEPENDENCY_LOCK_SCHEMA"
             tgcli
+            "${stream_schema_files[@]}"
             "${runtime_license_files[@]}"
           )
           expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)"
@@ -393,6 +403,9 @@ jobs:
             echo "Linux release package has an unexpected or unverifiable file set" >&2
             exit 1
           fi
+          bash scripts/check-release-artifact.sh verify-schema-package \
+            "dist/$package" \
+            docs/schemas
           python3 scripts/release/build_provenance.py verify-sbom \
             --artifact "dist/$package/tgcli" \
             --lock "dist/$package/$DEPENDENCY_LOCK" \
@@ -1049,6 +1062,16 @@ jobs:
           install -m 0644 "$DEPENDENCY_LOCK" "package/$package/$DEPENDENCY_LOCK"
           install -m 0644 "$DEPENDENCY_LOCK_SCHEMA" \
             "package/$package/$DEPENDENCY_LOCK_SCHEMA"
+          stream_schema_files=(
+            docs/schemas/listen.item.schema.json
+            docs/schemas/stream-manifest.json
+            docs/schemas/stream.error.schema.json
+            docs/schemas/wait-for.result.schema.json
+          )
+          install -d "package/$package/docs/schemas"
+          for schema_file in "${stream_schema_files[@]}"; do
+            install -m 0644 "$schema_file" "package/$package/$schema_file"
+          done
           runtime_license_files=()
           while IFS= read -r license_file; do
             runtime_license_files+=("$license_file")
@@ -1084,6 +1107,7 @@ jobs:
             "$DEPENDENCY_LOCK"
             "$DEPENDENCY_LOCK_SCHEMA"
             tgcli
+            "${stream_schema_files[@]}"
             "${runtime_license_files[@]}"
           )
           expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)"
@@ -1099,6 +1123,9 @@ jobs:
             echo "macOS release package has an unexpected or unverifiable file set" >&2
             exit 1
           fi
+          bash scripts/check-release-artifact.sh verify-schema-package \
+            "package/$package" \
+            docs/schemas
           bash scripts/check-release-artifact.sh verify-macos-build \
             "package/$package/tgcli" \
             "package/$package/PROVENANCE.json" \

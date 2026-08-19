@@ -1,0 +1,623 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli stream error",
+  "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "state": {
+      "enum": [
+        "unknown",
+        "wait_tdlib_parameters",
+        "wait_phone_number",
+        "wait_premium_purchase",
+        "wait_email_address",
+        "wait_email_code",
+        "wait_code",
+        "wait_other_device_confirmation",
+        "wait_registration",
+        "wait_password",
+        "ready",
+        "logging_out",
+        "closing",
+        "closed"
+      ]
+    },
+    "nullableState": {
+      "oneOf": [
+        { "$ref": "#/$defs/state" },
+        { "type": "null" }
+      ]
+    },
+    "int53": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    },
+    "positiveInt53": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "chatIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "type", "is_bot", "usernames"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53" },
+        "title": { "type": "string" },
+        "type": { "enum": ["private", "basic_group", "supergroup", "channel"] },
+        "is_bot": { "type": "boolean" },
+        "usernames": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "userIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "usernames", "is_bot"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInt53" },
+        "display_name": { "type": "string" },
+        "usernames": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "is_bot": { "type": "boolean" }
+      }
+    },
+    "usageError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "USAGE" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["argument", "reason"],
+          "properties": {
+            "argument": { "type": ["string", "null"] },
+            "reason": {
+              "enum": [
+                "missing_argument",
+                "invalid_argument",
+                "mutually_exclusive",
+                "unknown_command",
+                "invalid_environment",
+                "unsupported_mode",
+                "invalid_cursor",
+                "cursor_scope_mismatch",
+                "unsupported_chat_type",
+                "unsupported_link_type"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "notAuthedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "NOT_AUTHED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "state", "reason"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "state": { "$ref": "#/$defs/state" },
+            "reason": { "enum": ["not_ready", "authorization_lost", "login_required"] }
+          }
+        }
+      }
+    },
+    "botUnsupportedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "BOT_UNSUPPORTED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation"],
+          "properties": {
+            "operation": { "enum": ["resolve", "wait_for"] }
+          }
+        }
+      }
+    },
+    "notFoundError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "NOT_FOUND" },
+        "message": { "type": "string" },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selector"],
+              "properties": {
+                "selector": { "type": "string" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selector", "scope"],
+              "properties": {
+                "selector": { "type": "string" },
+                "scope": { "const": "local_materialized" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ambiguousError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "AMBIGUOUS" },
+        "message": { "type": "string" },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selector", "scope", "candidates", "truncated"],
+              "properties": {
+                "selector": { "type": "string" },
+                "scope": { "enum": ["active_dialogs", "local_materialized"] },
+                "candidates": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": { "$ref": "#/$defs/chatIdentity" }
+                },
+                "truncated": { "type": "boolean" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["selector", "candidates", "truncated"],
+              "properties": {
+                "selector": { "type": "string" },
+                "candidates": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": { "$ref": "#/$defs/userIdentity" }
+                },
+                "truncated": { "type": "boolean" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "rateLimitedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "RATE_LIMITED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "tdlib_code", "retry_after"],
+          "properties": {
+            "operation": { "enum": ["resolve", "listen", "wait_for"] },
+            "tdlib_code": { "const": 429 },
+            "retry_after": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "tdlibError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "TDLIB_ERROR" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "tdlib_code"],
+          "properties": {
+            "operation": { "enum": ["resolve", "listen", "wait_for"] },
+            "tdlib_code": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "timeoutError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "TIMEOUT" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "state"],
+          "properties": {
+            "operation": { "enum": ["resolve", "listen", "wait_for"] },
+            "state": { "$ref": "#/$defs/nullableState" }
+          }
+        }
+      }
+    },
+    "paginationInvalidError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "PAGINATION_INVALID" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "reason"],
+          "properties": {
+            "operation": { "enum": ["resolve", "listen", "wait_for"] },
+            "reason": { "const": "non_advancing_upstream" }
+          }
+        }
+      }
+    },
+    "daemonShutdownError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "DAEMON_SHUTDOWN" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {
+            "reason": { "const": "daemon_shutdown" }
+          }
+        }
+      }
+    },
+    "internalError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "INTERNAL" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "reason"],
+          "properties": {
+            "operation": { "enum": ["resolve", "listen", "wait_for"] },
+            "reason": { "const": "internal_error" }
+          }
+        }
+      }
+    },
+    "streamOverflowError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "STREAM_OVERFLOW" },
+        "message": { "type": "string" },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "cause",
+                "limit_items",
+                "limit_bytes",
+                "queued_items",
+                "queued_bytes",
+                "incoming_bytes"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "cause": { "const": "queue_items" },
+                "limit_items": { "const": 1024 },
+                "limit_bytes": { "const": 8388608 },
+                "queued_items": { "type": "integer", "minimum": 0, "maximum": 1024 },
+                "queued_bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+                "incoming_bytes": { "type": "integer", "minimum": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "cause",
+                "limit_items",
+                "limit_bytes",
+                "queued_items",
+                "queued_bytes",
+                "incoming_bytes"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "cause": { "const": "queue_bytes" },
+                "limit_items": { "const": 1024 },
+                "limit_bytes": { "const": 8388608 },
+                "queued_items": { "type": "integer", "minimum": 0, "maximum": 1024 },
+                "queued_bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+                "incoming_bytes": { "type": "integer", "minimum": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "cause", "limit_bytes", "incoming_bytes"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "cause": { "const": "item_bytes" },
+                "limit_bytes": { "const": 262144 },
+                "incoming_bytes": { "type": "integer", "minimum": 262145 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "cause",
+                "limit_items",
+                "limit_bytes",
+                "queued_items",
+                "queued_bytes",
+                "incoming_bytes"
+              ],
+              "properties": {
+                "operation": { "const": "wait_for" },
+                "cause": { "const": "history_overlap" },
+                "limit_items": { "const": 1024 },
+                "limit_bytes": { "const": 8388608 },
+                "queued_items": { "type": "integer", "minimum": 0, "maximum": 1024 },
+                "queued_bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+                "incoming_bytes": { "type": "integer", "minimum": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "cause"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "cause": { "const": "counter_exhausted" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "streamCapacityError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "STREAM_CAPACITY" },
+        "message": { "type": "string" },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "resource", "limit"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "admission" },
+                "resource": { "const": "subscriber_slots" },
+                "limit": { "const": 32 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "resource", "atomic"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "admission" },
+                "resource": { "const": "lock_free_ingress" },
+                "atomic": {
+                  "enum": [
+                    "slot_pointer",
+                    "publisher_count",
+                    "descriptor_index",
+                    "byte_index",
+                    "terminal_cause"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "phase",
+                "resource",
+                "limit_items",
+                "used_items",
+                "incoming_items"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "bootstrap" },
+                "resource": { "const": "metadata_bootstrap_items" },
+                "limit_items": { "const": 4096 },
+                "used_items": { "type": "integer", "minimum": 0, "maximum": 4096 },
+                "incoming_items": { "const": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "phase",
+                "resource",
+                "limit_bytes",
+                "used_bytes",
+                "incoming_bytes"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "bootstrap" },
+                "resource": { "const": "metadata_bootstrap_bytes" },
+                "limit_bytes": { "const": 16777216 },
+                "used_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+                "incoming_bytes": { "type": "integer", "minimum": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "resource", "limit", "used", "incoming"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "enum": ["bootstrap", "active"] },
+                "resource": { "const": "metadata_chats" },
+                "limit": { "const": 65536 },
+                "used": { "type": "integer", "minimum": 0, "maximum": 65536 },
+                "incoming": { "const": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "resource", "limit", "used", "incoming"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "enum": ["bootstrap", "active"] },
+                "resource": { "const": "metadata_entities" },
+                "limit": { "const": 131072 },
+                "used": { "type": "integer", "minimum": 0, "maximum": 131072 },
+                "incoming": { "const": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "phase",
+                "resource",
+                "limit_bytes",
+                "used_bytes",
+                "incoming_bytes"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "enum": ["bootstrap", "active"] },
+                "resource": { "const": "metadata_bytes" },
+                "limit_bytes": { "const": 67108864 },
+                "used_bytes": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+                "incoming_bytes": { "type": "integer", "minimum": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "phase",
+                "resource",
+                "limit_items",
+                "used_items",
+                "incoming_items"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "active" },
+                "resource": { "const": "metadata_order_items" },
+                "limit_items": { "const": 4096 },
+                "used_items": { "type": "integer", "minimum": 0, "maximum": 4096 },
+                "incoming_items": { "const": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "phase",
+                "resource",
+                "limit_bytes",
+                "used_bytes",
+                "incoming_bytes"
+              ],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "active" },
+                "resource": { "const": "metadata_order_bytes" },
+                "limit_bytes": { "const": 16777216 },
+                "used_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+                "incoming_bytes": { "type": "integer", "minimum": 1 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "resource", "limit_bytes", "incoming_bytes"],
+              "properties": {
+                "operation": { "enum": ["listen", "wait_for"] },
+                "phase": { "const": "active" },
+                "resource": { "const": "metadata_item_bytes" },
+                "limit_bytes": { "const": 262144 },
+                "incoming_bytes": { "type": "integer", "minimum": 262145 }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "oneOf": [
+        { "$ref": "#/$defs/usageError" },
+        { "$ref": "#/$defs/notAuthedError" },
+        { "$ref": "#/$defs/botUnsupportedError" },
+        { "$ref": "#/$defs/notFoundError" },
+        { "$ref": "#/$defs/ambiguousError" },
+        { "$ref": "#/$defs/rateLimitedError" },
+        { "$ref": "#/$defs/tdlibError" },
+        { "$ref": "#/$defs/timeoutError" },
+        { "$ref": "#/$defs/paginationInvalidError" },
+        { "$ref": "#/$defs/daemonShutdownError" },
+        { "$ref": "#/$defs/internalError" },
+        { "$ref": "#/$defs/streamOverflowError" },
+        { "$ref": "#/$defs/streamCapacityError" }
+      ]
+    }
+  }
+}
