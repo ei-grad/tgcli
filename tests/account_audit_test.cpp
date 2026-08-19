@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <fcntl.h>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <set>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -826,8 +828,7 @@ TEST_CASE("account audit streams mixed history and applies recognition precedenc
     daemon::AccountAuditAppendReceipt receipt;
     daemon::AccountAuditFailure failure;
     const auto intent = make_intent(daemon::AccountAuditOperation::Send);
-    REQUIRE(log.append_intent(intent, daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
-                              failure));
+    REQUIRE(log.append_intent(intent, daemon::KnownAccountAuditPins{}, guard, receipt, failure));
     CHECK(receipt.audit_generation != 0);
     auto inspection = log.inspect(guard);
     REQUIRE(inspection.status == daemon::AccountAuditInspectionStatus::Open);
@@ -946,9 +947,7 @@ TEST_CASE("account audit hole-first rotation covers every occupancy mask",
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        const auto pins =
-            mask == 15 ? daemon::AccountAuditPinSource{daemon::KnownAccountAuditPins{}}
-                       : daemon::AccountAuditPinSource{daemon::AbsentAccountAuditPinsByPolicy{}};
+        const daemon::AccountAuditPinSource pins = daemon::KnownAccountAuditPins{};
         REQUIRE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send), pins, guard,
                                   receipt, failure));
         unsigned after = 0;
@@ -959,7 +958,7 @@ TEST_CASE("account audit hole-first rotation covers every occupancy mask",
     }
 }
 
-TEST_CASE("account audit full rotation refuses absent pins and preserves pinned inodes",
+TEST_CASE("account audit ordinary writes refuse absent pins and preserve pinned inodes",
           "[account-audit][rotation][pins]") {
     AuditTree tree;
     tree.write({}, json_lines(complete_v2_records("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
@@ -977,7 +976,7 @@ TEST_CASE("account audit full rotation refuses absent pins and preserves pinned 
     CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
                                   daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
                                   failure));
-    CHECK(failure.reason == daemon::AccountAuditDurabilityReason::CapacityExhausted);
+    CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
 
     struct stat pinned {};
     REQUIRE(::stat(tree.audit(".4").c_str(), &pinned) == 0);
@@ -1117,8 +1116,7 @@ TEST_CASE("account audit maps filesystem faults and binds the coordinator accoun
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
         CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                      daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
-                                      failure));
+                                      daemon::KnownAccountAuditPins{}, guard, receipt, failure));
         CHECK(failure.reason == daemon::AccountAuditDurabilityReason::LockFailed);
     }
 
@@ -1142,7 +1140,7 @@ TEST_CASE("account audit maps filesystem faults and binds the coordinator accoun
             daemon::AccountAuditAppendReceipt receipt;
             daemon::AccountAuditFailure failure;
             CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                          daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
+                                          daemon::KnownAccountAuditPins{}, guard, receipt,
                                           failure));
             CHECK(failure.reason == expected_fault_reason(fault));
         }
@@ -1475,6 +1473,36 @@ TEST_CASE("account audit coordinator rejects unlocked files and reuses one mutex
     auto forged = daemon::AccountAuditCoordinator::create(forged_state.string(), "forged",
                                                           ::getuid(), {}, error);
     CHECK_FALSE(forged);
+
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        auto repeated = daemon::AccountAuditCoordinator::create(tree.state(), "main", ::getuid(),
+                                                                tree.lock_lease(), error);
+        REQUIRE(repeated);
+        CHECK(repeated.get() == &tree.coordinator());
+    }
+
+    const pid_t competitor = ::fork();
+    REQUIRE(competitor >= 0);
+    if (competitor == 0) {
+        const int descriptor =
+            ::open((tree.state() + "/daemon.lock").c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        if (descriptor < 0) {
+            ::_exit(91);
+        }
+        struct flock lock {};
+        lock.l_type = F_WRLCK;
+        lock.l_whence = SEEK_SET;
+        lock.l_start = 0;
+        lock.l_len = 0;
+        const int acquired = ::fcntl(descriptor, F_SETLK, &lock);
+        const int failure = errno;
+        ::close(descriptor);
+        ::_exit(acquired < 0 && (failure == EACCES || failure == EAGAIN) ? 0 : 92);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(competitor, &status, 0) == competitor);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
 }
 
 TEST_CASE("account audit scan and identity rescan share one interruption budget",
@@ -1507,6 +1535,48 @@ TEST_CASE("account audit scan and identity rescan share one interruption budget"
         REQUIRE(inspection.failure.interruption);
         CHECK(*inspection.failure.interruption ==
               daemon::AccountAuditFailure::Interruption::Cancelled);
+    }
+
+    SECTION("maximum record parsing observes cancellation inside the parser") {
+        AuditTree tree;
+        constexpr std::string_view prefix = R"({"schema_version":2,"phase":"intent","padding":")";
+        constexpr std::string_view suffix = R"("})";
+        REQUIRE(prefix.size() + suffix.size() < daemon::account_audit_limits::kIntentJsonBytes);
+        std::string record(prefix);
+        record.append(static_cast<std::size_t>(daemon::account_audit_limits::kIntentJsonBytes -
+                                               prefix.size() - suffix.size()),
+                      'x');
+        record += suffix;
+        record.push_back('\n');
+        tree.write({}, record);
+
+        std::atomic<bool> cancelled = false;
+        auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+        hooks->after_parser_poll = [&] { cancelled.store(true, std::memory_order_release); };
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+        daemon::AccountAuditScanControl control;
+        control.cancelled = [&] { return cancelled.load(std::memory_order_acquire); };
+        auto guard = tree.coordinator().lock(std::move(control));
+        const auto inspection = log.inspect(guard);
+        CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Interrupted);
+        REQUIRE(inspection.failure.interruption);
+        CHECK(*inspection.failure.interruption ==
+              daemon::AccountAuditFailure::Interruption::Cancelled);
+    }
+
+    SECTION("final classification rechecks the same cancellation") {
+        AuditTree tree;
+        std::atomic<bool> cancelled = false;
+        auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+        hooks->before_final_classification = [&] {
+            cancelled.store(true, std::memory_order_release);
+        };
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+        daemon::AccountAuditScanControl control;
+        control.cancelled = [&] { return cancelled.load(std::memory_order_acquire); };
+        auto guard = tree.coordinator().lock(std::move(control));
+        const auto inspection = log.inspect(guard);
+        CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Interrupted);
     }
 }
 
@@ -1663,18 +1733,306 @@ TEST_CASE("account audit runtime and generated schemas share operation boundarie
     CHECK_FALSE(daemon::validate_account_audit_checkpoint(forward, error));
     CHECK_FALSE(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(forward));
 
-    const auto schema = tgcli::test::load_schema_document("audit-intent.schema.json");
-    CHECK(schema["$defs"]["messageWriteResult"]["properties"]["text"]["x-tgcli-maxUtf8Bytes"] ==
-          16'384);
-    CHECK(schema["$defs"]["fileSnapshot"]["properties"]["name"]["x-tgcli-forbidControlScalars"] ==
-          true);
-    const auto& delete_branches = schema["oneOf"];
-    CHECK(std::any_of(delete_branches.begin(), delete_branches.end(), [](const json& branch) {
-        return branch.contains("properties") && branch["properties"].contains("command") &&
-               branch["properties"]["command"]["const"] == "msg_delete" &&
-               branch["properties"]["arguments"]["properties"]["message_ids"]
-                     ["x-tgcli-strictlyIncreasing"] == true;
-    }));
+    const std::vector<std::pair<std::string, std::vector<std::string>>> expected_rules{
+        {"audit-checkpoint.schema.json",
+         {"aggregate_serialized_bytes", "cross_record_equality_and_derivation",
+          "projected_uniqueness", "same_record_equality_and_derivation", "strict_numeric_order",
+          "utf8_byte_limits"}},
+        {"audit-intent.schema.json",
+         {"aggregate_serialized_bytes", "contextual_normalization",
+          "same_record_equality_and_derivation", "strict_numeric_order", "utf8_byte_limits"}},
+        {"audit-outcome.schema.json",
+         {"aggregate_serialized_bytes", "cross_record_equality_and_derivation",
+          "projected_uniqueness", "same_record_equality_and_derivation", "strict_numeric_order",
+          "utf8_byte_limits"}},
+    };
+    constexpr std::array<std::string_view, 8> forbidden_pseudo_assertions{
+        "x-tgcli-maxUtf8Bytes",
+        "x-tgcli-forbidControlScalars",
+        "x-tgcli-strictlyIncreasing",
+        "x-tgcli-strictlyIncreasingField",
+        "x-tgcli-serverWindow",
+        "x-tgcli-legalStagePrefixFor",
+        "x-tgcli-retryAfterEqualsMaximum",
+        "x-tgcli-terminalClass"};
+    for (const auto& [filename, rules] : expected_rules) {
+        const auto schema = tgcli::test::load_schema_document(filename);
+        CHECK(schema["$comment"] ==
+              "For schema_version 2, full tgcli contract validation also requires the "
+              "documentation-only x-tgcli-semanticValidation rules; an ordinary Draft 2020-12 "
+              "validator ignores that annotation.");
+        REQUIRE(schema.contains("x-tgcli-semanticValidation"));
+        const auto& marker = schema["x-tgcli-semanticValidation"];
+        CHECK(marker == json{{"annotationOnly", true},
+                             {"ordinaryDraft202012ValidationIsInsufficient", true},
+                             {"schemaVersion", 2},
+                             {"validator", "tgcli-runtime-v1"},
+                             {"rules", rules}});
+        CHECK(std::ranges::is_sorted(rules));
+        CHECK(std::set<std::string>(rules.begin(), rules.end()).size() == rules.size());
+        const auto bytes = schema.dump();
+        for (const auto pseudo_assertion : forbidden_pseudo_assertions) {
+            INFO(filename);
+            INFO(pseudo_assertion);
+            CHECK(bytes.find(pseudo_assertion) == std::string::npos);
+        }
+        REQUIRE(schema["oneOf"].is_array());
+        REQUIRE_FALSE(schema["oneOf"].empty());
+        const auto& v1_branch = schema["oneOf"].front();
+        const auto& v1_base = v1_branch.contains("properties") ? v1_branch : v1_branch["allOf"][0];
+        CHECK(v1_base["properties"]["schema_version"]["const"] == 1);
+        CHECK_FALSE(v1_branch.contains("x-tgcli-semanticValidation"));
+    }
+}
+
+TEST_CASE("account audit schemas assert every portable calendar path stage and terminal relation",
+          "[account-audit][contract][schema][ordinary]") {
+    const auto rejects_intent = [](const json& document) {
+        std::string error;
+        CHECK_FALSE(daemon::validate_account_audit_intent(document, error));
+        CHECK_FALSE(tgcli::test::matches_json_schema("audit-intent.schema.json").match(document));
+    };
+    for (const auto* timestamp : {"1969-12-31T23:59:59Z", "2001-02-29T00:00:00Z",
+                                  "2000-04-31T00:00:00Z", "9999-02-29T00:00:00Z"}) {
+        auto document = make_intent(daemon::AccountAuditOperation::Send).document();
+        document["timestamp"] = timestamp;
+        rejects_intent(document);
+    }
+    for (const auto* timestamp :
+         {"1972-02-29T00:00:00Z", "2000-02-29T23:59:59Z", "9996-02-29T12:34:56Z"}) {
+        auto document = make_intent(daemon::AccountAuditOperation::Send).document();
+        document["timestamp"] = timestamp;
+        std::string error;
+        CHECK(daemon::validate_account_audit_intent(document, error));
+        CHECK(tgcli::test::matches_json_schema("audit-intent.schema.json").match(document));
+    }
+
+    for (const std::string& invalid_name :
+         {std::string("bad\x1f", 4), std::string("bad\x7f", 4), std::string("bad\xc2\x80", 5)}) {
+        auto document = make_intent(daemon::AccountAuditOperation::SavedAttach).document();
+        document["plan"]["file"]["name"] = invalid_name;
+        document["plan"]["file"]["path"] = "/tmp/" + invalid_name;
+        rejects_intent(document);
+    }
+    for (const auto* invalid_path :
+         {"relative/input", "/tmp//input", "/tmp/./input", "/tmp/../input", "/tmp/input/"}) {
+        auto document = make_intent(daemon::AccountAuditOperation::SavedAttach).document();
+        document["plan"]["file"]["path"] = invalid_path;
+        rejects_intent(document);
+    }
+    {
+        auto document = make_intent(daemon::AccountAuditOperation::SavedAttach).document();
+        document["arguments"]["path"] = "input/";
+        rejects_intent(document);
+    }
+
+    const json audit_incomplete{
+        {"kind", "error"},
+        {"code", "AUDIT_INCOMPLETE"},
+        {"message", "a prior audited invocation did not reach a terminal proof"},
+        {"details",
+         {{"account", "main"},
+          {"path", "/tmp/audit.log"},
+          {"mutation_state", "none"},
+          {"completed_stages", json::array()}}},
+        {"exit_code", 1}};
+    std::string error;
+    auto outcome = daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         daemon::AccountAuditOperation::Send,
+         false,
+         daemon::AccountAuditMutationState::None,
+         {},
+         audit_incomplete},
+        error);
+    REQUIRE(outcome);
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json").match(outcome->document()));
+    auto illegal_stage_relation = outcome->document();
+    illegal_stage_relation["terminal"]["details"]["mutation_state"] = "possible";
+    CHECK_FALSE(daemon::validate_account_audit_outcome(illegal_stage_relation, error));
+    CHECK_FALSE(tgcli::test::matches_json_schema("audit-outcome.schema.json")
+                    .match(illegal_stage_relation));
+
+    const json sent{{"source_id", 1}, {"status", "sent"}, {"message", message_write()}};
+    const json failed{{"source_id", 2},
+                      {"status", "failed"},
+                      {"failure_reason", "upstream_null"},
+                      {"tdlib_code", nullptr},
+                      {"retry_after", nullptr}};
+    const auto forward_terminal = [](std::string code, std::string message, json items) {
+        return json{{"kind", "error"},
+                    {"code", std::move(code)},
+                    {"message", std::move(message)},
+                    {"details",
+                     {{"operation", "msg_forward"},
+                      {"from_chat_id", -1001},
+                      {"to_chat_id", -1002},
+                      {"items", std::move(items)}}},
+                    {"exit_code", 1}};
+    };
+    auto failed_outcome = daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         daemon::AccountAuditOperation::MsgForward,
+         false,
+         daemon::AccountAuditMutationState::None,
+         {daemon::AccountAuditStage::DispatchStarted, daemon::AccountAuditStage::ForwardProgress},
+         forward_terminal("FORWARD_FAILED", "messages could not be forwarded",
+                          json::array({failed}))},
+        error);
+    REQUIRE(failed_outcome);
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json")
+              .match(failed_outcome->document()));
+    auto failed_with_sent = failed_outcome->document();
+    failed_with_sent["terminal"]["details"]["items"] = json::array({sent});
+    CHECK_FALSE(daemon::validate_account_audit_outcome(failed_with_sent, error));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("audit-outcome.schema.json").match(failed_with_sent));
+
+    auto partial_outcome = daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         daemon::AccountAuditOperation::MsgForward,
+         false,
+         daemon::AccountAuditMutationState::Confirmed,
+         {daemon::AccountAuditStage::DispatchStarted, daemon::AccountAuditStage::ForwardProgress},
+         forward_terminal("FORWARD_PARTIAL", "some messages could not be forwarded",
+                          json::array({sent, failed}))},
+        error);
+    REQUIRE(partial_outcome);
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json")
+              .match(partial_outcome->document()));
+    auto partial_without_sent = partial_outcome->document();
+    partial_without_sent["terminal"]["details"]["items"] = json::array({failed});
+    CHECK_FALSE(daemon::validate_account_audit_outcome(partial_without_sent, error));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("audit-outcome.schema.json").match(partial_without_sent));
+}
+
+TEST_CASE("account audit semantic marker rules are runtime-only conjunction checks",
+          "[account-audit][contract][schema][runtime-only]") {
+    const auto schema_accepts_runtime_rejects_intent = [](const json& document) {
+        std::string error;
+        CHECK(tgcli::test::matches_json_schema("audit-intent.schema.json").match(document));
+        CHECK_FALSE(daemon::validate_account_audit_intent(document, error));
+    };
+
+    auto document = make_intent(daemon::AccountAuditOperation::MsgDelete).document();
+    document["arguments"]["message_ids"] = json::array({2, 1});
+    document["plan"]["message_ids"] = document["arguments"]["message_ids"];
+    schema_accepts_runtime_rejects_intent(document);
+
+    document = make_intent(daemon::AccountAuditOperation::Send).document();
+    document["arguments"]["text"] = "different";
+    schema_accepts_runtime_rejects_intent(document);
+
+    document = make_intent(daemon::AccountAuditOperation::SavedAttach).document();
+    document["plan"]["file"]["path"] = "/tmp/other";
+    schema_accepts_runtime_rejects_intent(document);
+
+    document = make_intent(daemon::AccountAuditOperation::Send).document();
+    std::string wide_title;
+    wide_title.reserve(1'048'578);
+    for (std::size_t index = 0; index < 524'289; ++index) {
+        wide_title += "\xc3\xa9";
+    }
+    document["plan"]["chat"]["title"] = std::move(wide_title);
+    schema_accepts_runtime_rejects_intent(document);
+
+    std::string error;
+    auto progress = checkpoint(daemon::AccountAuditOperation::MsgForward,
+                               daemon::AccountAuditStage::ForwardProgress, 1,
+                               {{"items", json::array({json{{"source_id", 1},
+                                                            {"status", "pending"},
+                                                            {"temporary_message_id", -1}},
+                                                       json{{"source_id", 2},
+                                                            {"status", "failed"},
+                                                            {"failure_reason", "upstream_null"},
+                                                            {"tdlib_code", nullptr},
+                                                            {"retry_after", nullptr}}})}})
+                        .document();
+    progress["data"]["items"][1]["source_id"] = 1;
+    CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(progress));
+    CHECK_FALSE(daemon::validate_account_audit_checkpoint(progress, error));
+
+    const json incomplete{{"kind", "error"},
+                          {"code", "AUDIT_INCOMPLETE"},
+                          {"message", "a prior audited invocation did not reach a terminal proof"},
+                          {"details",
+                           {{"account", "main"},
+                            {"path", std::string(6'000, '\x01')},
+                            {"mutation_state", "none"},
+                            {"completed_stages", json::array()}}},
+                          {"exit_code", 1}};
+    json aggregate_outcome{{"schema_version", 2},
+                           {"phase", "outcome"},
+                           {"invocation_id", "0123456789abcdef0123456789abcdef"},
+                           {"timestamp", "2026-08-19T12:00:02Z"},
+                           {"account", "main"},
+                           {"command", "chat_mark_read"},
+                           {"success", false},
+                           {"mutation_state", "none"},
+                           {"completed_stages", json::array()},
+                           {"terminal", incomplete}};
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json").match(aggregate_outcome));
+    CHECK_FALSE(daemon::validate_account_audit_outcome(aggregate_outcome, error));
+
+    auto mismatched_incomplete = aggregate_outcome;
+    mismatched_incomplete["terminal"]["details"]["path"] = "/tmp/audit.log";
+    mismatched_incomplete["terminal"]["details"]["mutation_state"] = "possible";
+    mismatched_incomplete["terminal"]["details"]["completed_stages"] =
+        json::array({"dispatch_started"});
+    CHECK(
+        tgcli::test::matches_json_schema("audit-outcome.schema.json").match(mismatched_incomplete));
+    CHECK_FALSE(daemon::validate_account_audit_outcome(mismatched_incomplete, error));
+
+    const json rate_limited{{"kind", "error"},
+                            {"code", "RATE_LIMITED"},
+                            {"message", "Telegram rate limit exceeded"},
+                            {"details",
+                             {{"operation", "msg_forward"},
+                              {"tdlib_code", 429},
+                              {"retry_after", 2},
+                              {"items", json::array({json{{"source_id", 1},
+                                                          {"status", "failed"},
+                                                          {"failure_reason", "tdlib_error"},
+                                                          {"tdlib_code", 429},
+                                                          {"retry_after", 2}},
+                                                     json{{"source_id", 2},
+                                                          {"status", "failed"},
+                                                          {"failure_reason", "tdlib_error"},
+                                                          {"tdlib_code", 429},
+                                                          {"retry_after", 3}}})}}},
+                            {"exit_code", 5}};
+    json rate_outcome{{"schema_version", 2},
+                      {"phase", "outcome"},
+                      {"invocation_id", "0123456789abcdef0123456789abcdef"},
+                      {"timestamp", "2026-08-19T12:00:02Z"},
+                      {"account", "main"},
+                      {"command", "msg_forward"},
+                      {"success", false},
+                      {"mutation_state", "none"},
+                      {"completed_stages", json::array({"dispatch_started", "forward_progress"})},
+                      {"terminal", rate_limited}};
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json").match(rate_outcome));
+    CHECK_FALSE(daemon::validate_account_audit_outcome(rate_outcome, error));
+
+    AuditTree tree;
+    append_line(tree, make_intent(daemon::AccountAuditOperation::Send).document());
+    auto cross_record = checkpoint(daemon::AccountAuditOperation::Send,
+                                   daemon::AccountAuditStage::DispatchStarted, 1,
+                                   {{"tdlib_function", "sendMessage"},
+                                    {"dispatch_token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                                    {"client_generation", std::uint64_t{1}}})
+                            .document();
+    cross_record["account"] = "other";
+    CHECK(daemon::validate_account_audit_checkpoint(cross_record, error));
+    CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(cross_record));
+    append_line(tree, cross_record);
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    CHECK(log.inspect(guard).status == daemon::AccountAuditInspectionStatus::Contradiction);
 }
 
 TEST_CASE("account audit forward proof is byte-semantic with its final vector and plan",
@@ -1702,6 +2060,79 @@ TEST_CASE("account audit forward proof is byte-semantic with its final vector an
     daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
     auto guard = tree.coordinator().lock();
     CHECK(log.inspect(guard).status == daemon::AccountAuditInspectionStatus::Contradiction);
+}
+
+TEST_CASE("account audit correlates every later item terminal with latest forward progress",
+          "[account-audit][forward][terminal][regression]") {
+    const auto inspect_with_terminal_items = [](json terminal_items) {
+        AuditTree tree;
+        auto intent = make_intent(daemon::AccountAuditOperation::MsgForward).document();
+        intent["arguments"]["message_ids"] = json::array({1, 2});
+        intent["plan"]["message_ids"] = json::array({1, 2});
+        append_line(tree, intent);
+        append_line(tree, checkpoint(daemon::AccountAuditOperation::MsgForward,
+                                     daemon::AccountAuditStage::DispatchStarted, 1,
+                                     {{"tdlib_function", "forwardMessages"},
+                                      {"dispatch_token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                                      {"client_generation", std::uint64_t{1}}})
+                              .document());
+        append_line(tree, checkpoint(daemon::AccountAuditOperation::MsgForward,
+                                     daemon::AccountAuditStage::TemporaryIdsObserved, 2,
+                                     {{"temporary_message_ids", json::array({-2})}})
+                              .document());
+        const json latest = json::array(
+            {json{{"source_id", 1}, {"status", "sent"}, {"message", message_write()}},
+             json{{"source_id", 2}, {"status", "pending"}, {"temporary_message_id", -2}}});
+        append_line(tree,
+                    checkpoint(daemon::AccountAuditOperation::MsgForward,
+                               daemon::AccountAuditStage::ForwardProgress, 3, {{"items", latest}})
+                        .document());
+        const json terminal{{"kind", "error"},
+                            {"code", "TIMEOUT"},
+                            {"message", "request timed out"},
+                            {"details",
+                             {{"operation", "msg_forward"},
+                              {"phase", "confirmation"},
+                              {"state", "ready"},
+                              {"outcome", "unknown"},
+                              {"idempotency", "not_requested"},
+                              {"items", std::move(terminal_items)}}},
+                            {"exit_code", 7}};
+        std::string error;
+        auto outcome = daemon::make_account_audit_outcome(
+            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:04Z"},
+             "main",
+             daemon::AccountAuditOperation::MsgForward,
+             false,
+             daemon::AccountAuditMutationState::Confirmed,
+             {daemon::AccountAuditStage::DispatchStarted,
+              daemon::AccountAuditStage::TemporaryIdsObserved,
+              daemon::AccountAuditStage::ForwardProgress},
+             terminal},
+            error);
+        INFO(error);
+        REQUIRE(outcome);
+        append_line(tree, outcome->document());
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+        auto guard = tree.coordinator().lock();
+        return log.inspect(guard).status;
+    };
+
+    const json latest =
+        json::array({json{{"source_id", 1}, {"status", "sent"}, {"message", message_write()}},
+                     json{{"source_id", 2}, {"status", "pending"}, {"temporary_message_id", -2}}});
+    CHECK(inspect_with_terminal_items(latest) == daemon::AccountAuditInspectionStatus::Clean);
+
+    auto changed_pending = latest;
+    changed_pending[1]["temporary_message_id"] = -3;
+    CHECK(inspect_with_terminal_items(changed_pending) ==
+          daemon::AccountAuditInspectionStatus::Contradiction);
+
+    auto wrong_sources = latest;
+    wrong_sources[0]["source_id"] = 2;
+    wrong_sources[1]["source_id"] = 3;
+    CHECK(inspect_with_terminal_items(wrong_sources) ==
+          daemon::AccountAuditInspectionStatus::Contradiction);
 }
 
 TEST_CASE("account audit validates dangling pins for every numbered occupancy mask",
@@ -1853,6 +2284,170 @@ TEST_CASE("account audit stored errors are closed by operation stage and exit",
          {},
          wrong_operation},
         error));
+}
+
+TEST_CASE("account audit stores spool failures only at saved attach spool prefixes",
+          "[account-audit][spool][terminal][regression]") {
+    const auto spool_error = [](std::string operation) {
+        return json{{"kind", "error"},
+                    {"code", "SPOOL_UNAVAILABLE"},
+                    {"message", "attachment spool is unavailable"},
+                    {"details",
+                     {{"operation", std::move(operation)},
+                      {"path", "/tmp/input"},
+                      {"reason", "write_failed"}}},
+                    {"exit_code", 1}};
+    };
+    std::string error;
+    CHECK_FALSE(daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         daemon::AccountAuditOperation::Send,
+         false,
+         daemon::AccountAuditMutationState::None,
+         {},
+         spool_error("send")},
+        error));
+    CHECK_FALSE(daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         daemon::AccountAuditOperation::SavedAttach,
+         false,
+         daemon::AccountAuditMutationState::Possible,
+         {daemon::AccountAuditStage::DispatchStarted},
+         spool_error("saved_attach")},
+        error));
+    auto valid = daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         daemon::AccountAuditOperation::SavedAttach,
+         false,
+         daemon::AccountAuditMutationState::None,
+         {daemon::AccountAuditStage::SpoolReady},
+         spool_error("saved_attach")},
+        error);
+    REQUIRE(valid);
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json").match(valid->document()));
+
+    auto after_dispatch = valid->document();
+    after_dispatch["mutation_state"] = "possible";
+    after_dispatch["completed_stages"] = json::array({"spool_ready", "dispatch_started"});
+    CHECK_FALSE(daemon::validate_account_audit_outcome(after_dispatch, error));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("audit-outcome.schema.json").match(after_dispatch));
+
+    auto wrong_operation = valid->document();
+    wrong_operation["command"] = "send";
+    wrong_operation["completed_stages"] = json::array();
+    wrong_operation["terminal"]["details"]["operation"] = "send";
+    CHECK_FALSE(daemon::validate_account_audit_outcome(wrong_operation, error));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("audit-outcome.schema.json").match(wrong_operation));
+}
+
+TEST_CASE("account audit pin absence is reserved for session terminate policy",
+          "[account-audit][pins][session][regression]") {
+    SECTION("ordinary writes require an actual pin snapshot") {
+        AuditTree tree;
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+        auto guard = tree.coordinator().lock();
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
+                                      daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
+                                      failure));
+        CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
+    }
+    SECTION("session terminate requires AbsentByPolicy") {
+        AuditTree tree;
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+        auto guard = tree.coordinator().lock();
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::SessionTerminate),
+                                      daemon::KnownAccountAuditPins{}, guard, receipt, failure));
+        CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
+    }
+    SECTION("session terminate accepts only non-evicting AbsentByPolicy capacity") {
+        AuditTree tree;
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+        auto guard = tree.coordinator().lock();
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        CHECK(log.append_intent(make_intent(daemon::AccountAuditOperation::SessionTerminate),
+                                daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt, failure));
+    }
+}
+
+TEST_CASE("account audit enforces file path roles and positive-int32 session time",
+          "[account-audit][contract][path][session][regression]") {
+    const auto make_saved = [](json args, json immutable_plan) {
+        std::string error;
+        return daemon::make_account_audit_intent(
+            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:00Z"},
+             "main",
+             daemon::AccountAuditOperation::SavedAttach,
+             std::move(args),
+             std::move(immutable_plan),
+             std::string(kFingerprint),
+             std::string(kSnapshot),
+             "request",
+             std::nullopt,
+             std::nullopt,
+             100},
+            error);
+    };
+
+    auto args = arguments(daemon::AccountAuditOperation::SavedAttach);
+    auto immutable_plan = plan(daemon::AccountAuditOperation::SavedAttach);
+    args["path"] = "relative//./input";
+    immutable_plan["file"]["path"] = "/cwd/relative/input";
+    auto accepted = make_saved(args, immutable_plan);
+    REQUIRE(accepted);
+    CHECK(accepted->document()["arguments"]["path"] == "relative//./input");
+    CHECK(accepted->document()["plan"]["file"]["path"] == "/cwd/relative/input");
+
+    for (const auto& invalid : {"relative/input", "/tmp//input", "/tmp/./input", "/tmp/../input",
+                                "/tmp/input/", "/tmp/other"}) {
+        args = arguments(daemon::AccountAuditOperation::SavedAttach);
+        immutable_plan = plan(daemon::AccountAuditOperation::SavedAttach);
+        immutable_plan["file"]["path"] = invalid;
+        CHECK_FALSE(make_saved(args, immutable_plan));
+    }
+    args = arguments(daemon::AccountAuditOperation::SavedAttach);
+    immutable_plan = plan(daemon::AccountAuditOperation::SavedAttach);
+    immutable_plan["file"]["path"] = "/" + std::string(4'096, 'a');
+    CHECK_FALSE(make_saved(args, immutable_plan));
+
+    for (const auto& invalid : {std::string("input/"), std::string(4'097, 'a')}) {
+        args = arguments(daemon::AccountAuditOperation::SavedAttach);
+        immutable_plan = plan(daemon::AccountAuditOperation::SavedAttach);
+        args["path"] = invalid;
+        CHECK_FALSE(make_saved(args, immutable_plan));
+    }
+
+    const auto make_session = [](std::string timestamp) {
+        auto immutable_plan = plan(daemon::AccountAuditOperation::SessionTerminate);
+        immutable_plan["session"]["last_active_date"] = std::move(timestamp);
+        std::string error;
+        return daemon::make_account_audit_intent(
+            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:00Z"},
+             "main",
+             daemon::AccountAuditOperation::SessionTerminate,
+             arguments(daemon::AccountAuditOperation::SessionTerminate),
+             std::move(immutable_plan),
+             std::string(kFingerprint),
+             std::string(kSnapshot),
+             "request",
+             std::optional<std::string>{"yes"},
+             std::nullopt,
+             100},
+            error);
+    };
+    CHECK(make_session("1970-01-01T00:00:01Z").has_value());
+    CHECK(make_session("2038-01-19T03:14:07Z").has_value());
+    CHECK_FALSE(make_session("1970-01-01T00:00:00Z"));
+    CHECK_FALSE(make_session("2038-01-19T03:14:08Z"));
 }
 
 // NOLINTEND(misc-const-correctness)

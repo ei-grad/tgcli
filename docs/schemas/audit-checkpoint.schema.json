@@ -1,5 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "For schema_version 2, full tgcli contract validation also requires the documentation-only x-tgcli-semanticValidation rules; an ordinary Draft 2020-12 validator ignores that annotation.",
+  "x-tgcli-semanticValidation": {
+    "annotationOnly": true,
+    "ordinaryDraft202012ValidationIsInsufficient": true,
+    "schemaVersion": 2,
+    "validator": "tgcli-runtime-v1",
+    "rules": [
+      "aggregate_serialized_bytes",
+      "cross_record_equality_and_derivation",
+      "projected_uniqueness",
+      "same_record_equality_and_derivation",
+      "strict_numeric_order",
+      "utf8_byte_limits"
+    ]
+  },
   "title": "tgcli logout audit checkpoint",
   "$defs": {
     "account": {
@@ -338,8 +353,33 @@
       "maximum": 253402300799
     },
     "v2Timestamp": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:19[7-9][0-9]|[2-9][0-9]{3})-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?:19(?:7[26]|8[048]|9[26])|[2-9][0-9](?:0[48]|[2468][048]|[13579][26])|(?:[2468][048]|[3579][26])00)-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+        }
+      ]
+    },
+    "v2SessionTimestamp": {
       "type": "string",
-      "pattern": "^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+      "not": {
+        "const": "1970-01-01T00:00:00Z"
+      },
+      "oneOf": [
+        {
+          "pattern": "^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+        },
+        {
+          "pattern": "^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+        },
+        {
+          "pattern": "^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:0[0-7])))Z$"
+        }
+      ]
     },
     "v2ConfigSnapshot": {
       "type": "string",
@@ -404,8 +444,7 @@
             },
             "title": {
               "type": "string",
-              "maxLength": 1048576,
-              "x-tgcli-maxUtf8Bytes": 1048576
+              "maxLength": 1048576
             },
             "type": {
               "enum": [
@@ -425,7 +464,6 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 32,
-                "x-tgcli-maxUtf8Bytes": 32,
                 "pattern": "^[A-Za-z0-9_]+$"
               }
             }
@@ -675,7 +713,6 @@
         "text": {
           "type": "string",
           "maxLength": 4096,
-          "x-tgcli-maxUtf8Bytes": 16384,
           "pattern": "^[^\\u0000]*$"
         },
         "scheduled": {
@@ -731,18 +768,15 @@
       "properties": {
         "path": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 16842751,
-          "x-tgcli-maxUtf8Bytes": 16842751,
-          "pattern": "^[^\\u0000]+$"
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^/(?!\\.{1,2}(?:/|$))[^/\\x00]+(?:/(?!\\.{1,2}(?:/|$))[^/\\x00]+)*$"
         },
         "name": {
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "x-tgcli-maxUtf8Bytes": 255,
-          "pattern": "^(?!\\.{1,2}$)[^/]+$",
-          "x-tgcli-forbidControlScalars": true
+          "pattern": "^(?!\\.{1,2}$)(?!.*(?:\\u0000|\\u0001|\\u0002|\\u0003|\\u0004|\\u0005|\\u0006|\\u0007|\\u0008|\\u0009|\\u000a|\\u000b|\\u000c|\\u000d|\\u000e|\\u000f|\\u0010|\\u0011|\\u0012|\\u0013|\\u0014|\\u0015|\\u0016|\\u0017|\\u0018|\\u0019|\\u001a|\\u001b|\\u001c|\\u001d|\\u001e|\\u001f|\\u007f|\\u0080|\\u0081|\\u0082|\\u0083|\\u0084|\\u0085|\\u0086|\\u0087|\\u0088|\\u0089|\\u008a|\\u008b|\\u008c|\\u008d|\\u008e|\\u008f|\\u0090|\\u0091|\\u0092|\\u0093|\\u0094|\\u0095|\\u0096|\\u0097|\\u0098|\\u0099|\\u009a|\\u009b|\\u009c|\\u009d|\\u009e|\\u009f))[^/]+$"
         },
         "size": {
           "$ref": "#/$defs/uint64"
@@ -831,33 +865,28 @@
         },
         "application_name": {
           "type": "string",
-          "maxLength": 1048576,
-          "x-tgcli-maxUtf8Bytes": 1048576
+          "maxLength": 1048576
         },
         "application_version": {
           "type": "string",
-          "maxLength": 1048576,
-          "x-tgcli-maxUtf8Bytes": 1048576
+          "maxLength": 1048576
         },
         "device_model": {
           "type": "string",
-          "maxLength": 1048576,
-          "x-tgcli-maxUtf8Bytes": 1048576
+          "maxLength": 1048576
         },
         "platform": {
           "type": "string",
-          "maxLength": 1048576,
-          "x-tgcli-maxUtf8Bytes": 1048576
+          "maxLength": 1048576
         },
         "system_version": {
           "type": "string",
-          "maxLength": 1048576,
-          "x-tgcli-maxUtf8Bytes": 1048576
+          "maxLength": 1048576
         },
         "last_active_date": {
           "oneOf": [
             {
-              "$ref": "#/$defs/v2Timestamp"
+              "$ref": "#/$defs/v2SessionTimestamp"
             },
             {
               "type": "null"
@@ -866,48 +895,28 @@
         }
       }
     },
-    "forwardItem": {
+    "forwardSentItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "status",
+        "message"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/positiveInt53"
+        },
+        "status": {
+          "const": "sent"
+        },
+        "message": {
+          "$ref": "#/$defs/messageWriteResult"
+        }
+      }
+    },
+    "forwardFailedItem": {
       "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "source_id",
-            "status",
-            "temporary_message_id"
-          ],
-          "properties": {
-            "source_id": {
-              "$ref": "#/$defs/positiveInt53"
-            },
-            "status": {
-              "const": "pending"
-            },
-            "temporary_message_id": {
-              "$ref": "#/$defs/int53"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "source_id",
-            "status",
-            "message"
-          ],
-          "properties": {
-            "source_id": {
-              "$ref": "#/$defs/positiveInt53"
-            },
-            "status": {
-              "const": "sent"
-            },
-            "message": {
-              "$ref": "#/$defs/messageWriteResult"
-            }
-          }
-        },
         {
           "type": "object",
           "additionalProperties": false,
@@ -1028,6 +1037,46 @@
               "$ref": "#/$defs/positiveInt32"
             }
           }
+        }
+      ]
+    },
+    "forwardTerminalItem": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/forwardSentItem"
+        },
+        {
+          "$ref": "#/$defs/forwardFailedItem"
+        }
+      ]
+    },
+    "forwardItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "status",
+            "temporary_message_id"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/positiveInt53"
+            },
+            "status": {
+              "const": "pending"
+            },
+            "temporary_message_id": {
+              "$ref": "#/$defs/int53"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/forwardSentItem"
+        },
+        {
+          "$ref": "#/$defs/forwardFailedItem"
         }
       ]
     }
@@ -1822,7 +1871,6 @@
                           "minItems": 1,
                           "maxItems": 100,
                           "uniqueItems": true,
-                          "x-tgcli-strictlyIncreasing": true,
                           "items": {
                             "$ref": "#/$defs/positiveInt53"
                           }
@@ -2080,7 +2128,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
-              "x-tgcli-strictlyIncreasingField": "source_id",
+              "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/forwardItem"
               }
@@ -2167,33 +2215,9 @@
                           "type": "array",
                           "minItems": 1,
                           "maxItems": 100,
-                          "x-tgcli-strictlyIncreasingField": "source_id",
+                          "uniqueItems": true,
                           "items": {
-                            "allOf": [
-                              {
-                                "$ref": "#/$defs/forwardItem"
-                              },
-                              {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": [
-                                  "source_id",
-                                  "status",
-                                  "message"
-                                ],
-                                "properties": {
-                                  "source_id": {
-                                    "$ref": "#/$defs/positiveInt53"
-                                  },
-                                  "status": {
-                                    "const": "sent"
-                                  },
-                                  "message": {
-                                    "$ref": "#/$defs/messageWriteResult"
-                                  }
-                                }
-                              }
-                            ]
+                            "$ref": "#/$defs/forwardSentItem"
                           }
                         }
                       }
@@ -2290,11 +2314,24 @@
                           "type": "array",
                           "minItems": 1,
                           "maxItems": 100,
-                          "x-tgcli-strictlyIncreasingField": "source_id",
+                          "uniqueItems": true,
                           "items": {
-                            "$ref": "#/$defs/forwardItem"
+                            "$ref": "#/$defs/forwardTerminalItem"
                           },
-                          "x-tgcli-terminalClass": "FORWARD_PARTIAL"
+                          "allOf": [
+                            {
+                              "contains": {
+                                "$ref": "#/$defs/forwardSentItem"
+                              },
+                              "minContains": 1
+                            },
+                            {
+                              "contains": {
+                                "$ref": "#/$defs/forwardFailedItem"
+                              },
+                              "minContains": 1
+                            }
+                          ]
                         }
                       }
                     },
@@ -2518,7 +2555,6 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 64,
-                          "x-tgcli-maxUtf8Bytes": 64,
                           "pattern": "^[^\\u0000]+$"
                         },
                         "removed": {

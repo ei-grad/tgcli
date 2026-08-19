@@ -49,16 +49,24 @@ class LifetimeLease final {
   private:
     friend std::shared_ptr<LifetimeLease> acquire_lifetime(const std::string& lock_path,
                                                            Identity& identity, std::string& error);
-    LifetimeLease(int fd, std::string path, Identity identity, std::uint64_t device,
-                  std::uint64_t inode)
-        : fd_(fd), path_(std::move(path)), identity_(std::move(identity)), device_(device),
-          inode_(inode) {}
+    LifetimeLease(int fd, int parent_fd, std::string path, std::string parent_path,
+                  std::string basename, Identity identity, std::uint64_t device,
+                  std::uint64_t inode, std::uint64_t parent_device, std::uint64_t parent_inode)
+        : fd_(fd), parent_fd_(parent_fd), path_(std::move(path)),
+          parent_path_(std::move(parent_path)), basename_(std::move(basename)),
+          identity_(std::move(identity)), device_(device), inode_(inode),
+          parent_device_(parent_device), parent_inode_(parent_inode) {}
 
     int fd_ = -1;
+    int parent_fd_ = -1;
     std::string path_;
+    std::string parent_path_;
+    std::string basename_;
     Identity identity_;
     std::uint64_t device_ = 0;
     std::uint64_t inode_ = 0;
+    std::uint64_t parent_device_ = 0;
+    std::uint64_t parent_inode_ = 0;
 };
 
 namespace detail {

@@ -209,6 +209,14 @@ TEST_CASE("schema lookup selects result then item and renders fixed all-kind ord
     CHECK_FALSE(tgcli::cli::find_schema_set("schema"));
     CHECK_FALSE(tgcli::cli::find_schema_set("daemon run"));
     CHECK_FALSE(tgcli::cli::find_schema_set("history"));
+    for (const auto* audit_target : {"audit intent", "audit checkpoint", "audit outcome"}) {
+        CHECK_FALSE(tgcli::cli::find_schema_set(audit_target));
+    }
+    for (const auto& mapping : tgcli::cli::embedded_schema_mappings()) {
+        CHECK(mapping.filename != "audit-intent.schema.json");
+        CHECK(mapping.filename != "audit-checkpoint.schema.json");
+        CHECK(mapping.filename != "audit-outcome.schema.json");
+    }
 }
 
 TEST_CASE("schema target completion keys expose only cataloged lookup operands",

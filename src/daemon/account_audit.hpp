@@ -276,6 +276,8 @@ struct AccountAuditHooks {
     std::function<bool(AccountAuditFault)> should_fail;
     std::function<void(std::string_view)> after_rotation_step;
     std::function<void()> before_identity_rescan;
+    std::function<void()> after_parser_poll;
+    std::function<void()> before_final_classification;
     std::uint64_t rotation_bytes = account_audit_limits::kRotationBytes;
 };
 } // namespace testing
@@ -343,6 +345,8 @@ class AccountAuditLog final {
                                       AccountAuditFailure& failure) const;
 
   private:
+    [[nodiscard]]
+    AccountAuditInspection inspect_unfinalized(const AccountAuditCoordinator::Guard& guard) const;
     std::string state_directory_;
     std::string audit_path_;
     std::string account_;

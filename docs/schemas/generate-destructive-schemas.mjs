@@ -26,11 +26,10 @@ const relation = (fields, constrained) =>
   );
 const constrained = (base, branches) => ({ allOf: [base, { oneOf: branches }] });
 const reference = (name) => ({ $ref: `#/$defs/${name}` });
-const utf8String = ({ minScalars = 0, maxScalars, maxBytes, pattern } = {}) => ({
+const utf8String = ({ minScalars = 0, maxScalars, pattern } = {}) => ({
   type: 'string',
   ...(minScalars > 0 ? { minLength: minScalars } : {}),
   ...(maxScalars !== undefined ? { maxLength: maxScalars } : {}),
-  ...(maxBytes !== undefined ? { 'x-tgcli-maxUtf8Bytes': maxBytes } : {}),
   ...(pattern !== undefined ? { pattern } : {}),
 });
 const noNulString = (limits = {}) => utf8String({ ...limits, pattern: '^[^\\u0000]*$' });
@@ -152,6 +151,81 @@ const uniquePrefixes = (branches, minimum = 1) => {
   return [...prefixes.values()];
 };
 
+const v2CompletedStagePrefixes = (operation) => {
+  const prefixes = new Map([[JSON.stringify([]), []]]);
+  for (const keyed of [false, true]) {
+    for (const temporary of [false, true]) {
+      for (const progress of [false, true]) {
+        for (const mutation of [false, true]) {
+          const complete = [];
+          if (keyed && operation !== 'session_terminate') complete.push('idempotency_pending');
+          if (operation === 'saved_attach') complete.push('spool_ready');
+          complete.push('dispatch_started');
+          if (temporary && ['send', 'msg_forward', 'saved_attach'].includes(operation)) {
+            complete.push('temporary_ids_observed');
+          }
+          if (progress && operation === 'msg_forward') complete.push('forward_progress');
+          if (mutation) complete.push('mutation_confirmed');
+          for (let length = 1; length <= complete.length; ++length) {
+            const prefix = complete.slice(0, length);
+            prefixes.set(JSON.stringify(prefix), prefix);
+          }
+        }
+      }
+    }
+  }
+  return [...prefixes.values()];
+};
+
+const timestampTimePattern = 'T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$';
+const v2YearPattern = '(?:19[7-9][0-9]|[2-9][0-9]{3})';
+const v2LeapYearPattern =
+  '(?:19(?:7[26]|8[048]|9[26])|[2-9][0-9](?:0[48]|[2468][048]|[13579][26])|' +
+  '(?:[2468][048]|[3579][26])00)';
+const regularCalendarPattern =
+  '(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|' +
+  '(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))';
+const v2TimestampSchema = {
+  oneOf: [
+    { type: 'string', pattern: `^${v2YearPattern}-${regularCalendarPattern}${timestampTimePattern}` },
+    { type: 'string', pattern: `^${v2LeapYearPattern}-02-29${timestampTimePattern}` },
+  ],
+};
+const v2SessionTimestampSchema = {
+  type: 'string',
+  not: { const: '1970-01-01T00:00:00Z' },
+  oneOf: [
+    {
+      pattern:
+        '^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-' +
+        `${regularCalendarPattern}${timestampTimePattern}`,
+    },
+    {
+      pattern:
+        '^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29' +
+        timestampTimePattern,
+    },
+    {
+      pattern:
+        '^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|' +
+        '2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):' +
+        '[0-5][0-9]|14:0[0-7])))Z$',
+    },
+  ],
+};
+const auditArgumentPath = () => ({
+  type: 'string',
+  minLength: 1,
+  maxLength: 4096,
+  pattern: '^[^\\x00]*[^\\x00/]$',
+});
+const forbiddenBasenameScalars = [
+  ...Array.from({ length: 32 }, (_value, code) => code),
+  ...Array.from({ length: 33 }, (_value, index) => index + 127),
+].map((code) => `\\u${code.toString(16).padStart(4, '0')}`).join('|');
+const safeBasenamePattern =
+  `^(?!\\.{1,2}$)(?!.*(?:${forbiddenBasenameScalars}))[^/]+$`;
+
 const snapshotPattern =
   '^sha256:[0-9a-f]{64};dev:(0|[1-9][0-9]*);ino:(0|[1-9][0-9]*);' +
   'size:(0|[1-9][0-9]*);ctime_ns:(0|[1-9][0-9]*)$';
@@ -255,12 +329,8 @@ const v2Definitions = () => ({
     maximum: int64Maximum,
   },
   unixSeconds: { type: 'integer', minimum: 0, maximum: 253402300799 },
-  v2Timestamp: {
-    type: 'string',
-    pattern:
-      '^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' +
-      'T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$',
-  },
+  v2Timestamp: v2TimestampSchema,
+  v2SessionTimestamp: v2SessionTimestampSchema,
   v2ConfigSnapshot: { type: 'string', pattern: snapshotPattern },
   v2Operation: { enum: v2Operations },
   v2Stage: { enum: v2Stages },
@@ -274,8 +344,7 @@ const v2Definitions = () => ({
         type: 'array',
         maxItems: 100,
         items: {
-          type: 'string', minLength: 1, maxLength: 32,
-          'x-tgcli-maxUtf8Bytes': 32, pattern: '^[A-Za-z0-9_]+$',
+          type: 'string', minLength: 1, maxLength: 32, pattern: '^[A-Za-z0-9_]+$',
         },
       },
     }),
@@ -336,13 +405,18 @@ const v2Definitions = () => ({
   fileSnapshot: object(
     ['path', 'name', 'size', 'sha256', 'device', 'inode', 'mtime_ns', 'ctime_ns'],
     {
-      path: nonemptyNoNulString({ maxScalars: 16842751, maxBytes: 16842751 }),
+      path: {
+        type: 'string',
+        minLength: 2,
+        maxLength: 4096,
+        pattern:
+          '^/(?!\\.{1,2}(?:/|$))[^/\\x00]+(?:/(?!\\.{1,2}(?:/|$))[^/\\x00]+)*$',
+      },
       name: {
         ...utf8String({
           minScalars: 1, maxScalars: 255, maxBytes: 255,
-          pattern: '^(?!\\.{1,2}$)[^/]+$',
+          pattern: safeBasenamePattern,
         }),
-        'x-tgcli-forbidControlScalars': true,
       },
       size: reference('uint64'),
       sha256: reference('sha256'),
@@ -390,21 +464,16 @@ const v2Definitions = () => ({
       device_model: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
       platform: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
       system_version: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
-      last_active_date: nullable(reference('v2Timestamp')),
+      last_active_date: nullable(reference('v2SessionTimestamp')),
     },
   ),
-  forwardItem: {
+  forwardSentItem: object(['source_id', 'status', 'message'], {
+    source_id: reference('positiveInt53'),
+    status: { const: 'sent' },
+    message: reference('messageWriteResult'),
+  }),
+  forwardFailedItem: {
     oneOf: [
-      object(['source_id', 'status', 'temporary_message_id'], {
-        source_id: reference('positiveInt53'),
-        status: { const: 'pending' },
-        temporary_message_id: reference('int53'),
-      }),
-      object(['source_id', 'status', 'message'], {
-        source_id: reference('positiveInt53'),
-        status: { const: 'sent' },
-        message: reference('messageWriteResult'),
-      }),
       ...['upstream_null', 'deleted_before_confirmation'].map((failureReason) =>
         object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
           source_id: reference('positiveInt53'),
@@ -429,6 +498,20 @@ const v2Definitions = () => ({
       }),
     ],
   },
+  forwardTerminalItem: {
+    oneOf: [reference('forwardSentItem'), reference('forwardFailedItem')],
+  },
+  forwardItem: {
+    oneOf: [
+      object(['source_id', 'status', 'temporary_message_id'], {
+        source_id: reference('positiveInt53'),
+        status: { const: 'pending' },
+        temporary_message_id: reference('int53'),
+      }),
+      reference('forwardSentItem'),
+      reference('forwardFailedItem'),
+    ],
+  },
 });
 const auditDefinitions = () => ({ ...definitions(), ...v2Definitions() });
 
@@ -444,7 +527,6 @@ const positiveInt53Array = () => ({
   minItems: 1,
   maxItems: 100,
   uniqueItems: true,
-  'x-tgcli-strictlyIncreasing': true,
   items: reference('positiveInt53'),
 });
 const v2Arguments = (operation) => {
@@ -520,7 +602,7 @@ const v2Arguments = (operation) => {
     chat_leave: object(['chat'], { chat: string }),
     saved_attach: object(['message_id', 'path', 'caption'], {
       message_id: reference('positiveInt53'),
-      path: string,
+      path: auditArgumentPath(),
       caption: noNulString({ maxScalars: 1024, maxBytes: 4096 }),
     }),
     session_terminate: object(['session_id'], { session_id: reference('sessionId') }),
@@ -570,8 +652,7 @@ const v2Plan = (operation) => {
             observed_server_unix_time: { type: 'null' },
           },
         ),
-        {
-          ...planRelation(
+        planRelation(
             ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
               'schedule', 'observed_server_unix_time'],
             {
@@ -581,8 +662,6 @@ const v2Plan = (operation) => {
             observed_server_unix_time: reference('int64'),
             },
           ),
-          'x-tgcli-serverWindow': { minimumLeadSeconds: 11, maximumLeadSeconds: 31622400 },
-        },
       ],
     ),
     msg_edit: plan(['chat', 'message_id', 'text'], {
@@ -711,18 +790,8 @@ const v2ResultData = (operation) => {
       from_chat_id: reference('chatId'),
       to_chat_id: reference('chatId'),
       items: {
-        type: 'array', minItems: 1, maxItems: 100,
-        'x-tgcli-strictlyIncreasingField': 'source_id',
-        items: {
-          allOf: [
-            reference('forwardItem'),
-            object(['source_id', 'status', 'message'], {
-              source_id: reference('positiveInt53'),
-              status: { const: 'sent' },
-              message: reference('messageWriteResult'),
-            }),
-          ],
-        },
+        type: 'array', minItems: 1, maxItems: 100, uniqueItems: true,
+        items: reference('forwardSentItem'),
       },
     }),
     msg_react: object(['chat_id', 'message_id', 'reaction', 'removed', 'big'], {
@@ -814,8 +883,8 @@ const storedError = (code, details, exitCode, message) => ({
 const operationDetails = (operation, fields, properties) =>
   object(['operation', ...fields], { operation: { const: operation }, ...properties });
 const storedForwardItems = (minimum = 1) => ({
-  type: 'array', minItems: minimum, maxItems: 100,
-  'x-tgcli-strictlyIncreasingField': 'source_id', items: reference('forwardItem'),
+  type: 'array', minItems: minimum, maxItems: 100, uniqueItems: true,
+  items: reference('forwardTerminalItem'),
 });
 const storedTimeoutDetails = (operation) => {
   if (operation === 'session_terminate') {
@@ -879,18 +948,45 @@ const preconditionReasons = {
   chat_leave: ['wrong_chat_type'],
   saved_attach: ['wrong_content_type', 'wrong_topic'],
 };
+const v2AuditIncompleteDetails = (operation) => {
+  const fields = ['account', 'path', 'mutation_state', 'completed_stages'];
+  const prefixes = v2CompletedStagePrefixes(operation);
+  const undispatched = prefixes.filter((value) => !value.includes('dispatch_started'));
+  const proved = prefixes.filter((value) => value.includes('mutation_confirmed'));
+  const progress = prefixes.filter((value) =>
+    value.includes('forward_progress') && !value.includes('mutation_confirmed'));
+  const ambiguous = prefixes.filter((value) =>
+    value.includes('dispatch_started') && !value.includes('forward_progress') &&
+    !value.includes('mutation_confirmed'));
+  return constrained(
+    object(fields, {
+      account: reference('account'),
+      path: nonemptyNoNulString({ maxScalars: 16842751, maxBytes: 16842751 }),
+      mutation_state: { enum: ['none', 'possible', 'confirmed'] },
+      completed_stages: { enum: prefixes },
+    }),
+    [
+      relation(fields, {
+        mutation_state: { const: 'none' }, completed_stages: { enum: undispatched },
+      }),
+      relation(fields, {
+        mutation_state: { const: 'confirmed' }, completed_stages: { enum: proved },
+      }),
+      relation(fields, {
+        mutation_state: { enum: ['none', 'possible', 'confirmed'] },
+        completed_stages: { enum: progress },
+      }),
+      relation(fields, {
+        mutation_state: { const: 'possible' }, completed_stages: { enum: ambiguous },
+      }),
+    ].filter((branch) => branch.properties.completed_stages.enum.length > 0),
+  );
+};
 const v2StoredErrorBranches = (operation) => {
   const branches = [
     storedError(
       'AUDIT_INCOMPLETE',
-      object(['account', 'path', 'mutation_state', 'completed_stages'], {
-        account: reference('account'), path: nonemptyNoNulString({ maxBytes: 16842751 }),
-        mutation_state: { enum: ['none', 'possible', 'confirmed'] },
-        completed_stages: {
-          type: 'array', maxItems: 6, uniqueItems: true, items: reference('v2Stage'),
-          'x-tgcli-legalStagePrefixFor': operation,
-        },
-      }),
+      v2AuditIncompleteDetails(operation),
       1,
       { const: 'a prior audited invocation did not reach a terminal proof' },
     ),
@@ -923,20 +1019,28 @@ const v2StoredErrorBranches = (operation) => {
       operation, ['tdlib_code', 'retry_after', 'items'], {
         tdlib_code: { const: 429 }, retry_after: reference('positiveInt32'),
         items: {
-          type: 'array', minItems: 0, maxItems: 100,
-          'x-tgcli-strictlyIncreasingField': 'source_id',
-          'x-tgcli-retryAfterEqualsMaximum': true, items: failed429,
+          type: 'array', minItems: 0, maxItems: 100, uniqueItems: true, items: failed429,
         },
       },
     ), 5));
-    for (const code of ['FORWARD_FAILED', 'FORWARD_PARTIAL']) {
-      branches.push(storedError(code, operationDetails(
-        operation, ['from_chat_id', 'to_chat_id', 'items'], {
-          from_chat_id: reference('chatId'), to_chat_id: reference('chatId'),
-          items: { ...storedForwardItems(), 'x-tgcli-terminalClass': code },
+    branches.push(storedError('FORWARD_FAILED', operationDetails(
+      operation, ['from_chat_id', 'to_chat_id', 'items'], {
+        from_chat_id: reference('chatId'), to_chat_id: reference('chatId'),
+        items: { ...storedForwardItems(), items: reference('forwardFailedItem') },
+      },
+    ), 1));
+    branches.push(storedError('FORWARD_PARTIAL', operationDetails(
+      operation, ['from_chat_id', 'to_chat_id', 'items'], {
+        from_chat_id: reference('chatId'), to_chat_id: reference('chatId'),
+        items: {
+          ...storedForwardItems(),
+          allOf: [
+            { contains: reference('forwardSentItem'), minContains: 1 },
+            { contains: reference('forwardFailedItem'), minContains: 1 },
+          ],
         },
-      ), 1));
-    }
+      },
+    ), 1));
   } else {
     branches.push(storedError('RATE_LIMITED', operationDetails(
       operation, ['tdlib_code', 'retry_after'], {
@@ -965,20 +1069,22 @@ const v2StoredErrorBranches = (operation) => {
   }
   if (operation === 'saved_attach') {
     branches.push(storedError('INPUT_CHANGED', operationDetails(operation, ['path'], {
-      path: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 4096 }),
+      path: auditArgumentPath(),
     }), 1));
   }
-  branches.push(storedError('SPOOL_UNAVAILABLE', operationDetails(
-    operation, ['path', 'reason'], {
-      path: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 4096 }),
-      reason: { enum: [
-        'path_invalid', 'wrong_owner', 'wrong_type', 'wrong_mode', 'wrong_link_count',
-        'too_large', 'capacity_exhausted', 'open_failed', 'lock_failed', 'read_failed',
-        'write_failed', 'sync_failed', 'rename_failed', 'directory_sync_failed',
-        'parse_error', 'schema_error', 'contradiction',
-      ] },
-    },
-  ), 1));
+  if (operation === 'saved_attach') {
+    branches.push(storedError('SPOOL_UNAVAILABLE', operationDetails(
+      operation, ['path', 'reason'], {
+        path: auditArgumentPath(),
+        reason: { enum: [
+          'path_invalid', 'wrong_owner', 'wrong_type', 'wrong_mode', 'wrong_link_count',
+          'too_large', 'capacity_exhausted', 'open_failed', 'lock_failed', 'read_failed',
+          'write_failed', 'sync_failed', 'rename_failed', 'directory_sync_failed',
+          'parse_error', 'schema_error', 'contradiction',
+        ] },
+      },
+    ), 1));
+  }
   if (preconditionReasons[operation]) {
     branches.push(storedError('PRECONDITION_FAILED', operationDetails(
       operation, ['chat_id', 'message_id', 'reason'], {
@@ -989,9 +1095,10 @@ const v2StoredErrorBranches = (operation) => {
   }
   return branches;
 };
-const v2StoredErrorTerminal = (operation, allowedCodes) => ({
+const v2StoredErrorTerminal = (operation, allowedCodes, excludedCodes = []) => ({
   oneOf: v2StoredErrorBranches(operation)
-    .filter(({ code }) => allowedCodes === undefined || allowedCodes.includes(code))
+    .filter(({ code }) =>
+      (allowedCodes === undefined || allowedCodes.includes(code)) && !excludedCodes.includes(code))
     .map(({ schema: branch }) => branch),
 });
 const v2StoredTerminal = (operation) => ({
@@ -1018,6 +1125,48 @@ const errorEnvelope = (code, details) =>
     }),
   });
 const schema = (title, defs, body) => ({ $schema: dialect, title, $defs: defs, ...body });
+const auditSemanticComment =
+  'For schema_version 2, full tgcli contract validation also requires the documentation-only ' +
+  'x-tgcli-semanticValidation rules; an ordinary Draft 2020-12 validator ignores that annotation.';
+const auditSemanticRules = {
+  'audit-checkpoint.schema.json': [
+    'aggregate_serialized_bytes',
+    'cross_record_equality_and_derivation',
+    'projected_uniqueness',
+    'same_record_equality_and_derivation',
+    'strict_numeric_order',
+    'utf8_byte_limits',
+  ],
+  'audit-intent.schema.json': [
+    'aggregate_serialized_bytes',
+    'contextual_normalization',
+    'same_record_equality_and_derivation',
+    'strict_numeric_order',
+    'utf8_byte_limits',
+  ],
+  'audit-outcome.schema.json': [
+    'aggregate_serialized_bytes',
+    'cross_record_equality_and_derivation',
+    'projected_uniqueness',
+    'same_record_equality_and_derivation',
+    'strict_numeric_order',
+    'utf8_byte_limits',
+  ],
+};
+const auditSchema = (filename, title, defs, body) => ({
+  $schema: dialect,
+  $comment: auditSemanticComment,
+  'x-tgcli-semanticValidation': {
+    annotationOnly: true,
+    ordinaryDraft202012ValidationIsInsufficient: true,
+    schemaVersion: 2,
+    validator: 'tgcli-runtime-v1',
+    rules: auditSemanticRules[filename],
+  },
+  title,
+  $defs: defs,
+  ...body,
+});
 
 const usageDetails = detail(['argument', 'reason'], {
   argument: { type: ['string', 'null'] },
@@ -1412,7 +1561,8 @@ const v2IntentBranches = v2Operations.map((operation) =>
       operation === 'session_terminate' ? { type: 'null' } : nullable(reference('sha256')),
   }),
 );
-const intentSchema = schema('tgcli destructive audit intent', auditDefinitions(), {
+const intentSchema = auditSchema('audit-intent.schema.json', 'tgcli destructive audit intent',
+  auditDefinitions(), {
   oneOf: [
     object(intentFields, {
       ...intentBase,
@@ -1549,7 +1699,7 @@ for (const operation of v2Operations) {
             type: 'array',
             minItems: 1,
             maxItems: 100,
-            'x-tgcli-strictlyIncreasingField': 'source_id',
+            uniqueItems: true,
             items: reference('forwardItem'),
           },
         }),
@@ -1564,7 +1714,8 @@ for (const operation of v2Operations) {
     ),
   );
 }
-const checkpointSchema = schema(
+const checkpointSchema = auditSchema(
+  'audit-checkpoint.schema.json',
   'tgcli logout audit checkpoint',
   auditDefinitions(),
   {
@@ -1636,31 +1787,6 @@ const outcomeDefinitions = {
   removalNotPresentResult: removalSuccessResult('not_present'),
   removalKeptResult: removalSuccessResult('kept'),
 };
-const v2CompletedStagePrefixes = (operation) => {
-  const prefixes = new Map([[JSON.stringify([]), []]]);
-  for (const keyed of [false, true]) {
-    for (const temporary of [false, true]) {
-      for (const progress of [false, true]) {
-        for (const mutation of [false, true]) {
-          const complete = [];
-          if (keyed && operation !== 'session_terminate') complete.push('idempotency_pending');
-          if (operation === 'saved_attach') complete.push('spool_ready');
-          complete.push('dispatch_started');
-          if (temporary && ['send', 'msg_forward', 'saved_attach'].includes(operation)) {
-            complete.push('temporary_ids_observed');
-          }
-          if (progress && operation === 'msg_forward') complete.push('forward_progress');
-          if (mutation) complete.push('mutation_confirmed');
-          for (let length = 1; length <= complete.length; ++length) {
-            const prefix = complete.slice(0, length);
-            prefixes.set(JSON.stringify(prefix), prefix);
-          }
-        }
-      }
-    }
-  }
-  return [...prefixes.values()];
-};
 const v2OutcomeFields = [
   'schema_version',
   'phase',
@@ -1698,12 +1824,26 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
     ...dispatched.filter((value) => value.includes('forward_progress') &&
       !value.includes('mutation_confirmed'))];
   const successful = confirmed.filter((value) => value.at(-1) === 'mutation_confirmed');
-  return [
+  const branches = [
     v2OutcomeBranch(operation, true, 'confirmed', successful, v2ResultTerminal(operation)),
-    v2OutcomeBranch(operation, false, 'none', none, v2StoredErrorTerminal(operation)),
-    v2OutcomeBranch(operation, false, 'possible', ambiguous, v2StoredErrorTerminal(operation)),
-    v2OutcomeBranch(operation, false, 'confirmed', confirmed, v2StoredErrorTerminal(operation)),
+    v2OutcomeBranch(operation, false, 'none', none,
+      v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
+    v2OutcomeBranch(operation, false, 'possible', ambiguous,
+      v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
+    v2OutcomeBranch(operation, false, 'confirmed', confirmed,
+      v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
   ];
+  if (operation === 'saved_attach') {
+    const spoolPrefixes = undispatched.filter((value) => value.includes('spool_ready'));
+    branches.push(v2OutcomeBranch(
+      operation,
+      false,
+      'none',
+      spoolPrefixes,
+      v2StoredErrorTerminal(operation, ['SPOOL_UNAVAILABLE']),
+    ));
+  }
+  return branches;
 });
 const outcomeBase = object(outcomeFields, {
   schema_version: { const: 1 },
@@ -1795,7 +1935,8 @@ for (const state of ['none', 'possible', 'confirmed']) {
     );
   }
 }
-const outcomeSchema = schema(
+const outcomeSchema = auditSchema(
+  'audit-outcome.schema.json',
   'tgcli destructive audit outcome',
   { ...outcomeDefinitions, ...v2Definitions() },
   {
@@ -1907,6 +2048,48 @@ const documents = new Map([
   ['audit-outcome.schema.json', outcomeSchema],
   ['removal-tombstone.schema.json', tombstoneSchema],
 ]);
+
+const semanticMarkerKeys = [
+  'annotationOnly',
+  'ordinaryDraft202012ValidationIsInsufficient',
+  'rules',
+  'schemaVersion',
+  'validator',
+];
+const knownSemanticRules = new Set(Object.values(auditSemanticRules).flat());
+const validateAuditSemanticMarker = (filename, document) => {
+  const marker = document['x-tgcli-semanticValidation'];
+  if (document.$comment !== auditSemanticComment || marker === null ||
+      typeof marker !== 'object' || Array.isArray(marker) ||
+      JSON.stringify(Object.keys(marker).sort()) !== JSON.stringify(semanticMarkerKeys) ||
+      marker.annotationOnly !== true ||
+      marker.ordinaryDraft202012ValidationIsInsufficient !== true ||
+      marker.schemaVersion !== 2 || marker.validator !== 'tgcli-runtime-v1' ||
+      !Array.isArray(marker.rules) || marker.rules.length === 0 ||
+      JSON.stringify(marker.rules) !== JSON.stringify([...marker.rules].sort()) ||
+      new Set(marker.rules).size !== marker.rules.length ||
+      marker.rules.some((rule) => !knownSemanticRules.has(rule)) ||
+      JSON.stringify(marker.rules) !== JSON.stringify(auditSemanticRules[filename])) {
+    throw new Error(`${filename} has an invalid semantic-validation marker`);
+  }
+  const visit = (value, root) => {
+    if (value === null || typeof value !== 'object') return;
+    for (const [key, nested] of Object.entries(value)) {
+      if (key.startsWith('x-tgcli-') &&
+          !(root && key === 'x-tgcli-semanticValidation')) {
+        throw new Error(`${filename} has a nested pseudo-assertion ${key}`);
+      }
+      visit(nested, false);
+    }
+  };
+  visit(document, true);
+};
+for (const [filename, expectedRules] of Object.entries(auditSemanticRules)) {
+  if (!documents.has(filename) || expectedRules.length === 0) {
+    throw new Error(`${filename} has no generated audit schema or semantic rules`);
+  }
+  validateAuditSemanticMarker(filename, documents.get(filename));
+}
 
 const render = (document) =>
   (JSON.stringify(
