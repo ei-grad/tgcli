@@ -59,10 +59,13 @@ deliberately avoids:
   tgcli defaults to live server-side operations (per-chat and global search
   included), with `--local` on history reads as the explicit offline option.
 - **Bespoke SQLite store with a hardcoded schema** — a migration liability on
-  every upgrade. tgcli keeps *no* message store of its own: tdlib owns its
-  database and migrates its schema across versions itself. tgcli's only
-  persistent state is an append-only JSONL audit log and a tiny versioned
-  idempotency store (§8).
+  every upgrade.
+  tgcli keeps no message store of its own: TDLib owns and migrates the Telegram
+  database. tgcli's own persistent state is limited to config.toml, append-only
+  audit, the versioned idempotency store, removal tombstones, rotated logs, and
+  the private crash-recoverable outbound attachment spool from §4.5.12. The
+  spool contains temporary bytes for one audited send and is not a Telegram
+  message cache.
 - **`listen` streamed to stdout without persisting, and there was no
   wait-by-filter primitive.** In tgcli persistence is decoupled from
   streaming: tdlib writes everything it observes into its DB regardless (the
@@ -1080,6 +1083,30 @@ SPOOL_UNAVAILABLE/1:
   {"operation":"saved_attach","path":string,"reason":durability_reason}
 ```
 
+The `saved_attach` source-file `NOT_FOUND` branch is exit 4 with stable
+message `input file is unavailable` and exact details
+`{"operation":"saved_attach","path":string,"reason":source_file_reason}`.
+`source_file_reason` is exactly
+`missing|symlink|wrong_type|empty|unreadable`. Its `path`, and the `path` in
+`INPUT_CHANGED` and per-invocation `SPOOL_UNAVAILABLE`, is the canonical
+absolute source display path from §4.5.12. `INPUT_CHANGED` has stable message
+`input file changed while being read`; `SPOOL_UNAVAILABLE` has stable message
+`attachment spool is unavailable`. Per-invocation spool errors never report
+an account-state or spool path. An account-global spool-root failure instead
+has exact details
+`{"operation":v2_gate_operation,"path":"spool/","reason":durability_reason}`;
+the literal `spool/` is a redacted token, not a filesystem path.
+
+`FilesystemDiagnosticPath` is exactly
+`{"kind":"bytes_hex","value":lowercase_even_hex}`. It encodes every complete
+absolute pathname as two lowercase hex digits per raw byte, including paths
+whose bytes happen to be valid UTF-8. The value has even length at least 4,
+begins `2f`, and contains no `00` byte pair.
+The spool-contradiction `AUDIT_INCOMPLETE` branch has exact details
+`{"account":string,"path":FilesystemDiagnosticPath,
+"mutation_state":"none","completed_stages":[]}`. Existing audit-record
+incomplete errors retain their string path branch.
+
 `precondition_reason` exact:
 
 ```text
@@ -1170,6 +1197,12 @@ current user's Saved chat; inherited topic допускается только
 `PRECONDITION_FAILED/wrong_topic`. Caller topic flag отсутствует. Fingerprint
 содержит original message id и marker `"topic":"inherit_saved"`; derived
 saved topic не является caller-controlled и фиксируется в plan/audit.
+
+Omitted `--caption` normalizes to `""`; normalized args always contain the
+string field. Caption is plain valid Unicode-scalar UTF-8, contains no NUL,
+and is at most 4096 UTF-8 bytes and 1024 Unicode scalars. Empty is valid,
+normalization is absent, and TDLib receives `formattedText(caption,[])`.
+Formatting flags or caller entities are unsupported.
 
 `messageSendOptions` имеет все поля false/0/null кроме silent, schedule и
 random nonzero int32 `sending_id`; `only_preview=false`, `clear_draft=false`,
@@ -1470,6 +1503,13 @@ completed terminal
 `created_at/expires_at` are integer Unix seconds 0…253402300799;
 `expires_at=created_at+604800` exactly. `audit_generation` pins a real segment.
 No transport request id/raw key/raw invite.
+
+`Entry.spool` changes from null only after matching durable audit
+`spool_ready`; it is durable before `dispatch_started`. The update obeys the
+existing 16 MiB actual-snapshot and pending-reservation inequalities. No file
+bytes or separate spool quota are reserved. A completed entry retains the
+non-null reference through filesystem cleanup and changes it to null only
+after cleanup plus spool-root fsync.
 
 Before pending insert quota reserves maximum terminal bytes:
 
@@ -1776,31 +1816,83 @@ inputMessageDocument(document, caption)
 
 No autodetection/albums/spoiler in v1.
 
-PATH valid UTF-8 1…4096 bytes, no NUL. Relative resolves against frozen cwd.
-Each component opened no-follow; target readable nonempty regular. Basename
-не empty, `.` или `..`. Owner restriction и extra size cap отсутствуют.
+PATH is valid Unicode-scalar UTF-8, 1…4096 caller bytes, without NUL. A
+trailing slash is invalid. Relative PATH resolves only against the frozen
+client cwd. That cwd must be valid UTF-8, non-NUL, absolute, 1…4096 bytes and
+already lexically canonical; otherwise the relative PATH is
+`USAGE/{"argument":"PATH","reason":"invalid_argument"}`. Absolute PATH
+ignores cwd. No fallback directory is used.
 
-Pass 1 before idempotency lookup opens source once, records
-dev/inode/size/mtime_ns/ctime_ns before and after, hashes all bytes, requires
-identity stable, then closes. Dry-run stops here.
+The canonical display path is the lexical normalization of canonical cwd plus
+PATH, or `/` plus absolute PATH: empty and `.` components are omitted, `..`
+pops one component without moving above `/`, and the result has one leading
+slash, one separator, no dot components and at most 4096 UTF-8 bytes. It is
+exactly `FileSnapshot.path` and the path in source/spool errors; only
+`audit.arguments.path` preserves caller spelling. The display path is never
+used to open the source.
 
-Pass 2 is permitted only after durable intent. For keyed execution it is
-further permitted only after the invocation wins durable
-`insert-if-absent`; an unkeyed invocation performs the same pass immediately
-after its durable intent. It creates:
+Before pass 1 tgcli freezes an in-memory locator containing the exact original
+PATH component sequence—including empty repeated-separator components, `.`
+and `..`—and, for a relative PATH, one retained descriptor for the validated
+client cwd. Each pass replays that exact sequence independently: absolute
+starts from `/`; relative starts from a `dup` of the same cwd FD. Empty
+components are explicit no-ops, `.` and `..` are processed in sequence, and
+every named component is opened no-follow. No lexically cancelled component
+is omitted. `/symlink/../file` is rejected while its canonical error path is
+`/file`; renaming/replacing the cwd pathname between passes does not retarget a
+relative source.
 
-```text
-<account-state>/spool/<invocation_id>/<basename>
-```
+Each pass retains its directory-edge FDs. After pass-1 read and pass-2 copy it
+revalidates every raw named edge with `fstatat(...,AT_SYMLINK_NOFOLLOW)` against
+the retained child FD, and revalidates the basename entry against the source
+FD. Disappearance, replacement, symlink, type or device/inode mismatch is
+`INPUT_CHANGED`. Empty components have no entry; the frozen cwd root is
+validated by FD, never reopened by its former pathname.
 
-Every new directory `0700`, file `0600 O_EXCL`. Creation fsyncs each newly
-created parent: account-state after spool root, spool root after invocation
-dir, then file fsync and invocation-dir fsync. Source is reopened no-follow
-once; copy+SHA is one pass. Before/after identity and digest must equal pass 1.
-Mismatch: no dispatch, durable INPUT_CHANGED outcome, remove pending only when
-keyed, then cleanup.
+The final basename is the exact `FileSnapshot.name`: valid UTF-8, 1…255
+bytes, no slash, C0/C1 control scalar, `.` or `..`. Other leading-dot names
+are allowed. No escaping, hashing, normalization or case folding occurs. The
+destination `_PC_NAME_MAX` must also admit it. The target is a readable,
+nonempty regular file. Source owner, mode and link count are not restricted;
+hard links are accepted. There is no local file-size or spool-byte quota.
 
-Only after complete copy/fsync tgcli appends+fsyncs `spool_ready`; only spool
+Pass 1 before idempotency lookup opens the source once. It records
+dev/inode/size/mtime_ns/ctime_ns before reading, hashes exactly `size` bytes,
+probes EOF, records the identity after reading, and requires identical
+identities and byte count. Initial missing/symlink/wrong-type/empty/unreadable
+conditions use §4.5.3's source-file `NOT_FOUND`; malformed path is `USAGE`;
+other I/O/representation failures are `SPOOL_UNAVAILABLE`. Any instability
+after a regular target was observed is `INPUT_CHANGED`. Pass-1 failure creates
+no current-invocation intent, idempotency entry or spool. A real request's
+earlier v2 preflight may already have durably reconciled prior groups; absolute
+zero persistence requires a clean preflight. All seventeen M3/M4 dry-runs
+perform no reconciliation and retain their absolute zero-persistence rule.
+Dry-run stops after pass 1 and its ordinary read-only planner work.
+
+Pass 2 is permitted only after durable intent, and for a keyed invocation
+only after durable insert-if-absent victory. It replays the frozen locator,
+opens the source no-follow once, requires the before identity to equal pass 1,
+copies and SHA-256 hashes in one streaming pass, then performs the full
+directory-edge/basename revalidation and requires exact byte count, EOF,
+after identity and digest equality with pass 1. Every source discrepancy is
+`INPUT_CHANGED`; genuine I/O is `SPOOL_UNAVAILABLE`. Both are pre-dispatch
+mutation `none` outcomes, with keyed pending removal and eligible cleanup.
+
+Pass 2 creates `<account-state>/spool/<invocation_id>/<FileSnapshot.name>`.
+Account-state, spool root and invocation directories are current-uid,
+non-symlink exact-0700 directories; the exact-0600 `O_EXCL` file is a
+current-uid non-symlink regular file with link count 1. Creation fsyncs
+account-state after a new spool root and the spool root after a new invocation
+directory, then fsyncs the completed file and invocation directory. The
+persisted path is exactly `spool/<invocation_id>/<FileSnapshot.name>`.
+
+After file and invocation-directory sync, tgcli appends and fsyncs
+`spool_ready`. A keyed winner then durably changes its exact pending entry
+from `spool:null` to the matching `SpoolRef` under the store lock. Only that
+store update, or `spool_ready` itself for unkeyed execution, admits
+`dispatch_started`. The store never references a spool without durable
+`spool_ready`; file hashing/copy never holds the store lock.
+Only the spool
 path enters TDLib. Recovery/cleanup:
 
 | Crash cutpoint | Action |
@@ -1816,6 +1908,44 @@ path enters TDLib. Recovery/cleanup:
 Cleanup failure не меняет уже confirmed Telegram result; reference остаётся
 durable и startup повторяет cleanup. Startup никогда удаляет spool по age
 без reconciled audit/store relation.
+
+Keyed completion is first durable with non-null `Entry.spool`. Successful
+cleanup fsyncs the spool root and then canonically rewrites the completed
+entry with `spool:null`. Failure to clear that reference does not replace a
+confirmed terminal; startup accepts missing-after-delete and retries the
+clear. Keyed mutation-none removal is durable before cleanup. Unkeyed cleanup
+is related by audit. Cleanup failure never replaces the selected terminal.
+
+Spool-root classification is total after no-follow validation of
+`<account-state>`; an unsafe account-state maps through the same reason table
+without exposing or repairing that path. Root absence is clean and creates nothing.
+Safe means a current-uid, non-symlink exact-0700 directory whose opened FD
+matches the entry. Symlink/replacement is `SPOOL_UNAVAILABLE/path_invalid`, a
+file is `wrong_type`, wrong uid is `wrong_owner`, wrong mode is `wrong_mode`,
+open/fstat I/O is `open_failed`, and enumeration I/O is `read_failed`. The
+account-global error uses the requested `v2_gate_operation` and literal
+redacted `path:"spool/"`. Unsafe roots are retained and never repaired.
+
+After safe-root enumeration, raw entry names are sorted lexicographically by
+unsigned bytes, shorter equal-prefix first. An orphan/invalid entry or
+audit/store mismatch is a retained contradiction. Its complete absolute raw
+path is rendered as canonical `FilesystemDiagnosticPath` with
+`kind:"bytes_hex"` and two lowercase hex digits per raw byte, regardless of
+UTF-8 validity. No filesystem entry bytes are placed directly in a JSON
+string.
+
+The account-global v2 gate blocks every real M3/M4 operation and M6
+`session list` plus dry/real `session terminate`. It permits truly
+persistence-free reads, v1-only M1 behavior and all seventeen M3/M4 dry-runs,
+which never reconcile v2. Root classification precedes contradiction
+selection, which precedes prior-group reconciliation/capacity preflight. For
+session list/dry terminate this is §4.7.5 step 2; real terminate and real
+M3/M4 retain their auth/bot/authority-before-step-6 ordering. Root failure is
+account-global `SPOOL_UNAVAILABLE`; contradiction is the object-path
+`AUDIT_INCOMPLETE` with mutation none and empty stages. No resend occurs.
+
+`v2_gate_operation` is exactly the seventeen §4.5.1 operation names plus
+`session_list` and `session_terminate`.
 
 `saved_attach` exact order:
 
@@ -1870,8 +2000,21 @@ Required fake-boundary/contract gates:
 - all direct response/auth/deadline permutations;
 - all single-send response/update/delete/generation permutations;
 - every forward vector/429/deletion/timeout aggregation;
-- keyed-winner and unkeyed-post-intent file symlink/replacement/in-place
-  rewrite/two-pass mismatch and every cleanup cutpoint;
+- both passes replay one frozen cwd FD and the exact original component
+  sequence, including repeated separators, dot and lexically cancelled
+  components; after-read/copy parent-edge and basename-entry replacement,
+  disappearance and symlink races; keyed-winner and unkeyed-post-intent
+  hard-link-positive, wrong-type, empty, unreadable, same-size rewrite,
+  truncate/append and identity/digest mismatch; 4096-byte path,
+  safe-basename/control/255-byte and caption byte/scalar boundaries; total
+  absent/safe/unsafe root classification; raw-byte orphan sorting and exact
+  `bytes_hex` diagnostic encoding; effect-based gate coverage; every
+  create/copy/file-fsync/directory-fsync/audit-ready/keyed-spool-ref/cleanup/
+  ref-clear cutpoint; no local file-size/spool quota and no raw file bytes in
+  any output, diagnostic, log, audit or store artifact; pass-1 failure creates
+  no current-invocation artifact, real dirty-preflight fixtures permit only
+  prior-group recovery records, and clean plus all seventeen dry-run fixtures
+  prove absolute zero persistence;
 - strict actual result/error/audit/store schema validation.
 
 TestDC M3 flow is mandatory after canonical user auth smoke:
@@ -3177,6 +3320,16 @@ append/sync recovery records for prior invocations; those records belong to the
 prior invocation. List and dry-run create no audit group for their current
 invocation.
 
+Every §4.7.5 reconciliation point first applies §4.5.12's account-global v2
+gate. `session list` and `session terminate --dry-run` apply it at step 2
+before Ready; real `session terminate` applies it at step 6 after
+Ready/getMe/bot/authority. An unsafe/unreadable spool root returns the exact
+account-global `SPOOL_UNAVAILABLE`; a retained spool contradiction returns
+the object-path `AUDIT_INCOMPLETE`. Neither branch appends a current or prior
+record. Session list and terminate dry-run are blocked because they can
+reconcile v2; they are not members of the seventeen persistence-free §4.5
+planner dry-runs.
+
 `session list` runs this exact logical order:
 
 1. strict CLI/frame/config parse and frozen account match;
@@ -3382,6 +3535,62 @@ The session-specific exact detail shapes are:
 | `RATE_LIMITED` / 5 | `{"operation":"session_list"|"session_terminate","tdlib_code":429,"retry_after":nonnegative_integer}` |
 | `INTERNAL` / 1 | `{"operation":"session_list"|"session_terminate","reason":"malformed_tdlib_response","tdlib_type_id":integer|null}` |
 
+The account-global v2 spool gate adds exactly two M6-reachable branches.
+
+`SPOOL_UNAVAILABLE`, exit 1, has stable message
+`attachment spool is unavailable` and exact details:
+
+```json
+{"operation":"session_list","path":"spool/","reason":"wrong_mode"}
+```
+
+`operation` is exactly `session_list|session_terminate`; `path` is the literal
+redacted token `spool/`, not a filesystem pathname; `reason` is exactly
+`path_invalid|wrong_type|wrong_owner|wrong_mode|open_failed|read_failed`.
+
+The spool-contradiction `AUDIT_INCOMPLETE`, exit 1, has stable message
+`attachment spool recovery is incomplete` and exact details:
+
+```json
+{"account":"main",
+ "path":{"kind":"bytes_hex","value":"2f73746174652f73706f6f6c2fff"},
+ "mutation_state":"none","completed_stages":[]}
+```
+
+The path object has exactly `kind` and `value`; `kind` is `bytes_hex` and
+`value` is the complete absolute retained pathname encoded as two lowercase
+hexadecimal digits per raw non-NUL byte. It has even length at least 4,
+begins `2f`, and contains no `00` byte pair. Every spool contradiction uses
+this object even when its raw bytes are valid UTF-8. Existing audit-record
+`AUDIT_INCOMPLETE` branches keep their absolute string `path`, existing
+messages and legal history vectors.
+
+Root classification precedes contradiction selection. Missing `spool` is
+safe and creates nothing. Account-state/root symlink, entry/FD replacement or
+disappearance maps to `SPOOL_UNAVAILABLE/path_invalid`; a non-directory root
+maps to `wrong_type`; wrong uid to `wrong_owner`; non-0700 mode to
+`wrong_mode`; root/account-state open, reopen or fstat I/O to `open_failed`;
+root enumeration or entry-metadata I/O to `read_failed`. These cases retain
+and never repair the unsafe object and cannot safely select an orphan.
+
+Only after complete safe-root enumeration do an invalid raw invocation name,
+unexpected entry type/owner/mode, an invocation without a matching valid v2
+`saved_attach` intent, an unexpected invocation child, or an audit/store
+filename mismatch become object-path `AUDIT_INCOMPLETE`. Raw entry names are
+sorted lexicographically by unsigned bytes, shorter equal-prefix first, before
+the first contradiction's complete path is encoded. A missing spool required
+by an existing audit/store relation has no retained object and therefore uses
+the existing string audit-path `AUDIT_INCOMPLETE`, not the object branch.
+
+Neither new error appends/reconciles a record or creates current-invocation
+state. For `session list` and `session terminate --dry-run`, the gate runs at
+§4.7.5 step 2 before Ready. For real `session terminate`, it runs at step 6
+after Ready/getMe/bot/authority. Root failure wins before object contradiction;
+object contradiction wins before prior-group reconciliation. The exact
+effect-based admitted/blocked operation set is §4.5.12's v2 gate. No M6
+command can emit either branch with an M3/M4 operation name or an uncataloged
+details shape.
+
 Code 429 uses the accepted positive flood-wait parser and mathematical ceiling
 to seconds; if the TD error has no valid positive wait, `retry_after` is 0.
 Every other TD error remains `TDLIB_ERROR`; in particular, terminate errors
@@ -3424,6 +3633,145 @@ Each of the three files is self-contained: it has no external `$ref`, `$id` or
 `format`, defines every reused type under its own local `$defs`, and carries
 all range/calendar restrictions itself. Passing a separate C++ semantic check
 does not make a value schema-valid.
+
+`session.error.schema.json` must add these self-contained definitions under
+`$defs`; every existing definition remains unchanged:
+
+```json
+"filesystemDiagnosticPath": {
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "value"],
+  "properties": {
+    "kind": { "const": "bytes_hex" },
+    "value": {
+      "type": "string",
+      "pattern": "^2f(?:0[1-9a-f]|[1-9a-f][0-9a-f])+$"
+    }
+  }
+},
+"spoolUnavailableError": {
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "message", "details"],
+  "properties": {
+    "code": { "const": "SPOOL_UNAVAILABLE" },
+    "message": { "const": "attachment spool is unavailable" },
+    "details": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "path", "reason"],
+      "properties": {
+        "operation": { "enum": ["session_list", "session_terminate"] },
+        "path": { "const": "spool/" },
+        "reason": {
+          "enum": [
+            "path_invalid",
+            "wrong_type",
+            "wrong_owner",
+            "wrong_mode",
+            "open_failed",
+            "read_failed"
+          ]
+        }
+      }
+    }
+  }
+},
+"spoolAuditIncompleteError": {
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "message", "details"],
+  "properties": {
+    "code": { "const": "AUDIT_INCOMPLETE" },
+    "message": { "const": "attachment spool recovery is incomplete" },
+    "details": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "path", "mutation_state", "completed_stages"],
+      "properties": {
+        "account": { "$ref": "#/$defs/account" },
+        "path": { "$ref": "#/$defs/filesystemDiagnosticPath" },
+        "mutation_state": { "const": "none" },
+        "completed_stages": { "const": [] }
+      }
+    }
+  }
+}
+```
+
+The two new error references are adjacent to the existing audit definitions
+and are exactly:
+
+```json
+{ "$ref": "#/$defs/spoolUnavailableError" },
+{ "$ref": "#/$defs/spoolAuditIncompleteError" }
+```
+
+The resulting top-level `error.oneOf` is authoritative and has exactly these
+24 references in this order:
+
+```text
+#/$defs/usageError
+#/$defs/accountNotFoundError
+#/$defs/accountMismatchError
+#/$defs/configInvalidError
+#/$defs/configConflictError
+#/$defs/hookFailedError
+#/$defs/notAuthedError
+#/$defs/writeDeniedError
+#/$defs/confirmationRequiredError
+#/$defs/auditUnavailableError
+#/$defs/spoolUnavailableError
+#/$defs/auditIncompleteError
+#/$defs/spoolAuditIncompleteError
+#/$defs/protocolAnswerInvalidError
+#/$defs/daemonNotRunningError
+#/$defs/daemonControlFailedError
+#/$defs/daemonShutdownError
+#/$defs/botUnsupportedError
+#/$defs/notFoundError
+#/$defs/preconditionFailedError
+#/$defs/tdlibError
+#/$defs/rateLimitedError
+#/$defs/internalError
+#/$defs/timeoutError
+```
+
+This authoritative common-branch list preserves every existing common/session
+branch and adds only `spoolUnavailableError` and
+`spoolAuditIncompleteError`. `SPOOL_UNAVAILABLE` is represented only by
+`spoolUnavailableError`. `AUDIT_INCOMPLETE` intentionally has two disjoint
+schema definitions: `auditIncompleteError` retains every legacy/current audit
+branch whose `details.path` is a string and whose history vector is one of its
+existing six strict `oneOf` cases; `spoolAuditIncompleteError` is only the
+retained-spool contradiction branch whose `details.path` is the strict
+reversible `FilesystemDiagnosticPath` object, `mutation_state` is `none`, and
+`completed_stages` is empty. Neither definition widens the other.
+
+Neither error definition is added to the result-only manifest. The error
+schema remains self-contained Draft 2020-12, has
+`additionalProperties: false` at every new object boundary and keeps every
+existing session error branch. No M6 command may return an uncataloged error
+branch.
+
+Schema tests must accept every cross-product of the two permitted operations
+and six `SPOOL_UNAVAILABLE` reasons, an object-path contradiction containing an
+invalid-UTF-8 byte such as
+`{"kind":"bytes_hex","value":"2f73746174652f73706f6f6c2fff"}`,
+and the existing legacy string-path `AUDIT_INCOMPLETE` histories. They must
+assert the exact 24 top-level references and order, the exact diagnostic-path
+pattern above, and the unchanged six-case
+`auditIncompleteError.details.oneOf`.
+
+Negative schema tests must reject an unknown or M3/M4 operation, any
+nonliteral, absolute-string or typed-object `SPOOL_UNAVAILABLE` path, unknown
+and non-root reasons including `sync_failed`, `capacity_exhausted` and
+`contradiction`, wrong messages, missing or extra fields, and unknown error
+codes. For the object-path `AUDIT_INCOMPLETE` branch they must also reject a
+kind other than `bytes_hex`, missing or extra object fields, uppercase, odd,
+non-hex, non-absolute or NUL-containing encodings, any mutation state other
+than `none`, and any nonempty completed-stage list.
 
 The local `sessionId` definition in every applicable schema is exactly this
 full signed-int64 string language:
@@ -3608,6 +3956,10 @@ Command/fake tests:
   traces perform Ready/getMe/bot/authority first and reconcile at step 6 before
   target resolution; authority-denied traces contain no reconciliation or
   prior-group append; list/dry-run create no current invocation group;
+- total spool-root failure and byte-safe orphan contradiction at list,
+  terminate-dry and real-terminate admission; exact step-2 versus step-6
+  precedence; all affected paths emit no new record or TD request, while
+  persistence-free reads and the seventeen §4.5 dry-runs remain admitted;
 - list preserves order and makes exactly one `getActiveSessions` request;
 - terminate grant denial occurs before target lookup in a real invocation;
 - dry-run needs no grant/confirmation, calls only the admitted reads and
@@ -4734,10 +5086,14 @@ type-erased public boundary keeps generated types from leaking across layers.
   agents should expect exit 5 with `retry_after` and back off.
 - **Local DB and persistence**: tdlib persists every chat, message and update
   it observes into its own database and migrates that schema across tdlib
-  versions itself — tgcli never defines a message schema and has no
-  migration story to maintain for messages. tgcli's own persistent state is
-  deliberately trivial: an append-only JSONL audit log (no schema to migrate)
-  and a small idempotency store carrying an explicit `schema_version`. The
+  versions itself.
+  tgcli never defines a Telegram message schema or message-cache migration.
+  Its own persistent state is deliberately bounded to config.toml, append-only
+  audit, the versioned idempotency store, removal tombstones, rotated logs, and
+  the private crash-recoverable outbound attachment spool. The spool is
+  temporary send staging governed by §4.5.12, not a message cache; TDLib's
+  database remains the only Telegram cache.
+  The
   per-account daemon (§10) keeps running by default, so the local DB absorbs
   updates continuously; `listen` is a live view over that stream, not the
   persistence mechanism.
@@ -4777,7 +5133,8 @@ XDG layout, one subtree per account:
 ```
 ~/.config/tgcli/config.toml                    global + per-account config
 ~/.local/share/tgcli/accounts/<name>/tdlib/    tdlib database + files
-~/.local/state/tgcli/accounts/<name>/          audit.log, idempotency.db, tdlib.log
+~/.local/state/tgcli/accounts/<name>/          audit.log, idempotency.db,
+                                               spool/, tdlib.log
 ~/.local/state/tgcli/removals/                 removal audit + durable tombstones
 ~/.local/state/tgcli/removals/.<name>.lock     stable removal/daemon exclusion gate
 $XDG_RUNTIME_DIR/tgcli/<name>.ctl              bootstrap stop socket
@@ -4790,6 +5147,10 @@ the socket falls back to `$TMPDIR/tgcli-<uid>/<name>.sock` (then
 use. Socket paths must fit `sun_path` (~104 bytes); account names are
 length-validated accordingly. `audit.log` and `tdlib.log` rotate by size
 (default 32 MiB, keep 4).
+
+`spool/` is the private crash-recoverable outbound-attachment staging area
+defined by §4.5.12. It is tgcli persistent state but not a message cache;
+TDLib's database remains the only Telegram cache.
 
 The `.ctl` endpoint and `<account-state-dir>/daemon.lock` form the bootstrap
 compatibility surface described in §10. They are account-scoped even though

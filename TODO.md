@@ -226,9 +226,15 @@ before the milestone is closed.
 
 - [ ] `tgcli download` with progress frames (stderr bar / NDJSON); transfers
       unlimited by default, `--timeout` opt-in
-- [ ] Add the two-pass file snapshot/spool coordinator: pass-1 full identity
-      and digest, winner-only post-intent pass 2, private fsynced spool,
-      durable `spool_ready`, complete crash-cutpoint cleanup and startup repair
+- [ ] Add the dormant two-pass file snapshot/spool foundation: exact
+      no-follow frozen-locator replay and post-pass entry/FD revalidation,
+      strict source errors, pass-1 full identity/digest, winner-only
+      post-intent pass 2, total private-root classification, fsynced one-file
+      spool, audit-first keyed SpoolRef publication, durable cleanup/ref
+      clearing, byte-safe orphan diagnostics plus the effect-based v2 gate,
+      prior-group/current-invocation persistence distinctions, Linux/macOS
+      portability, and all filesystem/deadline/crash cutpoints; do not register
+      `saved attach` or mark the adapter complete in this slice
 - [ ] Implement `tgcli saved attach <message-id> <PATH> [--caption TEXT]` as a
       user-only, single-file Saved reply adapter preserving the original;
       enforce saved/null topic inheritance and the shared plan/audit/timeout/

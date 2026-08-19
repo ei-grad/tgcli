@@ -60,8 +60,10 @@ authoritative implementation status and roadmap (work milestones top-down).
   client-side code (cli, output, prompts).
 - No bespoke message store: tdlib's database is the cache. tgcli's own
   persistent state is limited to the audit log, the idempotency store,
-  removal tombstones, config.toml (which `login` updates with app credentials)
-  and rotated logs.
+  removal tombstones, the private crash-recoverable outbound attachment
+  spool from DESIGN.md §4.5.12, config.toml (which `login` updates with app
+  credentials), and rotated logs. The spool is temporary send staging and
+  never becomes a second Telegram message cache.
 - Real secrets (2FA password, DB encryption key, bot token) are never accepted
   via argv or environment and never written to disk by the tool. Bot login is
   `login --bot` and obtains its token only from `bot_token_cmd` or a no-echo
