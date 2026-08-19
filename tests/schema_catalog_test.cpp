@@ -136,6 +136,7 @@ TEST_CASE("non-stream error manifest is the exact accepted command authority",
     CHECK(tgcli::test::load_schema_document("error-manifest.json") == expected);
     CHECK_FALSE(expected.at("commands").contains("chats"));
     CHECK_FALSE(expected.at("commands").contains("listen"));
+    CHECK_FALSE(expected.at("commands").contains("read"));
     CHECK_FALSE(expected.at("commands").contains("unread"));
     CHECK_FALSE(expected.at("commands").contains("wait-for"));
 }
@@ -205,6 +206,13 @@ TEST_CASE("schema lookup selects result then item and renders fixed all-kind ord
     CHECK(unread->result->filename == "unread.result.schema.json");
     CHECK(unread->item == nullptr);
     CHECK(unread->error == nullptr);
+
+    const auto read = tgcli::cli::find_schema_set("read");
+    REQUIRE(read);
+    REQUIRE(read->result != nullptr);
+    CHECK(read->result->filename == "read.result.schema.json");
+    CHECK(read->item == nullptr);
+    CHECK(read->error == nullptr);
 
     CHECK_FALSE(tgcli::cli::find_schema_set("schema"));
     CHECK_FALSE(tgcli::cli::find_schema_set("daemon run"));

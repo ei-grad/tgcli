@@ -36,6 +36,13 @@ enum class TdFunctionKind {
     GetActiveSessions,
     TerminateSession,
     GetChat,
+    GetChatHistory,
+    GetChatMessageByDate,
+    GetMessageThread,
+    GetForumTopicHistory,
+    GetMessageThreadHistory,
+    GetDirectMessagesChatTopicHistory,
+    GetSavedMessagesTopicHistory,
     GetMessages,
     GetMessageLink,
     GetChats,
@@ -88,6 +95,20 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "terminateSession";
     case TdFunctionKind::GetChat:
         return "getChat";
+    case TdFunctionKind::GetChatHistory:
+        return "getChatHistory";
+    case TdFunctionKind::GetChatMessageByDate:
+        return "getChatMessageByDate";
+    case TdFunctionKind::GetMessageThread:
+        return "getMessageThread";
+    case TdFunctionKind::GetForumTopicHistory:
+        return "getForumTopicHistory";
+    case TdFunctionKind::GetMessageThreadHistory:
+        return "getMessageThreadHistory";
+    case TdFunctionKind::GetDirectMessagesChatTopicHistory:
+        return "getDirectMessagesChatTopicHistory";
+    case TdFunctionKind::GetSavedMessagesTopicHistory:
+        return "getSavedMessagesTopicHistory";
     case TdFunctionKind::GetMessages:
         return "getMessages";
     case TdFunctionKind::GetMessageLink:
@@ -783,6 +804,14 @@ struct TdMessages {
     bool operator==(const TdMessages&) const = default;
 };
 
+struct TdMessageThreadInfo {
+    std::int64_t history_chat_id = 0;
+    std::int64_t history_thread_id = 0;
+    std::vector<std::optional<TdMessageSummary>> starting_messages;
+
+    bool operator==(const TdMessageThreadInfo&) const = default;
+};
+
 struct TdMessageLink {
     std::string link;
     bool is_public = false;
@@ -873,6 +902,26 @@ class TdRuntime {
     virtual TdValue make_get_active_sessions() = 0;
     virtual TdValue make_terminate_session(std::int64_t session_id) = 0;
     virtual TdValue make_get_chat(std::int64_t chat_id) = 0;
+    virtual TdValue make_get_chat_history(std::int64_t chat_id, std::int64_t from_message_id,
+                                          std::int32_t offset, std::int32_t limit,
+                                          bool only_local) = 0;
+    virtual TdValue make_get_chat_message_by_date(std::int64_t chat_id, std::int32_t date) = 0;
+    virtual TdValue make_get_message_thread(std::int64_t chat_id, std::int64_t message_id) = 0;
+    virtual TdValue make_get_forum_topic_history(std::int64_t chat_id, std::int32_t forum_topic_id,
+                                                 std::int64_t from_message_id, std::int32_t offset,
+                                                 std::int32_t limit) = 0;
+    virtual TdValue make_get_message_thread_history(std::int64_t chat_id, std::int64_t message_id,
+                                                    std::int64_t from_message_id,
+                                                    std::int32_t offset, std::int32_t limit) = 0;
+    virtual TdValue make_get_direct_messages_chat_topic_history(std::int64_t chat_id,
+                                                                std::int64_t topic_id,
+                                                                std::int64_t from_message_id,
+                                                                std::int32_t offset,
+                                                                std::int32_t limit) = 0;
+    virtual TdValue make_get_saved_messages_topic_history(std::int64_t topic_id,
+                                                          std::int64_t from_message_id,
+                                                          std::int32_t offset,
+                                                          std::int32_t limit) = 0;
     virtual TdValue make_get_messages(std::int64_t chat_id,
                                       std::vector<std::int64_t> message_ids) = 0;
     virtual TdValue make_get_message_link(std::int64_t chat_id, std::int64_t message_id,

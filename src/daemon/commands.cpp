@@ -6,6 +6,7 @@
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/message_commands.hpp"
+#include "daemon/read_commands.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
@@ -96,6 +97,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.messages != nullptr) {
         register_message_commands(dispatcher, *context.messages);
+    }
+    if (context.read != nullptr) {
+        register_read_command(dispatcher, *context.read);
     }
     if (context.resolver != nullptr) {
         register_resolve_command(dispatcher, *context.resolver);

@@ -32,6 +32,9 @@ add_executable(tgcli_unit_tests
     dispatch_test.cpp
     request_session_test.cpp
     ready_read_test.cpp
+    read_domain_test.cpp
+    read_commands_test.cpp
+    read_td_runtime_conversion_test.cpp
     resolver_test.cpp
     resolver_consumer_test.cpp
     chats_commands_test.cpp

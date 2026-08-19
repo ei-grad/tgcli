@@ -294,3 +294,18 @@ TEST_CASE("message read human renderers match their reviewed exact TSV goldens",
                                                 {"link", "https://t.me/example/7"},
                                                 {"is_public", true}}) == golden("msg-link.txt"));
 }
+
+TEST_CASE("read human renderer matches its reviewed exact TSV golden", "[read][render][golden]") {
+    const json message{{"id", 123},
+                       {"chat_id", -1001},
+                       {"date", "2026-08-05T10:00:00Z"},
+                       {"sender", {{"type", "user"}, {"id", 42}}},
+                       {"is_outgoing", false},
+                       {"topic", {{"kind", "forum"}, {"id", 7}}},
+                       {"type", "text"},
+                       {"text", "message or caption"}};
+    const json result{
+        {"items", json::array({message})}, {"next", "cursor-2"}, {"boundary", "page"}};
+    CHECK_THAT(result, tgcli::test::matches_json_schema("read.result.schema.json"));
+    CHECK(tgcli::cli::render_human("read", result) == golden("read.txt"));
+}

@@ -204,6 +204,19 @@ std::vector<SchemaCase> schema_cases() {
           {"link", "urn:telegram:message"},
           {"is_public", false}},
          "link"},
+        {"read.result.schema.json",
+         {{"items", json::array({json{{"id", 123},
+                                      {"chat_id", -1001},
+                                      {"date", "2026-08-05T10:00:00Z"},
+                                      {"sender", {{"type", "user"}, {"id", 42}}},
+                                      {"is_outgoing", false},
+                                      {"topic", {{"kind", "forum"}, {"id", 7}}},
+                                      {"type", "text"},
+                                      {"text", "message or caption"}}})},
+          {"next", "cursor-2"},
+          {"boundary", "page"}},
+         "items",
+         true},
         {"doctor.result.schema.json",
          {{"account", "main"},
           {"daemon",
@@ -329,6 +342,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"me", {{"result", "me.result.schema.json"}}},
           {"msg get", {{"result", "msg-get.result.schema.json"}}},
           {"msg link", {{"result", "msg-link.result.schema.json"}}},
+          {"read", {{"result", "read.result.schema.json"}}},
           {"resolve", {{"result", "resolve.result.schema.json"}}},
           {"saved search", {{"result", "saved-search.result.schema.json"}}},
           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
@@ -338,7 +352,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 23);
+    CHECK(manifest["commands"].size() == 24);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -478,6 +492,39 @@ TEST_CASE("unread schema is unpaginated unbounded and keeps private bot identity
         result["items"].push_back(std::move(next));
     }
     CHECK_THAT(result, tgcli::test::matches_json_schema("unread.result.schema.json"));
+}
+
+TEST_CASE("read schema binds page cursors to progress and terminal boundaries to null",
+          "[schema][read]") {
+    const auto cases = schema_cases();
+    const auto found = std::ranges::find_if(cases, [](const SchemaCase& test_case) {
+        return test_case.filename == "read.result.schema.json";
+    });
+    REQUIRE(found != cases.end());
+    auto result = found->instance;
+    CHECK_THAT(result, tgcli::test::matches_json_schema("read.result.schema.json"));
+
+    result["next"] = nullptr;
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("read.result.schema.json"));
+    result = found->instance;
+    result["boundary"] = "tdlib_idle";
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("read.result.schema.json"));
+    result["next"] = nullptr;
+    CHECK_THAT(result, tgcli::test::matches_json_schema("read.result.schema.json"));
+    result["items"] = json::array();
+    CHECK_THAT(result, tgcli::test::matches_json_schema("read.result.schema.json"));
+    result["extra"] = true;
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("read.result.schema.json"));
+
+    result = found->instance;
+    const auto item = result["items"][0];
+    result["items"] = json::array();
+    for (std::size_t index = 0; index < 101; ++index) {
+        auto next = item;
+        next["id"] = static_cast<std::int64_t>(index + 1);
+        result["items"].push_back(std::move(next));
+    }
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("read.result.schema.json"));
 }
 
 TEST_CASE("resolver errors have exact command-specific shapes", "[schema][resolver][error]") {

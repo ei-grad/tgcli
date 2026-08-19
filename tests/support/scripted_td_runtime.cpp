@@ -119,6 +119,92 @@ core::TdValue ScriptedTdRuntime::make_get_chat(std::int64_t chat_id) {
         core::TdFunctionData{core::TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_chat_history(std::int64_t chat_id,
+                                                       std::int64_t from_message_id,
+                                                       std::int32_t offset, std::int32_t limit,
+                                                       bool only_local) {
+    before_make(core::TdFunctionKind::GetChatHistory);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetChatHistory,
+                             {{"chat_id", chat_id},
+                              {"from_message_id", from_message_id},
+                              {"offset", static_cast<std::int64_t>(offset)},
+                              {"limit", static_cast<std::int64_t>(limit)},
+                              {"only_local", only_local}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_chat_message_by_date(std::int64_t chat_id,
+                                                               std::int32_t date) {
+    before_make(core::TdFunctionKind::GetChatMessageByDate);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetChatMessageByDate,
+                             {{"chat_id", chat_id}, {"date", static_cast<std::int64_t>(date)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_message_thread(std::int64_t chat_id,
+                                                         std::int64_t message_id) {
+    before_make(core::TdFunctionKind::GetMessageThread);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetMessageThread,
+                             {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_forum_topic_history(std::int64_t chat_id,
+                                                              std::int32_t forum_topic_id,
+                                                              std::int64_t from_message_id,
+                                                              std::int32_t offset,
+                                                              std::int32_t limit) {
+    before_make(core::TdFunctionKind::GetForumTopicHistory);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetForumTopicHistory,
+                             {{"chat_id", chat_id},
+                              {"forum_topic_id", static_cast<std::int64_t>(forum_topic_id)},
+                              {"from_message_id", from_message_id},
+                              {"offset", static_cast<std::int64_t>(offset)},
+                              {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_message_thread_history(std::int64_t chat_id,
+                                                                 std::int64_t message_id,
+                                                                 std::int64_t from_message_id,
+                                                                 std::int32_t offset,
+                                                                 std::int32_t limit) {
+    before_make(core::TdFunctionKind::GetMessageThreadHistory);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetMessageThreadHistory,
+                             {{"chat_id", chat_id},
+                              {"message_id", message_id},
+                              {"from_message_id", from_message_id},
+                              {"offset", static_cast<std::int64_t>(offset)},
+                              {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_direct_messages_chat_topic_history(
+    std::int64_t chat_id, std::int64_t topic_id, std::int64_t from_message_id, std::int32_t offset,
+    std::int32_t limit) {
+    before_make(core::TdFunctionKind::GetDirectMessagesChatTopicHistory);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetDirectMessagesChatTopicHistory,
+                             {{"chat_id", chat_id},
+                              {"topic_id", topic_id},
+                              {"from_message_id", from_message_id},
+                              {"offset", static_cast<std::int64_t>(offset)},
+                              {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_saved_messages_topic_history(std::int64_t topic_id,
+                                                                       std::int64_t from_message_id,
+                                                                       std::int32_t offset,
+                                                                       std::int32_t limit) {
+    before_make(core::TdFunctionKind::GetSavedMessagesTopicHistory);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetSavedMessagesTopicHistory,
+                             {{"saved_messages_topic_id", topic_id},
+                              {"from_message_id", from_message_id},
+                              {"offset", static_cast<std::int64_t>(offset)},
+                              {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
 core::TdValue ScriptedTdRuntime::make_get_messages(std::int64_t chat_id,
                                                    std::vector<std::int64_t> message_ids) {
     before_make(core::TdFunctionKind::GetMessages);

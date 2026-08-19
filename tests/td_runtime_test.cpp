@@ -34,10 +34,12 @@ using tgcli::core::AuthWaitOtherDeviceConfirmation;
 using tgcli::core::AuthWaitPassword;
 using tgcli::core::AuthWaitPremiumPurchase;
 using tgcli::core::AuthWaitRegistration;
+using tgcli::core::TdAuthorizationError;
 using tgcli::core::TdClient;
 using tgcli::core::TdFunctionData;
 using tgcli::core::TdFunctionField;
 using tgcli::core::TdFunctionKind;
+using tgcli::core::TdOk;
 using tgcli::core::TdSendDescriptor;
 using tgcli::core::TdSession;
 using tgcli::core::TdSessionDeviceType;
@@ -270,6 +272,53 @@ TEST_CASE("TdClient authorizes both message-read functions only as Ready reads",
                                     .link = "urn:telegram:message", .is_public = false}));
     REQUIRE(link.wait_for(2s) == std::future_status::ready);
     CHECK(link.get().get_if<tgcli::core::TdMessageLink>() != nullptr);
+}
+
+TEST_CASE("TdClient authorizes all seven read-history functions only as Ready reads",
+          "[core][td-runtime][read][authorization][fake-boundary]") {
+    auto fake = make_fake_client();
+    fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return fake.client->auth_state()->data.state == AuthState::Ready; }));
+
+    std::size_t expected_count = 2;
+    const auto admitted = [&](TdFunctionKind expected, std::future<TdValue> response) {
+        REQUIRE(fake.runtime->wait_for_sent(expected_count));
+        const auto sent = fake.runtime->sent_functions();
+        REQUIRE(sent.size() == expected_count);
+        CHECK(sent.back().function.kind() == expected);
+        fake.runtime->push_response(fake.first, sent.back().query_id, TdValue::from(TdOk{}));
+        REQUIRE(response.wait_for(2s) == std::future_status::ready);
+        CHECK(response.get().get_if<TdOk>() != nullptr);
+        ++expected_count;
+    };
+
+    admitted(TdFunctionKind::GetChatHistory,
+             fake.client->get_chat_history(fake.client->auth_state(), -1001, 123, 0, 21, true));
+    admitted(TdFunctionKind::GetChatMessageByDate,
+             fake.client->get_chat_message_by_date(fake.client->auth_state(), -1001, -17));
+    admitted(TdFunctionKind::GetMessageThread,
+             fake.client->get_message_thread(fake.client->auth_state(), -1001, 500));
+    admitted(TdFunctionKind::GetForumTopicHistory,
+             fake.client->get_forum_topic_history(fake.client->auth_state(), -1001, 7, 123, 0, 20));
+    admitted(
+        TdFunctionKind::GetMessageThreadHistory,
+        fake.client->get_message_thread_history(fake.client->auth_state(), -1001, 500, 123, 0, 20));
+    admitted(TdFunctionKind::GetDirectMessagesChatTopicHistory,
+             fake.client->get_direct_messages_chat_topic_history(fake.client->auth_state(), -1001,
+                                                                 600, 123, 0, 20));
+    admitted(
+        TdFunctionKind::GetSavedMessagesTopicHistory,
+        fake.client->get_saved_messages_topic_history(fake.client->auth_state(), 700, 123, 0, 20));
+
+    auto denied = make_fake_client();
+    denied.runtime->push_response(denied.first, 1, {}, AuthStateData{AuthState::WaitPhoneNumber});
+    REQUIRE(eventually(
+        [&] { return denied.client->auth_state()->data.state == AuthState::WaitPhoneNumber; }));
+    auto response =
+        denied.client->get_chat_history(denied.client->auth_state(), -1001, 0, 0, 20, false);
+    REQUIRE(response.wait_for(2s) == std::future_status::ready);
+    CHECK_THROWS_AS(response.get(), TdAuthorizationError);
+    CHECK(denied.runtime->sent_functions().size() == 1);
 }
 
 TEST_CASE("process logging configuration is frozen before the first client id",

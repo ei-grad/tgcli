@@ -13,6 +13,27 @@ TdValue convert_production_response_for_test(TdValue object);
 TdValue convert_production_sessions_for_test(TdValue object);
 TdValue make_production_get_active_sessions_for_test();
 TdValue make_production_terminate_session_for_test(std::int64_t session_id);
+TdValue make_production_get_chat_history_for_test(std::int64_t chat_id,
+                                                  std::int64_t from_message_id, std::int32_t offset,
+                                                  std::int32_t limit, bool only_local);
+TdValue make_production_get_chat_message_by_date_for_test(std::int64_t chat_id, std::int32_t date);
+TdValue make_production_get_message_thread_for_test(std::int64_t chat_id, std::int64_t message_id);
+TdValue make_production_get_forum_topic_history_for_test(std::int64_t chat_id,
+                                                         std::int32_t forum_topic_id,
+                                                         std::int64_t from_message_id,
+                                                         std::int32_t offset, std::int32_t limit);
+TdValue make_production_get_message_thread_history_for_test(std::int64_t chat_id,
+                                                            std::int64_t message_id,
+                                                            std::int64_t from_message_id,
+                                                            std::int32_t offset,
+                                                            std::int32_t limit);
+TdValue make_production_get_direct_messages_chat_topic_history_for_test(
+    std::int64_t chat_id, std::int64_t topic_id, std::int64_t from_message_id, std::int32_t offset,
+    std::int32_t limit);
+TdValue make_production_get_saved_messages_topic_history_for_test(std::int64_t topic_id,
+                                                                  std::int64_t from_message_id,
+                                                                  std::int32_t offset,
+                                                                  std::int32_t limit);
 TdValue make_production_get_messages_for_test(std::int64_t chat_id,
                                               std::vector<std::int64_t> message_ids);
 TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int64_t message_id,
@@ -21,6 +42,29 @@ TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int
                                                   std::string poll_option_id, bool for_album,
                                                   bool in_message_thread);
 bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind);
+bool production_get_chat_history_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                                  std::int64_t from_message_id, std::int32_t offset,
+                                                  std::int32_t limit, bool only_local);
+bool production_get_chat_message_by_date_matches_for_test(const TdValue& function,
+                                                          std::int64_t chat_id, std::int32_t date);
+bool production_get_message_thread_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                                    std::int64_t message_id);
+bool production_get_forum_topic_history_matches_for_test(const TdValue& function,
+                                                         std::int64_t chat_id,
+                                                         std::int32_t forum_topic_id,
+                                                         std::int64_t from_message_id,
+                                                         std::int32_t offset, std::int32_t limit);
+bool production_get_message_thread_history_matches_for_test(
+    const TdValue& function, std::int64_t chat_id, std::int64_t message_id,
+    std::int64_t from_message_id, std::int32_t offset, std::int32_t limit);
+bool production_get_direct_messages_chat_topic_history_matches_for_test(
+    const TdValue& function, std::int64_t chat_id, std::int64_t topic_id,
+    std::int64_t from_message_id, std::int32_t offset, std::int32_t limit);
+bool production_get_saved_messages_topic_history_matches_for_test(const TdValue& function,
+                                                                  std::int64_t topic_id,
+                                                                  std::int64_t from_message_id,
+                                                                  std::int32_t offset,
+                                                                  std::int32_t limit);
 std::optional<std::int64_t> production_terminate_session_id_for_test(const TdValue& function);
 bool production_get_messages_matches_for_test(const TdValue& function, std::int64_t chat_id,
                                               const std::vector<std::int64_t>& message_ids);

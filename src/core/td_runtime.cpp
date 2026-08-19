@@ -374,6 +374,92 @@ TdValue make_native_get_messages(std::int64_t chat_id, std::vector<std::int64_t>
                                           {{"chat_id", chat_id}, {"message_ids", descriptor_ids}}});
 }
 
+TdValue make_native_get_chat_history(std::int64_t chat_id, std::int64_t from_message_id,
+                                     std::int32_t offset, std::int32_t limit, bool only_local) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getChatHistory>(
+        chat_id, from_message_id, offset, limit, only_local);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetChatHistory,
+                                            {{"chat_id", chat_id},
+                                             {"from_message_id", from_message_id},
+                                             {"offset", static_cast<std::int64_t>(offset)},
+                                             {"limit", static_cast<std::int64_t>(limit)},
+                                             {"only_local", only_local}}});
+}
+
+TdValue make_native_get_chat_message_by_date(std::int64_t chat_id, std::int32_t date) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getChatMessageByDate>(chat_id, date);
+    return TdValue::function(
+        std::move(native),
+        TdFunctionData{TdFunctionKind::GetChatMessageByDate,
+                       {{"chat_id", chat_id}, {"date", static_cast<std::int64_t>(date)}}});
+}
+
+TdValue make_native_get_message_thread(std::int64_t chat_id, std::int64_t message_id) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getMessageThread>(chat_id, message_id);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetMessageThread,
+                                            {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+TdValue make_native_get_forum_topic_history(std::int64_t chat_id, std::int32_t forum_topic_id,
+                                            std::int64_t from_message_id, std::int32_t offset,
+                                            std::int32_t limit) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getForumTopicHistory>(
+        chat_id, forum_topic_id, from_message_id, offset, limit);
+    return TdValue::function(
+        std::move(native),
+        TdFunctionData{TdFunctionKind::GetForumTopicHistory,
+                       {{"chat_id", chat_id},
+                        {"forum_topic_id", static_cast<std::int64_t>(forum_topic_id)},
+                        {"from_message_id", from_message_id},
+                        {"offset", static_cast<std::int64_t>(offset)},
+                        {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+TdValue make_native_get_message_thread_history(std::int64_t chat_id, std::int64_t message_id,
+                                               std::int64_t from_message_id, std::int32_t offset,
+                                               std::int32_t limit) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getMessageThreadHistory>(
+        chat_id, message_id, from_message_id, offset, limit);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetMessageThreadHistory,
+                                            {{"chat_id", chat_id},
+                                             {"message_id", message_id},
+                                             {"from_message_id", from_message_id},
+                                             {"offset", static_cast<std::int64_t>(offset)},
+                                             {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+TdValue make_native_get_direct_messages_chat_topic_history(std::int64_t chat_id,
+                                                           std::int64_t topic_id,
+                                                           std::int64_t from_message_id,
+                                                           std::int32_t offset,
+                                                           std::int32_t limit) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getDirectMessagesChatTopicHistory>(
+        chat_id, topic_id, from_message_id, offset, limit);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetDirectMessagesChatTopicHistory,
+                                            {{"chat_id", chat_id},
+                                             {"topic_id", topic_id},
+                                             {"from_message_id", from_message_id},
+                                             {"offset", static_cast<std::int64_t>(offset)},
+                                             {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+TdValue make_native_get_saved_messages_topic_history(std::int64_t topic_id,
+                                                     std::int64_t from_message_id,
+                                                     std::int32_t offset, std::int32_t limit) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getSavedMessagesTopicHistory>(
+        topic_id, from_message_id, offset, limit);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetSavedMessagesTopicHistory,
+                                            {{"saved_messages_topic_id", topic_id},
+                                             {"from_message_id", from_message_id},
+                                             {"offset", static_cast<std::int64_t>(offset)},
+                                             {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
 TdValue make_native_get_message_link(std::int64_t chat_id, std::int64_t message_id,
                                      std::int32_t media_timestamp, std::int32_t checklist_task_id,
                                      std::string poll_option_id, bool for_album,
@@ -527,6 +613,19 @@ TdMessages convert_messages(const td_api::messages& messages) {
     converted.messages.reserve(messages.messages_.size());
     for (const auto& message : messages.messages_) {
         converted.messages.push_back(
+            message == nullptr ? std::nullopt
+                               : std::optional<TdMessageSummary>{convert_message(*message)});
+    }
+    return converted;
+}
+
+TdMessageThreadInfo convert_message_thread_info(const td_api::messageThreadInfo& info) {
+    TdMessageThreadInfo converted{.history_chat_id = info.chat_id_,
+                                  .history_thread_id = info.message_thread_id_,
+                                  .starting_messages = {}};
+    converted.starting_messages.reserve(info.messages_.size());
+    for (const auto& message : info.messages_) {
+        converted.starting_messages.push_back(
             message == nullptr ? std::nullopt
                                : std::optional<TdMessageSummary>{convert_message(*message)});
     }
@@ -760,6 +859,11 @@ TdValue convert_response(NativeObjectPtr object) {
     case td_api::messages::ID: {
         return TdValue::from(convert_messages(static_cast<const td_api::messages&>(*object)));
     }
+    case td_api::message::ID:
+        return TdValue::from(convert_message(static_cast<const td_api::message&>(*object)));
+    case td_api::messageThreadInfo::ID:
+        return TdValue::from(
+            convert_message_thread_info(static_cast<const td_api::messageThreadInfo&>(*object)));
     case td_api::messageLink::ID: {
         return TdValue::from(convert_message_link(static_cast<td_api::messageLink&>(*object)));
     }
@@ -883,6 +987,20 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::terminateSession::ID;
     case TdFunctionKind::GetChat:
         return function.get_id() == td_api::getChat::ID;
+    case TdFunctionKind::GetChatHistory:
+        return function.get_id() == td_api::getChatHistory::ID;
+    case TdFunctionKind::GetChatMessageByDate:
+        return function.get_id() == td_api::getChatMessageByDate::ID;
+    case TdFunctionKind::GetMessageThread:
+        return function.get_id() == td_api::getMessageThread::ID;
+    case TdFunctionKind::GetForumTopicHistory:
+        return function.get_id() == td_api::getForumTopicHistory::ID;
+    case TdFunctionKind::GetMessageThreadHistory:
+        return function.get_id() == td_api::getMessageThreadHistory::ID;
+    case TdFunctionKind::GetDirectMessagesChatTopicHistory:
+        return function.get_id() == td_api::getDirectMessagesChatTopicHistory::ID;
+    case TdFunctionKind::GetSavedMessagesTopicHistory:
+        return function.get_id() == td_api::getSavedMessagesTopicHistory::ID;
     case TdFunctionKind::GetMessages:
         return function.get_id() == td_api::getMessages::ID;
     case TdFunctionKind::GetMessageLink:
@@ -1324,6 +1442,49 @@ class ProductionTdRuntime final : public TdRuntime {
                                  TdFunctionData{TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
     }
 
+    TdValue make_get_chat_history(std::int64_t chat_id, std::int64_t from_message_id,
+                                  std::int32_t offset, std::int32_t limit,
+                                  bool only_local) override {
+        return make_native_get_chat_history(chat_id, from_message_id, offset, limit, only_local);
+    }
+
+    TdValue make_get_chat_message_by_date(std::int64_t chat_id, std::int32_t date) override {
+        return make_native_get_chat_message_by_date(chat_id, date);
+    }
+
+    TdValue make_get_message_thread(std::int64_t chat_id, std::int64_t message_id) override {
+        return make_native_get_message_thread(chat_id, message_id);
+    }
+
+    TdValue make_get_forum_topic_history(std::int64_t chat_id, std::int32_t forum_topic_id,
+                                         std::int64_t from_message_id, std::int32_t offset,
+                                         std::int32_t limit) override {
+        return make_native_get_forum_topic_history(chat_id, forum_topic_id, from_message_id, offset,
+                                                   limit);
+    }
+
+    TdValue make_get_message_thread_history(std::int64_t chat_id, std::int64_t message_id,
+                                            std::int64_t from_message_id, std::int32_t offset,
+                                            std::int32_t limit) override {
+        return make_native_get_message_thread_history(chat_id, message_id, from_message_id, offset,
+                                                      limit);
+    }
+
+    TdValue make_get_direct_messages_chat_topic_history(std::int64_t chat_id, std::int64_t topic_id,
+                                                        std::int64_t from_message_id,
+                                                        std::int32_t offset,
+                                                        std::int32_t limit) override {
+        return make_native_get_direct_messages_chat_topic_history(chat_id, topic_id,
+                                                                  from_message_id, offset, limit);
+    }
+
+    TdValue make_get_saved_messages_topic_history(std::int64_t topic_id,
+                                                  std::int64_t from_message_id, std::int32_t offset,
+                                                  std::int32_t limit) override {
+        return make_native_get_saved_messages_topic_history(topic_id, from_message_id, offset,
+                                                            limit);
+    }
+
     TdValue make_get_messages(std::int64_t chat_id,
                               std::vector<std::int64_t> message_ids) override {
         return make_native_get_messages(chat_id, std::move(message_ids));
@@ -1517,6 +1678,51 @@ TdValue make_production_terminate_session_for_test(std::int64_t session_id) {
     return make_native_terminate_session(session_id);
 }
 
+TdValue make_production_get_chat_history_for_test(std::int64_t chat_id,
+                                                  std::int64_t from_message_id, std::int32_t offset,
+                                                  std::int32_t limit, bool only_local) {
+    return make_native_get_chat_history(chat_id, from_message_id, offset, limit, only_local);
+}
+
+TdValue make_production_get_chat_message_by_date_for_test(std::int64_t chat_id, std::int32_t date) {
+    return make_native_get_chat_message_by_date(chat_id, date);
+}
+
+TdValue make_production_get_message_thread_for_test(std::int64_t chat_id, std::int64_t message_id) {
+    return make_native_get_message_thread(chat_id, message_id);
+}
+
+TdValue make_production_get_forum_topic_history_for_test(std::int64_t chat_id,
+                                                         std::int32_t forum_topic_id,
+                                                         std::int64_t from_message_id,
+                                                         std::int32_t offset, std::int32_t limit) {
+    return make_native_get_forum_topic_history(chat_id, forum_topic_id, from_message_id, offset,
+                                               limit);
+}
+
+TdValue make_production_get_message_thread_history_for_test(std::int64_t chat_id,
+                                                            std::int64_t message_id,
+                                                            std::int64_t from_message_id,
+                                                            std::int32_t offset,
+                                                            std::int32_t limit) {
+    return make_native_get_message_thread_history(chat_id, message_id, from_message_id, offset,
+                                                  limit);
+}
+
+TdValue make_production_get_direct_messages_chat_topic_history_for_test(
+    std::int64_t chat_id, std::int64_t topic_id, std::int64_t from_message_id, std::int32_t offset,
+    std::int32_t limit) {
+    return make_native_get_direct_messages_chat_topic_history(chat_id, topic_id, from_message_id,
+                                                              offset, limit);
+}
+
+TdValue make_production_get_saved_messages_topic_history_for_test(std::int64_t topic_id,
+                                                                  std::int64_t from_message_id,
+                                                                  std::int32_t offset,
+                                                                  std::int32_t limit) {
+    return make_native_get_saved_messages_topic_history(topic_id, from_message_id, offset, limit);
+}
+
 TdValue make_production_get_messages_for_test(std::int64_t chat_id,
                                               std::vector<std::int64_t> message_ids) {
     return make_native_get_messages(chat_id, std::move(message_ids));
@@ -1534,6 +1740,102 @@ TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int
 bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind) {
     const auto* native = function.get_if<NativeFunctionPtr>();
     return native != nullptr && *native != nullptr && native_function_matches(**native, kind);
+}
+
+bool production_get_chat_history_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                                  std::int64_t from_message_id, std::int32_t offset,
+                                                  std::int32_t limit, bool only_local) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getChatHistory::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getChatHistory&>(**native);
+    return request.chat_id_ == chat_id && request.from_message_id_ == from_message_id &&
+           request.offset_ == offset && request.limit_ == limit &&
+           request.only_local_ == only_local;
+}
+
+bool production_get_chat_message_by_date_matches_for_test(const TdValue& function,
+                                                          std::int64_t chat_id, std::int32_t date) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getChatMessageByDate::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getChatMessageByDate&>(**native);
+    return request.chat_id_ == chat_id && request.date_ == date;
+}
+
+bool production_get_message_thread_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                                    std::int64_t message_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getMessageThread::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessageThread&>(**native);
+    return request.chat_id_ == chat_id && request.message_id_ == message_id;
+}
+
+bool production_get_forum_topic_history_matches_for_test(const TdValue& function,
+                                                         std::int64_t chat_id,
+                                                         std::int32_t forum_topic_id,
+                                                         std::int64_t from_message_id,
+                                                         std::int32_t offset, std::int32_t limit) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getForumTopicHistory::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getForumTopicHistory&>(**native);
+    return request.chat_id_ == chat_id && request.forum_topic_id_ == forum_topic_id &&
+           request.from_message_id_ == from_message_id && request.offset_ == offset &&
+           request.limit_ == limit;
+}
+
+bool production_get_message_thread_history_matches_for_test(
+    const TdValue& function, std::int64_t chat_id, std::int64_t message_id,
+    std::int64_t from_message_id, std::int32_t offset, std::int32_t limit) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getMessageThreadHistory::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessageThreadHistory&>(**native);
+    return request.chat_id_ == chat_id && request.message_id_ == message_id &&
+           request.from_message_id_ == from_message_id && request.offset_ == offset &&
+           request.limit_ == limit;
+}
+
+bool production_get_direct_messages_chat_topic_history_matches_for_test(
+    const TdValue& function, std::int64_t chat_id, std::int64_t topic_id,
+    std::int64_t from_message_id, std::int32_t offset, std::int32_t limit) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getDirectMessagesChatTopicHistory::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getDirectMessagesChatTopicHistory&>(**native);
+    return request.chat_id_ == chat_id && request.topic_id_ == topic_id &&
+           request.from_message_id_ == from_message_id && request.offset_ == offset &&
+           request.limit_ == limit;
+}
+
+bool production_get_saved_messages_topic_history_matches_for_test(const TdValue& function,
+                                                                  std::int64_t topic_id,
+                                                                  std::int64_t from_message_id,
+                                                                  std::int32_t offset,
+                                                                  std::int32_t limit) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getSavedMessagesTopicHistory::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getSavedMessagesTopicHistory&>(**native);
+    return request.saved_messages_topic_id_ == topic_id &&
+           request.from_message_id_ == from_message_id && request.offset_ == offset &&
+           request.limit_ == limit;
 }
 
 std::optional<std::int64_t> production_terminate_session_id_for_test(const TdValue& function) {

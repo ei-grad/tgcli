@@ -141,6 +141,13 @@ class TdClient::Impl {
              function != TdFunctionKind::GetSavedMessagesTags &&
              function != TdFunctionKind::SearchSavedMessages &&
              function != TdFunctionKind::GetActiveSessions && function != TdFunctionKind::GetChat &&
+             function != TdFunctionKind::GetChatHistory &&
+             function != TdFunctionKind::GetChatMessageByDate &&
+             function != TdFunctionKind::GetMessageThread &&
+             function != TdFunctionKind::GetForumTopicHistory &&
+             function != TdFunctionKind::GetMessageThreadHistory &&
+             function != TdFunctionKind::GetDirectMessagesChatTopicHistory &&
+             function != TdFunctionKind::GetSavedMessagesTopicHistory &&
              function != TdFunctionKind::GetMessages &&
              function != TdFunctionKind::GetMessageLink && function != TdFunctionKind::GetChats &&
              function != TdFunctionKind::LoadChats &&
@@ -197,6 +204,66 @@ class TdClient::Impl {
     std::future<TdValue> get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   std::int64_t chat_id) {
         return send_read(authorization, TdFunctionKind::GetChat, runtime_->make_get_chat(chat_id));
+    }
+
+    std::future<TdValue>
+    get_chat_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     std::int64_t chat_id, std::int64_t from_message_id, std::int32_t offset,
+                     std::int32_t limit, bool only_local) {
+        return send_read(
+            authorization, TdFunctionKind::GetChatHistory,
+            runtime_->make_get_chat_history(chat_id, from_message_id, offset, limit, only_local));
+    }
+
+    std::future<TdValue>
+    get_chat_message_by_date(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             std::int64_t chat_id, std::int32_t date) {
+        return send_read(authorization, TdFunctionKind::GetChatMessageByDate,
+                         runtime_->make_get_chat_message_by_date(chat_id, date));
+    }
+
+    std::future<TdValue>
+    get_message_thread(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       std::int64_t chat_id, std::int64_t message_id) {
+        return send_read(authorization, TdFunctionKind::GetMessageThread,
+                         runtime_->make_get_message_thread(chat_id, message_id));
+    }
+
+    std::future<TdValue>
+    get_forum_topic_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            std::int64_t chat_id, std::int32_t forum_topic_id,
+                            std::int64_t from_message_id, std::int32_t offset, std::int32_t limit) {
+        return send_read(authorization, TdFunctionKind::GetForumTopicHistory,
+                         runtime_->make_get_forum_topic_history(chat_id, forum_topic_id,
+                                                                from_message_id, offset, limit));
+    }
+
+    std::future<TdValue>
+    get_message_thread_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                               std::int64_t chat_id, std::int64_t message_id,
+                               std::int64_t from_message_id, std::int32_t offset,
+                               std::int32_t limit) {
+        return send_read(authorization, TdFunctionKind::GetMessageThreadHistory,
+                         runtime_->make_get_message_thread_history(chat_id, message_id,
+                                                                   from_message_id, offset, limit));
+    }
+
+    std::future<TdValue> get_direct_messages_chat_topic_history(
+        const std::shared_ptr<const AuthStateSnapshot>& authorization, std::int64_t chat_id,
+        std::int64_t topic_id, std::int64_t from_message_id, std::int32_t offset,
+        std::int32_t limit) {
+        return send_read(authorization, TdFunctionKind::GetDirectMessagesChatTopicHistory,
+                         runtime_->make_get_direct_messages_chat_topic_history(
+                             chat_id, topic_id, from_message_id, offset, limit));
+    }
+
+    std::future<TdValue>
+    get_saved_messages_topic_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                     std::int64_t topic_id, std::int64_t from_message_id,
+                                     std::int32_t offset, std::int32_t limit) {
+        return send_read(authorization, TdFunctionKind::GetSavedMessagesTopicHistory,
+                         runtime_->make_get_saved_messages_topic_history(topic_id, from_message_id,
+                                                                         offset, limit));
     }
 
     std::future<TdValue> get_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -1304,6 +1371,58 @@ std::future<TdValue>
 TdClient::get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                    std::int64_t chat_id) {
     return impl_->get_chat(authorization, chat_id);
+}
+
+std::future<TdValue>
+TdClient::get_chat_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t chat_id, std::int64_t from_message_id, std::int32_t offset,
+                           std::int32_t limit, bool only_local) {
+    return impl_->get_chat_history(authorization, chat_id, from_message_id, offset, limit,
+                                   only_local);
+}
+
+std::future<TdValue>
+TdClient::get_chat_message_by_date(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   std::int64_t chat_id, std::int32_t date) {
+    return impl_->get_chat_message_by_date(authorization, chat_id, date);
+}
+
+std::future<TdValue>
+TdClient::get_message_thread(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             std::int64_t chat_id, std::int64_t message_id) {
+    return impl_->get_message_thread(authorization, chat_id, message_id);
+}
+
+std::future<TdValue>
+TdClient::get_forum_topic_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int64_t chat_id, std::int32_t forum_topic_id,
+                                  std::int64_t from_message_id, std::int32_t offset,
+                                  std::int32_t limit) {
+    return impl_->get_forum_topic_history(authorization, chat_id, forum_topic_id, from_message_id,
+                                          offset, limit);
+}
+
+std::future<TdValue>
+TdClient::get_message_thread_history(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                     std::int64_t chat_id, std::int64_t message_id,
+                                     std::int64_t from_message_id, std::int32_t offset,
+                                     std::int32_t limit) {
+    return impl_->get_message_thread_history(authorization, chat_id, message_id, from_message_id,
+                                             offset, limit);
+}
+
+std::future<TdValue> TdClient::get_direct_messages_chat_topic_history(
+    const std::shared_ptr<const AuthStateSnapshot>& authorization, std::int64_t chat_id,
+    std::int64_t topic_id, std::int64_t from_message_id, std::int32_t offset, std::int32_t limit) {
+    return impl_->get_direct_messages_chat_topic_history(authorization, chat_id, topic_id,
+                                                         from_message_id, offset, limit);
+}
+
+std::future<TdValue> TdClient::get_saved_messages_topic_history(
+    const std::shared_ptr<const AuthStateSnapshot>& authorization, std::int64_t topic_id,
+    std::int64_t from_message_id, std::int32_t offset, std::int32_t limit) {
+    return impl_->get_saved_messages_topic_history(authorization, topic_id, from_message_id, offset,
+                                                   limit);
 }
 
 std::future<TdValue>

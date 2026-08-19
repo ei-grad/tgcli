@@ -277,6 +277,10 @@ class ResolverRun {
         return reads_.read(start, snapshot_);
     }
 
+    [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const {
+        return saved_messages_chat_;
+    }
+
   private:
     ResolverPrincipalOutcome take_error_or_stop() {
         if (error_) {
@@ -868,6 +872,7 @@ class ResolverRun {
         if (!materialized) {
             return std::nullopt;
         }
+        saved_messages_chat_ = *chat;
         return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
                              ResolvedLinkType::SavedMessages);
     }
@@ -881,6 +886,7 @@ class ResolverRun {
     core::TdUserSummary me_;
     ResolverCaller caller_ = M2Operation::Resolve;
     std::optional<ResolverPrincipal> principal_;
+    std::optional<core::TdChat> saved_messages_chat_;
     std::optional<ResolverError> error_;
     bool bound_ = false;
 };
@@ -898,6 +904,10 @@ class ResolverConsumer::Impl {
 
     ResolverOutcome resolve_chat(std::string selector, ResolverScope scope) {
         return run_.resolve_chat(std::move(selector), scope);
+    }
+
+    [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const {
+        return run_.cached_saved_messages_chat();
     }
 
     ReadyReadResult read_target(const ReadyReadStart& start) {
@@ -954,6 +964,10 @@ ResolverPrincipalOutcome ResolverConsumer::bind_principal(ResolverCaller caller)
 
 ResolverOutcome ResolverConsumer::resolve_chat(std::string selector, ResolverScope scope) {
     return impl_->resolve_chat(std::move(selector), scope);
+}
+
+std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {
+    return impl_->cached_saved_messages_chat();
 }
 
 ReadyReadResult ResolverConsumer::read_target(const ReadyReadStart& start) {

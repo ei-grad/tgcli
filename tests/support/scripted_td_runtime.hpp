@@ -44,6 +44,26 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_get_active_sessions() override;
     core::TdValue make_terminate_session(std::int64_t session_id) override;
     core::TdValue make_get_chat(std::int64_t chat_id) override;
+    core::TdValue make_get_chat_history(std::int64_t chat_id, std::int64_t from_message_id,
+                                        std::int32_t offset, std::int32_t limit,
+                                        bool only_local) override;
+    core::TdValue make_get_chat_message_by_date(std::int64_t chat_id, std::int32_t date) override;
+    core::TdValue make_get_message_thread(std::int64_t chat_id, std::int64_t message_id) override;
+    core::TdValue make_get_forum_topic_history(std::int64_t chat_id, std::int32_t forum_topic_id,
+                                               std::int64_t from_message_id, std::int32_t offset,
+                                               std::int32_t limit) override;
+    core::TdValue make_get_message_thread_history(std::int64_t chat_id, std::int64_t message_id,
+                                                  std::int64_t from_message_id, std::int32_t offset,
+                                                  std::int32_t limit) override;
+    core::TdValue make_get_direct_messages_chat_topic_history(std::int64_t chat_id,
+                                                              std::int64_t topic_id,
+                                                              std::int64_t from_message_id,
+                                                              std::int32_t offset,
+                                                              std::int32_t limit) override;
+    core::TdValue make_get_saved_messages_topic_history(std::int64_t topic_id,
+                                                        std::int64_t from_message_id,
+                                                        std::int32_t offset,
+                                                        std::int32_t limit) override;
     core::TdValue make_get_messages(std::int64_t chat_id,
                                     std::vector<std::int64_t> message_ids) override;
     core::TdValue make_get_message_link(std::int64_t chat_id, std::int64_t message_id,

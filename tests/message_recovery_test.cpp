@@ -8,6 +8,7 @@
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/message_commands.hpp"
+#include "daemon/read_commands.hpp"
 #include "daemon/removal_journal.hpp"
 #include "daemon/request_session.hpp"
 #include "support/scripted_td_runtime.hpp"
@@ -180,10 +181,12 @@ class RecoveryFixture {
             logout_hooks_);
         messages_ =
             std::make_unique<tgcli::daemon::MessageCoordinator>(*client_, std::string("main"));
+        read_ = std::make_unique<tgcli::daemon::ReadCoordinator>(*client_, std::string("main"));
         context_.account = "main";
         context_.account_removal = removal_.get();
         context_.logout = logout_.get();
         context_.messages = messages_.get();
+        context_.read = read_.get();
         tgcli::daemon::register_commands(dispatcher_, context_);
     }
 
@@ -248,9 +251,15 @@ class RecoveryFixture {
                 });
             tgcli::proto::Request request("main");
             request.command = command;
-            request.args = command == std::vector<std::string>{"msg", "get"}
-                               ? json{{"chat", "-1001"}, {"message_ids", json::array({123})}}
-                               : json{{"chat", "-1001"}, {"message_id", 123}};
+            if (command == std::vector<std::string>{"msg", "get"}) {
+                request.args = {{"chat", "-1001"}, {"message_ids", json::array({123})}};
+            } else if (command == std::vector<std::string>{"read"}) {
+                request.args = {{"chat", "-1001"},  {"before", nullptr}, {"since", nullptr},
+                                {"until", nullptr}, {"topic", nullptr},  {"local", false},
+                                {"limit", 20},      {"cursor", nullptr}};
+            } else {
+                request.args = {{"chat", "-1001"}, {"message_id", 123}};
+            }
             request.context.timeout_seconds = 1.0;
             request.context.cwd = "/";
             tgcli::daemon::RequestSession session(std::move(request), sink);
@@ -317,6 +326,7 @@ class RecoveryFixture {
     std::unique_ptr<tgcli::daemon::AccountRemovalCoordinator> removal_;
     std::unique_ptr<tgcli::daemon::LogoutCoordinator> logout_;
     std::unique_ptr<tgcli::daemon::MessageCoordinator> messages_;
+    std::unique_ptr<tgcli::daemon::ReadCoordinator> read_;
     tgcli::daemon::DaemonContext context_;
     tgcli::daemon::Dispatcher dispatcher_;
     std::size_t sent_count_ = 1;
@@ -439,4 +449,27 @@ TEST_CASE("msg real dispatch clean trace orders both recoveries before resolver 
         CHECK(first_index(trace, "getMe") < first_index(trace, "getChat"));
         CHECK(first_index(trace, "getChat") < first_index(trace, target));
     }
+}
+
+TEST_CASE("read remains outside both recovery preflight lists",
+          "[read][recovery][dispatch][fake-boundary]") {
+    RecoveryFixture fixture;
+    fixture.add_incomplete_removal();
+    auto pending = fixture.dispatch({"read"});
+    fixture.respond(tgcli::core::TdFunctionKind::GetMe, user());
+    fixture.respond(tgcli::core::TdFunctionKind::GetChat, chat());
+    fixture.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                    tgcli::core::TdMessages{.total_count = 0, .messages = {}});
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result) ==
+          json{{"items", json::array()}, {"next", nullptr}, {"boundary", "tdlib_idle"}});
+    CHECK_FALSE(outcome.error);
+    const auto trace = fixture.trace();
+    CHECK(first_index(trace, "removal") == trace.size());
+    CHECK(first_index(trace, "logout") == trace.size());
+    REQUIRE(trace.size() >= 3);
+    CHECK(trace[0] == "getMe");
+    CHECK(trace[1] == "getChat");
+    CHECK(trace[2] == "getChatHistory");
 }

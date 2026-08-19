@@ -392,6 +392,13 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetActiveSessions:
     case core::TdFunctionKind::TerminateSession:
     case core::TdFunctionKind::GetChat:
+    case core::TdFunctionKind::GetChatHistory:
+    case core::TdFunctionKind::GetChatMessageByDate:
+    case core::TdFunctionKind::GetMessageThread:
+    case core::TdFunctionKind::GetForumTopicHistory:
+    case core::TdFunctionKind::GetMessageThreadHistory:
+    case core::TdFunctionKind::GetDirectMessagesChatTopicHistory:
+    case core::TdFunctionKind::GetSavedMessagesTopicHistory:
     case core::TdFunctionKind::GetMessages:
     case core::TdFunctionKind::GetMessageLink:
     case core::TdFunctionKind::GetChats:

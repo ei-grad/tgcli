@@ -163,7 +163,7 @@ before the milestone is closed.
 - [x] `tgcli chats`: Main/Archive/numeric-folder growing-prefix scan, exact
       `(position.order, chat_id)` keyset, sparse unread pagination, and
       live-view continuation cases across restart/movement/removal/ties
-- [ ] `tgcli read`/`history`, after shared MessageSummary/TdMessages and
+- [x] `tgcli read`/`history`, after shared MessageSummary/TdMessages and
       ResolverConsumer land: pure timestamp/topic/cursor/scanner foundation;
       seven typed TD calls including `getMessageThread`; one canonical coordinator
       plus parser alias; limits,

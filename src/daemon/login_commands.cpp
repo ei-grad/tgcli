@@ -318,6 +318,13 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetActiveSessions:
     case TdFunctionKind::TerminateSession:
     case TdFunctionKind::GetChat:
+    case TdFunctionKind::GetChatHistory:
+    case TdFunctionKind::GetChatMessageByDate:
+    case TdFunctionKind::GetMessageThread:
+    case TdFunctionKind::GetForumTopicHistory:
+    case TdFunctionKind::GetMessageThreadHistory:
+    case TdFunctionKind::GetDirectMessagesChatTopicHistory:
+    case TdFunctionKind::GetSavedMessagesTopicHistory:
     case TdFunctionKind::GetMessages:
     case TdFunctionKind::GetMessageLink:
     case TdFunctionKind::GetChats:

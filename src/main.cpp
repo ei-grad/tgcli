@@ -4,6 +4,8 @@
 #include "common/paths.hpp"
 #include "daemon/chats_commands.hpp"
 #include "daemon/daemon_run.hpp"
+#include "daemon/local_selector.hpp"
+#include "daemon/read_domain.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "proto/frame.hpp"
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -365,6 +368,23 @@ struct MessageCliArguments {
     std::int64_t link_id = 0;
 };
 
+struct ReadCliArguments {
+    std::string chat;
+    std::int64_t before = 0;
+    std::string since;
+    std::string until;
+    std::string topic;
+    int limit = tgcli::daemon::kDefaultReadLimit;
+    bool local = false;
+    CLI::Option* chat_option = nullptr;
+    CLI::Option* before_option = nullptr;
+    CLI::Option* since_option = nullptr;
+    CLI::Option* until_option = nullptr;
+    CLI::Option* topic_option = nullptr;
+    CLI::Option* limit_option = nullptr;
+    CLI::Option* local_option = nullptr;
+};
+
 bool is_saved_tags(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "tags"};
 }
@@ -379,7 +399,8 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
         return report_usage("saved tags does not accept --cursor", "--cursor");
     }
     if (saved.cursor_option->count() != 0 && !is_saved_search(command) &&
-        command != std::vector<std::string>{"chats"}) {
+        command != std::vector<std::string>{"chats"} &&
+        command != std::vector<std::string>{"read"}) {
         return report_usage("--cursor is not supported for this command", "--cursor",
                             "unsupported_mode");
     }
@@ -415,16 +436,80 @@ std::optional<int> validate_chats_arguments(const std::vector<std::string>& comm
                                             const ChatsCliArguments& chats,
                                             const SavedCliArguments& pagination);
 
-std::optional<int> validate_command_arguments(const std::vector<std::string>& command,
-                                              const SavedCliArguments& saved,
-                                              const ChatsCliArguments& chats,
-                                              const MessageCliArguments& messages,
-                                              std::string_view resolve_selector) {
+// Each command's closed CLI contract is validated before common request construction.
+// NOLINTBEGIN(readability-function-cognitive-complexity)
+std::optional<int>
+validate_command_arguments(const std::vector<std::string>& command, const SavedCliArguments& saved,
+                           const ChatsCliArguments& chats, const MessageCliArguments& messages,
+                           const ReadCliArguments& read, std::string_view resolve_selector) {
     if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
         return saved_exit;
     }
     if (const auto chats_exit = validate_chats_arguments(command, chats, saved); chats_exit) {
         return chats_exit;
+    }
+    if (command == std::vector<std::string>{"read"}) {
+        const bool cursor = saved.cursor_option->count() != 0;
+        if (cursor) {
+            if (read.chat_option->count() != 0 || read.before_option->count() != 0 ||
+                read.since_option->count() != 0 || read.until_option->count() != 0 ||
+                read.topic_option->count() != 0 || read.limit_option->count() != 0 ||
+                read.local_option->count() != 0) {
+                return report_usage("read cursor cannot be combined with first-page arguments",
+                                    "--cursor", "mutually_exclusive");
+            }
+            if (!tgcli::daemon::decode_read_cursor(saved.cursor)) {
+                return report_usage("invalid read cursor", "--cursor", "invalid_cursor");
+            }
+        } else {
+            if (read.chat_option->count() == 0) {
+                return report_usage("read requires a chat selector", "chat", "missing_argument");
+            }
+            if (read.local) {
+                const auto selector = tgcli::daemon::classify_local_selector(read.chat);
+                if (!selector || selector->kind == tgcli::daemon::LocalSelectorKind::InvalidLink) {
+                    return report_usage("read selector is invalid", "selector");
+                }
+                if (selector->kind == tgcli::daemon::LocalSelectorKind::UnsupportedLink) {
+                    return report_usage("read selector has an unsupported link type", "selector",
+                                        "unsupported_link_type");
+                }
+            } else if (!tgcli::daemon::valid_resolve_selector(read.chat)) {
+                return report_usage("read selector is invalid", "selector");
+            }
+            constexpr std::int64_t maximum_int53 = 9007199254740991LL;
+            if (read.before_option->count() != 0 &&
+                (read.before == 0 || read.before < -maximum_int53 || read.before > maximum_int53)) {
+                return report_usage("--before must be a nonzero int53 message id", "--before");
+            }
+            if (read.limit_option->count() != 0 &&
+                (read.limit < 1 || read.limit > tgcli::daemon::kMaximumReadLimit)) {
+                return report_usage("read limit must be between 1 and 100", "-n");
+            }
+            if (read.topic_option->count() != 0 && !tgcli::daemon::parse_read_topic(read.topic)) {
+                return report_usage("invalid read topic", "--topic");
+            }
+            const auto request_start = std::chrono::system_clock::now();
+            std::optional<std::int32_t> since;
+            std::optional<std::int32_t> until;
+            if (read.since_option->count() != 0) {
+                since = tgcli::daemon::parse_read_timestamp(
+                    read.since, tgcli::daemon::ReadTimestampBound::Since, request_start);
+                if (!since) {
+                    return report_usage("invalid --since timestamp", "--since");
+                }
+            }
+            if (read.until_option->count() != 0) {
+                until = tgcli::daemon::parse_read_timestamp(
+                    read.until, tgcli::daemon::ReadTimestampBound::Until, request_start);
+                if (!until) {
+                    return report_usage("invalid --until timestamp", "--until");
+                }
+            }
+            if (since && until && *since > *until) {
+                return report_usage("--since must not be later than --until", "--since/--until");
+            }
+        }
     }
     if (command == std::vector<std::string>{"resolve"} &&
         !tgcli::daemon::valid_resolve_selector(resolve_selector)) {
@@ -456,6 +541,7 @@ std::optional<int> validate_command_arguments(const std::vector<std::string>& co
     }
     return std::nullopt;
 }
+// NOLINTEND(readability-function-cognitive-complexity)
 
 std::optional<int> validate_chats_arguments(const std::vector<std::string>& command,
                                             const ChatsCliArguments& chats,
@@ -521,10 +607,32 @@ nlohmann::json saved_search_request_args(const SavedCliArguments& saved) {
     };
 }
 
+nlohmann::json read_request_args(const ReadCliArguments& read,
+                                 const SavedCliArguments& pagination) {
+    return {
+        {"chat",
+         read.chat_option->count() != 0 ? nlohmann::json(read.chat) : nlohmann::json(nullptr)},
+        {"before",
+         read.before_option->count() != 0 ? nlohmann::json(read.before) : nlohmann::json(nullptr)},
+        {"since",
+         read.since_option->count() != 0 ? nlohmann::json(read.since) : nlohmann::json(nullptr)},
+        {"until",
+         read.until_option->count() != 0 ? nlohmann::json(read.until) : nlohmann::json(nullptr)},
+        {"topic",
+         read.topic_option->count() != 0 ? nlohmann::json(read.topic) : nlohmann::json(nullptr)},
+        {"local", read.local},
+        {"limit",
+         read.limit_option->count() != 0 ? nlohmann::json(read.limit) : nlohmann::json(nullptr)},
+        {"cursor", pagination.cursor_option->count() != 0 ? nlohmann::json(pagination.cursor)
+                                                          : nlohmann::json(nullptr)},
+    };
+}
+
 nlohmann::json command_request_args(const std::vector<std::string>& command, bool login_qr,
                                     bool login_bot, std::string_view resolve_selector,
                                     const ChatsCliArguments& chats, const SavedCliArguments& saved,
-                                    const MessageCliArguments& messages) {
+                                    const MessageCliArguments& messages,
+                                    const ReadCliArguments& read) {
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -533,6 +641,9 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     if (command == std::vector<std::string>{"chats"}) {
         return chats_request_args(chats, saved);
+    }
+    if (command == std::vector<std::string>{"read"}) {
+        return read_request_args(read, saved);
     }
     if (is_saved_search(command)) {
         return saved_search_request_args(saved);
@@ -571,6 +682,8 @@ int run(int argc, char** argv) {
     SavedCliArguments saved;
     ChatsCliArguments chats;
     MessageCliArguments messages;
+    ReadCliArguments read;
+    ReadCliArguments history;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -614,6 +727,26 @@ int run(int argc, char** argv) {
     chats.unread_option =
         chats_cmd->add_flag("--unread", chats.unread, "only include unread chats");
     chats.limit_option = chats_cmd->add_option("-n", chats.limit, "page size (1-100; default 20)");
+    const auto add_read_options = [](CLI::App& command, ReadCliArguments& arguments) {
+        arguments.chat_option = command.add_option("chat", arguments.chat, "chat selector");
+        arguments.chat_option->expected(0, 1);
+        arguments.before_option =
+            command.add_option("--before", arguments.before, "exclusive message-id anchor");
+        arguments.since_option =
+            command.add_option("--since", arguments.since, "inclusive timestamp lower bound");
+        arguments.until_option =
+            command.add_option("--until", arguments.until, "inclusive timestamp upper bound");
+        arguments.topic_option =
+            command.add_option("--topic", arguments.topic, "topic kind:id selector");
+        arguments.local_option =
+            command.add_flag("--local", arguments.local, "use only local TDLib history");
+        arguments.limit_option =
+            command.add_option("-n", arguments.limit, "page size (1-100; default 20)");
+    };
+    CLI::App* read_cmd = app.add_subcommand("read", "read chat history");
+    add_read_options(*read_cmd, read);
+    CLI::App* history_cmd = app.add_subcommand("history", "alias for read");
+    add_read_options(*history_cmd, history);
     app.add_subcommand("unread", "list chats with unread activity");
     CLI::App* msg_cmd = app.add_subcommand("msg", "message reads and mutations");
     msg_cmd->require_subcommand(1);
@@ -679,7 +812,12 @@ int run(int argc, char** argv) {
         return report_insecure_bot_token();
     }
 
-    const auto command = selected_command(app);
+    auto command = selected_command(app);
+    const ReadCliArguments* selected_read = &read;
+    if (command == std::vector<std::string>{"history"}) {
+        command = {"read"};
+        selected_read = &history;
+    }
     if (full_option->count() != 0) {
         return report_unsupported_mode("--full");
     }
@@ -689,8 +827,8 @@ int run(int argc, char** argv) {
     if (command.empty()) {
         return report_missing_command();
     }
-    if (const auto argument_exit =
-            validate_command_arguments(command, saved, chats, messages, resolve_selector);
+    if (const auto argument_exit = validate_command_arguments(command, saved, chats, messages,
+                                                              *selected_read, resolve_selector);
         argument_exit) {
         return *argument_exit;
     }
@@ -735,8 +873,8 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
-    nlohmann::json request_args = command_request_args(command, login_qr, login_bot,
-                                                       resolve_selector, chats, saved, messages);
+    nlohmann::json request_args = command_request_args(
+        command, login_qr, login_bot, resolve_selector, chats, saved, messages, *selected_read);
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);
