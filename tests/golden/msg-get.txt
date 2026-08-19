@@ -1,0 +1,3 @@
+id	chat_id	date	sender	is_outgoing	topic	type	text
+123	-1001	"2026-08-05T10:00:00Z"	{"type":"user","id":42}	false	{"kind":"forum","id":7}	"text"	"message or caption"
+next	null

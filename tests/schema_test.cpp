@@ -186,6 +186,24 @@ std::vector<SchemaCase> schema_cases() {
           {"is_bot", false},
           {"is_premium", true}},
          "id"},
+        {"msg-get.result.schema.json",
+         {{"items", json::array({json{{"id", 123},
+                                      {"chat_id", -1001},
+                                      {"date", "2026-08-05T10:00:00Z"},
+                                      {"sender", {{"type", "user"}, {"id", 42}}},
+                                      {"is_outgoing", false},
+                                      {"topic", {{"kind", "forum"}, {"id", 7}}},
+                                      {"type", "text"},
+                                      {"text", "message or caption"}}})},
+          {"next", nullptr}},
+         "items",
+         true},
+        {"msg-link.result.schema.json",
+         {{"chat_id", -1001},
+          {"message_id", 123},
+          {"link", "urn:telegram:message"},
+          {"is_public", false}},
+         "link"},
         {"doctor.result.schema.json",
          {{"account", "main"},
           {"daemon",
@@ -309,6 +327,8 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"login", {{"result", "login.result.schema.json"}}},
           {"logout", {{"result", "logout.result.schema.json"}}},
           {"me", {{"result", "me.result.schema.json"}}},
+          {"msg get", {{"result", "msg-get.result.schema.json"}}},
+          {"msg link", {{"result", "msg-link.result.schema.json"}}},
           {"resolve", {{"result", "resolve.result.schema.json"}}},
           {"saved search", {{"result", "saved-search.result.schema.json"}}},
           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
@@ -318,7 +338,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 21);
+    CHECK(manifest["commands"].size() == 23);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

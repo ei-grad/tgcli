@@ -162,6 +162,13 @@ class TdClient {
     get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization);
     std::future<TdValue> get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   std::int64_t chat_id);
+    std::future<TdValue> get_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                      std::int64_t chat_id, std::vector<std::int64_t> message_ids);
+    std::future<TdValue>
+    get_message_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     std::int64_t chat_id, std::int64_t message_id, std::int32_t media_timestamp,
+                     std::int32_t checklist_task_id, std::string poll_option_id, bool for_album,
+                     bool in_message_thread);
     std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    TdChatListKind list, std::int32_t limit);
     std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,

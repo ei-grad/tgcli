@@ -1,0 +1,4 @@
+chat_id	-1001
+message_id	123
+link	"https://t.me/example/7"
+is_public	true

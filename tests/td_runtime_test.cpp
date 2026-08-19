@@ -242,6 +242,36 @@ TEST_CASE("TdClient exposes only the dormant session read seam",
     }));
 }
 
+TEST_CASE("TdClient authorizes both message-read functions only as Ready reads",
+          "[core][td-runtime][msg][authorization][fake-boundary]") {
+    auto fake = make_fake_client();
+    fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return fake.client->auth_state()->data.state == AuthState::Ready; }));
+
+    auto messages = fake.client->get_messages(fake.client->auth_state(), -1001, {123, 123, 124});
+    REQUIRE(fake.runtime->wait_for_sent(2));
+    auto sent = fake.runtime->sent_functions();
+    REQUIRE(sent.size() == 2);
+    CHECK(sent.back().function.kind() == TdFunctionKind::GetMessages);
+    fake.runtime->push_response(fake.first, sent.back().query_id,
+                                TdValue::from(tgcli::core::TdMessages{
+                                    .messages = {std::nullopt, std::nullopt, std::nullopt}}));
+    REQUIRE(messages.wait_for(2s) == std::future_status::ready);
+    CHECK(messages.get().get_if<tgcli::core::TdMessages>() != nullptr);
+
+    auto link = fake.client->get_message_link(fake.client->auth_state(), -1001, 123, 0, 0, "",
+                                              false, false);
+    REQUIRE(fake.runtime->wait_for_sent(3));
+    sent = fake.runtime->sent_functions();
+    REQUIRE(sent.size() == 3);
+    CHECK(sent.back().function.kind() == TdFunctionKind::GetMessageLink);
+    fake.runtime->push_response(fake.first, sent.back().query_id,
+                                TdValue::from(tgcli::core::TdMessageLink{
+                                    .link = "urn:telegram:message", .is_public = false}));
+    REQUIRE(link.wait_for(2s) == std::future_status::ready);
+    CHECK(link.get().get_if<tgcli::core::TdMessageLink>() != nullptr);
+}
+
 TEST_CASE("process logging configuration is frozen before the first client id",
           "[core][td-runtime][logging]") {
     const tgcli::core::TdLogConfiguration logging{

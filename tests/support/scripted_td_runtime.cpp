@@ -119,6 +119,32 @@ core::TdValue ScriptedTdRuntime::make_get_chat(std::int64_t chat_id) {
         core::TdFunctionData{core::TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_messages(std::int64_t chat_id,
+                                                   std::vector<std::int64_t> message_ids) {
+    before_make(core::TdFunctionKind::GetMessages);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetMessages,
+                             {{"chat_id", chat_id}, {"message_ids", std::move(message_ids)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_message_link(std::int64_t chat_id,
+                                                       std::int64_t message_id,
+                                                       std::int32_t media_timestamp,
+                                                       std::int32_t checklist_task_id,
+                                                       std::string poll_option_id, bool for_album,
+                                                       bool in_message_thread) {
+    before_make(core::TdFunctionKind::GetMessageLink);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetMessageLink,
+                             {{"chat_id", chat_id},
+                              {"message_id", message_id},
+                              {"media_timestamp", static_cast<std::int64_t>(media_timestamp)},
+                              {"checklist_task_id", static_cast<std::int64_t>(checklist_task_id)},
+                              {"poll_option_id", std::move(poll_option_id)},
+                              {"for_album", for_album},
+                              {"in_message_thread", in_message_thread}}});
+}
+
 namespace {
 
 std::string chat_list_name(core::TdChatListKind list) {

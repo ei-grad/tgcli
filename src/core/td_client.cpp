@@ -141,7 +141,9 @@ class TdClient::Impl {
              function != TdFunctionKind::GetSavedMessagesTags &&
              function != TdFunctionKind::SearchSavedMessages &&
              function != TdFunctionKind::GetActiveSessions && function != TdFunctionKind::GetChat &&
-             function != TdFunctionKind::GetChats && function != TdFunctionKind::LoadChats &&
+             function != TdFunctionKind::GetMessages &&
+             function != TdFunctionKind::GetMessageLink && function != TdFunctionKind::GetChats &&
+             function != TdFunctionKind::LoadChats &&
              function != TdFunctionKind::SearchPublicChat &&
              function != TdFunctionKind::GetInternalLinkType &&
              function != TdFunctionKind::GetMessageLinkInfo &&
@@ -195,6 +197,23 @@ class TdClient::Impl {
     std::future<TdValue> get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   std::int64_t chat_id) {
         return send_read(authorization, TdFunctionKind::GetChat, runtime_->make_get_chat(chat_id));
+    }
+
+    std::future<TdValue> get_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                      std::int64_t chat_id, std::vector<std::int64_t> message_ids) {
+        return send_read(authorization, TdFunctionKind::GetMessages,
+                         runtime_->make_get_messages(chat_id, std::move(message_ids)));
+    }
+
+    std::future<TdValue>
+    get_message_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     std::int64_t chat_id, std::int64_t message_id, std::int32_t media_timestamp,
+                     std::int32_t checklist_task_id, std::string poll_option_id, bool for_album,
+                     bool in_message_thread) {
+        return send_read(authorization, TdFunctionKind::GetMessageLink,
+                         runtime_->make_get_message_link(
+                             chat_id, message_id, media_timestamp, checklist_task_id,
+                             std::move(poll_option_id), for_album, in_message_thread));
     }
 
     std::future<TdValue> get_chats(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -1285,6 +1304,22 @@ std::future<TdValue>
 TdClient::get_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                    std::int64_t chat_id) {
     return impl_->get_chat(authorization, chat_id);
+}
+
+std::future<TdValue>
+TdClient::get_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       std::int64_t chat_id, std::vector<std::int64_t> message_ids) {
+    return impl_->get_messages(authorization, chat_id, std::move(message_ids));
+}
+
+std::future<TdValue>
+TdClient::get_message_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t chat_id, std::int64_t message_id,
+                           std::int32_t media_timestamp, std::int32_t checklist_task_id,
+                           std::string poll_option_id, bool for_album, bool in_message_thread) {
+    return impl_->get_message_link(authorization, chat_id, message_id, media_timestamp,
+                                   checklist_task_id, std::move(poll_option_id), for_album,
+                                   in_message_thread);
 }
 
 std::future<TdValue>

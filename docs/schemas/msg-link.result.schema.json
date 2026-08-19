@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "int53_nonzero": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["chat_id", "message_id", "link", "is_public"],
+  "properties": {
+    "chat_id": { "$ref": "#/$defs/int53_nonzero" },
+    "message_id": { "$ref": "#/$defs/int53_nonzero" },
+    "link": { "type": "string", "minLength": 1 },
+    "is_public": { "type": "boolean" }
+  }
+}

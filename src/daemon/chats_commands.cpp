@@ -3,13 +3,12 @@
 #include "common/exit_codes.hpp"
 #include "common/utf8.hpp"
 #include "daemon/chat_identity.hpp"
+#include "daemon/message_summary.hpp"
 #include "daemon/ready_read.hpp"
 #include "daemon/request_session.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
-#include <ctime>
 #include <limits>
 #include <optional>
 #include <regex>
@@ -208,113 +207,12 @@ std::int32_t retry_after(std::string_view message) {
     return result;
 }
 
-std::optional<std::string> timestamp(std::int32_t seconds) {
-    if (seconds == 0) {
-        return std::string{};
-    }
-    if (seconds < 0) {
-        return std::nullopt;
-    }
-    const std::time_t value = seconds;
-    std::tm utc{};
-    if (gmtime_r(&value, &utc) == nullptr) {
-        return std::nullopt;
-    }
-    std::array<char, 21> rendered{};
-    if (std::strftime(rendered.data(), rendered.size(), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
-        return std::nullopt;
-    }
-    return std::string(rendered.data());
-}
-
-std::optional<json> topic_json(const core::TdTopic& topic) {
-    std::string_view kind;
-    switch (topic.kind) {
-    case core::TdTopicKind::Forum:
-        if (topic.id <= 0 || topic.id > std::numeric_limits<std::int32_t>::max()) {
-            return std::nullopt;
-        }
-        kind = "forum";
-        break;
-    case core::TdTopicKind::Thread:
-        kind = "thread";
-        break;
-    case core::TdTopicKind::Direct:
-        kind = "direct";
-        break;
-    case core::TdTopicKind::Saved:
-        kind = "saved";
-        break;
-    case core::TdTopicKind::Unknown:
-        return std::nullopt;
-    }
-    if (!valid_user_id(topic.id)) {
-        return std::nullopt;
-    }
-    return json{{"kind", kind}, {"id", topic.id}};
-}
-
 std::optional<json> message_json(const core::TdMessageSummary& message,
                                  std::int64_t expected_chat_id) {
-    if (!valid_int53(message.id) || message.chat_id != expected_chat_id ||
-        !valid_int53(message.chat_id) || !common::valid_utf8(message.text)) {
-        return std::nullopt;
-    }
-    json sender;
-    if (message.sender.kind == core::TdMessageSenderKind::User &&
-        valid_user_id(message.sender.id)) {
-        sender = {{"type", "user"}, {"id", message.sender.id}};
-    } else if (message.sender.kind == core::TdMessageSenderKind::Chat &&
-               valid_int53(message.sender.id)) {
-        sender = {{"type", "chat"}, {"id", message.sender.id}};
-    } else {
-        return std::nullopt;
-    }
-    json topic = nullptr;
-    if (message.topic) {
-        const auto converted = topic_json(*message.topic);
-        if (!converted) {
-            return std::nullopt;
-        }
-        topic = *converted;
-    }
-    std::string_view type;
-    switch (message.content_kind) {
-    case core::TdMessageContentKind::Text:
-        type = "text";
-        break;
-    case core::TdMessageContentKind::Photo:
-        type = "photo";
-        break;
-    case core::TdMessageContentKind::Video:
-        type = "video";
-        break;
-    case core::TdMessageContentKind::Document:
-        type = "doc";
-        break;
-    case core::TdMessageContentKind::Voice:
-        type = "voice";
-        break;
-    case core::TdMessageContentKind::Other:
-        type = "other";
-        break;
-    }
-    json date = nullptr;
-    if (message.date != 0) {
-        const auto rendered = timestamp(message.date);
-        if (!rendered) {
-            return std::nullopt;
-        }
-        date = *rendered;
-    }
-    return json{{"id", message.id},
-                {"chat_id", message.chat_id},
-                {"date", std::move(date)},
-                {"sender", std::move(sender)},
-                {"is_outgoing", message.is_outgoing},
-                {"topic", std::move(topic)},
-                {"type", type},
-                {"text", message.text}};
+    const auto converted = materialize_message_summary(message);
+    return converted && converted->chat_id == expected_chat_id
+               ? std::optional<json>{message_summary_json(*converted)}
+               : std::nullopt;
 }
 
 Position selected_position(const core::TdChat& chat, const core::TdChatList& selected) {

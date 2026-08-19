@@ -365,6 +365,34 @@ TdValue make_native_terminate_session(std::int64_t session_id) {
                                                                {{"session_id", session_id}}});
 }
 
+TdValue make_native_get_messages(std::int64_t chat_id, std::vector<std::int64_t> message_ids) {
+    const auto descriptor_ids = message_ids;
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::getMessages>(chat_id, std::move(message_ids));
+    return TdValue::function(
+        std::move(native), TdFunctionData{TdFunctionKind::GetMessages,
+                                          {{"chat_id", chat_id}, {"message_ids", descriptor_ids}}});
+}
+
+TdValue make_native_get_message_link(std::int64_t chat_id, std::int64_t message_id,
+                                     std::int32_t media_timestamp, std::int32_t checklist_task_id,
+                                     std::string poll_option_id, bool for_album,
+                                     bool in_message_thread) {
+    NativeFunctionPtr native = td_api::make_object<td_api::getMessageLink>(
+        chat_id, message_id, media_timestamp, checklist_task_id, poll_option_id, for_album,
+        in_message_thread);
+    return TdValue::function(
+        std::move(native),
+        TdFunctionData{TdFunctionKind::GetMessageLink,
+                       {{"chat_id", chat_id},
+                        {"message_id", message_id},
+                        {"media_timestamp", static_cast<std::int64_t>(media_timestamp)},
+                        {"checklist_task_id", static_cast<std::int64_t>(checklist_task_id)},
+                        {"poll_option_id", std::move(poll_option_id)},
+                        {"for_album", for_album},
+                        {"in_message_thread", in_message_thread}}});
+}
+
 td_api::object_ptr<td_api::ChatList> make_chat_list(const TdChatList& list) {
     switch (list.kind) {
     case TdChatListKind::Main:
@@ -492,6 +520,21 @@ TdMessageSummary convert_message(const td_api::message& message) {
         break;
     }
     return converted;
+}
+
+TdMessages convert_messages(const td_api::messages& messages) {
+    TdMessages converted;
+    converted.messages.reserve(messages.messages_.size());
+    for (const auto& message : messages.messages_) {
+        converted.messages.push_back(
+            message == nullptr ? std::nullopt
+                               : std::optional<TdMessageSummary>{convert_message(*message)});
+    }
+    return converted;
+}
+
+TdMessageLink convert_message_link(td_api::messageLink& link) {
+    return {.link = std::move(link.link_), .is_public = link.is_public_};
 }
 
 TdChat convert_chat(td_api::chat& chat) {
@@ -714,6 +757,12 @@ TdValue convert_response(NativeObjectPtr object) {
         auto& chats = static_cast<td_api::chats&>(*object);
         return TdValue::from(TdChats{.chat_ids = std::move(chats.chat_ids_)});
     }
+    case td_api::messages::ID: {
+        return TdValue::from(convert_messages(static_cast<const td_api::messages&>(*object)));
+    }
+    case td_api::messageLink::ID: {
+        return TdValue::from(convert_message_link(static_cast<td_api::messageLink&>(*object)));
+    }
     case td_api::supergroup::ID: {
         auto& supergroup = static_cast<td_api::supergroup&>(*object);
         TdSupergroup converted{
@@ -834,6 +883,10 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::terminateSession::ID;
     case TdFunctionKind::GetChat:
         return function.get_id() == td_api::getChat::ID;
+    case TdFunctionKind::GetMessages:
+        return function.get_id() == td_api::getMessages::ID;
+    case TdFunctionKind::GetMessageLink:
+        return function.get_id() == td_api::getMessageLink::ID;
     case TdFunctionKind::GetChats:
         return function.get_id() == td_api::getChats::ID;
     case TdFunctionKind::LoadChats:
@@ -1271,6 +1324,20 @@ class ProductionTdRuntime final : public TdRuntime {
                                  TdFunctionData{TdFunctionKind::GetChat, {{"chat_id", chat_id}}});
     }
 
+    TdValue make_get_messages(std::int64_t chat_id,
+                              std::vector<std::int64_t> message_ids) override {
+        return make_native_get_messages(chat_id, std::move(message_ids));
+    }
+
+    TdValue make_get_message_link(std::int64_t chat_id, std::int64_t message_id,
+                                  std::int32_t media_timestamp, std::int32_t checklist_task_id,
+                                  std::string poll_option_id, bool for_album,
+                                  bool in_message_thread) override {
+        return make_native_get_message_link(chat_id, message_id, media_timestamp, checklist_task_id,
+                                            std::move(poll_option_id), for_album,
+                                            in_message_thread);
+    }
+
     TdValue make_get_chats(TdChatList list, std::int32_t limit) override {
         NativeFunctionPtr native =
             td_api::make_object<td_api::getChats>(make_chat_list(list), limit);
@@ -1450,6 +1517,20 @@ TdValue make_production_terminate_session_for_test(std::int64_t session_id) {
     return make_native_terminate_session(session_id);
 }
 
+TdValue make_production_get_messages_for_test(std::int64_t chat_id,
+                                              std::vector<std::int64_t> message_ids) {
+    return make_native_get_messages(chat_id, std::move(message_ids));
+}
+
+TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int64_t message_id,
+                                                  std::int32_t media_timestamp,
+                                                  std::int32_t checklist_task_id,
+                                                  std::string poll_option_id, bool for_album,
+                                                  bool in_message_thread) {
+    return make_native_get_message_link(chat_id, message_id, media_timestamp, checklist_task_id,
+                                        std::move(poll_option_id), for_album, in_message_thread);
+}
+
 bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind) {
     const auto* native = function.get_if<NativeFunctionPtr>();
     return native != nullptr && *native != nullptr && native_function_matches(**native, kind);
@@ -1462,6 +1543,35 @@ std::optional<std::int64_t> production_terminate_session_id_for_test(const TdVal
         return std::nullopt;
     }
     return static_cast<const td_api::terminateSession&>(**native).session_id_;
+}
+
+bool production_get_messages_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                              const std::vector<std::int64_t>& message_ids) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr || (*native)->get_id() != td_api::getMessages::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessages&>(**native);
+    return request.chat_id_ == chat_id && request.message_ids_ == message_ids;
+}
+
+bool production_get_message_link_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                                  std::int64_t message_id,
+                                                  std::int32_t media_timestamp,
+                                                  std::int32_t checklist_task_id,
+                                                  std::string_view poll_option_id, bool for_album,
+                                                  bool in_message_thread) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getMessageLink::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessageLink&>(**native);
+    return request.chat_id_ == chat_id && request.message_id_ == message_id &&
+           request.media_timestamp_ == media_timestamp &&
+           request.checklist_task_id_ == checklist_task_id &&
+           request.poll_option_id_ == poll_option_id && request.for_album_ == for_album &&
+           request.in_message_thread_ == in_message_thread;
 }
 
 std::optional<AuthStateData>

@@ -39,6 +39,8 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
     case TdFunctionKind::GetChat:
+    case TdFunctionKind::GetMessages:
+    case TdFunctionKind::GetMessageLink:
     case TdFunctionKind::GetChats:
     case TdFunctionKind::LoadChats:
     case TdFunctionKind::SearchPublicChat:

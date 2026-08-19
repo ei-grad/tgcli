@@ -40,6 +40,12 @@
     "me": {
       "result": "me.result.schema.json"
     },
+    "msg get": {
+      "result": "msg-get.result.schema.json"
+    },
+    "msg link": {
+      "result": "msg-link.result.schema.json"
+    },
     "resolve": {
       "result": "resolve.result.schema.json"
     },

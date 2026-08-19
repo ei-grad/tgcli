@@ -36,6 +36,8 @@ enum class TdFunctionKind {
     GetActiveSessions,
     TerminateSession,
     GetChat,
+    GetMessages,
+    GetMessageLink,
     GetChats,
     LoadChats,
     SearchPublicChat,
@@ -86,6 +88,10 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "terminateSession";
     case TdFunctionKind::GetChat:
         return "getChat";
+    case TdFunctionKind::GetMessages:
+        return "getMessages";
+    case TdFunctionKind::GetMessageLink:
+        return "getMessageLink";
     case TdFunctionKind::GetChats:
         return "getChats";
     case TdFunctionKind::LoadChats:
@@ -770,6 +776,19 @@ struct TdChats {
     bool operator==(const TdChats&) const = default;
 };
 
+struct TdMessages {
+    std::vector<std::optional<TdMessageSummary>> messages;
+
+    bool operator==(const TdMessages&) const = default;
+};
+
+struct TdMessageLink {
+    std::string link;
+    bool is_public = false;
+
+    bool operator==(const TdMessageLink&) const = default;
+};
+
 struct TdSupergroup {
     std::int64_t id = 0;
     std::vector<std::string> usernames;
@@ -853,6 +872,13 @@ class TdRuntime {
     virtual TdValue make_get_active_sessions() = 0;
     virtual TdValue make_terminate_session(std::int64_t session_id) = 0;
     virtual TdValue make_get_chat(std::int64_t chat_id) = 0;
+    virtual TdValue make_get_messages(std::int64_t chat_id,
+                                      std::vector<std::int64_t> message_ids) = 0;
+    virtual TdValue make_get_message_link(std::int64_t chat_id, std::int64_t message_id,
+                                          std::int32_t media_timestamp,
+                                          std::int32_t checklist_task_id,
+                                          std::string poll_option_id, bool for_album,
+                                          bool in_message_thread) = 0;
     virtual TdValue make_get_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_load_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_search_public_chat(std::string username) = 0;

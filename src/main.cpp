@@ -9,6 +9,7 @@
 #include "proto/frame.hpp"
 #include "proto/operation.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -357,6 +358,13 @@ struct ChatsCliArguments {
     CLI::Option* unread_option = nullptr;
 };
 
+struct MessageCliArguments {
+    std::string get_chat;
+    std::vector<std::int64_t> get_ids;
+    std::string link_chat;
+    std::int64_t link_id = 0;
+};
+
 bool is_saved_tags(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "tags"};
 }
@@ -410,6 +418,7 @@ std::optional<int> validate_chats_arguments(const std::vector<std::string>& comm
 std::optional<int> validate_command_arguments(const std::vector<std::string>& command,
                                               const SavedCliArguments& saved,
                                               const ChatsCliArguments& chats,
+                                              const MessageCliArguments& messages,
                                               std::string_view resolve_selector) {
     if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
         return saved_exit;
@@ -420,6 +429,30 @@ std::optional<int> validate_command_arguments(const std::vector<std::string>& co
     if (command == std::vector<std::string>{"resolve"} &&
         !tgcli::daemon::valid_resolve_selector(resolve_selector)) {
         return report_usage("resolve selector is invalid", "selector");
+    }
+    constexpr std::int64_t maximum_int53 = 9007199254740991LL;
+    const auto valid_message_id = [](std::int64_t id) {
+        return id != 0 && id >= -maximum_int53 && id <= maximum_int53;
+    };
+    if (command == std::vector<std::string>{"msg", "get"}) {
+        if (!tgcli::daemon::valid_resolve_selector(messages.get_chat)) {
+            return report_usage("msg get chat selector is invalid", "chat");
+        }
+        if (messages.get_ids.empty() || messages.get_ids.size() > 100) {
+            return report_usage("msg get requires between 1 and 100 message ids", "id",
+                                "invalid_argument");
+        }
+        if (!std::ranges::all_of(messages.get_ids, valid_message_id)) {
+            return report_usage("message ids must be nonzero int53 values", "id");
+        }
+    }
+    if (command == std::vector<std::string>{"msg", "link"}) {
+        if (!tgcli::daemon::valid_resolve_selector(messages.link_chat)) {
+            return report_usage("msg link chat selector is invalid", "chat");
+        }
+        if (!valid_message_id(messages.link_id)) {
+            return report_usage("message id must be a nonzero int53 value", "id");
+        }
     }
     return std::nullopt;
 }
@@ -490,8 +523,8 @@ nlohmann::json saved_search_request_args(const SavedCliArguments& saved) {
 
 nlohmann::json command_request_args(const std::vector<std::string>& command, bool login_qr,
                                     bool login_bot, std::string_view resolve_selector,
-                                    const ChatsCliArguments& chats,
-                                    const SavedCliArguments& saved) {
+                                    const ChatsCliArguments& chats, const SavedCliArguments& saved,
+                                    const MessageCliArguments& messages) {
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -503,6 +536,12 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     if (is_saved_search(command)) {
         return saved_search_request_args(saved);
+    }
+    if (command == std::vector<std::string>{"msg", "get"}) {
+        return {{"chat", messages.get_chat}, {"message_ids", messages.get_ids}};
+    }
+    if (command == std::vector<std::string>{"msg", "link"}) {
+        return {{"chat", messages.link_chat}, {"message_id", messages.link_id}};
     }
     return nlohmann::json::object();
 }
@@ -531,6 +570,7 @@ int run(int argc, char** argv) {
     std::string resolve_selector;
     SavedCliArguments saved;
     ChatsCliArguments chats;
+    MessageCliArguments messages;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -575,6 +615,14 @@ int run(int argc, char** argv) {
         chats_cmd->add_flag("--unread", chats.unread, "only include unread chats");
     chats.limit_option = chats_cmd->add_option("-n", chats.limit, "page size (1-100; default 20)");
     app.add_subcommand("unread", "list chats with unread activity");
+    CLI::App* msg_cmd = app.add_subcommand("msg", "message reads and mutations");
+    msg_cmd->require_subcommand(1);
+    CLI::App* msg_get_cmd = msg_cmd->add_subcommand("get", "get messages by id");
+    msg_get_cmd->add_option("chat", messages.get_chat)->required();
+    msg_get_cmd->add_option("id", messages.get_ids)->required()->expected(1, 100);
+    CLI::App* msg_link_cmd = msg_cmd->add_subcommand("link", "get a message link");
+    msg_link_cmd->add_option("chat", messages.link_chat)->required();
+    msg_link_cmd->add_option("id", messages.link_id)->required();
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -642,7 +690,7 @@ int run(int argc, char** argv) {
         return report_missing_command();
     }
     if (const auto argument_exit =
-            validate_command_arguments(command, saved, chats, resolve_selector);
+            validate_command_arguments(command, saved, chats, messages, resolve_selector);
         argument_exit) {
         return *argument_exit;
     }
@@ -687,8 +735,8 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
-    nlohmann::json request_args =
-        command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved);
+    nlohmann::json request_args = command_request_args(command, login_qr, login_bot,
+                                                       resolve_selector, chats, saved, messages);
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);

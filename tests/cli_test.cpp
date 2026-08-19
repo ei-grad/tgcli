@@ -2425,6 +2425,138 @@ TEST_CASE("resolve parser exposes its surface and rejects invalid selectors loca
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
 }
 
+TEST_CASE("msg parser exposes get and link and rejects invalid ids locally",
+          "[cli][msg][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "msg-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("msg") != std::string::npos);
+    const auto msg_help = run_binary_captured({"msg", "--help"}, env, "msg-help");
+    REQUIRE(msg_help.exit_code == kOk);
+    CHECK((msg_help.out + msg_help.err).find("get") != std::string::npos);
+    CHECK((msg_help.out + msg_help.err).find("link") != std::string::npos);
+
+    const std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
+        {"msg-get-zero", {"msg", "get", "-1001", "0"}},
+        {"msg-get-over-int53", {"msg", "get", "-1001", "9007199254740992"}},
+        {"msg-get-invalid-chat", {"msg", "get", "0", "1"}},
+        {"msg-link-zero", {"msg", "link", "-1001", "0"}},
+        {"msg-link-over-int53", {"msg", "link", "-1001", "9007199254740992"}},
+        {"msg-link-invalid-chat", {"msg", "link", "@", "1"}},
+    };
+    for (const auto& [stem, arguments] : invalid) {
+        const auto outcome = run_binary_captured(arguments, env, stem);
+        INFO(stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+    const auto cursor = run_binary_captured({"--cursor", "opaque", "msg", "get", "-1001", "1"}, env,
+                                            "msg-get-cursor");
+    CHECK(cursor.exit_code == kUsage);
+    CHECK(cursor.out.empty());
+    CHECK(json::parse(cursor.err)["error"]["details"] ==
+          json{{"argument", "--cursor"}, {"reason", "unsupported_mode"}});
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("msg get and link no-daemon fake boundary preserve strict JSON discipline",
+          "[cli][msg][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    const auto respond = [&](std::size_t count, core::TdFunctionKind kind, core::TdValue value) {
+        REQUIRE(scripted->wait_for_sent(count));
+        const auto sent = scripted->sent_functions();
+        REQUIRE(sent.size() == count);
+        REQUIRE(sent.back().function.kind() == kind);
+        scripted->push_response(td_client, sent.back().query_id, std::move(value));
+    };
+    const auto user = core::TdUserSummary{.id = 42,
+                                          .first_name = "Ada",
+                                          .last_name = "",
+                                          .usernames = {"ada"},
+                                          .phone_number = "12025550123",
+                                          .is_bot = false,
+                                          .is_premium = false};
+    const auto target_chat = core::TdChat{.id = -1001,
+                                          .title = "Project",
+                                          .kind = core::TdChatKind::BasicGroup,
+                                          .related_id = 0,
+                                          .tdlib_type_id = 1,
+                                          .positions = {},
+                                          .chat_lists = {},
+                                          .is_marked_unread = false,
+                                          .unread_count = 0,
+                                          .unread_mention_count = 0,
+                                          .unread_reaction_count = 0,
+                                          .unread_poll_vote_count = 0,
+                                          .last_message = std::nullopt};
+    const auto target_message = core::TdMessageSummary{
+        .id = 123,
+        .chat_id = -1001,
+        .date = 1785924000,
+        .sender = {.kind = core::TdMessageSenderKind::User, .id = 42, .tdlib_type_id = 1},
+        .is_outgoing = false,
+        .topic = core::TdTopic{.kind = core::TdTopicKind::Forum, .id = 7, .tdlib_type_id = 1},
+        .content_kind = core::TdMessageContentKind::Text,
+        .text = "message or caption"};
+
+    proto::Request get("main");
+    get.id = 1;
+    get.command = {"msg", "get"};
+    get.args = {{"chat", "-1001"}, {"message_ids", json::array({123})}};
+    get.context.json = true;
+    get.context.cwd = "/";
+    auto get_pending =
+        std::async(std::launch::async, [&] { return run_request_captured(get, options, env); });
+    respond(2, core::TdFunctionKind::GetMe, core::TdValue::from(user));
+    respond(3, core::TdFunctionKind::GetChat, core::TdValue::from(target_chat));
+    respond(4, core::TdFunctionKind::GetMessages,
+            core::TdValue::from(core::TdMessages{.messages = {target_message}}));
+    const auto get_outcome = get_pending.get();
+    CHECK(get_outcome.exit_code == kOk);
+    CHECK(get_outcome.err.empty());
+    const auto get_result = json::parse(get_outcome.out);
+    CHECK_THAT(get_result, test::matches_json_schema("msg-get.result.schema.json"));
+
+    proto::Request link("main");
+    link.id = 2;
+    link.command = {"msg", "link"};
+    link.args = {{"chat", "-1001"}, {"message_id", 123}};
+    link.context.json = true;
+    link.context.cwd = "/";
+    auto link_pending =
+        std::async(std::launch::async, [&] { return run_request_captured(link, options, env); });
+    respond(5, core::TdFunctionKind::GetMe, core::TdValue::from(user));
+    respond(6, core::TdFunctionKind::GetChat, core::TdValue::from(target_chat));
+    respond(7, core::TdFunctionKind::GetMessageLink,
+            core::TdValue::from(
+                core::TdMessageLink{.link = "https://t.me/example/7", .is_public = true}));
+    const auto link_outcome = link_pending.get();
+    CHECK(link_outcome.exit_code == kOk);
+    CHECK(link_outcome.err.empty());
+    const auto link_result = json::parse(link_outcome.out);
+    CHECK_THAT(link_result, test::matches_json_schema("msg-link.result.schema.json"));
+}
+
 TEST_CASE("resolve no-daemon fake boundary preserves JSON stream discipline",
           "[cli][resolver][fake-boundary][schema]") {
     const IsolatedEnv env;

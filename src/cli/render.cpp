@@ -396,6 +396,34 @@ std::string render_resolve(const nlohmann::json& data) {
         yes_no(chat.at("is_bot").get<bool>()), usernames, message_id, topic, link_type, is_public);
 }
 
+std::string render_msg_get(const nlohmann::json& data) {
+    std::string out = "id\tchat_id\tdate\tsender\tis_outgoing\ttopic\ttype\ttext\n";
+    for (const auto& message : data.at("items")) {
+        const auto& sender = message.at("sender");
+        const auto rendered_sender =
+            fmt::format(R"({{"type":{},"id":{}}})", sender.at("type").dump(),
+                        sender.at("id").get<std::int64_t>());
+        const auto& topic = message.at("topic");
+        const auto rendered_topic =
+            topic.is_null() ? std::string("null")
+                            : fmt::format(R"({{"kind":{},"id":{}}})", topic.at("kind").dump(),
+                                          topic.at("id").get<std::int64_t>());
+        out += fmt::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", message.at("id").get<std::int64_t>(),
+                           message.at("chat_id").get<std::int64_t>(), message.at("date").dump(),
+                           rendered_sender, message.at("is_outgoing").dump(), rendered_topic,
+                           message.at("type").dump(), message.at("text").dump());
+    }
+    out += "next\t" + data.at("next").dump() + "\n";
+    return out;
+}
+
+std::string render_msg_link(const nlohmann::json& data) {
+    return fmt::format("chat_id\t{}\nmessage_id\t{}\nlink\t{}\nis_public\t{}\n",
+                       data.at("chat_id").get<std::int64_t>(),
+                       data.at("message_id").get<std::int64_t>(), data.at("link").dump(),
+                       data.at("is_public").dump());
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -458,6 +486,12 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "resolve") {
         return render_resolve(data);
+    }
+    if (command_key == "msg get") {
+        return render_msg_get(data);
+    }
+    if (command_key == "msg link") {
+        return render_msg_link(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

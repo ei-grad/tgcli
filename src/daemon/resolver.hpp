@@ -3,14 +3,144 @@
 #include "core/td_client.hpp"
 #include "daemon/chat_identity.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/message_summary.hpp"
+#include "daemon/ready_read.hpp"
+#include "proto/operation.hpp"
 
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
+#include <vector>
 
 namespace tgcli::daemon {
 
 enum class ResolverScope { ActiveDialogs, LocalMaterialized };
+
+enum class M2Operation {
+    Chats,
+    Read,
+    MsgGet,
+    MsgLink,
+    Search,
+    Unread,
+    Fetch,
+    Resolve,
+    ChatInfo,
+    ChatMembers,
+};
+
+std::string_view m2_operation_name(M2Operation operation);
+
+using ResolverCaller = std::variant<M2Operation, proto::M3Operation>;
+
+std::string_view resolver_caller_name(const ResolverCaller& caller);
+
+enum class ResolverStop { Cancelled };
+enum class ResolverUsageReason { InvalidArgument, UnsupportedChatType, UnsupportedLinkType };
+enum class ResolverNotAuthedReason { NotReady, AuthorizationLost };
+enum class ResolvedLinkType {
+    PublicChat,
+    BotStart,
+    Message,
+    ChatInvite,
+    DirectMessagesChat,
+    SavedMessages,
+};
+
+struct ResolverUsageError {
+    std::string argument;
+    ResolverUsageReason reason = ResolverUsageReason::InvalidArgument;
+};
+
+struct ResolverNotAuthenticatedError {
+    std::string account;
+    core::AuthState state = core::AuthState::Unknown;
+    ResolverNotAuthedReason reason = ResolverNotAuthedReason::NotReady;
+};
+
+struct ResolverBotUnsupportedError {
+    ResolverCaller operation;
+};
+
+struct ResolverNotFoundError {
+    std::string selector;
+    std::optional<ResolverScope> scope;
+};
+
+struct ResolverAmbiguousError {
+    std::string selector;
+    ResolverScope scope = ResolverScope::ActiveDialogs;
+    std::vector<ChatIdentity> candidates;
+    bool truncated = false;
+};
+
+struct ResolverRateLimitedError {
+    ResolverCaller operation;
+    std::int32_t retry_after = 0;
+};
+
+struct ResolverTdlibError {
+    ResolverCaller operation;
+    std::int32_t tdlib_code = 0;
+};
+
+struct ResolverTimeoutError {
+    ResolverCaller operation;
+    std::optional<core::AuthState> state;
+};
+
+struct ResolverInternalError {
+    ResolverCaller operation;
+};
+
+using ResolverError =
+    std::variant<ResolverUsageError, ResolverNotAuthenticatedError, ResolverBotUnsupportedError,
+                 ResolverNotFoundError, ResolverAmbiguousError, ResolverRateLimitedError,
+                 ResolverTdlibError, ResolverTimeoutError, ResolverInternalError>;
+
+struct ResolverPrincipal {
+    std::int64_t id = 0;
+    bool is_bot = false;
+
+    bool operator==(const ResolverPrincipal&) const = default;
+};
+
+struct ResolvedChatTarget {
+    ResolverPrincipal principal;
+    ChatIdentity chat;
+    std::optional<std::int64_t> contextual_message_id;
+    std::optional<TopicRef> contextual_topic;
+    std::optional<ResolvedLinkType> link_type;
+    std::optional<bool> is_public;
+};
+
+using ResolverPrincipalOutcome = std::variant<ResolverPrincipal, ResolverError, ResolverStop>;
+using ResolverOutcome = std::variant<ResolvedChatTarget, ResolverError, ResolverStop>;
+
+class ResolverConsumer {
+  public:
+    ResolverConsumer(core::TdClient& client, std::string_view account, RequestSession& session);
+    ~ResolverConsumer();
+    ResolverConsumer(const ResolverConsumer&) = delete;
+    ResolverConsumer& operator=(const ResolverConsumer&) = delete;
+    ResolverConsumer(ResolverConsumer&&) = delete;
+    ResolverConsumer& operator=(ResolverConsumer&&) = delete;
+
+    ResolverPrincipalOutcome bind_principal(ResolverCaller caller);
+    ResolverOutcome resolve_chat(std::string selector, ResolverScope scope);
+    ReadyReadResult read_target(const ReadyReadStart& start);
+
+  private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+void emit_resolver_error(const ResolverError& error, RequestSession& session,
+                         M2Operation owning_operation = M2Operation::Resolve);
 
 bool valid_resolve_selector(std::string_view selector);
 

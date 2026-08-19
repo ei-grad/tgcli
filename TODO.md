@@ -140,7 +140,7 @@ before the milestone is closed.
       `TdMessages` retains nonnegative `total_count`, null positions and shared
       summaries without treating count as continuation state; strict thread metadata
       retains history chat/thread ids and starting summaries only
-- [ ] Refactor the accepted resolver into the typed non-terminal
+- [x] Refactor the accepted resolver into the typed non-terminal
       `ResolverConsumer`: retain the ten-value M2 operation enum, use the
       separate M2-or-frozen-M3/M4 caller attribution, bind Ready/getMe once,
       return immutable contextual result and typed error/stop outcomes, retain
@@ -172,7 +172,7 @@ before the milestone is closed.
       refusal, exact `boundary`/`next` mapping and
       advancing raw cursors; result schema/manifest, human goldens, fake/native
       coverage and full mechanical gates; no new TestDC flow or skip
-- [ ] `tgcli msg get`, `tgcli msg link`: explicit positional ids govern after
+- [x] `tgcli msg get`, `tgcli msg link`: explicit positional ids govern after
       chat-only consumption of immutable resolver context; atomic ordered batch
       reads, malformed-response integrity precedence, exact link call/result,
       non-empty UTF-8 link validation, both result schemas and result-manifest

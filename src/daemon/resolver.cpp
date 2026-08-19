@@ -27,7 +27,6 @@ using nlohmann::json;
 constexpr std::int64_t kMaximumInt53 = 9007199254740991LL;
 constexpr std::int32_t kDialogLoadBatch = 100;
 constexpr std::size_t kMaximumAmbiguousCandidates = 20;
-constexpr std::string_view kOperation = "resolve";
 
 enum class SelectorKind { Numeric, Username, Link, Title };
 
@@ -41,15 +40,15 @@ struct ResolveResult {
     explicit ResolveResult(ChatIdentity chat_value,
                            std::optional<std::int64_t> message_id_value = std::nullopt,
                            std::optional<core::TdTopic> topic_value = std::nullopt,
-                           std::optional<std::string> link_type_value = std::nullopt,
+                           std::optional<ResolvedLinkType> link_type_value = std::nullopt,
                            std::optional<bool> is_public_value = std::nullopt)
         : chat(std::move(chat_value)), message_id(message_id_value), topic(topic_value),
-          link_type(std::move(link_type_value)), is_public(is_public_value) {}
+          link_type(link_type_value), is_public(is_public_value) {}
 
     ChatIdentity chat;
     std::optional<std::int64_t> message_id;
     std::optional<core::TdTopic> topic;
-    std::optional<std::string> link_type;
+    std::optional<ResolvedLinkType> link_type;
     std::optional<bool> is_public;
 };
 
@@ -137,83 +136,138 @@ std::int32_t retry_after(std::string_view message) {
     return result;
 }
 
-std::optional<std::string> topic_kind_name(core::TdTopicKind kind) {
-    switch (kind) {
-    case core::TdTopicKind::Forum:
-        return "forum";
-    case core::TdTopicKind::Thread:
-        return "thread";
-    case core::TdTopicKind::Direct:
-        return "direct";
-    case core::TdTopicKind::Saved:
-        return "saved";
-    case core::TdTopicKind::Unknown:
-        return std::nullopt;
+std::string_view link_type_name(ResolvedLinkType type) {
+    switch (type) {
+    case ResolvedLinkType::PublicChat:
+        return "public_chat";
+    case ResolvedLinkType::BotStart:
+        return "bot_start";
+    case ResolvedLinkType::Message:
+        return "message";
+    case ResolvedLinkType::ChatInvite:
+        return "chat_invite";
+    case ResolvedLinkType::DirectMessagesChat:
+        return "direct_messages_chat";
+    case ResolvedLinkType::SavedMessages:
+        return "saved_messages";
     }
-    return std::nullopt;
+    return "message";
 }
 
-std::optional<json> topic_json(const core::TdTopic& topic) {
-    const auto kind = topic_kind_name(topic.kind);
-    if (!kind || topic.id <= 0 || topic.id > kMaximumInt53 ||
-        (topic.kind == core::TdTopicKind::Forum &&
-         topic.id > std::numeric_limits<std::int32_t>::max())) {
-        return std::nullopt;
-    }
-    return json{{"kind", *kind}, {"id", topic.id}};
-}
-
-std::optional<json> result_json(const ResolveResult& result) {
+json result_json(const ResolvedChatTarget& result) {
     json topic = nullptr;
-    if (result.topic) {
-        const auto converted = topic_json(*result.topic);
-        if (!converted) {
-            return std::nullopt;
-        }
-        topic = *converted;
+    if (result.contextual_topic) {
+        topic = topic_ref_json(*result.contextual_topic);
     }
     std::string kind = "chat";
-    if (result.message_id) {
+    if (result.contextual_message_id) {
         kind = "message";
-    } else if (result.topic) {
+    } else if (result.contextual_topic) {
         kind = "topic";
     }
-    return json{{"kind", kind},
-                {"chat", chat_identity_json(result.chat)},
-                {"message_id", result.message_id ? json(*result.message_id) : json(nullptr)},
-                {"topic", std::move(topic)},
-                {"link_type", result.link_type ? json(*result.link_type) : json(nullptr)},
-                {"is_public", result.is_public ? json(*result.is_public) : json(nullptr)}};
+    return json{
+        {"kind", kind},
+        {"chat", chat_identity_json(result.chat)},
+        {"message_id",
+         result.contextual_message_id ? json(*result.contextual_message_id) : json(nullptr)},
+        {"topic", std::move(topic)},
+        {"link_type", result.link_type ? json(link_type_name(*result.link_type)) : json(nullptr)},
+        {"is_public", result.is_public ? json(*result.is_public) : json(nullptr)}};
 }
 
 class ResolverRun {
   public:
-    ResolverRun(core::TdClient& client, std::string_view account, RequestSession& session,
-                std::string selector)
-        : client_(client), account_(account), session_(session), selector_(std::move(selector)),
-          reads_(client, session) {}
+    ResolverRun(core::TdClient& client, std::string_view account, RequestSession& session)
+        : client_(client), account_(account), session_(session), reads_(client, session) {}
 
-    bool preflight() {
+    ResolverPrincipalOutcome bind_principal(ResolverCaller caller) {
+        if (bound_) {
+            return ResolverError{ResolverInternalError{.operation = caller}};
+        }
+        bound_ = true;
+        caller_ = caller;
+        error_.reset();
         snapshot_ = reads_.current();
         if (!snapshot_ || snapshot_->data.state != AuthState::Ready) {
             not_authed(snapshot_, "not_ready");
-            return false;
+            return take_error_or_stop();
         }
         auto response = read([&](const auto& current) { return client_.get_me(current); });
         if (!response) {
-            return false;
+            return take_error_or_stop();
         }
         if (const auto* error = response->value.get_if<core::TdError>()) {
             td_error(*error);
-            return false;
+            return take_error_or_stop();
         }
         const auto* user = response->value.get_if<core::TdUserSummary>();
         if (user == nullptr || !valid_user_id(user->id)) {
             internal_error();
-            return false;
+            return take_error_or_stop();
         }
         me_ = *user;
-        return true;
+        principal_ = ResolverPrincipal{.id = user->id, .is_bot = user->is_bot};
+        return *principal_;
+    }
+
+    ResolverOutcome resolve_chat(std::string selector, ResolverScope scope) {
+        caller_ = M2Operation::Resolve;
+        error_.reset();
+        selector_ = std::move(selector);
+        if (!principal_) {
+            internal_error();
+            return take_resolve_error_or_stop();
+        }
+        const auto classified = !selector_.empty() && common::valid_utf8(selector_)
+                                    ? classify_selector(selector_)
+                                    : std::nullopt;
+        if (!classified) {
+            usage("resolve selector must be non-empty valid UTF-8", "invalid_argument");
+            return take_resolve_error_or_stop();
+        }
+        const auto result = resolve(*classified, scope);
+        if (!result) {
+            return take_resolve_error_or_stop();
+        }
+        std::optional<TopicRef> topic;
+        if (result->topic) {
+            topic = materialize_topic_ref(*result->topic);
+            if (!topic) {
+                internal_error();
+                return take_resolve_error_or_stop();
+            }
+        }
+        return ResolvedChatTarget{.principal = *principal_,
+                                  .chat = result->chat,
+                                  .contextual_message_id = result->message_id,
+                                  .contextual_topic = topic,
+                                  .link_type = result->link_type,
+                                  .is_public = result->is_public};
+    }
+
+    ReadyReadResult read_target(const ReadyReadStart& start) {
+        if (!principal_ || !snapshot_) {
+            return {.status = ReadyReadStatus::Failed,
+                    .value = {},
+                    .authorization_failure = std::nullopt,
+                    .snapshot = nullptr};
+        }
+        return reads_.read(start, snapshot_);
+    }
+
+  private:
+    ResolverPrincipalOutcome take_error_or_stop() {
+        if (error_) {
+            return *error_;
+        }
+        return ResolverStop::Cancelled;
+    }
+
+    ResolverOutcome take_resolve_error_or_stop() {
+        if (error_) {
+            return *error_;
+        }
+        return ResolverStop::Cancelled;
     }
 
     std::optional<ResolveResult> resolve(const ClassifiedSelector& selector, ResolverScope scope) {
@@ -238,7 +292,6 @@ class ResolverRun {
         return std::nullopt;
     }
 
-  private:
     std::optional<ReadyReadResult> read(const ReadyReadStart& start) {
         auto waited = reads_.read(start, snapshot_);
         if (waited.status == ReadyReadStatus::AuthorizationLost) {
@@ -249,12 +302,11 @@ class ResolverRun {
         }
         if (waited.status == ReadyReadStatus::TimedOut) {
             if (!session_.cancellation_requested()) {
-                session_.error("TIMEOUT", "resolver request timed out",
-                               {{"operation", kOperation},
-                                {"state", reads_.current() ? json(core::auth_state_name(
-                                                                 reads_.current()->data.state))
-                                                           : json(nullptr)}},
-                               kTimeout);
+                error_ = ResolverTimeoutError{
+                    .operation = caller_,
+                    .state = reads_.current()
+                                 ? std::optional<AuthState>{reads_.current()->data.state}
+                                 : std::nullopt};
             }
             return std::nullopt;
         }
@@ -269,49 +321,45 @@ class ResolverRun {
 
     void not_authed(const std::shared_ptr<const AuthStateSnapshot>& snapshot,
                     std::string_view reason) {
-        session_.error("NOT_AUTHED", "resolve requires an authenticated account",
-                       {{"account", account_},
-                        {"state", snapshot ? json(core::auth_state_name(snapshot->data.state))
-                                           : json("unknown")},
-                        {"reason", reason}},
-                       kNotAuthed);
+        error_ = ResolverNotAuthenticatedError{
+            .account = account_,
+            .state = snapshot ? snapshot->data.state : AuthState::Unknown,
+            .reason = reason == "authorization_lost" ? ResolverNotAuthedReason::AuthorizationLost
+                                                     : ResolverNotAuthedReason::NotReady};
     }
 
     void bot_unsupported() {
-        session_.error("BOT_UNSUPPORTED", "this resolver branch requires a user account",
-                       {{"operation", kOperation}}, kUsage);
+        error_ = ResolverBotUnsupportedError{.operation = caller_};
     }
 
     void td_error(const core::TdError& error) {
         if (error.code == 429) {
-            session_.error("RATE_LIMITED", "Telegram rate limit",
-                           {{"operation", kOperation},
-                            {"tdlib_code", 429},
-                            {"retry_after", retry_after(error.message)}},
-                           kRateLimited);
+            error_ = ResolverRateLimitedError{.operation = caller_,
+                                              .retry_after = retry_after(error.message)};
             return;
         }
-        session_.error("TDLIB_ERROR", "resolver TDLib request failed",
-                       {{"operation", kOperation}, {"tdlib_code", error.code}}, kGeneric);
+        error_ = ResolverTdlibError{.operation = caller_, .tdlib_code = error.code};
     }
 
     void internal_error() {
-        session_.error("INTERNAL", "resolver returned an unexpected object",
-                       {{"operation", kOperation}, {"reason", "internal_error"}}, kGeneric);
+        error_ = ResolverInternalError{.operation = caller_};
     }
 
     void not_found(ResolverScope scope = ResolverScope::ActiveDialogs) {
-        json details{{"selector", selector_}};
-        if (scope == ResolverScope::LocalMaterialized) {
-            details["scope"] = "local_materialized";
-        }
-        session_.error("NOT_FOUND", "no chat or link target matches the selector",
-                       std::move(details), kNotFound);
+        error_ = ResolverNotFoundError{.selector = selector_,
+                                       .scope = scope == ResolverScope::LocalMaterialized
+                                                    ? std::optional<ResolverScope>{scope}
+                                                    : std::nullopt};
     }
 
-    void usage(std::string_view message, std::string_view reason) {
-        session_.error("USAGE", std::string(message),
-                       {{"argument", "selector"}, {"reason", reason}}, kUsage);
+    void usage(std::string_view /*message*/, std::string_view reason) {
+        ResolverUsageReason typed_reason = ResolverUsageReason::InvalidArgument;
+        if (reason == "unsupported_chat_type") {
+            typed_reason = ResolverUsageReason::UnsupportedChatType;
+        } else if (reason == "unsupported_link_type") {
+            typed_reason = ResolverUsageReason::UnsupportedLinkType;
+        }
+        error_ = ResolverUsageError{.argument = "selector", .reason = typed_reason};
     }
 
     std::optional<core::TdChat> get_chat(std::int64_t chat_id, bool domain_scan = false) {
@@ -377,7 +425,7 @@ class ResolverRun {
     }
 
     std::optional<ResolveResult> resolve_public_username(const std::string& username,
-                                                         std::optional<std::string> link_type,
+                                                         std::optional<ResolvedLinkType> link_type,
                                                          bool require_bot) {
         auto response = read(
             [&](const auto& current) { return client_.search_public_chat(current, username); });
@@ -406,8 +454,7 @@ class ResolverRun {
             internal_error();
             return std::nullopt;
         }
-        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
-                             std::move(link_type));
+        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt, link_type);
     }
 
     std::optional<std::vector<std::int64_t>> load_list(core::TdChatListKind list,
@@ -520,17 +567,10 @@ class ResolverRun {
         if (matches == 1 && single) {
             return ResolveResult(std::move(*single));
         }
-        json values = json::array();
-        for (const auto& candidate : candidates) {
-            values.push_back(chat_identity_json(candidate));
-        }
-        session_.error("AMBIGUOUS", "multiple chats match the selector",
-                       {{"selector", selector_},
-                        {"scope", scope == ResolverScope::ActiveDialogs ? "active_dialogs"
-                                                                        : "local_materialized"},
-                        {"candidates", std::move(values)},
-                        {"truncated", matches > kMaximumAmbiguousCandidates}},
-                       kUsage);
+        error_ = ResolverAmbiguousError{.selector = selector_,
+                                        .scope = scope,
+                                        .candidates = std::move(candidates),
+                                        .truncated = matches > kMaximumAmbiguousCandidates};
         return std::nullopt;
     }
 
@@ -570,17 +610,14 @@ class ResolverRun {
         if (matches.size() == 1) {
             return ResolveResult(std::move(matches.front()));
         }
-        json candidates = json::array();
-        for (std::size_t index = 0; index < std::min(matches.size(), kMaximumAmbiguousCandidates);
-             ++index) {
-            candidates.push_back(chat_identity_json(matches[index]));
+        const bool truncated = matches.size() > kMaximumAmbiguousCandidates;
+        if (truncated) {
+            matches.resize(kMaximumAmbiguousCandidates);
         }
-        session_.error("AMBIGUOUS", "multiple chats match the selector",
-                       {{"selector", selector_},
-                        {"scope", "local_materialized"},
-                        {"candidates", std::move(candidates)},
-                        {"truncated", matches.size() > kMaximumAmbiguousCandidates}},
-                       kUsage);
+        error_ = ResolverAmbiguousError{.selector = selector_,
+                                        .scope = ResolverScope::LocalMaterialized,
+                                        .candidates = std::move(matches),
+                                        .truncated = truncated};
         return std::nullopt;
     }
 
@@ -605,9 +642,9 @@ class ResolverRun {
         }
         switch (link->kind) {
         case core::TdInternalLinkKind::PublicChat:
-            return resolve_public_username(link->username, "public_chat", false);
+            return resolve_public_username(link->username, ResolvedLinkType::PublicChat, false);
         case core::TdInternalLinkKind::BotStart:
-            return resolve_public_username(link->username, "bot_start", true);
+            return resolve_public_username(link->username, ResolvedLinkType::BotStart, true);
         case core::TdInternalLinkKind::Message:
             return resolve_message_link(link->url);
         case core::TdInternalLinkKind::ChatInvite:
@@ -672,8 +709,8 @@ class ResolverRun {
         if (!materialized) {
             return std::nullopt;
         }
-        return ResolveResult(std::move(*materialized), info->message_id, info->topic, "message",
-                             info->is_public);
+        return ResolveResult(std::move(*materialized), info->message_id, info->topic,
+                             ResolvedLinkType::Message, info->is_public);
     }
 
     std::optional<ResolveResult> resolve_invite_link(const core::TdInternalLink& link) {
@@ -711,8 +748,8 @@ class ResolverRun {
         if (!materialized) {
             return std::nullopt;
         }
-        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt, "chat_invite",
-                             info->is_public);
+        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
+                             ResolvedLinkType::ChatInvite, info->is_public);
     }
 
     std::optional<ResolveResult> resolve_direct_messages_link(const core::TdInternalLink& link) {
@@ -769,7 +806,7 @@ class ResolverRun {
             return std::nullopt;
         }
         return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
-                             "direct_messages_chat");
+                             ResolvedLinkType::DirectMessagesChat);
     }
 
     std::optional<ResolveResult> resolve_saved_messages_link() {
@@ -797,7 +834,7 @@ class ResolverRun {
             return std::nullopt;
         }
         return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
-                             "saved_messages");
+                             ResolvedLinkType::SavedMessages);
     }
 
     core::TdClient& client_;
@@ -807,9 +844,194 @@ class ResolverRun {
     ReadyReadSession reads_;
     std::shared_ptr<const AuthStateSnapshot> snapshot_;
     core::TdUserSummary me_;
+    ResolverCaller caller_ = M2Operation::Resolve;
+    std::optional<ResolverPrincipal> principal_;
+    std::optional<ResolverError> error_;
+    bool bound_ = false;
 };
 
 } // namespace
+
+class ResolverConsumer::Impl {
+  public:
+    Impl(core::TdClient& client, std::string_view account, RequestSession& session)
+        : run_(client, account, session) {}
+
+    ResolverPrincipalOutcome bind_principal(ResolverCaller caller) {
+        return run_.bind_principal(caller);
+    }
+
+    ResolverOutcome resolve_chat(std::string selector, ResolverScope scope) {
+        return run_.resolve_chat(std::move(selector), scope);
+    }
+
+    ReadyReadResult read_target(const ReadyReadStart& start) {
+        return run_.read_target(start);
+    }
+
+  private:
+    ResolverRun run_;
+};
+
+std::string_view m2_operation_name(M2Operation operation) {
+    switch (operation) {
+    case M2Operation::Chats:
+        return "chats";
+    case M2Operation::Read:
+        return "read";
+    case M2Operation::MsgGet:
+        return "msg_get";
+    case M2Operation::MsgLink:
+        return "msg_link";
+    case M2Operation::Search:
+        return "search";
+    case M2Operation::Unread:
+        return "unread";
+    case M2Operation::Fetch:
+        return "fetch";
+    case M2Operation::Resolve:
+        return "resolve";
+    case M2Operation::ChatInfo:
+        return "chat_info";
+    case M2Operation::ChatMembers:
+        return "chat_members";
+    }
+    return "resolve";
+}
+
+std::string_view resolver_caller_name(const ResolverCaller& caller) {
+    if (const auto* operation = std::get_if<M2Operation>(&caller)) {
+        return m2_operation_name(*operation);
+    }
+    const auto* identity = proto::m3_operation_identity(std::get<proto::M3Operation>(caller));
+    return identity == nullptr ? std::string_view{} : identity->canonical_name;
+}
+
+ResolverConsumer::ResolverConsumer(core::TdClient& client, std::string_view account,
+                                   RequestSession& session)
+    : impl_(std::make_unique<Impl>(client, account, session)) {}
+
+ResolverConsumer::~ResolverConsumer() = default;
+
+ResolverPrincipalOutcome ResolverConsumer::bind_principal(ResolverCaller caller) {
+    return impl_->bind_principal(caller);
+}
+
+ResolverOutcome ResolverConsumer::resolve_chat(std::string selector, ResolverScope scope) {
+    return impl_->resolve_chat(std::move(selector), scope);
+}
+
+ReadyReadResult ResolverConsumer::read_target(const ReadyReadStart& start) {
+    return impl_->read_target(start);
+}
+
+namespace {
+
+std::string_view resolver_error_subject(const ResolverCaller& caller) {
+    const auto name = resolver_caller_name(caller);
+    return name == "resolve" ? std::string_view("resolver") : name;
+}
+
+struct ResolverErrorEmitter {
+    void operator()(const ResolverUsageError& error) const {
+        std::string_view reason = "invalid_argument";
+        std::string_view message = "resolve selector must be non-empty valid UTF-8";
+        if (error.reason == ResolverUsageReason::UnsupportedChatType) {
+            reason = "unsupported_chat_type";
+            message = "secret chats are not supported";
+        } else if (error.reason == ResolverUsageReason::UnsupportedLinkType) {
+            reason = "unsupported_link_type";
+            message = "unsupported t.me link type";
+        }
+        session->error("USAGE", std::string(message),
+                       {{"argument", error.argument}, {"reason", reason}}, kUsage);
+    }
+
+    void operator()(const ResolverNotAuthenticatedError& error) const {
+        const std::string_view reason = error.reason == ResolverNotAuthedReason::AuthorizationLost
+                                            ? "authorization_lost"
+                                            : "not_ready";
+        session->error("NOT_AUTHED",
+                       std::string(m2_operation_name(owning_operation)) +
+                           " requires an authenticated account",
+                       {{"account", error.account},
+                        {"state", core::auth_state_name(error.state)},
+                        {"reason", reason}},
+                       kNotAuthed);
+    }
+
+    void operator()(const ResolverBotUnsupportedError& error) const {
+        session->error("BOT_UNSUPPORTED", "this resolver branch requires a user account",
+                       {{"operation", resolver_caller_name(error.operation)}}, kUsage);
+    }
+
+    void operator()(const ResolverNotFoundError& error) const {
+        json details{{"selector", error.selector}};
+        if (error.scope == ResolverScope::LocalMaterialized) {
+            details["scope"] = "local_materialized";
+        }
+        session->error("NOT_FOUND", "no chat or link target matches the selector",
+                       std::move(details), kNotFound);
+    }
+
+    void operator()(const ResolverAmbiguousError& error) const {
+        json candidates = json::array();
+        for (const auto& candidate : error.candidates) {
+            candidates.push_back(chat_identity_json(candidate));
+        }
+        session->error(
+            "AMBIGUOUS", "multiple chats match the selector",
+            {{"selector", error.selector},
+             {"scope", error.scope == ResolverScope::ActiveDialogs ? "active_dialogs"
+                                                                   : "local_materialized"},
+             {"candidates", std::move(candidates)},
+             {"truncated", error.truncated}},
+            kUsage);
+    }
+
+    void operator()(const ResolverRateLimitedError& error) const {
+        session->error("RATE_LIMITED", "Telegram rate limit",
+                       {{"operation", resolver_caller_name(error.operation)},
+                        {"tdlib_code", 429},
+                        {"retry_after", error.retry_after}},
+                       kRateLimited);
+    }
+
+    void operator()(const ResolverTdlibError& error) const {
+        session->error("TDLIB_ERROR",
+                       std::string(resolver_error_subject(error.operation)) +
+                           " TDLib request failed",
+                       {{"operation", resolver_caller_name(error.operation)},
+                        {"tdlib_code", error.tdlib_code}},
+                       kGeneric);
+    }
+
+    void operator()(const ResolverTimeoutError& error) const {
+        session->error(
+            "TIMEOUT", std::string(resolver_error_subject(error.operation)) + " request timed out",
+            {{"operation", resolver_caller_name(error.operation)},
+             {"state", error.state ? json(core::auth_state_name(*error.state)) : json(nullptr)}},
+            kTimeout);
+    }
+
+    void operator()(const ResolverInternalError& error) const {
+        session->error(
+            "INTERNAL",
+            std::string(resolver_error_subject(error.operation)) + " returned an unexpected object",
+            {{"operation", resolver_caller_name(error.operation)}, {"reason", "internal_error"}},
+            kGeneric);
+    }
+
+    RequestSession* session;
+    M2Operation owning_operation;
+};
+
+} // namespace
+
+void emit_resolver_error(const ResolverError& error, RequestSession& session,
+                         M2Operation owning_operation) {
+    std::visit(ResolverErrorEmitter{&session, owning_operation}, error);
+}
 
 bool valid_resolve_selector(std::string_view selector) {
     return !selector.empty() && common::valid_utf8(selector) && classify_selector(selector);
@@ -828,30 +1050,23 @@ void ResolveCoordinator::resolve(const proto::Request& request, RequestSession& 
 
 void ResolveCoordinator::resolve_for_scope(std::string selector, ResolverScope scope,
                                            RequestSession& session) {
-    const auto classified = !selector.empty() && common::valid_utf8(selector)
-                                ? classify_selector(selector)
-                                : std::nullopt;
-    if (!classified) {
-        session.error("USAGE", "resolve selector must be non-empty valid UTF-8",
-                      {{"argument", "selector"}, {"reason", "invalid_argument"}}, kUsage);
+    ResolverConsumer consumer(client_.get(), account_, session);
+    const auto principal = consumer.bind_principal(M2Operation::Resolve);
+    if (const auto* error = std::get_if<ResolverError>(&principal)) {
+        emit_resolver_error(*error, session);
         return;
     }
-    const auto& classified_value = classified.value();
-    ResolverRun run(client_.get(), account_, session, std::move(selector));
-    if (!run.preflight()) {
+    if (std::holds_alternative<ResolverStop>(principal)) {
         return;
     }
-    const auto result = run.resolve(classified_value, scope);
-    if (!result) {
+    const auto outcome = consumer.resolve_chat(std::move(selector), scope);
+    if (const auto* error = std::get_if<ResolverError>(&outcome)) {
+        emit_resolver_error(*error, session);
         return;
     }
-    const auto rendered = result_json(*result);
-    if (!rendered) {
-        session.error("INTERNAL", "resolver returned invalid result metadata",
-                      {{"operation", kOperation}, {"reason", "internal_error"}}, kGeneric);
-        return;
+    if (const auto* result = std::get_if<ResolvedChatTarget>(&outcome)) {
+        session.result(result_json(*result));
     }
-    session.result(*rendered);
 }
 
 void register_resolve_command(Dispatcher& dispatcher, ResolveCoordinator& coordinator) {
