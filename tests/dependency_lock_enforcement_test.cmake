@@ -64,6 +64,18 @@ lock_field(cli11 source_tree_sha256 cli11_source_tree_sha256)
 lock_field(tdlib immutable_ref tdlib_ref)
 lock_field(tdlib source_repository tdlib_repository)
 
+string(JSON component_count LENGTH "${lock_json}" components)
+string(JSON duplicate_component GET "${lock_json}" components 0)
+string(JSON duplicate_component_lock_json SET
+    "${lock_json}" components ${component_count} "${duplicate_component}")
+set(duplicate_component_lock "${TEST_OUTPUT_DIR}/duplicate-component-lock.json")
+file(WRITE "${duplicate_component_lock}" "${duplicate_component_lock_json}")
+expect_failure(
+    "duplicate dependency component id" "duplicate component id: tdlib"
+    "${PYTHON_EXECUTABLE}" "${verifier}"
+    --repo-root "${REPO_ROOT}"
+    --lock-file "${duplicate_component_lock}")
+
 string(REPLACE "${cli11_ref}" "0000000000000000000000000000000000000000"
     mismatched_lock_json "${lock_json}")
 set(mismatched_lock "${TEST_OUTPUT_DIR}/mismatched-lock.json")
