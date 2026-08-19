@@ -634,11 +634,152 @@ boundary.
 
 #### `msg get`, `msg link`, and `resolve`
 
+The shared chat resolver exposes one request-scoped, typed, non-terminal
+consumer. It does not redefine §5.2's authoritative ten-value `M2Operation`.
+Caller attribution instead uses this distinct extensible type:
+
+```cpp
+using ResolverCaller = std::variant<M2Operation, proto::M3Operation>;
+
+enum class ResolverStop { Cancelled };
+
+struct ResolverUsageError {
+    std::string argument;
+    UsageReason reason;
+};
+struct ResolverNotAuthenticatedError {
+    std::string account;
+    AuthState state;
+    NotAuthedReason reason;
+};
+struct ResolverBotUnsupportedError { ResolverCaller operation; };
+struct ResolverNotFoundError {
+    std::string selector;
+    std::optional<ResolverScope> scope;
+};
+struct ResolverAmbiguousError {
+    std::string selector;
+    ResolverScope scope;
+    std::vector<ChatIdentity> candidates;
+    bool truncated;
+};
+struct ResolverRateLimitedError {
+    ResolverCaller operation;
+    std::int32_t retry_after;
+};
+struct ResolverTdlibError {
+    ResolverCaller operation;
+    std::int32_t tdlib_code;
+};
+struct ResolverTimeoutError {
+    ResolverCaller operation;
+    std::optional<AuthState> state;
+};
+struct ResolverInternalError { ResolverCaller operation; };
+
+using ResolverError =
+    std::variant<ResolverUsageError, ResolverNotAuthenticatedError,
+                 ResolverBotUnsupportedError, ResolverNotFoundError,
+                 ResolverAmbiguousError, ResolverRateLimitedError,
+                 ResolverTdlibError, ResolverTimeoutError,
+                 ResolverInternalError>;
+
+struct ResolverPrincipal {
+    std::int64_t id;
+    bool is_bot;
+};
+
+struct ResolvedChatTarget {
+    ResolverPrincipal principal;
+    ChatIdentity chat;
+    std::optional<std::int64_t> contextual_message_id;
+    std::optional<TopicRef> contextual_topic;
+    std::optional<ResolvedLinkType> link_type;
+    std::optional<bool> is_public;
+};
+
+using ResolverPrincipalOutcome =
+    std::variant<ResolverPrincipal, ResolverError, ResolverStop>;
+using ResolverOutcome =
+    std::variant<ResolvedChatTarget, ResolverError, ResolverStop>;
+
+class ResolverConsumer {
+  public:
+    ResolverPrincipalOutcome bind_principal(ResolverCaller caller);
+    ResolverOutcome resolve_chat(std::string selector, ResolverScope scope);
+    ReadyReadResult read_target(const ReadyReadStart& start);
+};
+```
+
+`M2Operation` retains exactly `chats`, `read`, `msg_get`, `msg_link`,
+`search`, `unread`, `fetch`, `resolve`, `chat_info`, and `chat_members` from
+§5.2. `proto::M3Operation` retains the frozen seventeen M3/M4 canonical
+operation identities from §4.5.1, including `saved_attach`; the resolver does
+not create a parallel mutation-operation enum. `ResolverCaller` serializes
+through the canonical identity of its held operation. A selector or identity-
+enrichment failure is represented with
+`ResolverCaller{M2Operation::Resolve}` even for an M3/M4 consumer.
+
+`ResolvedLinkType` is the closed §4.4 `link_type` enum. `ResolverError` is a
+typed tagged union, not a terminal frame or free-form JSON value. Its variants
+carry exactly the closed payload already defined in §§4.1 and 5.2. Rendering
+that error to the standard envelope is the owning command adapter's
+responsibility.
+
+One `ResolverConsumer` owns one `ReadyReadSession`, its advancing immutable
+authorization snapshot, and the request's already-computed absolute deadline.
+`bind_principal` is called exactly once and performs Ready then one correlated
+`getMe`. Neither `bind_principal`, `resolve_chat`, nor `read_target` calls
+`RequestSession::result` or `RequestSession::error`.
+
+`bind_principal` and `resolve_chat` map an existing
+`ReadyReadStatus::Cancelled` to `ResolverStop::Cancelled`; their caller emits
+no terminal for that stop. `read_target` does not return `ResolverStop`: it
+returns the existing `ReadyReadResult` unchanged, including
+`ReadyReadStatus::Cancelled`. The outer message command owns the exact mapping
+of Response, AuthorizationLost, TimedOut, Failed, and Cancelled; Cancelled
+emits no terminal, while the other non-response states use the existing M2
+error rules. Disconnect and shutdown reach this same non-terminal Cancelled
+path through `RequestSession` cancellation. The public `resolve` handler is an
+adapter over the typed bind/resolve outcomes and remains responsible for its
+one terminal result or error.
+
+A Ready failure or `getMe` failure before selector resolution begins is
+attributed to the caller passed to `bind_principal`: `msg_get` or `msg_link`
+here, and the exact outer M2/M3/M4 canonical identity for later consumers.
+Once `resolve_chat` begins, every selector and identity-enrichment failure
+retains `operation:"resolve"`, including timeout, 429, other tdlib errors, and
+internal integrity failures. After a successful resolution, a `read_target`
+failure from `getMessages` or `getMessageLink` is attributed to `msg_get` or
+`msg_link`, respectively. All phases reuse the one absolute request deadline;
+none resets it or performs a second `getMe`.
+
+`ResolvedChatTarget` always retains message/topic/link metadata supplied by a
+message or topic selector. `msg get` and `msg link` use only its immutable
+`chat` identity. Their explicit positional message ids always govern the
+target request: contextual `message_id` or `topic` neither overrides nor
+validates a positional id.
+
+The implementation dependency order for this slice is exact: (1) shared M2
+DTOs plus neutral/native message conversion; (2) `ResolverConsumer` while the
+public `resolve` adapter remains green; (3) the `msg get`/`msg link` consumers,
+including their result schemas, manifest entries, human goldens, and focused
+tests. TODO.md carries the same order and assigns each deliverable once.
+
 `msg get` accepts 1 through 100 message ids and always returns
 `{"items":[<MessageSummary>],"next":null}`. A single id still uses the list
 shape. `getMessages` result order follows argv order and duplicate ids remain
-duplicated. If any result position is null, the command is atomic and emits no
-stdout; `NOT_FOUND.details` is exactly
+duplicated. It makes exactly one `getMessages(chat_id, message_ids)` target
+call after resolution.
+
+The complete response is validated before classifying missing positions. A
+response vector length different from the input length, or any non-null
+position whose message has a wrong `chat_id`, a wrong positional `id`, or an
+invalid `MessageSummary`, is `INTERNAL` with
+`{"operation":"msg_get","reason":"internal_error"}`. This integrity failure
+wins even when another position is null. Only a structurally valid response
+with one or more null positions is `NOT_FOUND`; the command is atomic and
+emits no result or partial stdout. `NOT_FOUND.details` is exactly
 `{"chat_id":integer,"missing_ids":[integer...]}`, with missing ids unique in
 first-occurrence order.
 
@@ -649,8 +790,40 @@ first-occurrence order.
 {"chat_id":-1001,"message_id":123,"link":"https://t.me/example/7","is_public":true}
 ```
 
-A documented 404 is `NOT_FOUND`; an eligibility or permission error is
-`TDLIB_ERROR`.
+The returned `messageLink.link` must be non-empty valid UTF-8. An invalid value
+is `INTERNAL` with `{"operation":"msg_link","reason":"internal_error"}`.
+No URL scheme, host, path, or t.me pattern is imposed. Accordingly,
+`msg-link.result.schema.json` uses only `{"type":"string","minLength":1}`
+for `link`. A documented 404 is `NOT_FOUND`; an eligibility or permission
+error is `TDLIB_ERROR`.
+
+Both commands are Read-tier and allow authenticated user and bot principals.
+The selector-specific §4.1 matrix is unchanged: user-only title, invite,
+direct-message, and Saved Messages branches still return the existing
+`BOT_UNSUPPORTED` resolver error at their specified point. A secret resolved
+chat returns `USAGE/unsupported_chat_type` before either target call.
+Neither command accepts a cursor; `msg get`'s `next:null` is terminal and not a
+continuation token.
+
+The exact human rendering is frozen by `tests/golden/msg-get.txt` and
+`tests/golden/msg-link.txt`. `msg get` prints this tab-separated form, using
+compact JSON for every non-integer value so untrusted strings remain escaped;
+each `\t` below denotes one literal U+0009 tab byte:
+
+```text
+id\tchat_id\tdate\tsender\tis_outgoing\ttopic\ttype\ttext
+123\t-1001\t"2026-08-05T10:00:00Z"\t{"type":"user","id":42}\tfalse\t{"kind":"forum","id":7}\t"text"\t"message or caption"
+next\tnull
+```
+
+`msg link` prints:
+
+```text
+chat_id\t-1001
+message_id\t123
+link\t"https://t.me/example/7"
+is_public\ttrue
+```
 
 `resolve` applies §4.1 and returns:
 
@@ -4691,9 +4864,19 @@ Implementation of the remaining M2 commands adds the following strict Draft
 `history` has no manifest entry or schema because it canonicalizes to `read`.
 `read.result` includes the closed boundary enum and tagged topic definition.
 `fetch.result` has nullable `target_reached`, `oldest_message_id`, and
-`resume_from_message_id`, and has no `complete` or `history_end`. Actual JSON
-data is validated against these strict schemas; human output renders the same
-fields.
+`resume_from_message_id`, and has no `complete` or `history_end`.
+`msg-get.result.schema.json` has one through 100 exact `MessageSummary` items
+and `next` is exactly null. `msg-link.result.schema.json` has exactly
+`chat_id`, `message_id`, `link`, and `is_public`; its ids are nonzero int53,
+`link` is a string with `minLength:1` and no pattern, and `is_public` is
+boolean. Human output renders the same fields and matches the exact goldens
+above. Actual JSON data is validated against these strict schemas.
+
+This M2 slice adds only those two result schemas and their result-manifest
+entries. It adds no `msg get`/`msg link` error schema and no error-catalog
+mapping. Naming and cataloging their exact error schemas is explicitly
+deferred to the existing M7 schema/error-manifest task; no filename or mapping
+is inferred by M2.
 
 M2 fake-boundary contract coverage must include:
 
@@ -4715,8 +4898,35 @@ M2 fake-boundary contract coverage must include:
 - filtered read pages with raw progress and zero items returning an advancing
   `page` cursor, followed by a zero-progress terminal boundary with null
   `next`;
-- `msg get` argv order/duplicates and atomic mixed found/missing behavior, plus
+- the typed `ResolverConsumer` bind/resolve success/error/stop variants without
+  a terminal, `read_target` retaining `ReadyReadStatus::Cancelled`, one
+  principal binding, Ready/getMe/selector/target attribution, reuse of the same
+  absolute deadline, later M3/M4 caller attribution, and the public `resolve`
+  adapter's one terminal;
+- `msg get` argv order/duplicates, one exact `getMessages` call, atomic mixed
+  found/missing behavior, unique first-occurrence missing ids, wrong vector
+  length, wrong positional chat/id, invalid non-null DTO precedence over a
+  simultaneous null, and no partial stdout; plus
   the exact `msg link` tdlib call and contextual errors;
+- a non-empty valid-UTF-8 message link, empty and invalid-UTF-8 link integrity
+  failures, no URL-pattern rejection, bot-positive numeric/public/message
+  selectors, selector-specific bot-negative branches, and secret rejection
+  before the target call;
+- for each of `msg get` and `msg link`, real-Dispatcher recovery fixtures with
+  both preflights installed: an unresolved removal stops at
+  `REMOVAL_INCOMPLETE` before logout recovery and with zero Ready/getMe,
+  resolver, target, or other tdlib calls; a clean removal followed by an
+  unresolved logout stops at `AUDIT_INCOMPLETE` with the same zero-call proof;
+  and a clean trace orders removal recovery, logout recovery, Ready, `getMe`,
+  resolver, then the command target call;
+- those Dispatcher fixtures validate the exact §5.1 terminal envelopes and
+  exit 1: `REMOVAL_INCOMPLETE.details` has exactly `account`, `path`,
+  `invocation_id`, `stage`, `completed_stages`, and `reason`, while
+  `AUDIT_INCOMPLETE.details` has exactly `account`, `path`, `mutation_state`,
+  and `completed_stages`; the removal branch proves the logout preflight was
+  not entered, and neither failure emits result/stdout;
+- exact result-schema validation and result-manifest entries in M2, with no msg
+  error-schema or error-catalog expectation before the named M7 task;
 - multi-page global sender/text search through matches/exhaustion, full marker
   preservation and repeated-marker rejection;
 - Main/Archive unread deduplication, secret exclusion, exact chat-info source
@@ -4866,7 +5076,18 @@ records `tty`. No other value reaches an intent.
 
 Audit inspection is an exact M1 preflight for `login`, `logout`, `me`,
 `doctor`, `account show <name>` and `account remove <name>`; daemon control and
-`account list|add|use` do not inspect a per-account logout audit. For each
+`account list|add|use` do not inspect a per-account logout audit.
+
+M2 extends, but does not otherwise broaden, that closed preflight surface.
+The accepted selected-account reads `saved tags`, `saved search`, `resolve`,
+`chats`, `msg get`, and `msg link` run both the global account-removal
+tombstone preflight and the selected account's logout-audit preflight before
+Ready/getMe or any command-specific tdlib request. Thus `msg get` and
+`msg link` cannot bypass an existing `REMOVAL_INCOMPLETE` or
+`AUDIT_INCOMPLETE` condition. No other M2 command is admitted to either list
+by this paragraph.
+
+For each
 intent lacking a synced outcome, the reconciler does exactly this: intent with
 no `logout_send_started` gets a failed `INTERNAL` outcome with mutation state
 `none`; `logout_closed_confirmed` gets the successful logout outcome with

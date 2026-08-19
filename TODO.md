@@ -133,22 +133,34 @@ before the milestone is closed.
       username `NOT_FOUND` normalization
 - [ ] Shared M2 DTOs and parsing: lossless `TopicRef`, `MessageSummary`,
       `ChatIdentity`/`ChatSummary`, member/user/chat sender variants, int53
-      boundaries, inclusive rounded timestamps, and command-specific limits
+      boundaries, inclusive rounded timestamps, command-specific limits, and
+      neutral/native top-level message/messages/message-link conversion
+- [ ] Refactor the accepted resolver into the typed non-terminal
+      `ResolverConsumer`: retain the ten-value M2 operation enum, use the
+      separate M2-or-frozen-M3/M4 caller attribution, bind Ready/getMe once,
+      return immutable contextual result and typed error/stop outcomes, retain
+      `ReadyReadStatus::Cancelled` from target reads, and reuse one absolute
+      deadline
 - [ ] Output layer: equivalent human/JSON rendering, exact result/error shapes,
       stderr discipline, and self-contained untrusted cursors without a MAC or
       daemon state; reject bad scope and non-advancing upstream markers
 - [ ] Add strict Draft 2020-12 result schemas and manifest entries for `chats`,
-      `read`, `msg get`, `msg link`, `search`, `unread`, `fetch`, `resolve`,
-      `chat info`, and `chat members`; validate actual result data and keep
-      `history` schema-less as the canonical `read` alias
+      `read`, `search`, `unread`, `fetch`, `resolve`, `chat info`, and `chat
+      members`; validate actual result data and keep `history` schema-less as
+      the canonical `read` alias
 - [x] `tgcli chats`: Main/Archive/numeric-folder growing-prefix scan, exact
       `(position.order, chat_id)` keyset, sparse unread pagination, and
       live-view continuation cases across restart/movement/removal/ties
 - [ ] `tgcli read`/`history`: limits, exclusive `--before`, inclusive
       `--since`/`--until`, all four topic kinds, offline continuous-prefix
       behavior, exact `boundary`/`next` mapping, and advancing raw cursors
-- [ ] `tgcli msg get`, `tgcli msg link`, `tgcli resolve`: atomic ordered batch
-      reads, exact link call/result, resolver DTOs, and contextual targets
+- [ ] `tgcli msg get`, `tgcli msg link`: explicit positional ids govern after
+      chat-only consumption of immutable resolver context; atomic ordered batch
+      reads, malformed-response integrity precedence, exact link call/result,
+      non-empty UTF-8 link validation, both result schemas and result-manifest
+      entries, equivalent exact human goldens, real-dispatch recovery ordering,
+      dispatcher/fake/native coverage, and no new TestDC skip; defer both error
+      schemas and error-catalog mappings to the existing M7 schema task
 - [ ] `tgcli search`: per-chat/global server search, exact filter mappings,
       exhaustive sender/text post-filtering, full upstream cursors, and no
       secret/local-search merge
@@ -331,11 +343,13 @@ before the milestone is closed.
 - [ ] Implement local `tgcli schema <command-token>... [--all]`: exact
       result/item fallback, fixed result/item/error aggregation, history alias,
       embedded byte-authoritative catalogs, separate non-stream error manifest,
-      canonical-key/different-spelling collision gates with legal identical-key kind
-      coexistence, trusted-source lstat/containment checks, frozen help/option/lookup
-      precedence, uncataloged meta-command exception, deterministic errors/output,
-      and complete Linux/macOS package derivation plus packaged-binary byte smoke;
-      perform no config/socket/daemon/TDLib access
+      including the deferred exact `msg get`/`msg link` error schemas and
+      mappings, canonical-key/different-spelling collision gates with legal
+      identical-key kind coexistence, trusted-source lstat/containment checks,
+      frozen help/option/lookup precedence, uncataloged meta-command exception,
+      deterministic errors/output, and complete Linux/macOS package derivation
+      plus packaged-binary byte smoke; perform no config/socket/daemon/TDLib
+      access
 - [ ] Shell completions (bash/zsh/fish), man pages
 - [ ] docs/schemas/ — freeze curated JSON schemas per command
 - [ ] Validate the complete M1–M6 test-DC E2E suite at the M7 gate, including
