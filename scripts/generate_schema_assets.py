@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -11,18 +12,27 @@ import stat
 import sys
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import NoReturn
 
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
 ASCII_WHITESPACE = re.compile(r"[ \t\n\r\f\v]+")
 COMMAND_KEY = re.compile(r"^[a-z0-9][a-z0-9-]*( [a-z0-9][a-z0-9-]*)*$")
+PORTABLE_SCHEMA_STEM = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
 KIND_ORDER = {"result": 0, "item": 1, "error": 2}
 CATALOG_RULES = {
     "manifest.json": frozenset({"result"}),
     "stream-manifest.json": frozenset({"result", "item", "error"}),
     "error-manifest.json": frozenset({"error"}),
 }
+DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+REGULAR_OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+READ_CHUNK_SIZE = 64 * 1024
 
 
 class GenerationError(RuntimeError):
@@ -50,6 +60,77 @@ class AssetInventory:
     mappings: tuple[Mapping, ...]
     assets: tuple[tuple[str, bytes], ...]
     completion_keys: tuple[str, ...]
+
+
+@dataclass
+class TrustedSchemaSource:
+    root_fd: int
+    docs_fd: int
+    schemas_fd: int
+
+    @classmethod
+    def open(cls, source_root_argument: Path) -> TrustedSchemaSource:
+        source_root = source_root_argument.absolute()
+        descriptors: list[int] = []
+        try:
+            root_fd = open_trusted_component(
+                source_root, DIRECTORY_OPEN_FLAGS, "directory", "source root"
+            )
+            descriptors.append(root_fd)
+            docs_fd = open_trusted_component(
+                "docs",
+                DIRECTORY_OPEN_FLAGS,
+                "directory",
+                "source docs",
+                dir_fd=root_fd,
+            )
+            descriptors.append(docs_fd)
+            schemas_fd = open_trusted_component(
+                "schemas",
+                DIRECTORY_OPEN_FLAGS,
+                "directory",
+                "source docs/schemas",
+                dir_fd=docs_fd,
+            )
+            descriptors.append(schemas_fd)
+        except GenerationError:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            raise
+        return cls(root_fd, docs_fd, schemas_fd)
+
+    def close(self) -> None:
+        os.close(self.schemas_fd)
+        os.close(self.docs_fd)
+        os.close(self.root_fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def verify_edges(self) -> None:
+        # Descriptor identity proves retained containment across directory renames.
+        verify_directory_edge(self.docs_fd, self.root_fd, "source docs")
+        verify_directory_edge(self.schemas_fd, self.docs_fd, "source docs/schemas")
+
+    def read_leaf(self, filename: str, owner: str) -> bytes:
+        self.verify_edges()
+        descriptor = open_trusted_component(
+            filename,
+            REGULAR_OPEN_FLAGS,
+            "file",
+            owner,
+            dir_fd=self.schemas_fd,
+        )
+        try:
+            data = read_descriptor_bytes(descriptor, owner)
+            # Reject a parent escape that raced the opened leaf read.
+            self.verify_edges()
+            return data
+        finally:
+            os.close(descriptor)
 
 
 def require(condition: bool, message: str) -> None:
@@ -95,55 +176,91 @@ def parse_json_object(data: bytes, owner: str) -> dict[str, object]:
     return document
 
 
-def checked_component(
-    candidate: Path,
+def component_mode(
+    candidate: str | Path,
+    dir_fd: int | None,
+) -> int | None:
+    try:
+        return os.stat(candidate, dir_fd=dir_fd, follow_symlinks=False).st_mode
+    except OSError:
+        return None
+
+
+def open_trusted_component(
+    candidate: str | Path,
+    flags: int,
     expected: str,
-    source_root: Path,
-    resolved_root: Path,
     owner: str,
-) -> Path:
+    *,
+    dir_fd: int | None = None,
+) -> int:
     try:
-        mode = os.lstat(candidate).st_mode
+        descriptor = os.open(candidate, flags, dir_fd=dir_fd)
     except OSError as error:
-        raise GenerationError(f"{owner}: missing or inaccessible: {error}") from error
-    require(not stat.S_ISLNK(mode), f"{owner}: cannot be a symlink")
-    if expected == "directory":
-        require(stat.S_ISDIR(mode), f"{owner}: must be a directory")
-    else:
-        require(stat.S_ISREG(mode), f"{owner}: must be a regular file")
+        mode = component_mode(candidate, dir_fd)
+        if mode is not None and stat.S_ISLNK(mode):
+            raise GenerationError(f"{owner}: cannot be a symlink") from error
+        if mode is not None and expected == "directory" and not stat.S_ISDIR(mode):
+            raise GenerationError(f"{owner}: must be a directory") from error
+        if mode is not None and expected == "file" and not stat.S_ISREG(mode):
+            raise GenerationError(f"{owner}: must be a regular file") from error
+        if error.errno in {errno.ENOENT, errno.ENOTDIR}:
+            raise GenerationError(
+                f"{owner}: missing or inaccessible: {error}"
+            ) from error
+        raise GenerationError(
+            f"{owner}: cannot open trusted component: {error}"
+        ) from error
     try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(resolved_root)
-    except (OSError, ValueError) as error:
-        raise GenerationError(f"{owner}: escapes {source_root}: {error}") from error
-    return resolved
+        mode = os.fstat(descriptor).st_mode
+    except OSError as error:
+        os.close(descriptor)
+        raise GenerationError(
+            f"{owner}: cannot inspect opened component: {error}"
+        ) from error
+    valid_type = stat.S_ISDIR(mode) if expected == "directory" else stat.S_ISREG(mode)
+    if not valid_type:
+        os.close(descriptor)
+        type_name = "directory" if expected == "directory" else "regular file"
+        fail(f"{owner}: must be a {type_name}")
+    return descriptor
 
 
-def trusted_schema_directory(source_root_argument: Path) -> tuple[Path, Path]:
-    source_root = source_root_argument.absolute()
+def read_descriptor_bytes(descriptor: int, owner: str) -> bytes:
+    chunks: list[bytes] = []
     try:
-        root_mode = os.lstat(source_root).st_mode
+        while True:
+            chunk = os.read(descriptor, READ_CHUNK_SIZE)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
     except OSError as error:
         raise GenerationError(
-            f"source root: missing or inaccessible: {error}"
+            f"{owner}: cannot read opened component: {error}"
         ) from error
-    require(not stat.S_ISLNK(root_mode), "source root: cannot be a symlink")
-    require(stat.S_ISDIR(root_mode), "source root: must be a directory")
-    try:
-        resolved_root = source_root.resolve(strict=True)
-    except OSError as error:
-        raise GenerationError(f"source root: cannot resolve: {error}") from error
-    checked_component(
-        source_root / "docs", "directory", source_root, resolved_root, "source docs"
-    )
-    schemas = checked_component(
-        source_root / "docs" / "schemas",
+
+
+def verify_directory_edge(child_fd: int, parent_fd: int, owner: str) -> None:
+    observed_parent = open_trusted_component(
+        "..",
+        DIRECTORY_OPEN_FLAGS,
         "directory",
-        source_root,
-        resolved_root,
-        "source docs/schemas",
+        f"{owner} parent edge",
+        dir_fd=child_fd,
     )
-    return resolved_root, schemas
+    try:
+        observed = os.fstat(observed_parent)
+        expected = os.fstat(parent_fd)
+    except OSError as error:
+        raise GenerationError(
+            f"{owner}: cannot verify retained edge: {error}"
+        ) from error
+    finally:
+        os.close(observed_parent)
+    require(
+        (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino),
+        f"{owner}: retained directory is outside its trusted parent",
+    )
 
 
 def normalize_target(tokens: list[str]) -> str:
@@ -197,33 +314,25 @@ def validate_reference(value: object, owner: str) -> str:
     require(
         isinstance(value, str) and value, f"{owner}: schema reference must be nonempty"
     )
+    posix_reference = PurePosixPath(value)
+    windows_reference = PureWindowsPath(value)
+    suffix = ".schema.json"
+    stem = value[: -len(suffix)] if value.endswith(suffix) else ""
     require(
-        "\0" not in value and "\\" not in value, f"{owner}: unsafe schema reference"
-    )
-    reference = PurePosixPath(value)
-    require(
-        not reference.is_absolute()
-        and len(reference.parts) == 1
-        and reference.parts[0] not in {"", ".", ".."}
-        and value.endswith(".schema.json"),
+        posix_reference.name == value
+        and windows_reference.name == value
+        and stem not in {"", ".", ".."}
+        and PORTABLE_SCHEMA_STEM.fullmatch(stem) is not None
+        and stem.split(".", 1)[0] not in WINDOWS_RESERVED_NAMES,
         f"{owner}: unsafe schema reference",
     )
     return value
 
 
-def load_catalogs(
-    source_root: Path, schemas: Path, resolved_root: Path
-) -> tuple[CatalogData, ...]:
+def load_catalogs(source: TrustedSchemaSource) -> tuple[CatalogData, ...]:
     loaded: list[CatalogData] = []
     for name in CATALOG_RULES:
-        catalog_file = checked_component(
-            schemas / name,
-            "file",
-            source_root,
-            resolved_root,
-            f"source catalog {name}",
-        )
-        data = catalog_file.read_bytes()
+        data = source.read_leaf(name, f"source catalog {name}")
         document = parse_json_object(data, f"catalog {name}")
         require(
             set(document) == {"schemaDialect", "commands"},
@@ -241,65 +350,60 @@ def load_catalogs(
 
 
 def build_inventory(source_root_argument: Path) -> AssetInventory:
-    resolved_root, schemas = trusted_schema_directory(source_root_argument)
-    source_root = source_root_argument.absolute()
-    catalogs = load_catalogs(source_root, schemas, resolved_root)
-    validate_command_collisions(catalogs)
+    with TrustedSchemaSource.open(source_root_argument) as source:
+        catalogs = load_catalogs(source)
+        validate_command_collisions(catalogs)
 
-    merged: dict[tuple[str, str], str] = {}
-    referenced: set[str] = set()
-    for catalog in catalogs:
-        commands = catalog.document["commands"]
-        assert isinstance(commands, dict)
-        allowed = CATALOG_RULES[catalog.name]
-        for raw_command, raw_contract in commands.items():
-            command = validate_command_key(raw_command, f"catalog {catalog.name}")
-            require(
-                isinstance(raw_contract, dict) and raw_contract,
-                f"catalog {catalog.name}/{command}: contract must be nonempty",
-            )
-            kinds = set(raw_contract)
-            if catalog.name == "stream-manifest.json":
+        merged: dict[tuple[str, str], str] = {}
+        referenced: set[str] = set()
+        for catalog in catalogs:
+            commands = catalog.document["commands"]
+            assert isinstance(commands, dict)
+            allowed = CATALOG_RULES[catalog.name]
+            for raw_command, raw_contract in commands.items():
+                command = validate_command_key(raw_command, f"catalog {catalog.name}")
                 require(
-                    kinds <= allowed, f"catalog {catalog.name}/{command}: invalid kind"
+                    isinstance(raw_contract, dict) and raw_contract,
+                    f"catalog {catalog.name}/{command}: contract must be nonempty",
                 )
-            else:
-                require(
-                    kinds == allowed, f"catalog {catalog.name}/{command}: invalid kinds"
-                )
-            for kind, raw_filename in raw_contract.items():
-                require(
-                    kind in allowed,
-                    f"catalog {catalog.name}/{command}: invalid kind {kind}",
-                )
-                filename = validate_reference(
-                    raw_filename, f"catalog {catalog.name}/{command}/{kind}"
-                )
-                key = (command, kind)
-                previous = merged.get(key)
-                if previous is not None and previous != filename:
-                    fail(
-                        f"conflicting schema mapping for {command}/{kind}: "
-                        f"{previous} versus {filename}"
+                kinds = set(raw_contract)
+                if catalog.name == "stream-manifest.json":
+                    require(
+                        kinds <= allowed,
+                        f"catalog {catalog.name}/{command}: invalid kind",
                     )
-                merged[key] = filename
-                referenced.add(filename)
+                else:
+                    require(
+                        kinds == allowed,
+                        f"catalog {catalog.name}/{command}: invalid kinds",
+                    )
+                for kind, raw_filename in raw_contract.items():
+                    require(
+                        kind in allowed,
+                        f"catalog {catalog.name}/{command}: invalid kind {kind}",
+                    )
+                    filename = validate_reference(
+                        raw_filename, f"catalog {catalog.name}/{command}/{kind}"
+                    )
+                    key = (command, kind)
+                    previous = merged.get(key)
+                    if previous is not None and previous != filename:
+                        fail(
+                            f"conflicting schema mapping for {command}/{kind}: "
+                            f"{previous} versus {filename}"
+                        )
+                    merged[key] = filename
+                    referenced.add(filename)
 
-    assets: list[tuple[str, bytes]] = []
-    for filename in sorted(referenced):
-        schema_file = checked_component(
-            schemas / filename,
-            "file",
-            source_root,
-            resolved_root,
-            f"source schema {filename}",
-        )
-        data = schema_file.read_bytes()
-        document = parse_json_object(data, f"schema {filename}")
-        require(
-            document.get("$schema") == DIALECT, f"schema {filename}: invalid dialect"
-        )
-        assets.append((filename, data))
+        assets: list[tuple[str, bytes]] = []
+        for filename in sorted(referenced):
+            data = source.read_leaf(filename, f"source schema {filename}")
+            document = parse_json_object(data, f"schema {filename}")
+            require(
+                document.get("$schema") == DIALECT,
+                f"schema {filename}: invalid dialect",
+            )
+            assets.append((filename, data))
 
     mappings = tuple(
         sorted(
@@ -326,6 +430,20 @@ def raw_literal(data: bytes, owner: str) -> str:
 
 def cpp_identifier(prefix: str, index: int) -> str:
     return f"k{prefix}{index}"
+
+
+def cpp_string_literal(value: str) -> str:
+    encoded: list[str] = []
+    for byte in value.encode("utf-8"):
+        if 0x20 <= byte <= 0x7E and byte not in {ord('"'), ord("\\")}:
+            encoded.append(chr(byte))
+        elif byte == ord('"'):
+            encoded.append('\\"')
+        elif byte == ord("\\"):
+            encoded.append("\\\\")
+        else:
+            encoded.append(f"\\{byte:03o}")
+    return f'"{"".join(encoded)}"'
 
 
 def render_cpp(inventory: AssetInventory) -> bytes:
@@ -359,7 +477,10 @@ def render_cpp(inventory: AssetInventory) -> bytes:
         ]
     )
     for index, catalog in enumerate(inventory.catalogs):
-        lines.append(f'    {{"{catalog.name}", {cpp_identifier("Catalog", index)}}},')
+        lines.append(
+            f"    {{{cpp_string_literal(catalog.name)}, "
+            f"{cpp_identifier('Catalog', index)}}},"
+        )
     lines.extend(
         [
             "}};",
@@ -370,7 +491,8 @@ def render_cpp(inventory: AssetInventory) -> bytes:
     for mapping in inventory.mappings:
         kind = mapping.kind.capitalize()
         lines.append(
-            f'    {{"{mapping.command}", SchemaPayloadKind::{kind}, "{mapping.filename}", '
+            f"    {{{cpp_string_literal(mapping.command)}, SchemaPayloadKind::{kind}, "
+            f"{cpp_string_literal(mapping.filename)}, "
             f"{asset_names[mapping.filename]}}},"
         )
     lines.extend(
@@ -381,7 +503,7 @@ def render_cpp(inventory: AssetInventory) -> bytes:
         ]
     )
     for command in inventory.completion_keys:
-        lines.append(f'    "{command}",')
+        lines.append(f"    {cpp_string_literal(command)},")
     lines.extend(
         [
             "}};",
