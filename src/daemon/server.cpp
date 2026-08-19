@@ -61,6 +61,18 @@ class ConnectionState {
 
 namespace {
 
+enum class HandshakeState { AwaitingHello, Matched, BinaryMismatch };
+
+bool is_canonical_binary_mismatch_stop(const proto::Request& request) {
+    return request.id == 1 && request.command == std::vector<std::string>{"daemon", "stop"} &&
+           request.args.is_object() && request.args.empty() && !request.context.tty &&
+           !request.context.json && !request.context.yes && !request.context.dry_run &&
+           !request.context.timeout_seconds && request.context.cwd == "/" &&
+           !request.context.media_dir &&
+           request.context.write_authority == proto::WriteAuthority::Unset &&
+           !request.context.idempotency_key;
+}
+
 class ConnectionSink final : public ResponseSink {
   public:
     using TerminalHook = std::function<void(bool)>;
@@ -406,7 +418,7 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
     connection->send(proto::Hello{options_.binary_version, options_.protocol_version});
 
     proto::FrameReader reader(connection->fd(), options_.wipe_observer);
-    bool hello_seen = false;
+    HandshakeState handshake = HandshakeState::AwaitingHello;
     std::shared_ptr<RequestSession> active_session;
     std::shared_ptr<std::atomic<bool>> active_terminal_visible;
     struct Worker {
@@ -445,9 +457,17 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
             std::string parse_error;
             std::optional<proto::Answer> answer_candidate;
             auto frame = proto::parse(std::move(*line), parse_error, options_.wipe_observer,
-                                      hello_seen ? &answer_candidate : nullptr);
+                                      handshake != HandshakeState::AwaitingHello ? &answer_candidate
+                                                                                 : nullptr);
             if (!frame) {
                 if (answer_candidate) {
+                    if (handshake == HandshakeState::BinaryMismatch) {
+                        connection->send(proto::Error{0, "USAGE",
+                                                      "binary-mismatched client may only stop the "
+                                                      "daemon",
+                                                      nlohmann::json::object(), kUsage});
+                        break;
+                    }
                     if (active_session) {
                         active_session->receive_answer(std::move(*answer_candidate));
                     } else {
@@ -465,7 +485,7 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                 break;
             }
             if (const auto* hello = std::get_if<proto::Hello>(&*frame)) {
-                if (hello_seen) {
+                if (handshake != HandshakeState::AwaitingHello) {
                     connection->send(proto::Error{0, "USAGE", "hello frame was already accepted",
                                                   nlohmann::json::object(), kUsage});
                     break;
@@ -478,12 +498,21 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                         nlohmann::json::object(), kGeneric});
                     break;
                 }
-                hello_seen = true;
+                handshake = hello->binary_version == options_.binary_version
+                                ? HandshakeState::Matched
+                                : HandshakeState::BinaryMismatch;
                 continue;
             }
             if (auto* answer = std::get_if<proto::Answer>(&*frame)) {
-                if (!hello_seen) {
+                if (handshake == HandshakeState::AwaitingHello) {
                     connection->send(proto::Error{0, "USAGE", "expected a hello frame first",
+                                                  nlohmann::json::object(), kUsage});
+                    break;
+                }
+                if (handshake == HandshakeState::BinaryMismatch) {
+                    connection->send(proto::Error{0, "USAGE",
+                                                  "binary-mismatched client may only stop the "
+                                                  "daemon",
                                                   nlohmann::json::object(), kUsage});
                     break;
                 }
@@ -500,10 +529,11 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                 continue;
             }
             const auto* request = std::get_if<proto::Request>(&*frame);
-            if (request == nullptr || !hello_seen) {
+            if (request == nullptr || handshake == HandshakeState::AwaitingHello) {
                 connection->send(proto::Error{0, "USAGE",
-                                              hello_seen ? "expected a request frame"
-                                                         : "expected a hello frame first",
+                                              handshake == HandshakeState::AwaitingHello
+                                                  ? "expected a hello frame first"
+                                                  : "expected a request frame",
                                               nlohmann::json::object(), kUsage});
                 break;
             }
@@ -520,6 +550,13 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                                               {{"requested_account", request->account},
                                                {"daemon_account", options_.account()}},
                                               kNotFound});
+                break;
+            }
+            if (handshake == HandshakeState::BinaryMismatch &&
+                !is_canonical_binary_mismatch_stop(*request)) {
+                connection->send(proto::Error{0, "USAGE",
+                                              "binary-mismatched client may only stop the daemon",
+                                              nlohmann::json::object(), kUsage});
                 break;
             }
             std::shared_ptr<const AdmittedAccountConfig> admitted_config;

@@ -1024,6 +1024,161 @@ TEST_CASE("hello handshake then version round-trip over the socket", "[server]")
     ::close(fd);
 }
 
+TEST_CASE("same-v3 stale binary rejects every noncanonical request before observation",
+          "[server][protocol-v3][binary-mismatch][safety]") {
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("test", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon({}, true, {}, "test", observer, probe.admission_probe());
+    observations.reset();
+
+    const auto request_document = [](std::vector<std::string> command) {
+        return json::parse(proto::serialize(make_request(std::move(command), 1, "test")));
+    };
+    std::vector<std::pair<std::string, json>> cases{
+        {"version", request_document({"version"})},
+        {"me", request_document({"me"})},
+        {"logout", request_document({"logout"})},
+        {"account remove", request_document({"account", "remove"})},
+        {"arbitrary M3", request_document({"send"})},
+        {"stop alias", request_document({"daemon", "shutdown"})},
+    };
+    cases[4].second["context"]["idempotency_key"] = "opaque-m3-key";
+
+    proto::Request canonical_stop("test");
+    canonical_stop.id = 1;
+    canonical_stop.command = {"daemon", "stop"};
+    canonical_stop.context.cwd = "/";
+    const auto stop_document = json::parse(proto::serialize(canonical_stop));
+    auto invalid_stop_args = stop_document;
+    invalid_stop_args["args"]["extra"] = true;
+    cases.emplace_back("stop args", std::move(invalid_stop_args));
+    auto invalid_stop_context = stop_document;
+    invalid_stop_context["context"]["json"] = true;
+    cases.emplace_back("stop context", std::move(invalid_stop_context));
+    auto invalid_stop_id = stop_document;
+    invalid_stop_id["id"] = 2;
+    cases.emplace_back("stop id", std::move(invalid_stop_id));
+    auto invalid_stop_key = stop_document;
+    invalid_stop_key["context"]["idempotency_key"] = "raw-stop-key";
+    cases.emplace_back("stop key", std::move(invalid_stop_key));
+
+    for (const auto& [name, document] : cases) {
+        DYNAMIC_SECTION(name) {
+            const int fd = connect_to(daemon.socket);
+            proto::FrameReader reader(fd);
+            read_frame(reader);
+            send_frame(fd, proto::Hello{"stale-client", proto::kProtocolVersion});
+            send_line(fd, document.dump());
+
+            const auto terminal = std::get<proto::Error>(read_frame(reader));
+            CHECK(terminal.id == 0);
+            CHECK(terminal.code == "USAGE");
+            CHECK(terminal.details == json::object());
+            CHECK(terminal.message.find("opaque-m3-key") == std::string::npos);
+            CHECK(terminal.message.find("raw-stop-key") == std::string::npos);
+            check_eof(reader);
+            check_request_observations(observations, 0);
+            ::close(fd);
+        }
+    }
+}
+
+TEST_CASE("same-v3 stale binary rejects answers and preserves routed account precedence",
+          "[server][protocol-v3][binary-mismatch][routing][safety]") {
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("main", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon({}, true, {}, "main", observer, probe.admission_probe());
+    observations.reset();
+
+    SECTION("answer") {
+        const int fd = connect_to(daemon.socket);
+        proto::FrameReader reader(fd);
+        read_frame(reader);
+        send_frame(fd, proto::Hello{"stale-client", proto::kProtocolVersion});
+        send_frame(fd, proto::Answer{1,
+                                     {{"nonce", "00112233445566778899aabbccddeeff"},
+                                      {"sequence", 1},
+                                      {"client_generation", nullptr},
+                                      {"auth_sequence", nullptr},
+                                      {"value", true}}});
+
+        const auto terminal = std::get<proto::Error>(read_frame(reader));
+        CHECK(terminal.id == 0);
+        CHECK(terminal.code == "USAGE");
+        CHECK(terminal.details == json::object());
+        check_eof(reader);
+        check_request_observations(observations, 0);
+        ::close(fd);
+    }
+
+    SECTION("wrong routed account") {
+        const int fd = connect_to(daemon.socket);
+        proto::FrameReader reader(fd);
+        read_frame(reader);
+        send_frame(fd, proto::Hello{"stale-client", proto::kProtocolVersion});
+        send_frame(fd, make_request({"version"}, 73, "work"));
+
+        const auto terminal = std::get<proto::Error>(read_frame(reader));
+        CHECK(terminal.id == 73);
+        CHECK(terminal.code == "ACCOUNT_MISMATCH");
+        CHECK(terminal.details == json{{"requested_account", "work"}, {"daemon_account", "main"}});
+        check_eof(reader);
+        check_request_observations(observations, 0);
+        ::close(fd);
+    }
+}
+
+TEST_CASE("same-v3 stale binary admits only the canonical routed daemon stop",
+          "[server][protocol-v3][binary-mismatch][lifecycle][safety]") {
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("test", observations);
+    const auto observer = observations.observer();
+    TestDaemon daemon({}, true, {}, "test", observer, probe.admission_probe());
+    observations.reset();
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    read_frame(reader);
+    send_frame(fd, proto::Hello{"stale-client", proto::kProtocolVersion});
+    proto::Request stop("test");
+    stop.id = 1;
+    stop.command = {"daemon", "stop"};
+    stop.context.cwd = "/";
+    send_frame(fd, stop);
+
+    const auto terminal = std::get<proto::Result>(read_frame(reader));
+    CHECK(terminal.id == 1);
+    CHECK(terminal.data == json{{"stopping", true}});
+    CHECK(daemon.server.stop_requested());
+    check_request_observations(observations, 1);
+    daemon.server.stop();
+    check_eof(reader);
+    ::close(fd);
+}
+
+TEST_CASE("same-v3 matched binary retains normal request admission",
+          "[server][protocol-v3][binary-match]") {
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("test", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon({}, true, {}, "test", observer, probe.admission_probe());
+    observations.reset();
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    read_frame(reader);
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"version"}, 74, "test"));
+
+    const auto terminal = std::get<proto::Result>(read_frame(reader));
+    CHECK(terminal.id == 74);
+    CHECK(terminal.data["version"] == "9.9.9");
+    check_request_observations(observations, 1);
+    ::close(fd);
+}
+
 TEST_CASE("multiple sequential requests on one connection", "[server]") {
     const TestDaemon daemon;
     const int fd = connect_to(daemon.socket);
