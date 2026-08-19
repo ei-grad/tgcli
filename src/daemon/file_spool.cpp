@@ -78,8 +78,14 @@ struct DirectoryEdge {
     struct stat child_status {};
 };
 
+struct AccountStateHandle {
+    Descriptor descriptor;
+    std::vector<DirectoryEdge> edges;
+};
+
 struct RootHandle {
     Descriptor account_state;
+    std::vector<DirectoryEdge> account_state_edges;
     Descriptor root;
     struct stat root_status {};
     std::string account_state_path;
@@ -935,7 +941,7 @@ DurabilityReason root_reason(const struct stat& status, uid_t expected_uid) {
 
 // Every account-state component is checked before advancing the retained descriptor.
 // NOLINTBEGIN(readability-function-cognitive-complexity)
-std::variant<Descriptor, FileSpoolError>
+std::variant<AccountStateHandle, FileSpoolError>
 open_account_state(std::string_view account_state, uid_t expected_uid,
                    const FileSpoolControl& control,
                    const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
@@ -951,6 +957,7 @@ open_account_state(std::string_view account_state, uid_t expected_uid,
     if (!current) {
         return durability_error(DurabilityReason::OpenFailed);
     }
+    std::vector<DirectoryEdge> edges;
     const auto components = split_components(account_state, true);
     for (std::size_t index = 0; index < components.size(); ++index) {
         const auto& component = components[index];
@@ -983,6 +990,15 @@ open_account_state(std::string_view account_state, uid_t expected_uid,
         if (!same_directory(entry, opened)) {
             return durability_error(DurabilityReason::PathInvalid);
         }
+        Descriptor retained_parent(::dup(current.get()));
+        Descriptor retained_child(::dup(child.get()));
+        if (!retained_parent || !retained_child) {
+            return durability_error(DurabilityReason::OpenFailed);
+        }
+        edges.push_back(DirectoryEdge{.parent = std::move(retained_parent),
+                                      .child = std::move(retained_child),
+                                      .component = component,
+                                      .child_status = opened});
         current = std::move(child);
         if (index + 1 == components.size()) {
             if (opened.st_uid != expected_uid) {
@@ -997,7 +1013,7 @@ open_account_state(std::string_view account_state, uid_t expected_uid,
             notify_controlled(hooks, FileSpoolStage::AfterAccountStateOpen, control)) {
         return *error;
     }
-    return current;
+    return AccountStateHandle{.descriptor = std::move(current), .edges = std::move(edges)};
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 
@@ -1014,8 +1030,10 @@ open_spool_root(std::string account_state, uid_t expected_uid, bool create,
     if (const auto* error = std::get_if<FileSpoolError>(&account)) {
         return *error;
     }
+    auto opened_account = std::move(std::get<AccountStateHandle>(account));
     RootHandle handle;
-    handle.account_state = std::move(std::get<Descriptor>(account));
+    handle.account_state = std::move(opened_account.descriptor);
+    handle.account_state_edges = std::move(opened_account.edges);
     handle.account_state_path = std::move(account_state);
 
     for (;;) {
@@ -1258,11 +1276,91 @@ bool stable_file_identity(const struct stat& before, const struct stat& after) {
            before.st_nlink == after.st_nlink && *before_times == *after_times;
 }
 
-std::optional<FileSpoolError> revalidate_publication(
-    RootHandle& root, std::string_view invocation_id, const InvocationHandle& invocation,
-    std::string_view name, const DestinationHandle& destination, const FileSnapshot& expected,
-    uid_t expected_uid, const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+bool revalidate_account_state_path(RootHandle& root, uid_t expected_uid,
+                                   const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+    if (root.account_state_edges.empty()) {
+        return false;
+    }
+    for (auto& edge : root.account_state_edges) {
+        struct stat entry {};
+        struct stat opened {};
+        if (::fstatat(edge.parent.get(), edge.component.c_str(), &entry, AT_SYMLINK_NOFOLLOW) !=
+                0 ||
+            ::fstat(edge.child.get(), &opened) != 0) {
+            return false;
+        }
+        mutate_metadata(hooks, FileSpoolMetadata::DirectoryEntry, entry);
+        mutate_metadata(hooks, FileSpoolMetadata::DirectoryDescriptor, opened);
+        if (S_ISLNK(entry.st_mode) || !same_directory(edge.child_status, entry) ||
+            !same_directory(edge.child_status, opened)) {
+            return false;
+        }
+    }
+    struct stat account_state {};
+    return ::fstat(root.account_state.get(), &account_state) == 0 &&
+           same_directory(root.account_state_edges.back().child_status, account_state) &&
+           valid_private_directory(account_state, expected_uid);
+}
+
+std::variant<std::string, FileSpoolError>
+destination_digest(int reader, std::uint64_t expected_size, const FileSpoolControl& control,
+                   const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+    Sha256 digest;
+    std::array<unsigned char, kBufferSize> buffer{};
+    std::uint64_t total = 0;
+    while (total < expected_size) {
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
+        const auto requested = static_cast<std::size_t>(std::min<std::uint64_t>(
+            expected_size - total, static_cast<std::uint64_t>(buffer.size())));
+        const auto count =
+            read_bytes(FileSpoolIo::DestinationReadback, reader, buffer.data(), requested, hooks);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0 || static_cast<std::size_t>(count) > requested) {
+            return contradiction_error();
+        }
+        digest.update(buffer.data(), static_cast<std::size_t>(count));
+        total += static_cast<std::uint64_t>(count);
+    }
+    for (;;) {
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
+        unsigned char extra = 0;
+        const auto count = read_bytes(FileSpoolIo::DestinationReadback, reader, &extra, 1, hooks);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count != 0) {
+            return contradiction_error();
+        }
+        break;
+    }
+    return "sha256:" + digest.finish();
+}
+
+std::optional<FileSpoolError>
+revalidate_publication(RootHandle& root, std::string_view invocation_id,
+                       const InvocationHandle& invocation, std::string_view name,
+                       const DestinationHandle& destination, const FileSnapshot& expected,
+                       uid_t expected_uid, const FileSpoolControl& control,
+                       const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
     notify(hooks, FileSpoolStage::BeforeDestinationRevalidate);
+    if (const auto error = control_error(control)) {
+        return error;
+    }
+    if (!revalidate_account_state_path(root, expected_uid, hooks)) {
+        return contradiction_error();
+    }
 
     struct stat root_entry {};
     struct stat root_opened {};
@@ -1313,31 +1411,11 @@ std::optional<FileSpoolError> revalidate_publication(
         return contradiction_error();
     }
 
-    Sha256 digest;
-    std::array<unsigned char, kBufferSize> buffer{};
-    std::uint64_t total = 0;
-    while (total < expected.size) {
-        const auto requested = static_cast<std::size_t>(std::min<std::uint64_t>(
-            expected.size - total, static_cast<std::uint64_t>(buffer.size())));
-        const auto count = ::read(reader.get(), buffer.data(), requested);
-        if (count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (count <= 0 || static_cast<std::size_t>(count) > requested) {
-            return contradiction_error();
-        }
-        digest.update(buffer.data(), static_cast<std::size_t>(count));
-        total += static_cast<std::uint64_t>(count);
+    auto digest = destination_digest(reader.get(), expected.size, control, hooks);
+    if (const auto* error = std::get_if<FileSpoolError>(&digest)) {
+        return *error;
     }
-    unsigned char extra = 0;
-    ssize_t extra_count = -1;
-    for (;;) {
-        extra_count = ::read(reader.get(), &extra, 1);
-        if (extra_count >= 0 || errno != EINTR) {
-            break;
-        }
-    }
-    if (extra_count != 0 || "sha256:" + digest.finish() != expected.sha256) {
+    if (std::get<std::string>(digest) != expected.sha256) {
         return contradiction_error();
     }
 
@@ -1348,7 +1426,8 @@ std::optional<FileSpoolError> revalidate_publication(
     struct stat final_destination_entry {};
     struct stat final_destination_opened {};
     struct stat reader_after {};
-    if (::fstatat(root.account_state.get(), kSpoolName.data(), &final_root_entry,
+    if (!revalidate_account_state_path(root, expected_uid, hooks) ||
+        ::fstatat(root.account_state.get(), kSpoolName.data(), &final_root_entry,
                   AT_SYMLINK_NOFOLLOW) != 0 ||
         ::fstat(root.root.get(), &final_root_opened) != 0 ||
         ::fstatat(root.root.get(), std::string(invocation_id).c_str(), &final_invocation_entry,
@@ -1647,7 +1726,7 @@ create_spool_file(PreparedSource& source, std::string account_state, std::string
     }
     if (const auto error =
             revalidate_publication(root, invocation_id, invocation, source.snapshot().name,
-                                   destination, source.snapshot(), expected_uid, hooks)) {
+                                   destination, source.snapshot(), expected_uid, control, hooks)) {
         return with_cleanup(*error, reference);
     }
     if (const auto error = control_error(control)) {
@@ -1805,17 +1884,15 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
         return *error;
     }
     const auto& children = std::get<std::vector<std::string>>(children_result);
-    if (children.size() > 1 || (children.size() == 1 && children.front() != name)) {
-        FilesystemDiagnosticPath unexpected = *invocation_diagnostic;
-        if (!children.empty()) {
-            const auto candidate =
-                diagnostic_for(account_state, "/" + invocation_id + "/" + children.front());
-            if (!candidate) {
-                return durability_error(DurabilityReason::SchemaError);
-            }
-            unexpected = *candidate;
+    const auto unexpected =
+        std::ranges::find_if(children, [&](const std::string& child) { return child != name; });
+    if (unexpected != children.end()) {
+        const auto candidate =
+            diagnostic_for(account_state, "/" + invocation_id + "/" + *unexpected);
+        if (!candidate) {
+            return durability_error(DurabilityReason::SchemaError);
         }
-        return contradiction_at(std::move(unexpected));
+        return contradiction_at(*candidate);
     }
     Descriptor file;
     struct stat file_entry {};

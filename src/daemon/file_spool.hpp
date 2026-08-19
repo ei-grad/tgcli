@@ -125,7 +125,7 @@ enum class FileSpoolStage {
     BeforeCleanupRootSync,
 };
 
-enum class FileSpoolIo { Pass1Read, Pass2Read, DestinationWrite };
+enum class FileSpoolIo { Pass1Read, Pass2Read, DestinationReadback, DestinationWrite };
 
 enum class FileSpoolMetadata {
     CwdEntry,

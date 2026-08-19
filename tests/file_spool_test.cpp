@@ -628,19 +628,21 @@ TEST_CASE("file spool cleanup is exact, durable and idempotent", "[file-spool]")
 
 TEST_CASE("file spool cleanup retains unexpected objects", "[file-spool]") {
     const TempTree temp;
-    temp.write(temp.source(), "payload");
-    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    temp.write(temp.source("a"), "payload");
+    auto source = require_source(prepare_spool_source(temp.source("a").string(), "/"));
     const auto created = require_created(
         create_spool_file(source, temp.state().string(), std::string(kInvocation), ::getuid()));
-    temp.write(temp.state() / "spool" / std::string(kInvocation) / "unexpected", "keep");
+    const auto unexpected = temp.state() / "spool" / std::string(kInvocation) / "b";
+    temp.write(unexpected, "keep");
     const auto error =
         require_error(cleanup_spool_file(temp.state().string(), created.reference, ::getuid()));
     CHECK(error.kind == FileSpoolErrorKind::Contradiction);
     REQUIRE(error.diagnostic_path);
-    CHECK(valid_filesystem_diagnostic_path(*error.diagnostic_path));
+    const auto expected_diagnostic = encode_filesystem_diagnostic_path(unexpected.string());
+    REQUIRE(expected_diagnostic);
+    CHECK(error.diagnostic_path->bytes_hex == expected_diagnostic->bytes_hex);
     CHECK(std::filesystem::exists(created.local_path));
-    CHECK(
-        std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation) / "unexpected"));
+    CHECK(std::filesystem::exists(unexpected));
 }
 
 TEST_CASE("file spool cleanup returns original failure when root sync fails", "[file-spool]") {
@@ -900,6 +902,70 @@ TEST_CASE("file spool revalidates retained invocation edge before publication", 
     CHECK(error.kind == FileSpoolErrorKind::Contradiction);
     CHECK_FALSE(std::filesystem::exists(invocation / "source.bin"));
     CHECK(std::filesystem::exists(moved / "source.bin"));
+}
+
+TEST_CASE("file spool revalidates the complete account-state path before publication",
+          "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto moved = temp.root() / "moved-state";
+    auto hooks = mutation_hook(FileSpoolStage::BeforeDestinationRevalidate, [&] {
+        REQUIRE(::rename(temp.state().c_str(), moved.c_str()) == 0);
+        std::filesystem::create_directory(temp.state());
+        REQUIRE(::chmod(temp.state().c_str(), 0700) == 0);
+    });
+    const auto error = require_error(create_spool_file(
+        source, temp.state().string(), std::string(kInvocation), ::getuid(), {}, hooks));
+    CHECK(error.kind == FileSpoolErrorKind::Contradiction);
+    CHECK_FALSE(error.cleanup_reference);
+    CHECK(std::filesystem::exists(moved / "spool" / std::string(kInvocation) / "source.bin"));
+    CHECK_FALSE(
+        std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation) / "source.bin"));
+}
+
+TEST_CASE("file spool readback observes control after each bounded chunk", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), std::string(200000, 'x'));
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    std::size_t readback_calls = 0;
+    auto hooks = std::make_shared<testing::FileSpoolHooks>();
+
+    SECTION("cancelled") {
+        std::stop_source stop;
+        const FileSpoolControl control{std::nullopt, stop.get_token()};
+        hooks->read = [&](FileSpoolIo operation, int descriptor, void* data,
+                          std::size_t size) -> ssize_t {
+            const auto count = ::read(descriptor, data, size);
+            if (operation == FileSpoolIo::DestinationReadback) {
+                ++readback_calls;
+                CHECK(size <= static_cast<std::size_t>(64) * 1024U);
+                stop.request_stop();
+            }
+            return count;
+        };
+        const auto error = require_error(create_spool_file(
+            source, temp.state().string(), std::string(kInvocation), ::getuid(), control, hooks));
+        CHECK(error.kind == FileSpoolErrorKind::Cancelled);
+        CHECK(readback_calls == 1);
+    }
+    SECTION("timed out") {
+        FileSpoolControl control;
+        hooks->read = [&](FileSpoolIo operation, int descriptor, void* data,
+                          std::size_t size) -> ssize_t {
+            const auto count = ::read(descriptor, data, size);
+            if (operation == FileSpoolIo::DestinationReadback) {
+                ++readback_calls;
+                CHECK(size <= static_cast<std::size_t>(64) * 1024U);
+                control.deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+            }
+            return count;
+        };
+        const auto error = require_error(create_spool_file(
+            source, temp.state().string(), std::string(kInvocation), ::getuid(), control, hooks));
+        CHECK(error.kind == FileSpoolErrorKind::TimedOut);
+        CHECK(readback_calls == 1);
+    }
 }
 
 TEST_CASE("file spool cleanup retry proves an already absent invocation durable", "[file-spool]") {
