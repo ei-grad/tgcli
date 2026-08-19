@@ -945,16 +945,46 @@ TEST_CASE("disconnect between challenges releases only the current waiter",
 }
 
 TEST_CASE("deadline and answer acceptance have one serialized winner", "[challenge][session]") {
-    for (int iteration = 0; // NOLINT(misc-const-correctness): loop counter.
-         iteration < 64; ++iteration) {
+    // NOLINTBEGIN(misc-const-correctness): Catch2 and concurrency callbacks mutate test state.
+    constexpr int target_iterations = 64;
+    constexpr int max_attempts = target_iterations * 4;
+    int completed_iterations = 0; // NOLINT(misc-const-correctness): loop counter.
+    for (int attempt = 0;         // NOLINT(misc-const-correctness): loop counter.
+         attempt < max_attempts && completed_iterations < target_iterations; ++attempt) {
+        CAPTURE(attempt, completed_iterations);
         Captured captured; // NOLINT(misc-const-correctness): callback output.
         auto sink = make_sink(captured);
+        std::optional<daemon::ChallengeStatus> worker_status;
         daemon::RequestSession session( // NOLINT(misc-const-correctness): mutable state.
             request(true, 0.003), sink, 17, [] { return std::string(kNonce); });
-        auto future =
-            std::async(std::launch::async, [&session] { return session.challenge(challenge()); });
-        const auto emitted = wait_challenge(captured);
-        std::this_thread::sleep_for(std::chrono::milliseconds(iteration % 5));
+        auto future = std::async(std::launch::async, [&] {
+            auto outcome = session.challenge(challenge());
+            const std::lock_guard lock(captured.mutex);
+            worker_status = outcome.status();
+            captured.cv.notify_all();
+            return outcome;
+        });
+        json emitted;
+        bool observed = false;
+        bool challenge_emitted = false;
+        {
+            std::unique_lock lock(captured.mutex);
+            observed = captured.cv.wait_for(lock, std::chrono::seconds(2), [&] {
+                return captured.challenge.has_value() || worker_status.has_value();
+            });
+            if (captured.challenge) {
+                emitted = *captured.challenge;
+                challenge_emitted = true;
+            }
+        }
+        REQUIRE(observed);
+        if (!challenge_emitted) {
+            REQUIRE(worker_status);
+            CHECK(*worker_status == daemon::ChallengeStatus::TimedOut);
+            CHECK(future.get().status() == daemon::ChallengeStatus::TimedOut);
+            continue;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(completed_iterations % 5));
         const auto disposition = session.receive_answer(answer(emitted));
         const auto status = future.get().status();
         // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
@@ -962,7 +992,10 @@ TEST_CASE("deadline and answer acceptance have one serialized winner", "[challen
                 status == daemon::ChallengeStatus::Answered) ||
                (disposition == daemon::AnswerDisposition::RequestTerminated &&
                 status == daemon::ChallengeStatus::TimedOut)));
+        ++completed_iterations;
     }
+    CHECK(completed_iterations == target_iterations);
+    // NOLINTEND(misc-const-correctness)
 }
 
 TEST_CASE("an answer received after the deadline is wiped before the timed-out worker resumes",
