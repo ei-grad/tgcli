@@ -316,6 +316,7 @@ TEST_CASE("read functions require Ready in every authorization state",
              {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
               core::TdFunctionKind::GetSavedMessagesTags, core::TdFunctionKind::SearchSavedMessages,
               core::TdFunctionKind::GetActiveSessions, core::TdFunctionKind::GetChat,
+              core::TdFunctionKind::GetMessages, core::TdFunctionKind::GetMessageLink,
               core::TdFunctionKind::GetChats, core::TdFunctionKind::LoadChats,
               core::TdFunctionKind::SearchPublicChat, core::TdFunctionKind::GetInternalLinkType,
               core::TdFunctionKind::GetMessageLinkInfo, core::TdFunctionKind::CheckChatInviteLink,
@@ -366,6 +367,42 @@ TEST_CASE("dormant session termination policy is destructive Ready-only and requ
           core::TdAuthorizationFailure::FunctionDenied);
 }
 
+TEST_CASE("message reads are Ready-tier request-owned functions",
+          "[core][auth-bootstrap][safety][msg]") {
+    const core::AuthStateSnapshot ready{
+        .client_id = 1001,
+        .client_generation = 1,
+        .auth_sequence = 1,
+        .data = core::AuthStateData{core::AuthState::Ready},
+        .receive_observed_at = std::nullopt,
+    };
+    for (const auto function :
+         {core::TdFunctionKind::GetMessages, core::TdFunctionKind::GetMessageLink}) {
+        INFO(core::td_function_name(function));
+        const core::TdFunctionData function_data{function};
+        const auto descriptor = descriptor_for(ready, function, core::DescriptorKind::Read,
+                                               {core::TdOwnerKind::Request, 1});
+        CHECK_FALSE(core::authorize_td_send(descriptor, &function_data, ready, false));
+
+        auto wrong_tier = descriptor;
+        wrong_tier.tier = core::DescriptorKind::Destructive;
+        CHECK(core::authorize_td_send(wrong_tier, &function_data, ready, false) ==
+              core::TdAuthorizationFailure::TierMismatch);
+
+        auto wrong_owner = descriptor;
+        wrong_owner.owner = {core::TdOwnerKind::Login, 1};
+        CHECK(core::authorize_td_send(wrong_owner, &function_data, ready, false) ==
+              core::TdAuthorizationFailure::OwnerMismatch);
+
+        auto not_ready = ready;
+        not_ready.data = core::AuthStateData{core::AuthState::WaitCode};
+        auto non_ready_descriptor = descriptor;
+        non_ready_descriptor.auth_state = core::AuthState::WaitCode;
+        CHECK(core::authorize_td_send(non_ready_descriptor, &function_data, not_ready, false) ==
+              core::TdAuthorizationFailure::FunctionDenied);
+    }
+}
+
 TEST_CASE("TdClient read admission is an exact closed function allowlist",
           "[core][auth-bootstrap][safety][fake-boundary]") {
     auto fake = make_fake_boundary(core::AuthState::Ready);
@@ -392,6 +429,8 @@ TEST_CASE("TdClient read admission is an exact closed function allowlist",
         Entry{core::TdFunctionKind::GetActiveSessions, true},
         Entry{core::TdFunctionKind::TerminateSession, false},
         Entry{core::TdFunctionKind::GetChat, true},
+        Entry{core::TdFunctionKind::GetMessages, true},
+        Entry{core::TdFunctionKind::GetMessageLink, true},
         Entry{core::TdFunctionKind::GetChats, true},
         Entry{core::TdFunctionKind::LoadChats, true},
         Entry{core::TdFunctionKind::SearchPublicChat, true},

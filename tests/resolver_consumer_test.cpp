@@ -205,6 +205,31 @@ TEST_CASE("ResolverConsumer keeps outer and selector failure attribution distinc
     }
 }
 
+TEST_CASE("ResolverConsumer classifies local message links without a TD link request",
+          "[resolver][consumer][local][fake-boundary]") {
+    ConsumerFixture fixture;
+    auto bound = std::async(std::launch::async, [&] {
+        return fixture.consumer().bind_principal(tgcli::daemon::M2Operation::Read);
+    });
+    fixture.respond(tgcli::core::TdFunctionKind::GetMe, user());
+    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverPrincipal>(bound.get()));
+    const auto sent_before_resolve = fixture.sent_count();
+
+    auto resolved = std::async(std::launch::async, [&] {
+        return fixture.consumer().resolve_chat("t.me/project/5",
+                                               tgcli::daemon::ResolverScope::LocalMaterialized);
+    });
+    REQUIRE(resolved.wait_for(200ms) == std::future_status::ready);
+    const auto outcome = resolved.get();
+    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(outcome));
+    const auto& error = std::get<tgcli::daemon::ResolverError>(outcome);
+    const auto* missing = std::get_if<tgcli::daemon::ResolverNotFoundError>(&error);
+    REQUIRE(missing != nullptr);
+    CHECK(missing->scope == tgcli::daemon::ResolverScope::LocalMaterialized);
+    CHECK(fixture.sent_count() == sent_before_resolve);
+    CHECK(fixture.terminals() == 0);
+}
+
 TEST_CASE("ResolverConsumer target reads retain ReadyRead cancellation unchanged",
           "[resolver][consumer][cancel][fake-boundary]") {
     ConsumerFixture fixture;

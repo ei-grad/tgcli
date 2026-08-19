@@ -1,6 +1,7 @@
 #include "core/td_runtime_test_adapter.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,7 @@ TEST_CASE("production messages conversion retains exact null positions and messa
     auto converted = detail::convert_production_response_for_test(TdValue::from(std::move(native)));
     const auto* messages = converted.get_if<TdMessages>();
     REQUIRE(messages != nullptr);
+    CHECK(messages->total_count == 2);
     REQUIRE(messages->messages.size() == 2);
     REQUIRE(messages->messages[0]);
     CHECK(messages->messages[0]->id == 123);
@@ -35,6 +37,22 @@ TEST_CASE("production messages conversion retains exact null positions and messa
     CHECK(messages->messages[0]->content_kind == TdMessageContentKind::Text);
     CHECK(messages->messages[0]->text == "🧪");
     CHECK_FALSE(messages->messages[1]);
+}
+
+TEST_CASE("production messages conversion retains total count boundary values",
+          "[msg][core][tdlib][td-runtime-converter]") {
+    for (const auto count : {-1, std::numeric_limits<std::int32_t>::max()}) {
+        DYNAMIC_SECTION(count) {
+            td_api::object_ptr<td_api::Object> native = td_api::make_object<td_api::messages>(
+                count, std::vector<td_api::object_ptr<td_api::message>>{});
+            auto converted =
+                detail::convert_production_response_for_test(TdValue::from(std::move(native)));
+            const auto* messages = converted.get_if<TdMessages>();
+            REQUIRE(messages != nullptr);
+            CHECK(messages->total_count == count);
+            CHECK(messages->messages.empty());
+        }
+    }
 }
 
 TEST_CASE("production messageLink conversion preserves opaque link and visibility",

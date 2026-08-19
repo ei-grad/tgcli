@@ -777,6 +777,7 @@ struct TdChats {
 };
 
 struct TdMessages {
+    std::int32_t total_count = 0;
     std::vector<std::optional<TdMessageSummary>> messages;
 
     bool operator==(const TdMessages&) const = default;

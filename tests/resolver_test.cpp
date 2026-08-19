@@ -1,5 +1,6 @@
 #include "common/exit_codes.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/local_selector.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/resolver.hpp"
 #include "schema_matcher.hpp"
@@ -140,6 +141,26 @@ class FakeResolver {
         return runtime_->sent_functions().size();
     }
 
+    [[nodiscard]] std::size_t forbidden_local_read_count() const {
+        return std::ranges::count_if(runtime_->sent_functions(), [](const auto& sent) {
+            const auto kind = sent.function.kind();
+            if (!kind) {
+                return false;
+            }
+            switch (*kind) {
+            case tgcli::core::TdFunctionKind::LoadChats:
+            case tgcli::core::TdFunctionKind::SearchPublicChat:
+            case tgcli::core::TdFunctionKind::GetInternalLinkType:
+            case tgcli::core::TdFunctionKind::GetMessageLinkInfo:
+            case tgcli::core::TdFunctionKind::CheckChatInviteLink:
+            case tgcli::core::TdFunctionKind::GetSupergroupFullInfo:
+                return true;
+            default:
+                return false;
+            }
+        });
+    }
+
   private:
     template <typename Predicate> static bool eventually(Predicate predicate) {
         const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -259,6 +280,88 @@ TEST_CASE("resolve selector validation is strict UTF-8 and int53", "[resolver][s
     CHECK_FALSE(tgcli::daemon::valid_resolve_selector("9007199254740992"));
     CHECK_FALSE(tgcli::daemon::valid_resolve_selector("@"));
     CHECK_FALSE(tgcli::daemon::valid_resolve_selector(std::string("\xED\xA0\x80", 3)));
+}
+
+TEST_CASE("local selector classifier implements the complete closed ASCII link table",
+          "[resolver][selector][local]") {
+    using tgcli::daemon::LocalSelectorKind;
+    struct Case {
+        std::string selector;
+        LocalSelectorKind kind;
+        std::string value;
+    };
+    const std::vector<Case> recognized{
+        {"-1001", LocalSelectorKind::Numeric, "-1001"},
+        {"@cached", LocalSelectorKind::Username, "cached"},
+        {"t.me/project", LocalSelectorKind::PublicChatLink, "project"},
+        {"https://t.me/helper?start=opaque_-", LocalSelectorKind::BotStartLink, "helper"},
+        {"t.me/project/5", LocalSelectorKind::MessageLink, ""},
+        {"https://t.me/c/7/9", LocalSelectorKind::MessageLink, ""},
+        {"t.me/+invite_-", LocalSelectorKind::ChatInviteLink, ""},
+        {"https://t.me/joinchat/invite_-", LocalSelectorKind::ChatInviteLink, ""},
+        {"t.me/project?direct", LocalSelectorKind::DirectMessagesChatLink, "project"},
+        {"Development", LocalSelectorKind::Title, "Development"},
+        {"example.com/x", LocalSelectorKind::Title, "example.com/x"},
+        {"notes/http", LocalSelectorKind::Title, "notes/http"},
+    };
+    for (const auto& test_case : recognized) {
+        DYNAMIC_SECTION(test_case.selector) {
+            const auto classified = tgcli::daemon::classify_local_selector(test_case.selector);
+            REQUIRE(classified);
+            CHECK(classified->kind == test_case.kind);
+            CHECK(classified->value == test_case.value);
+        }
+    }
+
+    const std::vector<std::string> malformed{
+        "t.me/",
+        "https://t.me/project/",
+        "t.me/project//5",
+        "t.me/project%20name",
+        "t.me/project#fragment",
+        "t.me/prøject",
+        "t.me/_project",
+        "t.me/project_",
+        "t.me/project__room",
+        "t.me/abcdefghijklmnopqrstuvwxyzabcdefg",
+        "t.me/project/0",
+        "t.me/project/01",
+        "t.me/_project/1",
+        "t.me/c/0/1",
+        "t.me/c/x/y",
+        "t.me/+",
+        "t.me/joinchat/+",
+        "t.me/project?start",
+        "t.me/project?starter=x",
+        "t.me/project?start=x&other=y",
+        "t.me/project?start=x?other=y",
+        "http://t.me/project",
+        "HTTPS://t.me/project",
+        "https://T.me/project",
+        "https://www.t.me/project",
+        "https://user@t.me/project",
+        "https://t.me:443/project",
+        "https://example.com/project",
+        "T.ME/project",
+        "www.t.me/project",
+        "t.me:443/project",
+    };
+    for (const auto& selector : malformed) {
+        DYNAMIC_SECTION(selector) {
+            const auto classified = tgcli::daemon::classify_local_selector(selector);
+            REQUIRE(classified);
+            CHECK(classified->kind == LocalSelectorKind::InvalidLink);
+        }
+    }
+
+    for (const auto& selector :
+         {"t.me/project/settings", "t.me/project?other=value", "t.me/project?direct&other=value"}) {
+        DYNAMIC_SECTION(selector) {
+            const auto classified = tgcli::daemon::classify_local_selector(selector);
+            REQUIRE(classified);
+            CHECK(classified->kind == LocalSelectorKind::UnsupportedLink);
+        }
+    }
 }
 
 TEST_CASE("numeric resolve materializes an exact chat identity",
@@ -398,6 +501,132 @@ TEST_CASE("local username resolution uses only materialized dialog reads",
     CHECK((*outcome.result)["chat"]["usernames"] == json::array({"cached"}));
     CHECK(fake.count(tgcli::core::TdFunctionKind::SearchPublicChat) == 0);
     CHECK(fake.count(tgcli::core::TdFunctionKind::LoadChats) == 0);
+}
+
+TEST_CASE("local link table never delegates classification to TDLib",
+          "[resolver][local][link][fake-boundary]") {
+    SECTION("PublicChat and BotStart hits retain link type") {
+        struct Case {
+            std::string selector;
+            std::string link_type;
+        };
+        for (const auto& test_case : {Case{"t.me/helper", "public_chat"},
+                                      Case{"https://t.me/helper?start=opaque_-", "bot_start"}}) {
+            DYNAMIC_SECTION(test_case.selector) {
+                FakeResolver fake;
+                auto pending = fake.dispatch(test_case.selector, {},
+                                             tgcli::daemon::ResolverScope::LocalMaterialized);
+                fake.respond_me();
+                finish_local_lists(fake, {-10});
+                fake.respond(tgcli::core::TdFunctionKind::GetChat, private_chat(-10, 10, "Helper"));
+                fake.respond(tgcli::core::TdFunctionKind::GetUser,
+                             tgcli::core::TdUserSummary{.id = 10,
+                                                        .first_name = "Helper",
+                                                        .last_name = "",
+                                                        .usernames = {"helper"},
+                                                        .phone_number = "",
+                                                        .is_bot = true,
+                                                        .is_premium = false});
+                const auto outcome = pending.get();
+                REQUIRE(outcome.result);
+                CHECK((*outcome.result)["chat"]["id"] == -10);
+                CHECK((*outcome.result)["link_type"] == test_case.link_type);
+                CHECK(fake.forbidden_local_read_count() == 0);
+            }
+        }
+    }
+
+    SECTION("PublicChat and BotStart misses remain local") {
+        for (const auto& selector : {"t.me/missing", "t.me/missing?start="}) {
+            DYNAMIC_SECTION(selector) {
+                FakeResolver fake;
+                auto pending =
+                    fake.dispatch(selector, {}, tgcli::daemon::ResolverScope::LocalMaterialized);
+                fake.respond_me();
+                finish_local_lists(fake, {});
+                const auto outcome = pending.get();
+                REQUIRE(outcome.error);
+                CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
+                CHECK((*outcome.error)["error"]["details"]["scope"] == "local_materialized");
+                CHECK(fake.forbidden_local_read_count() == 0);
+            }
+        }
+    }
+
+    SECTION("BotStart requires an active private bot") {
+        FakeResolver fake;
+        auto pending = fake.dispatch("t.me/helper?start=", {},
+                                     tgcli::daemon::ResolverScope::LocalMaterialized);
+        fake.respond_me();
+        finish_local_lists(fake, {-10});
+        fake.respond(tgcli::core::TdFunctionKind::GetChat, private_chat(-10, 10, "Helper"));
+        fake.respond(tgcli::core::TdFunctionKind::GetUser,
+                     tgcli::core::TdUserSummary{.id = 10,
+                                                .first_name = "Helper",
+                                                .last_name = "",
+                                                .usernames = {"helper"},
+                                                .phone_number = "12025550123",
+                                                .is_bot = false,
+                                                .is_premium = false});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
+        CHECK(fake.forbidden_local_read_count() == 0);
+    }
+
+    SECTION("Message Invite and Direct forms are immediate local misses") {
+        for (const auto& selector : {"t.me/project/5", "https://t.me/c/7/9", "t.me/+invite_-",
+                                     "https://t.me/joinchat/invite_-", "t.me/project?direct"}) {
+            DYNAMIC_SECTION(selector) {
+                FakeResolver fake;
+                auto pending =
+                    fake.dispatch(selector, {}, tgcli::daemon::ResolverScope::LocalMaterialized);
+                fake.respond_me();
+                const auto outcome = pending.get();
+                REQUIRE(outcome.error);
+                CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
+                CHECK((*outcome.error)["error"]["details"]["scope"] == "local_materialized");
+                CHECK(fake.forbidden_local_read_count() == 0);
+                CHECK(fake.sent_count() == 2);
+            }
+        }
+    }
+
+    SECTION("malformed and unsupported links fail before Ready") {
+        struct Case {
+            std::string selector;
+            std::string reason;
+        };
+        for (const auto& test_case : {Case{"t.me/project/", "invalid_argument"},
+                                      Case{"HTTPS://t.me/project", "invalid_argument"},
+                                      Case{"t.me/project/settings", "unsupported_link_type"}}) {
+            DYNAMIC_SECTION(test_case.selector) {
+                FakeResolver fake;
+                auto pending = fake.dispatch(test_case.selector, {},
+                                             tgcli::daemon::ResolverScope::LocalMaterialized);
+                REQUIRE(pending.wait_for(2s) == std::future_status::ready);
+                const auto outcome = pending.get();
+                REQUIRE(outcome.error);
+                CHECK((*outcome.error)["error"]["code"] == "USAGE");
+                CHECK((*outcome.error)["error"]["details"]["reason"] == test_case.reason);
+                CHECK(fake.sent_count() == 1);
+            }
+        }
+    }
+
+    SECTION("non-URL title fallback remains local") {
+        FakeResolver fake;
+        auto pending =
+            fake.dispatch("Development", {}, tgcli::daemon::ResolverScope::LocalMaterialized);
+        fake.respond_me();
+        finish_local_lists(fake, {-20});
+        fake.respond(tgcli::core::TdFunctionKind::GetChat, basic_chat(-20, "Product Development"));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["chat"]["id"] == -20);
+        CHECK((*outcome.result)["link_type"] == nullptr);
+        CHECK(fake.forbidden_local_read_count() == 0);
+    }
 }
 
 TEST_CASE("message links preserve message precedence and topic metadata",
@@ -576,23 +805,6 @@ TEST_CASE("resolver rejects closed link and chat classes exactly",
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["code"] == "USAGE");
         CHECK((*outcome.error)["error"]["details"]["reason"] == "unsupported_chat_type");
-    }
-
-    SECTION("local message link misses without a message lookup") {
-        FakeResolver fake;
-        auto pending =
-            fake.dispatch("t.me/project/5", {}, tgcli::daemon::ResolverScope::LocalMaterialized);
-        fake.respond_me();
-        fake.respond(tgcli::core::TdFunctionKind::GetInternalLinkType,
-                     tgcli::core::TdInternalLink{.kind = tgcli::core::TdInternalLinkKind::Message,
-                                                 .username = {},
-                                                 .url = "t.me/project/5",
-                                                 .tdlib_type_id = 1});
-        const auto outcome = pending.get();
-        REQUIRE(outcome.error);
-        CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
-        CHECK((*outcome.error)["error"]["details"]["scope"] == "local_materialized");
-        CHECK(fake.count(tgcli::core::TdFunctionKind::GetMessageLinkInfo) == 0);
     }
 }
 

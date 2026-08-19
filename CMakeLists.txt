@@ -213,6 +213,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/account_commands.cpp
     src/daemon/login_commands.cpp
     src/daemon/chat_identity.cpp
+    src/daemon/local_selector.cpp
     src/daemon/message_summary.cpp
     src/daemon/message_commands.cpp
     src/daemon/chats_commands.cpp

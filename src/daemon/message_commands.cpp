@@ -217,7 +217,8 @@ void MessageCoordinator::get(const proto::Request& request, RequestSession& sess
         return;
     }
     const auto* messages = result.value.get_if<core::TdMessages>();
-    if (messages == nullptr || messages->messages.size() != message_ids->size()) {
+    if (messages == nullptr || messages->total_count < 0 ||
+        messages->messages.size() != message_ids->size()) {
         internal(session, M2Operation::MsgGet);
         return;
     }

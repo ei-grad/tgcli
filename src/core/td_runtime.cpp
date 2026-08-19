@@ -523,7 +523,7 @@ TdMessageSummary convert_message(const td_api::message& message) {
 }
 
 TdMessages convert_messages(const td_api::messages& messages) {
-    TdMessages converted;
+    TdMessages converted{.total_count = messages.total_count_, .messages = {}};
     converted.messages.reserve(messages.messages_.size());
     for (const auto& message : messages.messages_) {
         converted.messages.push_back(

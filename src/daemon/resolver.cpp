@@ -2,6 +2,7 @@
 
 #include "common/exit_codes.hpp"
 #include "common/utf8.hpp"
+#include "daemon/local_selector.hpp"
 #include "daemon/ready_read.hpp"
 #include "daemon/request_session.hpp"
 
@@ -218,6 +219,18 @@ class ResolverRun {
             internal_error();
             return take_resolve_error_or_stop();
         }
+        if (scope == ResolverScope::LocalMaterialized) {
+            const auto classified = classify_local_selector(selector_);
+            if (!classified) {
+                usage("resolve selector must be non-empty valid UTF-8", "invalid_argument");
+                return take_resolve_error_or_stop();
+            }
+            auto result = resolve_local(*classified);
+            if (!result) {
+                return take_resolve_error_or_stop();
+            }
+            return materialize_result(std::move(*result));
+        }
         const auto classified = !selector_.empty() && common::valid_utf8(selector_)
                                     ? classify_selector(selector_)
                                     : std::nullopt;
@@ -225,24 +238,33 @@ class ResolverRun {
             usage("resolve selector must be non-empty valid UTF-8", "invalid_argument");
             return take_resolve_error_or_stop();
         }
-        const auto result = resolve(*classified, scope);
+        auto result = resolve(*classified, scope);
         if (!result) {
             return take_resolve_error_or_stop();
         }
+        return materialize_result(std::move(*result));
+    }
+
+    ResolverOutcome materialize_result(ResolveResult result) {
+        if (!principal_) {
+            internal_error();
+            return take_resolve_error_or_stop();
+        }
+        const auto principal = principal_.value();
         std::optional<TopicRef> topic;
-        if (result->topic) {
-            topic = materialize_topic_ref(*result->topic);
+        if (result.topic) {
+            topic = materialize_topic_ref(*result.topic);
             if (!topic) {
                 internal_error();
                 return take_resolve_error_or_stop();
             }
         }
-        return ResolvedChatTarget{.principal = *principal_,
-                                  .chat = result->chat,
-                                  .contextual_message_id = result->message_id,
+        return ResolvedChatTarget{.principal = principal,
+                                  .chat = std::move(result.chat),
+                                  .contextual_message_id = result.message_id,
                                   .contextual_topic = topic,
-                                  .link_type = result->link_type,
-                                  .is_public = result->is_public};
+                                  .link_type = result.link_type,
+                                  .is_public = result.is_public};
     }
 
     ReadyReadResult read_target(const ReadyReadStart& start) {
@@ -280,13 +302,45 @@ class ResolverRun {
             }
             return resolve_public_username(selector.value, std::nullopt, false);
         case SelectorKind::Link:
-            return resolve_link(selector.value, scope);
+            return resolve_link(selector.value);
         case SelectorKind::Title:
             if (me_.is_bot) {
                 bot_unsupported();
                 return std::nullopt;
             }
             return resolve_title(selector.value, scope);
+        }
+        internal_error();
+        return std::nullopt;
+    }
+
+    std::optional<ResolveResult> resolve_local(const LocalSelector& selector) {
+        switch (selector.kind) {
+        case LocalSelectorKind::Numeric:
+            return resolve_numeric(selector.chat_id);
+        case LocalSelectorKind::Username:
+            return resolve_local_username(selector.value);
+        case LocalSelectorKind::PublicChatLink:
+            return resolve_local_username(selector.value, ResolvedLinkType::PublicChat, false);
+        case LocalSelectorKind::BotStartLink:
+            return resolve_local_username(selector.value, ResolvedLinkType::BotStart, true);
+        case LocalSelectorKind::MessageLink:
+        case LocalSelectorKind::ChatInviteLink:
+        case LocalSelectorKind::DirectMessagesChatLink:
+            not_found(ResolverScope::LocalMaterialized);
+            return std::nullopt;
+        case LocalSelectorKind::InvalidLink:
+            usage("invalid local link", "invalid_argument");
+            return std::nullopt;
+        case LocalSelectorKind::UnsupportedLink:
+            usage("unsupported t.me link type", "unsupported_link_type");
+            return std::nullopt;
+        case LocalSelectorKind::Title:
+            if (me_.is_bot) {
+                bot_unsupported();
+                return std::nullopt;
+            }
+            return resolve_title(selector.value, ResolverScope::LocalMaterialized);
         }
         internal_error();
         return std::nullopt;
@@ -580,7 +634,10 @@ class ResolverRun {
             scope);
     }
 
-    std::optional<ResolveResult> resolve_local_username(const std::string& username) {
+    std::optional<ResolveResult>
+    resolve_local_username(const std::string& username,
+                           std::optional<ResolvedLinkType> link_type = std::nullopt,
+                           bool bot_only = false) {
         const auto ids = active_dialog_ids(ResolverScope::LocalMaterialized);
         if (!ids) {
             return std::nullopt;
@@ -599,7 +656,8 @@ class ResolverRun {
                 return std::nullopt;
             }
             if (std::ranges::find(materialized->usernames, username) !=
-                materialized->usernames.end()) {
+                    materialized->usernames.end() &&
+                (!bot_only || (materialized->type == "private" && materialized->is_bot))) {
                 matches.push_back(std::move(*materialized));
             }
         }
@@ -608,7 +666,7 @@ class ResolverRun {
             return std::nullopt;
         }
         if (matches.size() == 1) {
-            return ResolveResult(std::move(matches.front()));
+            return ResolveResult(std::move(matches.front()), std::nullopt, std::nullopt, link_type);
         }
         const bool truncated = matches.size() > kMaximumAmbiguousCandidates;
         if (truncated) {
@@ -621,7 +679,7 @@ class ResolverRun {
         return std::nullopt;
     }
 
-    std::optional<ResolveResult> resolve_link(const std::string& link_value, ResolverScope scope) {
+    std::optional<ResolveResult> resolve_link(const std::string& link_value) {
         auto classified = read([&](const auto& current) {
             return client_.get_internal_link_type(current, link_value);
         });
@@ -637,9 +695,6 @@ class ResolverRun {
             internal_error();
             return std::nullopt;
         }
-        if (scope == ResolverScope::LocalMaterialized) {
-            return resolve_local_link(*link);
-        }
         switch (link->kind) {
         case core::TdInternalLinkKind::PublicChat:
             return resolve_public_username(link->username, ResolvedLinkType::PublicChat, false);
@@ -653,26 +708,6 @@ class ResolverRun {
             return resolve_direct_messages_link(*link);
         case core::TdInternalLinkKind::SavedMessages:
             return resolve_saved_messages_link();
-        case core::TdInternalLinkKind::Unsupported:
-            usage("unsupported t.me link type", "unsupported_link_type");
-            return std::nullopt;
-        }
-        internal_error();
-        return std::nullopt;
-    }
-
-    std::optional<ResolveResult> resolve_local_link(const core::TdInternalLink& link) {
-        switch (link.kind) {
-        case core::TdInternalLinkKind::PublicChat:
-        case core::TdInternalLinkKind::BotStart:
-            return resolve_local_username(link.username);
-        case core::TdInternalLinkKind::SavedMessages:
-            return resolve_saved_messages_link();
-        case core::TdInternalLinkKind::Message:
-        case core::TdInternalLinkKind::ChatInvite:
-        case core::TdInternalLinkKind::DirectMessagesChat:
-            not_found(ResolverScope::LocalMaterialized);
-            return std::nullopt;
         case core::TdInternalLinkKind::Unsupported:
             usage("unsupported t.me link type", "unsupported_link_type");
             return std::nullopt;
@@ -1050,6 +1085,21 @@ void ResolveCoordinator::resolve(const proto::Request& request, RequestSession& 
 
 void ResolveCoordinator::resolve_for_scope(std::string selector, ResolverScope scope,
                                            RequestSession& session) {
+    if (scope == ResolverScope::LocalMaterialized) {
+        const auto classified = classify_local_selector(selector);
+        std::optional<ResolverUsageReason> reason;
+        if (!classified || classified->kind == LocalSelectorKind::InvalidLink) {
+            reason = ResolverUsageReason::InvalidArgument;
+        } else if (classified->kind == LocalSelectorKind::UnsupportedLink) {
+            reason = ResolverUsageReason::UnsupportedLinkType;
+        }
+        if (reason) {
+            emit_resolver_error(
+                ResolverError{ResolverUsageError{.argument = "selector", .reason = *reason}},
+                session);
+            return;
+        }
+    }
     ResolverConsumer consumer(client_.get(), account_, session);
     const auto principal = consumer.bind_principal(M2Operation::Resolve);
     if (const auto* error = std::get_if<ResolverError>(&principal)) {

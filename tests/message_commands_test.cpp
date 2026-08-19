@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -201,10 +202,11 @@ TEST_CASE("msg get preserves argv order and duplicates in one atomic vector resu
     resolve_numeric(fake);
     auto pre_epoch = message(-1001, 123);
     pre_epoch.date = -1;
-    const auto descriptor =
-        fake.respond(tgcli::core::TdFunctionKind::GetMessages,
-                     tgcli::core::TdMessages{.messages = {std::move(pre_epoch), message(-1001, 123),
-                                                          message(-1001, 124)}});
+    const auto descriptor = fake.respond(
+        tgcli::core::TdFunctionKind::GetMessages,
+        tgcli::core::TdMessages{
+            .total_count = std::numeric_limits<std::int32_t>::max(),
+            .messages = {std::move(pre_epoch), message(-1001, 123), message(-1001, 124)}});
     CHECK(field_as<std::int64_t>(descriptor, "chat_id") == -1001);
     CHECK(field_as<std::vector<std::int64_t>>(descriptor, "message_ids") ==
           std::vector<std::int64_t>{123, 123, 124});
@@ -251,6 +253,13 @@ TEST_CASE("msg get validates every found position before classifying nulls",
         const auto outcome = run({.messages = {std::nullopt, std::move(invalid)}});
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+    }
+    SECTION("negative total count wins over null") {
+        const auto outcome =
+            run({.total_count = -1, .messages = {std::nullopt, message(-1001, 124)}});
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK_FALSE(outcome.result);
     }
 }
 
