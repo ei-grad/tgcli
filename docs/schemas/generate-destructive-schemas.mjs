@@ -7,6 +7,10 @@ const check = process.argv.includes('--check');
 const dialect = 'https://json-schema.org/draft/2020-12/schema';
 const uint64Maximum = 18446744073709551615n;
 const uint64Marker = '__TGCLI_UINT64_MAXIMUM__';
+const int64Minimum = -9223372036854775808n;
+const int64Maximum = 9223372036854775807n;
+const int64MinimumMarker = '__TGCLI_INT64_MINIMUM__';
+const int64MaximumMarker = '__TGCLI_INT64_MAXIMUM__';
 
 const object = (required, properties) => ({
   type: 'object',
@@ -57,6 +61,34 @@ const auditStages = [
   'state_remove_started',
   'state_removed',
   'outcome_synced',
+];
+const v2Operations = [
+  'send',
+  'msg_edit',
+  'msg_delete',
+  'msg_forward',
+  'msg_react',
+  'msg_pin',
+  'msg_unpin',
+  'chat_mark_read',
+  'chat_mute',
+  'chat_unmute',
+  'chat_pin',
+  'chat_unpin',
+  'chat_archive',
+  'chat_unarchive',
+  'chat_join',
+  'chat_leave',
+  'saved_attach',
+  'session_terminate',
+];
+const v2Stages = [
+  'idempotency_pending',
+  'spool_ready',
+  'dispatch_started',
+  'temporary_ids_observed',
+  'forward_progress',
+  'mutation_confirmed',
 ];
 const logoutStages = [
   ['intent_synced'],
@@ -180,6 +212,459 @@ const definitions = () => {
     keepSessionPlan: removalPlan(true),
   };
 };
+
+const sessionIdMagnitude =
+  '(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|' +
+  '922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|' +
+  '922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|' +
+  '9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|' +
+  '922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|' +
+  '92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|' +
+  '9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])';
+const sessionIdNegativeMagnitude = sessionIdMagnitude.replace(
+  '922337203685477580[0-7]',
+  '922337203685477580[0-8]',
+);
+const v2Definitions = () => ({
+  sha256: { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' },
+  hex32: { type: 'string', pattern: '^[0-9a-f]{32}$' },
+  int53: {
+    type: 'integer',
+    minimum: -9007199254740991,
+    maximum: 9007199254740991,
+  },
+  chatId: { allOf: [reference('int53'), { not: { const: 0 } }] },
+  positiveInt53: { type: 'integer', minimum: 1, maximum: 9007199254740991 },
+  int32: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
+  positiveInt32: { type: 'integer', minimum: 1, maximum: 2147483647 },
+  uint32: { type: 'integer', minimum: 0, maximum: 4294967295 },
+  positiveUint32: { type: 'integer', minimum: 1, maximum: 4294967295 },
+  int64: {
+    type: 'integer',
+    minimum: int64Minimum,
+    maximum: int64Maximum,
+  },
+  unixSeconds: { type: 'integer', minimum: 0, maximum: 253402300799 },
+  v2Timestamp: {
+    type: 'string',
+    pattern:
+      '^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' +
+      'T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)Z$',
+  },
+  v2ConfigSnapshot: { type: 'string', pattern: snapshotPattern },
+  v2Operation: { enum: v2Operations },
+  v2Stage: { enum: v2Stages },
+  chatIdentity: object(['id', 'title', 'type', 'is_bot', 'usernames'], {
+    id: { allOf: [reference('int53'), { not: { const: 0 } }] },
+    title: { type: 'string', maxLength: 1048576 },
+    type: { enum: ['private', 'basic_group', 'supergroup', 'channel'] },
+    is_bot: { type: 'boolean' },
+    usernames: {
+      type: 'array',
+      maxItems: 100,
+      items: { type: 'string', minLength: 1, maxLength: 32, pattern: '^[A-Za-z0-9_]+$' },
+    },
+  }),
+  forumTopic: object(['kind', 'id'], {
+    kind: { const: 'forum' },
+    id: reference('positiveInt32'),
+  }),
+  savedTopic: object(['kind', 'id'], {
+    kind: { const: 'saved' },
+    id: reference('positiveInt53'),
+  }),
+  topicRef: {
+    oneOf: [
+      object(['kind', 'id'], { kind: { const: 'forum' }, id: reference('positiveInt32') }),
+      ...['thread', 'direct', 'saved'].map((kind) =>
+        object(['kind', 'id'], { kind: { const: kind }, id: reference('positiveInt53') }),
+      ),
+    ],
+  },
+  messageSender: {
+    oneOf: [
+      object(['type', 'id'], { type: { const: 'user' }, id: reference('positiveInt53') }),
+      object(['type', 'id'], { type: { const: 'chat' }, id: reference('chatId') }),
+    ],
+  },
+  messageWriteResult: object(
+    ['id', 'chat_id', 'date', 'sender', 'is_outgoing', 'topic', 'type', 'text', 'scheduled'],
+    {
+      id: reference('positiveInt53'),
+      chat_id: reference('chatId'),
+      date: nullable(reference('v2Timestamp')),
+      sender: reference('messageSender'),
+      is_outgoing: { type: 'boolean' },
+      topic: nullable(reference('topicRef')),
+      type: { enum: ['text', 'photo', 'video', 'doc', 'voice', 'other'] },
+      text: { type: 'string', maxLength: 4096 },
+      scheduled: { type: 'boolean' },
+    },
+  ),
+  schedule: {
+    oneOf: [
+      object(['kind'], { kind: { const: 'online' } }),
+      object(['kind', 'send_date'], {
+        kind: { const: 'at' },
+        send_date: reference('positiveInt32'),
+      }),
+    ],
+  },
+  fileSnapshot: object(
+    ['path', 'name', 'size', 'sha256', 'device', 'inode', 'mtime_ns', 'ctime_ns'],
+    {
+      path: { type: 'string' },
+      name: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[^/]+$' },
+      size: reference('uint64'),
+      sha256: reference('sha256'),
+      device: reference('uint64'),
+      inode: reference('uint64'),
+      mtime_ns: reference('int64'),
+      ctime_ns: reference('int64'),
+    },
+  ),
+  sessionId: {
+    oneOf: [
+      { const: '0' },
+      { type: 'string', pattern: `^${sessionIdMagnitude}$` },
+      { type: 'string', pattern: `^-${sessionIdNegativeMagnitude}$` },
+    ],
+  },
+  sessionTarget: object(
+    [
+      'id',
+      'is_current',
+      'is_password_pending',
+      'is_unconfirmed',
+      'device_type',
+      'application_name',
+      'application_version',
+      'device_model',
+      'platform',
+      'system_version',
+      'last_active_date',
+    ],
+    {
+      id: reference('sessionId'),
+      is_current: { const: false },
+      is_password_pending: { type: 'boolean' },
+      is_unconfirmed: { type: 'boolean' },
+      device_type: {
+        enum: [
+          'android', 'apple', 'brave', 'chrome', 'edge', 'firefox', 'ipad', 'iphone',
+          'linux', 'mac', 'opera', 'safari', 'ubuntu', 'unknown', 'vivaldi', 'windows',
+          'xbox',
+        ],
+      },
+      application_name: { type: 'string', maxLength: 1048576 },
+      application_version: { type: 'string', maxLength: 1048576 },
+      device_model: { type: 'string', maxLength: 1048576 },
+      platform: { type: 'string', maxLength: 1048576 },
+      system_version: { type: 'string', maxLength: 1048576 },
+      last_active_date: nullable(reference('v2Timestamp')),
+    },
+  ),
+  storedResultTerminal: object(['kind', 'data'], {
+    kind: { const: 'result' },
+    data: true,
+  }),
+  storedErrorTerminal: object(['kind', 'code', 'message', 'details', 'exit_code'], {
+    kind: { const: 'error' },
+    code: { type: 'string' },
+    message: { type: 'string' },
+    details: true,
+    exit_code: { type: 'integer' },
+  }),
+  storedTerminal: {
+    oneOf: [reference('storedResultTerminal'), reference('storedErrorTerminal')],
+  },
+  forwardItem: {
+    oneOf: [
+      object(['source_id', 'status', 'temporary_message_id'], {
+        source_id: reference('positiveInt53'),
+        status: { const: 'pending' },
+        temporary_message_id: reference('int53'),
+      }),
+      object(['source_id', 'status', 'message'], {
+        source_id: reference('positiveInt53'),
+        status: { const: 'sent' },
+        message: reference('messageWriteResult'),
+      }),
+      object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
+        source_id: reference('positiveInt53'),
+        status: { const: 'failed' },
+        failure_reason: {
+          enum: ['upstream_null', 'tdlib_error', 'deleted_before_confirmation'],
+        },
+        tdlib_code: nullable({ type: 'integer' }),
+        retry_after: nullable({ type: 'integer', minimum: 0 }),
+      }),
+    ],
+  },
+});
+const auditDefinitions = () => ({ ...definitions(), ...v2Definitions() });
+
+const int53Array = (minimum = 1) => ({
+  type: 'array',
+  minItems: minimum,
+  maxItems: 100,
+  items: reference('int53'),
+});
+const positiveInt53Array = () => ({
+  type: 'array',
+  minItems: 1,
+  maxItems: 100,
+  items: reference('positiveInt53'),
+});
+const v2Arguments = (operation) => {
+  const string = { type: 'string' };
+  const byOperation = {
+    send: object(['chat', 'text', 'parse_mode', 'reply_to', 'topic', 'silent', 'schedule'], {
+      chat: string,
+      text: string,
+      parse_mode: { enum: ['plain', 'markdown_v2', 'html'] },
+      reply_to: nullable(reference('positiveInt53')),
+      topic: nullable(reference('forumTopic')),
+      silent: { type: 'boolean' },
+      schedule: nullable(reference('schedule')),
+    }),
+    msg_edit: object(['chat', 'message_id', 'text'], {
+      chat: string,
+      message_id: reference('positiveInt53'),
+      text: string,
+    }),
+    msg_delete: object(['chat', 'message_ids', 'for_all'], {
+      chat: string,
+      message_ids: positiveInt53Array(),
+      for_all: { type: 'boolean' },
+    }),
+    msg_forward: object(['from', 'to', 'message_ids', 'drop_author'], {
+      from: string,
+      to: string,
+      message_ids: positiveInt53Array(),
+      drop_author: { type: 'boolean' },
+    }),
+    msg_react: object(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+      chat: string,
+      message_id: reference('positiveInt53'),
+      reaction: { type: 'string', maxLength: 64 },
+      remove: { type: 'boolean' },
+      big: { type: 'boolean' },
+    }),
+    msg_pin: object(['chat', 'message_id'], { chat: string, message_id: reference('positiveInt53') }),
+    msg_unpin: object(['chat', 'message_id'], { chat: string, message_id: reference('positiveInt53') }),
+    chat_mark_read: object(['chat'], { chat: string }),
+    chat_mute: object(['chat', 'duration_seconds'], { chat: string, duration_seconds: reference('int32') }),
+    chat_unmute: object(['chat', 'duration_seconds'], { chat: string, duration_seconds: reference('int32') }),
+    chat_pin: object(['chat'], { chat: string }),
+    chat_unpin: object(['chat'], { chat: string }),
+    chat_archive: object(['chat'], { chat: string }),
+    chat_unarchive: object(['chat'], { chat: string }),
+    chat_join: {
+      oneOf: [
+        object(['source', 'username'], {
+          source: { const: 'username' },
+          username: { type: 'string' },
+        }),
+        object(['source', 'invite_link_sha256'], {
+          source: { const: 'invite_link' },
+          invite_link_sha256: reference('sha256'),
+        }),
+      ],
+    },
+    chat_leave: object(['chat'], { chat: string }),
+    saved_attach: object(['message_id', 'path', 'caption'], {
+      message_id: reference('positiveInt53'),
+      path: { type: 'string', maxLength: 16842751 },
+      caption: { type: 'string', maxLength: 16842751 },
+    }),
+    session_terminate: object(['session_id'], { session_id: reference('sessionId') }),
+  };
+  return byOperation[operation];
+};
+
+const v2Plan = (operation) => {
+  const common = {
+    operation: { const: operation },
+    account: reference('account'),
+  };
+  const plan = (fields, properties) => object(
+    ['operation', 'account', 'tdlib_request', ...fields],
+    { ...common, ...properties },
+  );
+  const chat = reference('chatIdentity');
+  const byOperation = {
+    send: plan(
+      ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
+        'schedule', 'observed_server_unix_time'],
+      {
+        tdlib_request: { const: 'sendMessage' }, chat, text: { type: 'string' },
+        parse_mode: { enum: ['plain', 'markdown_v2', 'html'] },
+        reply_to: nullable(reference('positiveInt53')),
+        requested_topic: nullable(reference('forumTopic')),
+        effective_topic: nullable(reference('forumTopic')),
+        silent: { type: 'boolean' }, schedule: nullable(reference('schedule')),
+        observed_server_unix_time: nullable(reference('int64')),
+      },
+    ),
+    msg_edit: plan(['chat', 'message_id', 'text'], {
+      tdlib_request: { const: 'editMessageText' }, chat,
+      message_id: reference('positiveInt53'), text: { type: 'string' },
+    }),
+    msg_delete: plan(['chat', 'message_ids', 'requested_for_all', 'effective_for_all'], {
+      tdlib_request: { const: 'deleteMessages' }, chat, message_ids: positiveInt53Array(),
+      requested_for_all: { type: 'boolean' }, effective_for_all: { type: 'boolean' },
+    }),
+    msg_forward: plan(['from', 'to', 'message_ids', 'drop_author'], {
+      tdlib_request: { const: 'forwardMessages' }, from: chat, to: chat,
+      message_ids: positiveInt53Array(), drop_author: { type: 'boolean' },
+    }),
+    msg_react: plan(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+      tdlib_request: { enum: ['addMessageReaction', 'removeMessageReaction'] }, chat,
+      message_id: reference('positiveInt53'), reaction: { type: 'string', maxLength: 64 },
+      remove: { type: 'boolean' }, big: { type: 'boolean' },
+    }),
+    msg_pin: plan(['chat', 'message_id', 'pinned'], {
+      tdlib_request: { const: 'pinChatMessage' }, chat,
+      message_id: reference('positiveInt53'), pinned: { type: 'boolean' },
+    }),
+    msg_unpin: plan(['chat', 'message_id', 'pinned'], {
+      tdlib_request: { const: 'unpinChatMessage' }, chat,
+      message_id: reference('positiveInt53'), pinned: { type: 'boolean' },
+    }),
+    chat_mark_read: plan(['chat', 'last_message_id'], {
+      tdlib_request: { oneOf: [{ const: 'viewMessages' }, { type: 'null' }] }, chat,
+      last_message_id: nullable(reference('positiveInt53')),
+    }),
+    chat_mute: plan(['chat', 'muted', 'duration_seconds'], {
+      tdlib_request: { const: 'setChatNotificationSettings' }, chat,
+      muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+    }),
+    chat_unmute: plan(['chat', 'muted', 'duration_seconds'], {
+      tdlib_request: { const: 'setChatNotificationSettings' }, chat,
+      muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+    }),
+    chat_pin: plan(['chat', 'chat_list', 'pinned'], {
+      tdlib_request: { const: 'toggleChatIsPinned' }, chat,
+      chat_list: { enum: ['main', 'archive'] }, pinned: { type: 'boolean' },
+    }),
+    chat_unpin: plan(['chat', 'chat_list', 'pinned'], {
+      tdlib_request: { const: 'toggleChatIsPinned' }, chat,
+      chat_list: { enum: ['main', 'archive'] }, pinned: { type: 'boolean' },
+    }),
+    chat_archive: plan(['chat', 'archived'], {
+      tdlib_request: { const: 'addChatToList' }, chat, archived: { type: 'boolean' },
+    }),
+    chat_unarchive: plan(['chat', 'archived'], {
+      tdlib_request: { const: 'addChatToList' }, chat, archived: { type: 'boolean' },
+    }),
+    chat_join: plan(['source', 'chat', 'invite_link_sha256'], {
+      tdlib_request: { enum: ['joinChat', 'joinChatByInviteLink'] },
+      source: { enum: ['username', 'invite_link'] }, chat: nullable(chat),
+      invite_link_sha256: nullable(reference('sha256')),
+    }),
+    chat_leave: plan(['chat'], { tdlib_request: { const: 'leaveChat' }, chat }),
+    saved_attach: plan(['chat', 'message_id', 'effective_topic', 'caption', 'file'], {
+      tdlib_request: { const: 'sendMessage' }, chat,
+      message_id: reference('positiveInt53'), effective_topic: nullable(reference('savedTopic')),
+      caption: { type: 'string', maxLength: 4096 }, file: reference('fileSnapshot'),
+    }),
+    session_terminate: plan(['session'], {
+      tdlib_request: { const: 'terminateSession' }, session: reference('sessionTarget'),
+    }),
+  };
+  return byOperation[operation];
+};
+
+const v2ResultData = (operation) => {
+  const byOperation = {
+    send: reference('messageWriteResult'),
+    msg_edit: reference('messageWriteResult'),
+    saved_attach: reference('messageWriteResult'),
+    msg_delete: object(['chat_id', 'message_ids', 'for_all', 'deleted'], {
+      chat_id: reference('chatId'),
+      message_ids: positiveInt53Array(),
+      for_all: { type: 'boolean' },
+      deleted: { const: true },
+    }),
+    msg_forward: object(['from_chat_id', 'to_chat_id', 'items'], {
+      from_chat_id: reference('chatId'),
+      to_chat_id: reference('chatId'),
+      items: {
+        type: 'array', minItems: 1, maxItems: 100,
+        items: {
+          allOf: [
+            reference('forwardItem'),
+            object(['source_id', 'status', 'message'], {
+              source_id: reference('positiveInt53'),
+              status: { const: 'sent' },
+              message: reference('messageWriteResult'),
+            }),
+          ],
+        },
+      },
+    }),
+    msg_react: object(['chat_id', 'message_id', 'reaction', 'removed', 'big'], {
+      chat_id: reference('chatId'), message_id: reference('positiveInt53'),
+      reaction: { type: 'string' }, removed: { type: 'boolean' }, big: { type: 'boolean' },
+    }),
+    msg_pin: object(['chat_id', 'message_id', 'pinned'], {
+      chat_id: reference('chatId'), message_id: reference('positiveInt53'),
+      pinned: { type: 'boolean' },
+    }),
+    msg_unpin: object(['chat_id', 'message_id', 'pinned'], {
+      chat_id: reference('chatId'), message_id: reference('positiveInt53'),
+      pinned: { type: 'boolean' },
+    }),
+    chat_mark_read: object(['chat_id', 'last_read_message_id', 'marked_read'], {
+      chat_id: reference('chatId'), last_read_message_id: nullable(reference('positiveInt53')),
+      marked_read: { const: true },
+    }),
+    chat_mute: object(['chat_id', 'muted', 'duration_seconds'], {
+      chat_id: reference('chatId'), muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+    }),
+    chat_unmute: object(['chat_id', 'muted', 'duration_seconds'], {
+      chat_id: reference('chatId'), muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+    }),
+    chat_pin: object(['chat_id', 'chat_list', 'pinned'], {
+      chat_id: reference('chatId'), chat_list: { enum: ['main', 'archive'] },
+      pinned: { type: 'boolean' },
+    }),
+    chat_unpin: object(['chat_id', 'chat_list', 'pinned'], {
+      chat_id: reference('chatId'), chat_list: { enum: ['main', 'archive'] },
+      pinned: { type: 'boolean' },
+    }),
+    chat_archive: object(['chat_id', 'archived'], {
+      chat_id: reference('chatId'), archived: { type: 'boolean' },
+    }),
+    chat_unarchive: object(['chat_id', 'archived'], {
+      chat_id: reference('chatId'), archived: { type: 'boolean' },
+    }),
+    chat_join: {
+      oneOf: [
+        object(['status', 'chat_id'], {
+          status: { const: 'joined' }, chat_id: reference('chatId'),
+        }),
+        object(['status', 'chat_id'], {
+          status: { const: 'request_sent' }, chat_id: nullable(reference('chatId')),
+        }),
+      ],
+    },
+    chat_leave: object(['chat_id', 'left'], {
+      chat_id: reference('chatId'), left: { const: true },
+    }),
+    session_terminate: object(['session_id', 'terminated'], {
+      session_id: reference('sessionId'), terminated: { const: true },
+    }),
+  };
+  return byOperation[operation];
+};
+
+const v2ResultTerminal = (operation) =>
+  object(['kind', 'data'], { kind: { const: 'result' }, data: v2ResultData(operation) });
+const v2StoredTerminal = (operation) => ({
+  oneOf: [v2ResultTerminal(operation), reference('storedErrorTerminal')],
+});
 
 const detail = object;
 const structuredError = (code, details) =>
@@ -552,7 +1037,42 @@ const intentBase = {
   authority_source: { enum: ['request', 'config'] },
   confirmation_source: { enum: ['yes', 'tty'] },
 };
-const intentSchema = schema('tgcli destructive audit intent', definitions(), {
+const v2IntentFields = [
+  'schema_version',
+  'phase',
+  'invocation_id',
+  'timestamp',
+  'account',
+  'command',
+  'arguments',
+  'plan',
+  'request_fingerprint',
+  'config_snapshot',
+  'authority_source',
+  'confirmation_source',
+  'idempotency_key_hash',
+];
+const v2IntentBranches = v2Operations.map((operation) =>
+  object(v2IntentFields, {
+    schema_version: { const: 2 },
+    phase: { const: 'intent' },
+    invocation_id: reference('hex32'),
+    timestamp: reference('v2Timestamp'),
+    account: reference('account'),
+    command: { const: operation },
+    arguments: v2Arguments(operation),
+    plan: v2Plan(operation),
+    request_fingerprint: reference('sha256'),
+    config_snapshot: reference('v2ConfigSnapshot'),
+    authority_source: { enum: ['request', 'config'] },
+    confirmation_source: ['msg_delete', 'chat_leave', 'session_terminate'].includes(operation)
+      ? { enum: ['yes', 'tty'] }
+      : { type: 'null' },
+    idempotency_key_hash:
+      operation === 'session_terminate' ? { type: 'null' } : nullable(reference('sha256')),
+  }),
+);
+const intentSchema = schema('tgcli destructive audit intent', auditDefinitions(), {
   oneOf: [
     object(intentFields, {
       ...intentBase,
@@ -581,24 +1101,148 @@ const intentSchema = schema('tgcli destructive audit intent', definitions(), {
       plan: reference('keepSessionPlan'),
       config_snapshot: reference('configSnapshot'),
     }),
+    ...v2IntentBranches,
   ],
 });
 
+const v2CheckpointFields = [
+  'schema_version',
+  'phase',
+  'invocation_id',
+  'timestamp',
+  'account',
+  'command',
+  'checkpoint_sequence',
+  'stage',
+  'data',
+];
+const dispatchFunctions = {
+  send: ['sendMessage'],
+  msg_edit: ['editMessageText'],
+  msg_delete: ['deleteMessages'],
+  msg_forward: ['forwardMessages'],
+  msg_react: ['addMessageReaction', 'removeMessageReaction'],
+  msg_pin: ['pinChatMessage'],
+  msg_unpin: ['unpinChatMessage'],
+  chat_mark_read: ['viewMessages'],
+  chat_mute: ['setChatNotificationSettings'],
+  chat_unmute: ['setChatNotificationSettings'],
+  chat_pin: ['toggleChatIsPinned'],
+  chat_unpin: ['toggleChatIsPinned'],
+  chat_archive: ['addChatToList'],
+  chat_unarchive: ['addChatToList'],
+  chat_join: ['joinChat', 'joinChatByInviteLink'],
+  chat_leave: ['leaveChat'],
+  saved_attach: ['sendMessage'],
+  session_terminate: ['terminateSession'],
+};
+const v2CheckpointBranch = (operation, stage, data) =>
+  object(v2CheckpointFields, {
+    schema_version: { const: 2 },
+    phase: { const: 'checkpoint' },
+    invocation_id: reference('hex32'),
+    timestamp: reference('v2Timestamp'),
+    account: reference('account'),
+    command: { const: operation },
+    checkpoint_sequence: reference('positiveUint32'),
+    stage: { const: stage },
+    data,
+  });
+const v2CheckpointBranches = [];
+for (const operation of v2Operations) {
+  if (operation !== 'session_terminate') {
+    v2CheckpointBranches.push(
+      v2CheckpointBranch(
+        operation,
+        'idempotency_pending',
+        object(['key_hash', 'request_fingerprint', 'expires_at', 'reserved_terminal_bytes'], {
+          key_hash: reference('sha256'),
+          request_fingerprint: reference('sha256'),
+          expires_at: reference('unixSeconds'),
+          reserved_terminal_bytes: reference('uint32'),
+        }),
+      ),
+    );
+  }
+  if (operation === 'saved_attach') {
+    v2CheckpointBranches.push(
+      v2CheckpointBranch(
+        operation,
+        'spool_ready',
+        object(['file', 'relative_path'], {
+          file: reference('fileSnapshot'),
+          relative_path: {
+            type: 'string',
+            pattern: '^spool/[0-9a-f]{32}/[^/]+$',
+          },
+        }),
+      ),
+    );
+  }
+  v2CheckpointBranches.push(
+    v2CheckpointBranch(
+      operation,
+      'dispatch_started',
+      object(['tdlib_function', 'dispatch_token', 'client_generation'], {
+        tdlib_function: { enum: dispatchFunctions[operation] },
+        dispatch_token: reference('hex32'),
+        client_generation: reference('uint64'),
+      }),
+    ),
+  );
+  if (['send', 'msg_forward', 'saved_attach'].includes(operation)) {
+    v2CheckpointBranches.push(
+      v2CheckpointBranch(
+        operation,
+        'temporary_ids_observed',
+        object(['temporary_message_ids'], { temporary_message_ids: int53Array() }),
+      ),
+    );
+  }
+  if (operation === 'msg_forward') {
+    v2CheckpointBranches.push(
+      v2CheckpointBranch(
+        operation,
+        'forward_progress',
+        object(['items'], {
+          items: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 100,
+            items: reference('forwardItem'),
+          },
+        }),
+      ),
+    );
+  }
+  v2CheckpointBranches.push(
+    v2CheckpointBranch(
+      operation,
+      'mutation_confirmed',
+      object(['terminal'], { terminal: v2StoredTerminal(operation) }),
+    ),
+  );
+}
 const checkpointSchema = schema(
   'tgcli logout audit checkpoint',
-  definitions(),
-  object(
-    ['schema_version', 'phase', 'invocation_id', 'timestamp', 'account', 'command', 'stage'],
-    {
-      schema_version: { const: 1 },
-      phase: { const: 'checkpoint' },
-      invocation_id: reference('invocationId'),
-      timestamp: reference('timestamp'),
-      account: reference('account'),
-      command: { const: 'logout' },
-      stage: { enum: ['logout_send_started', 'logout_closed_confirmed'] },
-    },
-  ),
+  auditDefinitions(),
+  {
+    oneOf: [
+      object(
+        ['schema_version', 'phase', 'invocation_id', 'timestamp', 'account', 'command', 'stage'],
+        {
+          schema_version: { const: 1 },
+          phase: { const: 'checkpoint' },
+          invocation_id: reference('invocationId'),
+          timestamp: reference('timestamp'),
+          account: reference('account'),
+          command: { const: 'logout' },
+          stage: { enum: ['logout_send_started', 'logout_closed_confirmed'] },
+        },
+      ),
+      ...v2CheckpointBranches,
+    ],
+  },
 );
 
 const logoutSuccessResult = object(['account', 'logged_out'], {
@@ -651,6 +1295,70 @@ const outcomeDefinitions = {
   removalNotPresentResult: removalSuccessResult('not_present'),
   removalKeptResult: removalSuccessResult('kept'),
 };
+const v2CompletedStagePrefixes = (operation) => {
+  const prefixes = new Map([[JSON.stringify([]), []]]);
+  for (const keyed of [false, true]) {
+    for (const temporary of [false, true]) {
+      for (const progress of [false, true]) {
+        for (const mutation of [false, true]) {
+          const complete = [];
+          if (keyed && operation !== 'session_terminate') complete.push('idempotency_pending');
+          if (operation === 'saved_attach') complete.push('spool_ready');
+          complete.push('dispatch_started');
+          if (temporary && ['send', 'msg_forward', 'saved_attach'].includes(operation)) {
+            complete.push('temporary_ids_observed');
+          }
+          if (progress && operation === 'msg_forward') complete.push('forward_progress');
+          if (mutation) complete.push('mutation_confirmed');
+          for (let length = 1; length <= complete.length; ++length) {
+            const prefix = complete.slice(0, length);
+            prefixes.set(JSON.stringify(prefix), prefix);
+          }
+        }
+      }
+    }
+  }
+  return [...prefixes.values()];
+};
+const v2OutcomeFields = [
+  'schema_version',
+  'phase',
+  'invocation_id',
+  'timestamp',
+  'account',
+  'command',
+  'success',
+  'mutation_state',
+  'completed_stages',
+  'terminal',
+];
+const v2OutcomeBranch = (operation, success, mutation, prefixes, terminal) =>
+  object(v2OutcomeFields, {
+    schema_version: { const: 2 },
+    phase: { const: 'outcome' },
+    invocation_id: reference('hex32'),
+    timestamp: reference('v2Timestamp'),
+    account: reference('account'),
+    command: { const: operation },
+    success: { const: success },
+    mutation_state: { const: mutation },
+    completed_stages: { enum: prefixes },
+    terminal,
+  });
+const v2OutcomeBranches = v2Operations.flatMap((operation) => {
+  const prefixes = v2CompletedStagePrefixes(operation);
+  const dispatched = prefixes.filter((value) => value.includes('dispatch_started'));
+  const confirmed = dispatched.filter(
+    (value) => value.includes('mutation_confirmed') || value.includes('forward_progress'),
+  );
+  const successful = confirmed.filter((value) => value.at(-1) === 'mutation_confirmed');
+  return [
+    v2OutcomeBranch(operation, true, 'confirmed', successful, v2ResultTerminal(operation)),
+    v2OutcomeBranch(operation, false, 'none', prefixes, reference('storedErrorTerminal')),
+    v2OutcomeBranch(operation, false, 'possible', dispatched, reference('storedErrorTerminal')),
+    v2OutcomeBranch(operation, false, 'confirmed', confirmed, reference('storedErrorTerminal')),
+  ];
+});
 const outcomeBase = object(outcomeFields, {
   schema_version: { const: 1 },
   phase: { const: 'outcome' },
@@ -743,8 +1451,13 @@ for (const state of ['none', 'possible', 'confirmed']) {
 }
 const outcomeSchema = schema(
   'tgcli destructive audit outcome',
-  outcomeDefinitions,
-  constrained(outcomeBase, outcomeRelations),
+  { ...outcomeDefinitions, ...v2Definitions() },
+  {
+    oneOf: [
+      constrained(outcomeBase, outcomeRelations),
+      ...v2OutcomeBranches,
+    ],
+  },
 );
 
 const nextStage = (stages, keepSession) => {
@@ -852,9 +1565,17 @@ const documents = new Map([
 const render = (document) =>
   (JSON.stringify(
     document,
-    (_key, value) => (typeof value === 'bigint' ? uint64Marker : value),
+    (_key, value) => {
+      if (value === uint64Maximum) return uint64Marker;
+      if (value === int64Minimum) return int64MinimumMarker;
+      if (value === int64Maximum) return int64MaximumMarker;
+      return value;
+    },
     2,
-  ) + '\n').replaceAll(`"${uint64Marker}"`, uint64Maximum.toString());
+  ) + '\n')
+    .replaceAll(`"${uint64Marker}"`, uint64Maximum.toString())
+    .replaceAll(`"${int64MinimumMarker}"`, int64Minimum.toString())
+    .replaceAll(`"${int64MaximumMarker}"`, int64Maximum.toString());
 
 let mismatch = false;
 for (const [filename, document] of documents) {

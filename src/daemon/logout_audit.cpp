@@ -236,7 +236,6 @@ std::optional<ConfirmationSource> parse_confirmation_source(const nlohmann::json
 }
 
 using PendingAudits = std::map<std::string, PendingAudit, std::less<>>;
-using SeenInvocations = std::set<std::string, std::less<>>;
 
 std::string audit_timestamp(const nlohmann::json& record) {
     return record["timestamp"].is_string() ? record["timestamp"].get<std::string>() : std::string{};
@@ -244,12 +243,12 @@ std::string audit_timestamp(const nlohmann::json& record) {
 
 bool consume_intent(const nlohmann::json& record, std::string_view account,
                     const std::string& invocation, PendingAudits& pending,
-                    SeenInvocations& seen_invocations) {
+                    bool invocation_previously_seen) {
     if (!exact_fields(record, {"schema_version", "phase", "invocation_id", "timestamp", "account",
                                "command", "arguments", "plan", "config_snapshot",
                                "authority_source", "confirmation_source"}) ||
         record["schema_version"] != 1 || record["arguments"] != nlohmann::json::object() ||
-        seen_invocations.contains(invocation)) {
+        invocation_previously_seen) {
         return false;
     }
     std::string error;
@@ -267,7 +266,6 @@ bool consume_intent(const nlohmann::json& record, std::string_view account,
         return false;
     }
     pending.emplace(invocation, PendingAudit{std::move(*plan), {AuditStage::IntentSynced}});
-    seen_invocations.emplace(invocation);
     return true;
 }
 
@@ -347,7 +345,7 @@ bool consume_outcome(const nlohmann::json& record, const std::string& invocation
 }
 
 bool consume_audit_line(const nlohmann::json& record, std::string_view account,
-                        PendingAudits& pending, SeenInvocations& seen_invocations) {
+                        PendingAudits& pending, bool invocation_previously_seen) {
     if (!record.is_object() || !record.contains("phase") || !record["phase"].is_string() ||
         !record.contains("invocation_id") || !record["invocation_id"].is_string() ||
         !valid_invocation_id(record["invocation_id"].get_ref<const std::string&>()) ||
@@ -359,7 +357,7 @@ bool consume_audit_line(const nlohmann::json& record, std::string_view account,
     const auto& invocation = record["invocation_id"].get_ref<const std::string&>();
     const auto& phase = record["phase"].get_ref<const std::string&>();
     if (phase == "intent") {
-        return consume_intent(record, account, invocation, pending, seen_invocations);
+        return consume_intent(record, account, invocation, pending, invocation_previously_seen);
     }
     const auto found = pending.find(invocation);
     if (found == pending.end()) {
@@ -384,12 +382,43 @@ std::optional<IncompleteLogoutAudit> take_first_incomplete(PendingAudits& pendin
                                  std::move(first->second.stages)};
 }
 
-LogoutAuditInspection invalid_inspection(LogoutAuditFailure failure, PendingAudits& pending) {
-    return {LogoutAuditInspectionStatus::Invalid, take_first_incomplete(pending),
-            std::move(failure)};
+} // namespace
+
+struct LogoutAuditRecordAdapter::Impl {
+    explicit Impl(std::string account_value) : account(std::move(account_value)) {}
+
+    std::string account;
+    PendingAudits pending;
+};
+
+LogoutAuditRecordAdapter::LogoutAuditRecordAdapter(std::string account)
+    : impl_(std::make_unique<Impl>(std::move(account))) {}
+LogoutAuditRecordAdapter::~LogoutAuditRecordAdapter() = default;
+LogoutAuditRecordAdapter::LogoutAuditRecordAdapter(LogoutAuditRecordAdapter&&) noexcept = default;
+LogoutAuditRecordAdapter&
+LogoutAuditRecordAdapter::operator=(LogoutAuditRecordAdapter&&) noexcept = default;
+
+bool LogoutAuditRecordAdapter::consume(const nlohmann::json& record,
+                                       bool invocation_previously_seen,
+                                       LogoutAuditFailure& failure) {
+    if (!consume_audit_line(record, impl_->account, impl_->pending, invocation_previously_seen)) {
+        failure.reason = "path_invalid";
+        return false;
+    }
+    failure.reason.clear();
+    return true;
 }
 
-} // namespace
+LogoutAuditInspection LogoutAuditRecordAdapter::finish() {
+    if (impl_->pending.empty()) {
+        return {};
+    }
+    return {LogoutAuditInspectionStatus::Incomplete, take_first_incomplete(impl_->pending), {}};
+}
+
+bool LogoutAuditRecordAdapter::has_incomplete() const {
+    return !impl_->pending.empty();
+}
 
 LogoutAuditLog::LogoutAuditLog(std::string state_directory, std::string account, uid_t expected_uid,
                                std::shared_ptr<const testing::LogoutAuditHooks> hooks)
@@ -455,6 +484,7 @@ bool LogoutAuditLog::append(const nlohmann::json& record, LogoutAuditFailure& fa
     return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): byte-exact legacy parser parity.
 LogoutAuditInspection LogoutAuditLog::inspect() const {
     LogoutAuditFailure failure;
     const FileDescriptor directory(
@@ -473,12 +503,13 @@ LogoutAuditInspection LogoutAuditLog::inspect() const {
 
     constexpr std::array<const char*, 5> names{"audit.log.4", "audit.log.3", "audit.log.2",
                                                "audit.log.1", "audit.log"};
-    std::map<std::string, PendingAudit, std::less<>> pending;
+    LogoutAuditRecordAdapter adapter(account_);
     std::set<std::string, std::less<>> seen_invocations;
     for (const auto* name : names) {
         auto bytes = read_named_file(directory.get(), name, expected_uid_, hooks_, failure);
         if (!bytes) {
-            return invalid_inspection(std::move(failure), pending);
+            return {LogoutAuditInspectionStatus::Invalid, adapter.finish().incomplete,
+                    std::move(failure)};
         }
         auto contents = std::move(bytes).value();
         if (contents.empty()) {
@@ -489,27 +520,34 @@ LogoutAuditInspection LogoutAuditLog::inspect() const {
             const auto end = contents.find('\n', offset);
             if (end == std::string::npos) {
                 failure.reason = "path_invalid";
-                return invalid_inspection(std::move(failure), pending);
+                return {LogoutAuditInspectionStatus::Invalid, adapter.finish().incomplete,
+                        std::move(failure)};
             }
             if (end == offset) {
                 failure.reason = "path_invalid";
-                return invalid_inspection(std::move(failure), pending);
+                return {LogoutAuditInspectionStatus::Invalid, adapter.finish().incomplete,
+                        std::move(failure)};
             }
             auto parsed = nlohmann::json::parse(
                 contents.begin() + static_cast<std::ptrdiff_t>(offset),
                 contents.begin() + static_cast<std::ptrdiff_t>(end), nullptr, false);
-            if (parsed.is_discarded() ||
-                !consume_audit_line(parsed, account_, pending, seen_invocations)) {
+            const auto invocation = parsed.is_object() && parsed.contains("invocation_id") &&
+                                            parsed["invocation_id"].is_string()
+                                        ? parsed["invocation_id"].get<std::string>()
+                                        : std::string{};
+            const bool previously_seen = seen_invocations.contains(invocation);
+            if (parsed.is_discarded() || !adapter.consume(parsed, previously_seen, failure)) {
                 failure.reason = "path_invalid";
-                return invalid_inspection(std::move(failure), pending);
+                return {LogoutAuditInspectionStatus::Invalid, adapter.finish().incomplete,
+                        std::move(failure)};
+            }
+            if (parsed.value("phase", std::string{}) == "intent") {
+                seen_invocations.emplace(invocation);
             }
             offset = end + 1;
         }
     }
-    if (pending.empty()) {
-        return {};
-    }
-    return {LogoutAuditInspectionStatus::Incomplete, take_first_incomplete(pending), {}};
+    return adapter.finish();
 }
 
 LogoutAuditReconcileResult

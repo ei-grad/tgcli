@@ -129,6 +129,12 @@ TEST_CASE("session schemas are self-contained strict Draft 2020-12 documents",
     const auto error_schema = tgcli::test::load_schema_document("session.error.schema.json");
     CHECK(error_schema["$defs"]["auditIncompleteError"]["properties"]["details"]["oneOf"].size() ==
           6);
+    CHECK(error_schema["$defs"]["auditUnavailableError"]["properties"]["details"]["properties"]
+                      ["reason"]["enum"] ==
+          json::array({"path_invalid", "wrong_owner", "wrong_type", "wrong_mode",
+                       "wrong_link_count", "too_large", "capacity_exhausted", "open_failed",
+                       "lock_failed", "read_failed", "write_failed", "sync_failed", "rename_failed",
+                       "directory_sync_failed", "parse_error", "schema_error", "contradiction"}));
 }
 
 TEST_CASE("session id schemas accept exactly canonical signed int64 strings", "[schema][session]") {

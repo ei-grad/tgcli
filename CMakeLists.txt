@@ -195,6 +195,7 @@ target_link_libraries(tgcli_core
     PRIVATE tgcli_td_runtime)
 
 add_library(tgcli_daemon STATIC
+    src/daemon/account_audit.cpp
     src/daemon/account_removal.cpp
     src/daemon/account_removal_remote.cpp
     src/daemon/activity_tracker.cpp

@@ -46,6 +46,25 @@ struct LogoutAuditInspection {
     LogoutAuditFailure failure;
 };
 
+class LogoutAuditRecordAdapter final {
+  public:
+    explicit LogoutAuditRecordAdapter(std::string account);
+    ~LogoutAuditRecordAdapter();
+    LogoutAuditRecordAdapter(LogoutAuditRecordAdapter&&) noexcept;
+    LogoutAuditRecordAdapter& operator=(LogoutAuditRecordAdapter&&) noexcept;
+    LogoutAuditRecordAdapter(const LogoutAuditRecordAdapter&) = delete;
+    LogoutAuditRecordAdapter& operator=(const LogoutAuditRecordAdapter&) = delete;
+
+    [[nodiscard]] bool consume(const nlohmann::json& record, bool invocation_previously_seen,
+                               LogoutAuditFailure& failure);
+    [[nodiscard]] LogoutAuditInspection finish();
+    [[nodiscard]] bool has_incomplete() const;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 class LogoutAuditLog final {
   public:
     LogoutAuditLog(std::string state_directory, std::string account, uid_t expected_uid,

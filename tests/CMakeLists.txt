@@ -1,6 +1,7 @@
 include(Catch)
 
 add_executable(tgcli_unit_tests
+    account_audit_test.cpp
     account_removal_test.cpp
     account_removal_remote_test.cpp
     activity_tracker_test.cpp

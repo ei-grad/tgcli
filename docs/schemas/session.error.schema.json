@@ -364,11 +364,22 @@
             "reason": {
               "enum": [
                 "path_invalid",
+                "wrong_owner",
+                "wrong_type",
+                "wrong_mode",
+                "wrong_link_count",
+                "too_large",
+                "capacity_exhausted",
                 "open_failed",
+                "lock_failed",
+                "read_failed",
                 "write_failed",
                 "sync_failed",
-                "rotate_failed",
-                "capacity_exhausted"
+                "rename_failed",
+                "directory_sync_failed",
+                "parse_error",
+                "schema_error",
+                "contradiction"
               ]
             }
           }
