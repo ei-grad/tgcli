@@ -37,6 +37,15 @@ authoritative implementation status and roadmap (work milestones top-down).
   packages ship and byte-verify the same referenced set. The `schema` introspection
   meta-command is the sole explicit result-manifest exception and is not recursively
   cataloged; it does not permit a free-form result schema for ordinary commands.
+  Ordinary schema validity is necessary. The three uncataloged mixed audit
+  persistence schemas additionally carry one exact documentation-only marker
+  applying only to schema version 2 and naming their frozen filename-owned
+  `tgcli-runtime-v1` rules. Standard-expressible calendar, stage,
+  terminal-class, basename and lexical-path constraints remain schema
+  assertions; field/nested pseudo-assertion keywords are forbidden. Runtime
+  acceptance never makes a schema-invalid value valid. Audit markers are
+  verified by the audit generator/source tests and are not exposed through or
+  added to M7 command catalogs.
 - The write gate is fail-closed and evaluated daemon-side. Every
   Telegram-side mutation passes through the single safety chokepoint with a
   statically declared descriptor (Read/AuthBootstrap/Write/Destructive); no
@@ -92,6 +101,11 @@ Tests pin the external contract; they never mirror the implementation.
   requests actually emitted (as data), output JSON against docs/schemas/,
   exit code, stderr discipline. One high-fidelity fake, maintained in one
   place — no ad-hoc per-test mocks.
+  Marked audit schemas have separate ordinary-schema, runtime-only and
+  conjunction coverage. Ordinary-validator negatives cover every expressible
+  failure. Runtime-only pairs cover only the exact marker taxonomy. Every
+  runtime-accepted generated record also passes the ordinary schema, and no
+  test or prose claims that C++ makes a schema-invalid instance valid.
 - **Shared semantics are tested once, centrally.** Write gate, NOT_AUTHED,
   ambiguous resolver, timeout mapping, confirmation challenges live in one
   cross-command suite. A per-command test covers only that command's

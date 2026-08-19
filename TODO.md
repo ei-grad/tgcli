@@ -229,7 +229,12 @@ before the milestone is closed.
       inode-backed audit generations, hole-first rotation, bounded global
       invocation rescans, the continuous daemon.lock-backed outer mutex,
       external data ceilings, exact v2 record/group/segment limits,
-      oversize precedence, contradiction handling and crash points.
+      oversize precedence, contradiction handling and crash points; publish the
+      reviewed standard-schema/runtime boundary, retain all expressible
+      calendar/stage/terminal/basename/path assertions, remove field-level
+      pseudo-assertions, emit the exact schema-version-2 marker and
+      filename/rules matrix, and test ordinary-schema acceptance separately
+      from required runtime semantics.
 - [ ] Align session/M3 AUDIT_UNAVAILABLE schemas with the complete accepted
       durability_reason enum; reject rotate_failed in v2 while retaining the
       separate v1 audit_reason, and generator-check every runtime audit record.
@@ -369,7 +374,10 @@ before the milestone is closed.
       plus packaged-binary byte smoke; perform no config/socket/daemon/TDLib
       access
 - [ ] Shell completions (bash/zsh/fish), man pages
-- [ ] docs/schemas/ — freeze curated JSON schemas per command
+- [ ] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
+      schemas out of command catalogs unless a later reviewed mapping explicitly
+      adds them, and byte-preserve semantic markers only for explicitly
+      cataloged marked command schemas
 - [ ] Validate the complete M1–M6 test-DC E2E suite at the M7 gate, including
       fake-boundary coverage and explicit skip reasons for states the test DC
       or available account capabilities cannot exercise

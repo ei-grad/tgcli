@@ -1695,6 +1695,16 @@ existing exact schema_version=1 M1 intent/checkpoint/outcome
 new exact schema_version=2 M3 intent/checkpoint/outcome
 ```
 
+The mixed audit schemas use §5's two-layer boundary only for
+`schema_version:2`: ordinary self-contained Draft 2020-12 validation is
+necessary, and the exact filename-owned runtime rules in the top-level
+documentation-only marker are additionally necessary. Runtime acceptance
+never makes a schema-invalid record valid. V1 branches are unchanged and the
+marker is explicitly inapplicable to them. Every standard-expressible object,
+scalar, finite relation, terminal class, stage-prefix, calendar, basename and
+lexical-path restriction remains an ordinary schema assertion. Field/nested
+`x-tgcli-*` pseudo-assertions are forbidden.
+
 Before positive v2 recognition, unknown/absent/duplicate/non-integer schema
 version follows the exact `path_invalid`/`parse_error` precedence below. After
 positive recognition, unknown phase/field and a later bounded unsupported
@@ -1707,6 +1717,67 @@ v2 common scalar rules: `hex32`/`invocation_id` = 32 lowercase hex;
 integer 0…253402300799. Audit timestamp = UTC RFC3339 seconds
 `YYYY-MM-DDTHH:MM:SSZ`, year 1970…9999. Account/operation/tdlib_function
 use their closed enums; hashes are `sha256:<64 lowercase hex>`.
+
+The ordinary schemas assert real Gregorian 1970…9999 calendar/leap validity,
+finite legal stage-prefix and outcome mutation/success/proof branches,
+scheduled/date branches, exact forward terminal classes, basename C0/C1
+restrictions and lexical canonical `FileSnapshot.path`. Runtime-only checks are
+limited to aggregate serialized bytes, contextual normalization, same-record
+and cross-record equality/derivation, projected uniqueness, strict numeric
+ordering and UTF-8 byte ceilings. `audit.arguments.path` preserves caller
+spelling under §4.5.12 and is not incorrectly constrained to the canonical
+snapshot path.
+
+Each schema carries this exact top-level documentation-only marker adjacent to
+`$schema`:
+
+```json
+"$comment": "For schema_version 2, full tgcli contract validation also requires the documentation-only x-tgcli-semanticValidation rules; an ordinary Draft 2020-12 validator ignores that annotation.",
+"x-tgcli-semanticValidation": {
+  "annotationOnly": true,
+  "ordinaryDraft202012ValidationIsInsufficient": true,
+  "schemaVersion": 2,
+  "validator": "tgcli-runtime-v1",
+  "rules": ["<exact sorted filename-owned rules>"]
+}
+```
+
+The exact sorted filename-to-rules matrix is:
+
+```json
+{
+  "audit-checkpoint.schema.json": [
+    "aggregate_serialized_bytes",
+    "cross_record_equality_and_derivation",
+    "projected_uniqueness",
+    "same_record_equality_and_derivation",
+    "strict_numeric_order",
+    "utf8_byte_limits"
+  ],
+  "audit-intent.schema.json": [
+    "aggregate_serialized_bytes",
+    "contextual_normalization",
+    "same_record_equality_and_derivation",
+    "strict_numeric_order",
+    "utf8_byte_limits"
+  ],
+  "audit-outcome.schema.json": [
+    "aggregate_serialized_bytes",
+    "cross_record_equality_and_derivation",
+    "projected_uniqueness",
+    "same_record_equality_and_derivation",
+    "strict_numeric_order",
+    "utf8_byte_limits"
+  ]
+}
+```
+
+The generator enforces this exact matrix and `schemaVersion:2`. No unknown
+keyword is treated as an assertion. The runtime taxonomy covers
+`arguments↔plan`; group version/account/command/invocation identity;
+idempotency hash/fingerprint; spool file/relative path; terminal↔plan/latest
+vector; outcome stages/mutation/success/proof/terminal↔durable history; and
+terminal/record/group/segment aggregate byte ceilings.
 
 Intent exact keys:
 
@@ -4501,7 +4572,8 @@ message is a string except where §4.7.4 fixes a const message, and details is
 the exact strict branch object. `CONFIRMATION_REQUIRED.target` locally embeds
 the exact SessionTerminatePlan. `AuthStateOrNull`, audit stages, account names,
 reason enums and all other referenced types are local definitions; the schema
-has no reference to another packaged file and no semantic-validator caveat.
+has no reference to another packaged file and, because its current rules are
+fully asserted by the standard schema, has no semantic-validation marker.
 
 Manifest/package/schema tests require file/entry bijection for results,
 installed presence of all three files and direct Draft 2020-12 rejection of
@@ -4685,6 +4757,13 @@ to `saved.error.schema.json`, and session list/terminate to
 `session.error.schema.json`. Stream errors remain solely in the stream catalog.
 Audit/checkpoint/tombstone schemas are not command payload schemas and are not in these
 catalogs.
+
+The mixed audit schemas' documentation-only markers are verified by their
+owning audit generator/source tests, not by command lookup. They are not
+returned by `tgcli schema` or `--all` and are not silently added to a catalog.
+If a future reviewed catalog entry names a marked command schema, byte-exact
+schema discovery preserves that schema's marker; only then does the
+catalog/embedded-asset test acquire a marker-visibility case.
 
 Catalog merge keys are `(canonical command, result|item|error)`. Identical canonical
 command keys may recur across catalogs and different kinds coexist. An identical
@@ -6587,6 +6666,17 @@ What makes tgcli specifically LLM-agent-friendly:
   can do is reachable.
 - Stable curated schemas under `docs/schemas/`, also dumpable at runtime via
   `tgcli schema <command>` — no repo checkout needed inside a sandbox.
+- **Schema/runtime boundary.** Ordinary Draft 2020-12 validity is always
+  necessary. Schemas assert every restriction expressible in the project's
+  standard self-contained subset. A schema_version-2 persistence record in one
+  of the three explicitly marked audit files additionally requires the exact
+  `tgcli-runtime-v1` rules in that file's documentation-only marker. Those
+  rules are only aggregate serialized bytes, contextual normalization,
+  same/cross-record equality and derivation, projected uniqueness, strict
+  numeric order, and UTF-8 byte limits. A value rejected by the standard schema
+  is contract-invalid regardless of C++; a value accepted by the standard
+  schema may still fail a listed runtime rule. Unknown keywords never rescue or
+  replace standard assertions.
 - `tgcli doctor --json` is a one-call health/auth probe.
 
 ## 13. Build, dependencies, testing
