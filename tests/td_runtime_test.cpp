@@ -40,6 +40,7 @@ using tgcli::core::TdFunctionField;
 using tgcli::core::TdFunctionKind;
 using tgcli::core::TdSendDescriptor;
 using tgcli::core::TdSession;
+using tgcli::core::TdSessionDeviceType;
 using tgcli::core::TdSessions;
 using tgcli::core::TdValue;
 using tgcli::test::ScriptedClient;
@@ -180,14 +181,61 @@ TEST_CASE("TdClient exposes only the dormant session read seam",
     CHECK(sent[1].function.kind() == TdFunctionKind::GetActiveSessions);
     CHECK(sent[1].function.fields().empty());
 
-    TdSession expected_item;
-    expected_item.id = "0";
-    TdSessions expected{.items = {std::move(expected_item)}, .inactive_session_ttl_days = 180};
+    const TdSessions expected{
+        .items =
+            {
+                TdSession{
+                    .id = "-9223372036854775808",
+                    .is_current = true,
+                    .is_password_pending = false,
+                    .is_unconfirmed = true,
+                    .can_accept_secret_chats = false,
+                    .can_accept_calls = true,
+                    .device_type = TdSessionDeviceType::Linux,
+                    .api_id = -1001,
+                    .application_name = "tgcli alpha 🧪",
+                    .application_version = "1.8.65-a",
+                    .is_official_application = false,
+                    .device_model = "workstation-a",
+                    .platform = "Linux-a",
+                    .system_version = "6.8-a",
+                    .log_in_date = "1970-01-01T00:00:01Z",
+                    .last_active_date = "2038-01-19T03:14:07Z",
+                    .ip_address = "203.0.113.7",
+                    .location = "Athens-a",
+                },
+                TdSession{
+                    .id = "9223372036854775807",
+                    .is_current = false,
+                    .is_password_pending = true,
+                    .is_unconfirmed = false,
+                    .can_accept_secret_chats = true,
+                    .can_accept_calls = false,
+                    .device_type = TdSessionDeviceType::Xbox,
+                    .api_id = 2002,
+                    .application_name = "tgcli beta",
+                    .application_version = "1.8.65-b",
+                    .is_official_application = true,
+                    .device_model = "console-b",
+                    .platform = "Xbox-b",
+                    .system_version = "10.0-b",
+                    .log_in_date = "2000-02-29T12:34:56Z",
+                    .last_active_date = "2100-12-31T23:59:59Z",
+                    .ip_address = "2001:db8::2",
+                    .location = "Thessaloniki-b",
+                },
+            },
+        .inactive_session_ttl_days = 366,
+    };
     fake.runtime->push_response(fake.first, sent[1].query_id, TdValue::from(expected));
     REQUIRE(response.wait_for(2s) == std::future_status::ready);
     const auto value = response.get();
     const auto* sessions = value.get_if<TdSessions>();
     REQUIRE(sessions != nullptr);
+    REQUIRE(sessions->items.size() == 2);
+    CHECK(sessions->items[0] == expected.items[0]);
+    CHECK(sessions->items[1] == expected.items[1]);
+    CHECK(sessions->inactive_session_ttl_days == expected.inactive_session_ttl_days);
     CHECK(*sessions == expected);
     CHECK(std::ranges::none_of(fake.runtime->sent_functions(), [](const auto& request) {
         return request.function.kind() == TdFunctionKind::TerminateSession;

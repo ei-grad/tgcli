@@ -63,6 +63,11 @@ add_test(
         "${CMAKE_SOURCE_DIR}/scripts/verify_dependency_lock.py"
         --repo-root "${CMAKE_SOURCE_DIR}")
 add_test(
+    NAME tdlib-session-source-contract
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/scripts/verify_tdlib_session_source_contract.py"
+        --repo-root "${CMAKE_SOURCE_DIR}")
+add_test(
     NAME dependency-lock-enforcement
     COMMAND "${CMAKE_COMMAND}"
         -DREPO_ROOT=${CMAKE_SOURCE_DIR}

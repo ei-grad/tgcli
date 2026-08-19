@@ -1,0 +1,60 @@
+{
+  "assertions": [
+    {
+      "file_sha256": "3176b4c615614610f3766c652e54d296defe61084882f5ab5bc8302db559c1a1",
+      "fragment_sha256": "8c5735c4700a7e9306a20499a50c937fd02b24124d6c6c929b7f11c37755ef01",
+      "id": "reset_authorization_false_resolves_unit",
+      "path": "td/telegram/AccountManager.cpp",
+      "source_lines": [
+        "class ResetAuthorizationQuery final : public Td::ResultHandler {",
+        "  Promise<Unit> promise_;",
+        "",
+        " public:",
+        "  explicit ResetAuthorizationQuery(Promise<Unit> &&promise) : promise_(std::move(promise)) {",
+        "  }",
+        "",
+        "  void send(int64 authorization_id) {",
+        "    send_query(G()->net_query_creator().create(telegram_api::account_resetAuthorization(authorization_id)));",
+        "  }",
+        "",
+        "  void on_result(BufferSlice packet) final {",
+        "    auto result_ptr = fetch_result<telegram_api::account_resetAuthorization>(packet);",
+        "    if (result_ptr.is_error()) {",
+        "      return on_error(result_ptr.move_as_error());",
+        "    }",
+        "",
+        "    bool result = result_ptr.move_as_ok();",
+        "    LOG_IF(WARNING, !result) << \"Failed to terminate session\";",
+        "    promise_.set_value(Unit());",
+        "  }",
+        "",
+        "  void on_error(Status status) final {",
+        "    promise_.set_error(std::move(status));",
+        "  }",
+        "};"
+      ]
+    },
+    {
+      "file_sha256": "7b44e123158f145156934a7f245a7b487c995f125d2fd4eefa676e839d28dec6",
+      "fragment_sha256": "33611c6309ab126885ec3bafde6b450960cac81e69323f08a368e1c492f6391d",
+      "id": "terminate_session_maps_unit_to_public_ok",
+      "path": "td/telegram/Requests.cpp",
+      "source_lines": [
+        "void Requests::on_request(uint64 id, const td_api::terminateSession &request) {",
+        "  CHECK_IS_USER();",
+        "  CREATE_OK_REQUEST_PROMISE();",
+        "  td_->account_manager_->terminate_session(request.session_id_, std::move(promise));",
+        "}"
+      ]
+    }
+  ],
+  "component": {
+    "archive_sha256": "095a2e78ced222bbe4cf934d7a6796db6c13837b45f3c31e0a28df5d273770e7",
+    "generated_source_tree_sha256": "5999031e3cbfe0ebbd95f88b152fe2724df7042beb9e74843feb65b02ca6588d",
+    "id": "tdlib",
+    "immutable_ref": "a17f87c4cff7b90b278d12b91ba0614383aaee82",
+    "source_tree_sha256": "b7b7a35caefdc6d083f42fc8f331344fd6e021bdf30fde7518326303c2bdca35",
+    "version": "1.8.65"
+  },
+  "schema_version": 1
+}

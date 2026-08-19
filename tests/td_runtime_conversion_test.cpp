@@ -625,6 +625,7 @@ TEST_CASE("production session factories retain exact descriptors and native type
         CHECK(std::get<std::int64_t>(*session_id) == id);
         CHECK(detail::production_function_matches_for_test(terminate,
                                                            TdFunctionKind::TerminateSession));
+        CHECK(detail::production_terminate_session_id_for_test(terminate) == id);
         CHECK_FALSE(detail::production_function_matches_for_test(
             terminate, TdFunctionKind::GetActiveSessions));
     }

@@ -979,6 +979,15 @@ bool production_function_matches_for_test(const TdValue& function, TdFunctionKin
     return native != nullptr && *native != nullptr && native_function_matches(**native, kind);
 }
 
+std::optional<std::int64_t> production_terminate_session_id_for_test(const TdValue& function) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::terminateSession::ID) {
+        return std::nullopt;
+    }
+    return static_cast<const td_api::terminateSession&>(**native).session_id_;
+}
+
 std::optional<AuthStateData>
 convert_production_authorization_state_for_test(const TdValue& object,
                                                 bool authorization_state_response) {
