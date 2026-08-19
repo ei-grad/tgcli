@@ -5,6 +5,7 @@
 #include "daemon/daemon_run.hpp"
 #include "daemon/saved_commands.hpp"
 #include "proto/frame.hpp"
+#include "proto/operation.hpp"
 
 #include <array>
 #include <cstdio>
@@ -186,6 +187,26 @@ int report_unsupported_mode(std::string_view argument) {
           {"details", {{"argument", argument}, {"reason", "unsupported_mode"}}}}}};
     std::fputs((rendered.dump() + "\n").c_str(), stderr);
     return tgcli::kUsage;
+}
+
+std::optional<int> validate_idempotency_option(const CLI::Option& option,
+                                               const std::vector<std::string>& command,
+                                               std::string_view key, bool dry_run) {
+    if (option.count() == 0) {
+        return std::nullopt;
+    }
+    if (!tgcli::proto::valid_idempotency_key(key)) {
+        return report_usage("--idempotency-key has invalid syntax", "--idempotency-key");
+    }
+    if (dry_run) {
+        return report_usage("--idempotency-key cannot be combined with --dry-run",
+                            "--idempotency-key", "mutually_exclusive");
+    }
+    if (!tgcli::proto::m3_operation_for_command(command)) {
+        return report_usage("--idempotency-key is not supported for this command",
+                            "--idempotency-key", "unsupported_mode");
+    }
+    return std::nullopt;
 }
 
 std::vector<std::string> selected_command(const CLI::App& app) {
@@ -398,6 +419,7 @@ int run(int argc, char** argv) {
     bool allow_write = false;
     bool yes = false;
     bool dry_run = false;
+    std::string idempotency_key;
     double timeout_seconds = 0.0;
     SavedCliArguments saved;
     CLI::Option* account_option =
@@ -408,6 +430,8 @@ int run(int argc, char** argv) {
     app.add_flag("--allow-write", allow_write, "grant writes for this invocation");
     app.add_flag("--yes", yes, "approve destructive actions non-interactively");
     app.add_flag("--dry-run", dry_run, "validate and print a plan without mutation");
+    CLI::Option* idempotency_key_option = app.add_option("--idempotency-key", idempotency_key,
+                                                         "deduplicate an M3/M4 write invocation");
     app.add_flag("--no-daemon", no_daemon,
                  "run in-process without the daemon (debugging escape hatch)");
     CLI::Option* timeout_option =
@@ -521,8 +545,15 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
+    if (const auto idempotency_exit =
+            validate_idempotency_option(*idempotency_key_option, command, idempotency_key, dry_run);
+        idempotency_exit) {
+        return *idempotency_exit;
+    }
+
     const bool supports_dry_run = command == std::vector<std::string>{"logout"} ||
-                                  command == std::vector<std::string>{"account", "remove"};
+                                  command == std::vector<std::string>{"account", "remove"} ||
+                                  tgcli::proto::m3_operation_for_command(command).has_value();
     if (dry_run && !supports_dry_run) {
         const nlohmann::json rendered{
             {"error",
@@ -535,6 +566,9 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args = nlohmann::json::object();
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
+    if (idempotency_key_option->count() != 0) {
+        request_context.idempotency_key = std::move(idempotency_key);
+    }
     if (command == std::vector<std::string>{"login"}) {
         request_args = {{"qr", login_qr}, {"bot", login_bot}};
     } else if (is_saved_search(command)) {
@@ -574,10 +608,11 @@ int run(int argc, char** argv) {
     options.json = json_output;
     options.no_daemon = no_daemon;
     options.unavailable_route_error = std::move(unavailable_route_error);
+    const bool client_local_dry_run = tgcli::cli::uses_client_local_dry_run(command, dry_run);
     options.auto_spawn =
         command != std::vector<std::string>{"daemon", "status"} &&
-        command != std::vector<std::string>{"daemon", "stop"} && !dry_run && current_config_valid &&
-        !tgcli::cli::is_config_global_command(command) &&
+        command != std::vector<std::string>{"daemon", "stop"} && !client_local_dry_run &&
+        current_config_valid && !tgcli::cli::is_config_global_command(command) &&
         (command != std::vector<std::string>{"account", "remove"} || !keep_session);
     return tgcli::cli::run_command(request, options);
 }

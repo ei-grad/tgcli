@@ -1110,7 +1110,12 @@ TEST_CASE("routed account mismatch is the sole terminal before request admission
 
 TEST_CASE("strict request mutations are connection-scoped malformed frames",
           "[server][proto][account][mutation]") {
-    const TestDaemon daemon({}, true, {}, "main");
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("main", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon([&probe](daemon::Dispatcher& dispatcher) { probe.install(dispatcher); },
+                            false, {}, "main", observer, probe.admission_probe());
+    observations.reset();
     const auto valid = json::parse(proto::serialize(make_request({"version"}, 57, "main")));
     for (const auto& mutate : std::vector<std::function<void(json&)>>{
              [](json& value) { value.erase("account"); },
@@ -1119,7 +1124,16 @@ TEST_CASE("strict request mutations are connection-scoped malformed frames",
              [](json& value) { value["account"] = ""; },
              [](json& value) { value["account"] = std::string(33, 'x'); },
              [](json& value) { value["account"] = "bad.name"; },
-             [](json& value) { value["account"] = "w\xC3\xB6rk"; }}) {
+             [](json& value) { value["account"] = "w\xC3\xB6rk"; },
+             [](json& value) { value["context"].erase("idempotency_key"); },
+             [](json& value) { value["context"]["extra"] = true; },
+             [](json& value) { value["context"]["idempotency_key"] = "raw/key-sentinel"; },
+             [](json& value) { value["context"]["idempotency_key"] = "valid-key"; },
+             [](json& value) {
+                 value["command"] = json::array({"send"});
+                 value["context"]["idempotency_key"] = "valid-key";
+                 value["context"]["dry_run"] = true;
+             }}) {
         auto invalid = valid;
         mutate(invalid);
         const int fd = connect_to(daemon.socket);
@@ -1135,7 +1149,40 @@ TEST_CASE("strict request mutations are connection-scoped malformed frames",
         CHECK(error->id == 0);
         CHECK(error->code == "USAGE");
         CHECK(error->details == json::object());
+        CHECK(error->message.find("raw/key-sentinel") == std::string::npos);
         check_eof(reader);
+        check_request_observations(observations, 0);
+        ::close(fd);
+    }
+}
+
+TEST_CASE("strict Hello mutations are connection-scoped before every request observation",
+          "[server][proto][protocol-v3][mutation]") {
+    RequestObservationCounters observations;
+    RoutedAccountProbe probe("main", observations);
+    const auto observer = observations.observer();
+    const TestDaemon daemon([&probe](daemon::Dispatcher& dispatcher) { probe.install(dispatcher); },
+                            false, {}, "main", observer, probe.admission_probe());
+    observations.reset();
+    const auto valid =
+        json::parse(proto::serialize(proto::Hello{"9.9.9", proto::kProtocolVersion}));
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value.erase("binary_version"); },
+             [](json& value) { value.erase("protocol_version"); },
+             [](json& value) { value["extra"] = nullptr; }}) {
+        auto invalid = valid;
+        mutate(invalid);
+        const int fd = connect_to(daemon.socket);
+        proto::FrameReader reader(fd);
+        read_frame(reader);
+        send_line(fd, invalid.dump());
+
+        const auto terminal = std::get<proto::Error>(read_frame(reader));
+        CHECK(terminal.id == 0);
+        CHECK(terminal.code == "USAGE");
+        CHECK(terminal.details == json::object());
+        check_eof(reader);
+        check_request_observations(observations, 0);
         ::close(fd);
     }
 }

@@ -2,6 +2,7 @@
 
 #include "daemon/request_observer.hpp"
 #include "proto/frame.hpp"
+#include "proto/operation.hpp"
 
 #include <functional>
 #include <map>
@@ -23,28 +24,7 @@ class RequestSession;
 // dispatcher fails every non-Read command closed.
 enum class Tier { Read, Write, Destructive };
 
-// Canonical M3/M4 operation identities. Their enumerator values are process-
-// local only; persistent and wire contracts use the names returned by the
-// policy registry.
-enum class M3Operation {
-    Send,
-    MsgEdit,
-    MsgDelete,
-    MsgForward,
-    MsgReact,
-    MsgPin,
-    MsgUnpin,
-    ChatMarkRead,
-    ChatMute,
-    ChatUnmute,
-    ChatPin,
-    ChatUnpin,
-    ChatArchive,
-    ChatUnarchive,
-    ChatJoin,
-    ChatLeave,
-    SavedAttach,
-};
+using M3Operation = proto::M3Operation;
 
 enum class M3BotPolicy { Allowed, ImmediateOnly, UserOnly };
 enum class M3ScheduleKind { None, At, Online };

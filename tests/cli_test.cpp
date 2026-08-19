@@ -19,6 +19,7 @@
 #include "daemon/server.hpp"
 #include "proto/frame.hpp"
 #include "proto/frame_io.hpp"
+#include "proto/operation.hpp"
 #include "schema_matcher.hpp"
 #include "support/scripted_td_runtime.hpp"
 
@@ -492,9 +493,95 @@ proto::Frame read_fixture_frame(proto::FrameReader& reader) {
     return std::move(*frame);
 }
 
-void write_fixture_frame(int fd, const proto::Frame& frame) {
+bool exact_json_fields(const json& value, std::initializer_list<std::string_view> fields) {
+    if (!value.is_object() || value.size() != fields.size()) {
+        return false;
+    }
+    return std::all_of(fields.begin(), fields.end(), [&value](std::string_view field) {
+        return value.contains(std::string(field));
+    });
+}
+
+json raw_hello(std::string_view binary_version, int protocol_version) {
+    return {{"type", "hello"},
+            {"binary_version", binary_version},
+            {"protocol_version", protocol_version}};
+}
+
+json raw_request_dialect(int protocol_version, std::uint64_t id,
+                         const std::vector<std::string>& command) {
+    json context{
+        {"tty", false},       {"json", true}, {"yes", false},         {"dry_run", false},
+        {"timeout", nullptr}, {"cwd", "/"},   {"media_dir", nullptr}, {"write_authority", "unset"}};
+    if (protocol_version >= 3) {
+        context["idempotency_key"] = nullptr;
+    }
+    json request{{"type", "request"},
+                 {"id", id},
+                 {"command", command},
+                 {"args", json::object()},
+                 {"context", std::move(context)}};
+    if (protocol_version >= 2) {
+        request["account"] = "main";
+    }
+    return request;
+}
+
+std::vector<std::string> command_parts(std::string_view command_path) {
+    std::vector<std::string> parts;
+    while (!command_path.empty()) {
+        const auto separator = command_path.find(' ');
+        parts.emplace_back(command_path.substr(0, separator));
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        command_path.remove_prefix(separator + 1);
+    }
+    return parts;
+}
+
+bool valid_raw_request_dialect(const json& request, int protocol_version, std::uint64_t id,
+                               const std::vector<std::string>& command) {
+    const bool request_fields =
+        protocol_version == 1
+            ? exact_json_fields(request, {"type", "id", "command", "args", "context"})
+            : exact_json_fields(request, {"type", "id", "account", "command", "args", "context"});
+    if (!request_fields || request.value("type", "") != "request" || !request.contains("id") ||
+        !request["id"].is_number_unsigned() || request["id"].get<std::uint64_t>() != id ||
+        request.value("command", json::array()) != command || !request.contains("args") ||
+        request["args"] != json::object() ||
+        (protocol_version >= 2 && request.value("account", "") != "main") ||
+        !request.contains("context")) {
+        return false;
+    }
+    const auto& context = request["context"];
+    return protocol_version >= 3
+               ? exact_json_fields(context, {"tty", "json", "yes", "dry_run", "timeout", "cwd",
+                                             "media_dir", "write_authority", "idempotency_key"}) &&
+                     context["idempotency_key"].is_null()
+               : exact_json_fields(context, {"tty", "json", "yes", "dry_run", "timeout", "cwd",
+                                             "media_dir", "write_authority"});
+}
+
+json read_fixture_json(proto::FrameReader& reader) {
     std::string error;
-    REQUIRE(proto::write_frame(fd, frame, error));
+    const auto line =
+        reader.read_line_until(std::chrono::steady_clock::now() + std::chrono::seconds(3), error);
+    INFO(error);
+    REQUIRE(line.has_value());
+    auto document = json::parse(*line, nullptr, false);
+    REQUIRE_FALSE(document.is_discarded());
+    return document;
+}
+
+void write_fixture_json(int fd, const json& document) {
+    const std::string line = document.dump() + '\n';
+    std::size_t offset = 0;
+    while (offset < line.size()) {
+        const auto count = ::write(fd, line.data() + offset, line.size() - offset);
+        REQUIRE(count > 0);
+        offset += static_cast<std::size_t>(count);
+    }
 }
 
 void check_fixture_eof(proto::FrameReader& reader) {
@@ -676,6 +763,217 @@ class ChildProtocolDaemon {
     pid_t pid_ = -1;
 };
 
+enum class RawProtocolDaemonMode { MismatchOwner, Replacement };
+
+class ChildLegacyReplacementDaemon {
+  public:
+    ChildLegacyReplacementDaemon(int protocol_version, std::string binary_version,
+                                 RawProtocolDaemonMode mode = RawProtocolDaemonMode::Replacement)
+        : protocol_version_(protocol_version), binary_version_(std::move(binary_version)),
+          mode_(mode) {
+        prepare_account_layout();
+        std::array<int, 2> ready_fds{-1, -1};
+        REQUIRE(::pipe(ready_fds.data()) == 0);
+        pid_ = ::fork();
+        REQUIRE(pid_ >= 0);
+        if (pid_ == 0) {
+            ::signal(SIGTERM, SIG_DFL);
+            ::signal(SIGPIPE, SIG_IGN);
+            ::close(ready_fds[0]);
+            run_child(ready_fds[1], protocol_version_, binary_version_, mode_);
+        }
+        ::close(ready_fds[1]);
+        char ready = 0;
+        ssize_t count = -1;
+        do {
+            count = ::read(ready_fds[0], &ready, 1);
+        } while (count < 0 && errno == EINTR);
+        ::close(ready_fds[0]);
+        if (count != 1 || ready != '1') {
+            reap_blocking();
+        }
+        REQUIRE(pid_ > 0);
+    }
+
+    ChildLegacyReplacementDaemon(const ChildLegacyReplacementDaemon&) = delete;
+    ChildLegacyReplacementDaemon& operator=(const ChildLegacyReplacementDaemon&) = delete;
+    ChildLegacyReplacementDaemon(ChildLegacyReplacementDaemon&&) = delete;
+    ChildLegacyReplacementDaemon& operator=(ChildLegacyReplacementDaemon&&) = delete;
+
+    ~ChildLegacyReplacementDaemon() {
+        terminate();
+    }
+
+    int wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return -1;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        int status = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
+            if (waited == pid_) {
+                pid_ = -1;
+                return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            if (waited < 0 && errno != EINTR) {
+                pid_ = -1;
+                return -1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return -1;
+    }
+
+  private:
+    static bool read_json(proto::FrameReader& reader, json& document) {
+        std::string error;
+        const auto line = reader.read_line_until(
+            std::chrono::steady_clock::now() + std::chrono::seconds(3), error);
+        if (!line) {
+            return false;
+        }
+        document = json::parse(*line, nullptr, false);
+        return !document.is_discarded();
+    }
+
+    [[noreturn]] static void run_child(int ready_fd, int protocol_version,
+                                       const std::string& binary_version,
+                                       RawProtocolDaemonMode mode) {
+        const auto env = paths::real_environment();
+        std::string error;
+        const auto socket_path = paths::socket_path("main", env, error);
+        const auto control_path = paths::control_socket_path("main", env, error);
+        const std::string state_dir = paths::account_state_dir("main", env);
+        daemon_lock::Identity identity;
+        const int lock_fd = daemon_lock::acquire(state_dir + "/daemon.lock", identity, error);
+        if (lock_fd < 0 || !socket_path || !control_path) {
+            exit_child_startup_failure(ready_fd, 2);
+        }
+        auto main = bind_private_endpoint(*socket_path, SOCK_STREAM, error);
+        auto control = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
+        if (!main || !control) {
+            exit_child_startup_failure(ready_fd, 3);
+        }
+        report_child_ready_or_exit(ready_fd);
+        ::close(ready_fd);
+
+        int connection = -1;
+        do {
+            connection = net::accept_cloexec(main->fd);
+        } while (connection < 0 && errno == EINTR);
+        bool valid = connection >= 0;
+        if (valid) {
+            valid = proto::write_frame(connection, proto::Hello{binary_version, protocol_version},
+                                       error);
+        }
+        proto::FrameReader reader(connection);
+        json client_hello;
+        if (valid) {
+            const int expected_protocol = mode == RawProtocolDaemonMode::MismatchOwner
+                                              ? proto::kProtocolVersion
+                                              : protocol_version;
+            const std::string_view expected_binary = mode == RawProtocolDaemonMode::MismatchOwner
+                                                         ? std::string_view{kVersion}
+                                                         : std::string_view{binary_version};
+            valid =
+                read_json(reader, client_hello) &&
+                exact_json_fields(client_hello, {"type", "binary_version", "protocol_version"}) &&
+                client_hello.value("type", "") == "hello" &&
+                client_hello.value("binary_version", "") == expected_binary &&
+                client_hello.value("protocol_version", 0) == expected_protocol;
+        }
+        std::array<char, 256> token{};
+        ssize_t count = -1;
+        if (mode == RawProtocolDaemonMode::Replacement) {
+            json original;
+            if (valid) {
+                valid = read_json(reader, original) &&
+                        valid_raw_request_dialect(original, protocol_version, 61, {"version"});
+            }
+            if (valid) {
+                valid = proto::write_frame(connection,
+                                           proto::Result{61,
+                                                         {{"version", binary_version},
+                                                          {"protocol", protocol_version},
+                                                          {"tdlib", "legacy-test"}}},
+                                           error);
+            }
+            do {
+                count = ::recv(control->fd, token.data(), token.size(), 0);
+            } while (count < 0 && errno == EINTR);
+        } else {
+            bool stopped = false;
+            while (!stopped) {
+                std::array<pollfd, 2> descriptors{
+                    {{connection, POLLIN, 0}, {control->fd, POLLIN, 0}}};
+                const int polled = ::poll(descriptors.data(), descriptors.size(), 3000);
+                if (polled < 0 && errno == EINTR) {
+                    continue;
+                }
+                if (polled <= 0) {
+                    valid = false;
+                    break;
+                }
+                if ((descriptors[0].revents & POLLIN) != 0) {
+                    std::array<char, 256> unexpected{};
+                    const auto received =
+                        ::recv(connection, unexpected.data(), unexpected.size(), MSG_DONTWAIT);
+                    if (received > 0) {
+                        valid = false;
+                    }
+                }
+                if ((descriptors[1].revents & POLLIN) != 0) {
+                    count = ::recv(control->fd, token.data(), token.size(), 0);
+                    stopped = true;
+                }
+            }
+        }
+        valid =
+            valid && count == static_cast<ssize_t>(identity.control_token.size()) &&
+            std::equal(identity.control_token.begin(), identity.control_token.end(), token.begin());
+
+        if (connection >= 0) {
+            ::shutdown(connection, SHUT_RDWR);
+            ::close(connection);
+        }
+        ::close(main->fd);
+        ::close(control->fd);
+        paths::unlink_socket_endpoint_if_same(*socket_path, main->identity);
+        paths::unlink_socket_endpoint_if_same(*control_path, control->identity);
+        ::close(lock_fd);
+        ::_exit(valid ? 0 : 5);
+    }
+
+    void reap_blocking() {
+        if (pid_ <= 0) {
+            return;
+        }
+        int status = 0;
+        while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+        }
+        pid_ = -1;
+    }
+
+    void terminate() {
+        if (pid_ <= 0) {
+            return;
+        }
+        int status = 0;
+        if (::waitpid(pid_, &status, WNOHANG) == 0) {
+            ::kill(pid_, SIGTERM);
+            while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+            }
+        }
+        pid_ = -1;
+    }
+
+    int protocol_version_ = 0;
+    std::string binary_version_;
+    RawProtocolDaemonMode mode_ = RawProtocolDaemonMode::Replacement;
+    pid_t pid_ = -1;
+};
+
 class ChildBinaryRaceDaemon {
   public:
     ChildBinaryRaceDaemon() {
@@ -753,7 +1051,8 @@ class ChildBinaryRaceDaemon {
         const auto stop = proto::parse(*stop_line, parse_error);
         const auto* request = stop ? std::get_if<proto::Request>(&*stop) : nullptr;
         return request != nullptr && request->account == "main" &&
-               request->command == std::vector<std::string>{"daemon", "stop"};
+               request->command == std::vector<std::string>{"daemon", "stop"} &&
+               !request->context.idempotency_key.has_value();
     }
 
     [[noreturn]] static void run_child(int ready_fd) {
@@ -1574,6 +1873,18 @@ void stop_current_daemon(const IsolatedEnv& env) {
 
 } // namespace
 
+TEST_CASE("only M1 logout and removal dry-runs suppress daemon autospawn",
+          "[cli][dry-run][protocol-v3]") {
+    CHECK_FALSE(cli::uses_client_local_dry_run({"logout"}, false));
+    CHECK(cli::uses_client_local_dry_run({"logout"}, true));
+    CHECK(cli::uses_client_local_dry_run({"account", "remove"}, true));
+    CHECK_FALSE(cli::uses_client_local_dry_run({"version"}, true));
+    for (const auto& identity : proto::m3_operation_identities()) {
+        INFO(identity.command_path);
+        CHECK_FALSE(cli::uses_client_local_dry_run(command_parts(identity.command_path), true));
+    }
+}
+
 TEST_CASE("invalid TGCLI_TEST_DC is a narrow process-level usage error", "[cli][process]") {
     const IsolatedEnv env;
     const std::string output_path = env.root() + "/invalid-test-dc.out";
@@ -2190,26 +2501,31 @@ TEST_CASE("unlocked daemon identity records are validated before absent classifi
     }
 }
 
-TEST_CASE("daemon status reports compatible and parseable mismatched frozen owner facts",
-          "[cli][daemon-control][schema]") {
-    const IsolatedEnv env;
-    const ChildProtocolDaemon old_daemon;
+TEST_CASE("daemon status reports verified v1 and v2 owner facts without replacement",
+          "[cli][daemon-control][protocol-v1][protocol-v2][schema]") {
+    for (const int old_protocol : {1, 2}) {
+        DYNAMIC_SECTION("protocol " << old_protocol) {
+            const IsolatedEnv env;
+            const ChildProtocolDaemon old_daemon(
+                {.protocol_version = old_protocol, .binary_version = "old-test-binary"});
 
-    cli::RunOptions options;
-    options.json = true;
-    options.auto_spawn = false;
-    options.restart_timeout = std::chrono::seconds(2);
-    const auto status = run_captured({"daemon", "status"}, options, env);
+            cli::RunOptions options;
+            options.json = true;
+            options.auto_spawn = false;
+            options.restart_timeout = std::chrono::seconds(2);
+            const auto status = run_captured({"daemon", "status"}, options, env);
 
-    REQUIRE(status.exit_code == kOk);
-    CHECK(status.err.empty());
-    const auto data = json::parse(status.out);
-    CHECK(data["running"] == true);
-    CHECK(data["pid"] == old_daemon.pid());
-    CHECK(data["version"] == "old-test-binary");
-    CHECK(data["protocol"] == proto::kProtocolVersion + 1);
-    CHECK_THAT(data, test::matches_json_schema("daemon-status.result.schema.json"));
-    CHECK(old_daemon.running());
+            REQUIRE(status.exit_code == kOk);
+            CHECK(status.err.empty());
+            const auto data = json::parse(status.out);
+            CHECK(data["running"] == true);
+            CHECK(data["pid"] == old_daemon.pid());
+            CHECK(data["version"] == "old-test-binary");
+            CHECK(data["protocol"] == old_protocol);
+            CHECK_THAT(data, test::matches_json_schema("daemon-status.result.schema.json"));
+            CHECK(old_daemon.running());
+        }
+    }
 }
 
 TEST_CASE("daemon status fails closed on an unparseable Hello without stopping the owner",
@@ -2528,151 +2844,118 @@ TEST_CASE("write_frame to a closed peer reports an error instead of dying", "[cl
     ::close(fds[0]);
 }
 
-TEST_CASE("protocol mismatch stops the verified daemon, spawns, and re-handshakes",
-          "[cli][process][tdlib]") {
-    const IsolatedEnv env;
-    ChildProtocolDaemon old_daemon;
+TEST_CASE("v3 client replaces verified v1 and v2 daemons for both binary cases",
+          "[cli][restart][protocol-v1][protocol-v2][protocol-v3][process][tdlib]") {
+    for (const int old_protocol : {1, 2}) {
+        for (const std::string_view old_binary :
+             {std::string_view{kVersion}, std::string_view{"old-test-binary"}}) {
+            DYNAMIC_SECTION("protocol " << old_protocol << ", binary " << old_binary) {
+                const IsolatedEnv env;
+                ChildLegacyReplacementDaemon old_daemon(old_protocol, std::string(old_binary),
+                                                        RawProtocolDaemonMode::MismatchOwner);
 
-    cli::RunOptions options;
-    options.json = true;
-    options.daemon_executable = TGCLI_TEST_BINARY;
-    const auto result = run_captured({"version"}, options, env);
+                cli::RunOptions options;
+                options.json = true;
+                options.daemon_executable = TGCLI_TEST_BINARY;
+                options.restart_timeout = std::chrono::seconds(5);
+                const auto result = run_captured({"version"}, options, env);
 
-    CHECK(result.exit_code == kOk);
-    CHECK(result.err.empty());
-    const auto data = json::parse(result.out);
-    CHECK(data["version"] == kVersion);
-    CHECK(data["protocol"] == proto::kProtocolVersion);
-    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
-    stop_current_daemon(env);
+                INFO(result.err);
+                REQUIRE(result.exit_code == kOk);
+                CHECK(result.err.empty());
+                const auto data = json::parse(result.out);
+                CHECK(data["version"] == kVersion);
+                CHECK(data["protocol"] == 3);
+                CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+                stop_current_daemon(env);
+            }
+        }
+    }
 }
 
-TEST_CASE("v2 client recovers a v1 daemon through control with unequal binary versions",
-          "[cli][restart][protocol-v1][process][tdlib]") {
-    const IsolatedEnv env;
-    ChildProtocolDaemon old_daemon({.protocol_version = 1, .binary_version = "old-test-binary"});
+TEST_CASE("v1 and v2 raw clients replace a verified v3 daemon for both binary cases",
+          "[cli][restart][protocol-v1][protocol-v2][protocol-v3][process]") {
+    for (const int client_protocol : {1, 2}) {
+        for (const std::string_view client_binary :
+             {std::string_view{kVersion}, std::string_view{"legacy-client-binary"}}) {
+            DYNAMIC_SECTION("protocol " << client_protocol << ", binary " << client_binary) {
+                const IsolatedEnv env;
+                ChildDaemonOptions old_options;
+                old_options.require_no_dispatch = true;
+                old_options.protocol_version = 3;
+                old_options.binary_version = std::string(kVersion);
+                ChildProtocolDaemon old_daemon(old_options);
 
-    cli::RunOptions options;
-    options.json = true;
-    options.daemon_executable = TGCLI_TEST_BINARY;
-    options.restart_timeout = std::chrono::seconds(3);
-    const auto result = run_captured({"version"}, options, env);
+                const auto real_env = paths::real_environment();
+                std::string error;
+                const auto socket_path = paths::socket_path("main", real_env, error);
+                const auto control_path = paths::control_socket_path("main", real_env, error);
+                REQUIRE(socket_path.has_value());
+                REQUIRE(control_path.has_value());
+                const std::string lock_path =
+                    paths::account_state_dir("main", real_env) + "/daemon.lock";
+                auto owner = daemon_lock::verify_owner(lock_path, real_env.uid, error);
+                INFO(error);
+                REQUIRE(owner.has_value());
+                const auto main_identity =
+                    paths::inspect_socket_endpoint(*socket_path, real_env.uid, error);
+                const auto control_identity =
+                    paths::inspect_socket_endpoint(*control_path, real_env.uid, error);
+                REQUIRE(main_identity.has_value());
+                REQUIRE(control_identity.has_value());
 
-    INFO(result.err);
-    REQUIRE(result.exit_code == kOk);
-    CHECK(result.err.empty());
-    CHECK(json::parse(result.out)["protocol"] == 2);
-    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
-    stop_current_daemon(env);
-}
+                const int legacy_fd = connect_fixture_socket(*socket_path);
+                proto::FrameReader legacy_reader(legacy_fd);
+                const auto old_hello = read_fixture_json(legacy_reader);
+                CHECK(exact_json_fields(old_hello, {"type", "binary_version", "protocol_version"}));
+                CHECK(old_hello["protocol_version"] == 3);
+                write_fixture_json(legacy_fd, raw_hello(client_binary, client_protocol));
+                const auto mismatch = std::get<proto::Error>(read_fixture_frame(legacy_reader));
+                CHECK(mismatch.id == 0);
+                CHECK(mismatch.code == "PROTOCOL_MISMATCH");
+                check_fixture_eof(legacy_reader);
+                ::close(legacy_fd);
 
-TEST_CASE("v2 client recovers a v1 daemon through control with equal binary versions",
-          "[cli][restart][protocol-v1][process][tdlib]") {
-    const IsolatedEnv env;
-    ChildProtocolDaemon old_daemon(
-        {.protocol_version = 1, .binary_version = std::string(kVersion)});
+                send_control_token(*control_path, owner->identity().control_token);
+                CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
 
-    cli::RunOptions options;
-    options.json = true;
-    options.daemon_executable = TGCLI_TEST_BINARY;
-    options.restart_timeout = std::chrono::seconds(3);
-    const auto result = run_captured({"version"}, options, env);
+                bool lock_released = false;
+                REQUIRE(owner->owner_released(lock_released, error));
+                CHECK(lock_released);
+                bool main_changed = false;
+                bool control_changed = false;
+                REQUIRE(paths::socket_endpoint_changed(*socket_path, real_env.uid, *main_identity,
+                                                       main_changed, error));
+                REQUIRE(paths::socket_endpoint_changed(*control_path, real_env.uid,
+                                                       *control_identity, control_changed, error));
+                CHECK(main_changed);
+                CHECK(control_changed);
+                CHECK(::access(socket_path->c_str(), F_OK) != 0);
+                CHECK(::access(control_path->c_str(), F_OK) != 0);
 
-    INFO(result.err);
-    REQUIRE(result.exit_code == kOk);
-    CHECK(result.err.empty());
-    CHECK(json::parse(result.out)["protocol"] == 2);
-    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
-    stop_current_daemon(env);
-}
+                ChildLegacyReplacementDaemon replacement(client_protocol,
+                                                         std::string(client_binary));
+                auto replacement_owner = daemon_lock::verify_owner(lock_path, real_env.uid, error);
+                REQUIRE(replacement_owner.has_value());
+                const int replacement_fd = connect_fixture_socket(*socket_path);
+                proto::FrameReader replacement_reader(replacement_fd);
+                const auto replacement_hello = read_fixture_json(replacement_reader);
+                CHECK(replacement_hello == raw_hello(client_binary, client_protocol));
+                write_fixture_json(replacement_fd, raw_hello(client_binary, client_protocol));
+                const auto original = raw_request_dialect(client_protocol, 61, {"version"});
+                CHECK(valid_raw_request_dialect(original, client_protocol, 61, {"version"}));
+                CHECK(original.size() == (client_protocol == 1 ? 5 : 6));
+                CHECK(original["context"].size() == 8);
+                write_fixture_json(replacement_fd, original);
+                const auto retried = read_fixture_json(replacement_reader);
+                CHECK(exact_json_fields(retried, {"type", "id", "data"}));
+                CHECK(retried["id"] == 61);
+                CHECK(retried["data"]["protocol"] == client_protocol);
+                ::close(replacement_fd);
 
-TEST_CASE("v1 client replaces a v2 daemon through frozen control for both binary cases",
-          "[cli][restart][protocol-v1][protocol-v2][process]") {
-    const IsolatedEnv env;
-    for (const std::string_view client_binary :
-         {std::string_view{kVersion}, std::string_view{"legacy-client-binary"}}) {
-        DYNAMIC_SECTION(client_binary) {
-            ChildDaemonOptions old_options;
-            old_options.require_no_dispatch = true;
-            old_options.protocol_version = proto::kProtocolVersion;
-            old_options.binary_version = std::string(kVersion);
-            ChildProtocolDaemon old_daemon(old_options);
-
-            const auto real_env = paths::real_environment();
-            std::string error;
-            const auto socket_path = paths::socket_path("main", real_env, error);
-            const auto control_path = paths::control_socket_path("main", real_env, error);
-            REQUIRE(socket_path.has_value());
-            REQUIRE(control_path.has_value());
-            const std::string lock_path =
-                paths::account_state_dir("main", real_env) + "/daemon.lock";
-            auto owner = daemon_lock::verify_owner(lock_path, real_env.uid, error);
-            INFO(error);
-            REQUIRE(owner.has_value());
-            const auto main_identity =
-                paths::inspect_socket_endpoint(*socket_path, real_env.uid, error);
-            const auto control_identity =
-                paths::inspect_socket_endpoint(*control_path, real_env.uid, error);
-            REQUIRE(main_identity.has_value());
-            REQUIRE(control_identity.has_value());
-
-            const int legacy_fd = connect_fixture_socket(*socket_path);
-            proto::FrameReader legacy_reader(legacy_fd);
-            const auto old_hello = std::get<proto::Hello>(read_fixture_frame(legacy_reader));
-            CHECK(old_hello.protocol_version == 2);
-            write_fixture_frame(legacy_fd, proto::Hello{std::string(client_binary), 1});
-            const auto mismatch = std::get<proto::Error>(read_fixture_frame(legacy_reader));
-            CHECK(mismatch.id == 0);
-            CHECK(mismatch.code == "PROTOCOL_MISMATCH");
-            check_fixture_eof(legacy_reader);
-            ::close(legacy_fd);
-
-            send_control_token(*control_path, owner->identity().control_token);
-            CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
-
-            bool lock_released = false;
-            REQUIRE(owner->owner_released(lock_released, error));
-            CHECK(lock_released);
-            bool main_changed = false;
-            bool control_changed = false;
-            REQUIRE(paths::socket_endpoint_changed(*socket_path, real_env.uid, *main_identity,
-                                                   main_changed, error));
-            REQUIRE(paths::socket_endpoint_changed(*control_path, real_env.uid, *control_identity,
-                                                   control_changed, error));
-            CHECK(main_changed);
-            CHECK(control_changed);
-            CHECK(::access(socket_path->c_str(), F_OK) != 0);
-            CHECK(::access(control_path->c_str(), F_OK) != 0);
-            std::optional<daemon_lock::OwnerWatch> replacement_owner;
-            CHECK(daemon_lock::inspect_owner(lock_path, real_env.uid, replacement_owner, error) ==
-                  daemon_lock::OwnerStatus::Released);
-
-            ChildDaemonOptions replacement_options;
-            replacement_options.protocol_version = proto::kProtocolVersion;
-            replacement_options.binary_version = std::string(kVersion);
-            ChildProtocolDaemon replacement(replacement_options);
-            const int current_fd = connect_fixture_socket(*socket_path);
-            proto::FrameReader current_reader(current_fd);
-            const auto current_hello = std::get<proto::Hello>(read_fixture_frame(current_reader));
-            CHECK(current_hello.protocol_version == 2);
-            write_fixture_frame(current_fd, proto::Hello{kVersion, proto::kProtocolVersion});
-            proto::Request original("main");
-            original.id = 61;
-            original.command = {"version"};
-            original.context.cwd = "/";
-            write_fixture_frame(current_fd, original);
-            const auto retried = std::get<proto::Result>(read_fixture_frame(current_reader));
-            CHECK(retried.id == 61);
-            CHECK(retried.data["protocol"] == 2);
-
-            proto::Request stop("main");
-            stop.id = 62;
-            stop.command = {"daemon", "stop"};
-            stop.context.cwd = "/";
-            write_fixture_frame(current_fd, stop);
-            CHECK(std::get<proto::Result>(read_fixture_frame(current_reader)).id == 62);
-            ::close(current_fd);
-            CHECK(replacement.wait_for_exit(std::chrono::seconds(2)) == 0);
+                send_control_token(*control_path, replacement_owner->identity().control_token);
+                CHECK(replacement.wait_for_exit(std::chrono::seconds(2)) == 0);
+            }
         }
     }
 }
@@ -2703,30 +2986,34 @@ TEST_CASE("daemon stop succeeds after verified binary-mismatch shutdown",
     CHECK(::access(socket_path->c_str(), F_OK) != 0);
 }
 
-TEST_CASE("daemon stop succeeds after verified protocol-incompatible shutdown",
-          "[cli][process][restart][schema]") {
-    const IsolatedEnv env;
-    ChildProtocolDaemon old_daemon;
+TEST_CASE("daemon stop uses frozen control for verified v1 and v2 owners without spawning",
+          "[cli][process][protocol-v1][protocol-v2][schema]") {
+    for (const int old_protocol : {1, 2}) {
+        DYNAMIC_SECTION("protocol " << old_protocol) {
+            const IsolatedEnv env;
+            ChildProtocolDaemon old_daemon({.protocol_version = old_protocol});
 
-    cli::RunOptions options;
-    options.json = true;
-    options.auto_spawn = false;
-    options.restart_timeout = std::chrono::seconds(3);
-    const auto result = run_captured({"daemon", "stop"}, options, env);
+            cli::RunOptions options;
+            options.json = true;
+            options.auto_spawn = false;
+            options.restart_timeout = std::chrono::seconds(3);
+            const auto result = run_captured({"daemon", "stop"}, options, env);
 
-    INFO(result.err);
-    REQUIRE(result.exit_code == kOk);
-    CHECK(result.err.empty());
-    const auto data = json::parse(result.out);
-    CHECK(data == json{{"stopping", true}});
-    CHECK_THAT(data, test::matches_json_schema("daemon-stop.result.schema.json"));
-    CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
+            INFO(result.err);
+            REQUIRE(result.exit_code == kOk);
+            CHECK(result.err.empty());
+            const auto data = json::parse(result.out);
+            CHECK(data == json{{"stopping", true}});
+            CHECK_THAT(data, test::matches_json_schema("daemon-stop.result.schema.json"));
+            CHECK(old_daemon.wait_for_exit(std::chrono::seconds(2)) == 0);
 
-    const auto real_env = paths::real_environment();
-    std::string path_error;
-    const auto socket_path = paths::socket_path("main", real_env, path_error);
-    REQUIRE(socket_path.has_value());
-    CHECK(::access(socket_path->c_str(), F_OK) != 0);
+            const auto real_env = paths::real_environment();
+            std::string path_error;
+            const auto socket_path = paths::socket_path("main", real_env, path_error);
+            REQUIRE(socket_path.has_value());
+            CHECK(::access(socket_path->c_str(), F_OK) != 0);
+        }
+    }
 }
 
 TEST_CASE("daemon stop uses the frozen control surface for an unparseable Hello",

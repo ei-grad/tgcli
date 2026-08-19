@@ -31,10 +31,11 @@ namespace {
 struct Outcome {
     std::optional<json> result;
     std::optional<std::string> error_code;
+    std::optional<json> error_details;
     int exit_code = -1;
 };
 
-Outcome dispatch(const daemon::Dispatcher& dispatcher, const std::vector<std::string>& command) {
+Outcome dispatch_request(const daemon::Dispatcher& dispatcher, const proto::Request& request) {
     Outcome outcome;
     daemon::CallbackSink sink(
         [](const json&) {}, [](const json&) {},
@@ -42,15 +43,20 @@ Outcome dispatch(const daemon::Dispatcher& dispatcher, const std::vector<std::st
             outcome.result = std::move(data);
             outcome.exit_code = kOk;
         },
-        [&outcome](std::string code, const std::string&, const json&, int exit_code) {
+        [&outcome](std::string code, const std::string&, json details, int exit_code) {
             outcome.error_code = std::move(code);
+            outcome.error_details = std::move(details);
             outcome.exit_code = exit_code;
         });
+    dispatcher.dispatch(request, sink);
+    return outcome;
+}
+
+Outcome dispatch(const daemon::Dispatcher& dispatcher, const std::vector<std::string>& command) {
     proto::Request request("testacct");
     request.id = 1;
     request.command = command;
-    dispatcher.dispatch(request, sink);
-    return outcome;
+    return dispatch_request(dispatcher, request);
 }
 
 daemon::DaemonContext test_context() {
@@ -259,7 +265,9 @@ TEST_CASE("M3 operation registry is closed and has exact tier and bot policy",
     };
 
     const auto policies = daemon::m3_operation_policies();
+    const auto identities = proto::m3_operation_identities();
     REQUIRE(policies.size() == expected.size());
+    REQUIRE(identities.size() == expected.size());
     std::set<std::string_view> canonical_names;
     std::set<std::string_view> command_paths;
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -270,6 +278,9 @@ TEST_CASE("M3 operation registry is closed and has exact tier and bot policy",
         CHECK(actual.command_path == wanted.command_path);
         CHECK(actual.tier == wanted.tier);
         CHECK(actual.bot_policy == wanted.bot_policy);
+        CHECK(identities[index].operation == actual.operation);
+        CHECK(identities[index].canonical_name == actual.canonical_name);
+        CHECK(identities[index].command_path == actual.command_path);
         CHECK(canonical_names.emplace(actual.canonical_name).second);
         CHECK(command_paths.emplace(actual.command_path).second);
 
@@ -340,6 +351,53 @@ TEST_CASE("dormant M6 session functions do not extend or activate the M3 command
         CHECK(outcome.exit_code == kUsage);
         CHECK_FALSE(outcome.result.has_value());
     }
+}
+
+TEST_CASE("dispatcher independently rejects invalid or out-of-scope raw idempotency keys",
+          "[dispatch][m3][idempotency][safety]") {
+    daemon::Dispatcher dispatcher;
+    dispatcher.register_command(
+        "version", {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {
+                        session.result({{"ok", true}});
+                    }});
+
+    proto::Request invalid("testacct");
+    invalid.command = {"version"};
+    invalid.context.idempotency_key = "raw/key";
+    auto outcome = dispatch_request(dispatcher, invalid);
+    CHECK(outcome.error_code == "USAGE");
+    CHECK(outcome.error_details ==
+          json{{"argument", "--idempotency-key"}, {"reason", "invalid_argument"}});
+
+    invalid.context.idempotency_key = "valid-key";
+    outcome = dispatch_request(dispatcher, invalid);
+    CHECK(outcome.error_code == "USAGE");
+    CHECK(outcome.error_details ==
+          json{{"argument", "--idempotency-key"}, {"reason", "unsupported_mode"}});
+
+    daemon::Dispatcher m3;
+    bool handler_ran = false;
+    m3.register_command("send",
+                        {daemon::Tier::Write,
+                         [&handler_ran](const proto::Request&, daemon::RequestSession& session) {
+                             handler_ran = true;
+                             session.result(json::object());
+                         },
+                         false, daemon::M3Operation::Send});
+    proto::Request dry_run("testacct");
+    dry_run.command = {"send"};
+    dry_run.context.idempotency_key = "valid-key";
+    dry_run.context.dry_run = true;
+    outcome = dispatch_request(m3, dry_run);
+    CHECK(outcome.error_code == "USAGE");
+    CHECK(outcome.error_details ==
+          json{{"argument", "--idempotency-key"}, {"reason", "mutually_exclusive"}});
+
+    dry_run.context.dry_run = false;
+    outcome = dispatch_request(m3, dry_run);
+    CHECK(outcome.error_code == "DENIED");
+    CHECK(outcome.exit_code == kDenied);
+    CHECK_FALSE(handler_ran);
 }
 
 TEST_CASE("M3 descriptors must match the closed registry and remain fail closed",

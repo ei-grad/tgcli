@@ -1,5 +1,6 @@
 #include "proto/frame.hpp"
 #include "proto/frame_io.hpp"
+#include "proto/operation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -43,7 +44,32 @@ Request make_request() {
     req.context.cwd = "/home/user";
     req.context.media_dir = "/data/media";
     req.context.write_authority = WriteAuthority::Deny;
+    req.context.idempotency_key = "job:42.retry-1";
     return req;
+}
+
+std::vector<std::string> command_parts(std::string_view command_path) {
+    std::vector<std::string> parts;
+    while (!command_path.empty()) {
+        const auto separator = command_path.find(' ');
+        parts.emplace_back(command_path.substr(0, separator));
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        command_path.remove_prefix(separator + 1);
+    }
+    return parts;
+}
+
+json raw_request_dialect(int protocol_version) {
+    auto document = json::parse(serialize(make_request()));
+    if (protocol_version < 3) {
+        document["context"].erase("idempotency_key");
+    }
+    if (protocol_version < 2) {
+        document.erase("account");
+    }
+    return document;
 }
 
 json request_document_with_timeout(json timeout) {
@@ -112,6 +138,22 @@ TEST_CASE("hello round-trip", "[proto]") {
     CHECK(hello.protocol_version == kProtocolVersion);
 }
 
+TEST_CASE("protocol v3 Hello is an exact three-field frame", "[proto][protocol-v3]") {
+    STATIC_REQUIRE(kProtocolVersion == 3);
+    const auto valid = json::parse(serialize(Hello{"0.1.0", kProtocolVersion}));
+    CHECK(valid.size() == 3);
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value.erase("binary_version"); },
+             [](json& value) { value.erase("protocol_version"); },
+             [](json& value) { value["extra"] = nullptr; }}) {
+        auto invalid = valid;
+        mutate(invalid);
+        std::string error;
+        CHECK_FALSE(parse(invalid.dump(), error));
+        CHECK(error.find("hello") != std::string::npos);
+    }
+}
+
 TEST_CASE("request round-trip preserves context", "[proto]") {
     const auto document = json::parse(serialize(make_request()));
     CHECK(document.size() == 6);
@@ -119,6 +161,7 @@ TEST_CASE("request round-trip preserves context", "[proto]") {
         CHECK(document.contains(field));
     }
     CHECK(document["account"] == "main");
+    CHECK(document["context"].size() == 9);
 
     auto frame = round_trip(make_request());
     auto& req = std::get<Request>(frame);
@@ -134,6 +177,31 @@ TEST_CASE("request round-trip preserves context", "[proto]") {
     CHECK(req.context.cwd == "/home/user");
     CHECK(req.context.media_dir == "/data/media");
     CHECK(req.context.write_authority == WriteAuthority::Deny);
+    CHECK(req.context.idempotency_key == "job:42.retry-1");
+}
+
+TEST_CASE("raw request dialects stay disjoint at the v3 parser", "[proto][protocol-v3]") {
+    const auto v1 = raw_request_dialect(1);
+    const auto v2 = raw_request_dialect(2);
+    const auto v3 = raw_request_dialect(3);
+    CHECK(v1.size() == 5);
+    CHECK(v1["context"].size() == 8);
+    CHECK_FALSE(v1.contains("account"));
+    CHECK(v2.size() == 6);
+    CHECK(v2["context"].size() == 8);
+    CHECK(v2["account"] == "main");
+    CHECK(v3.size() == 6);
+    CHECK(v3["context"].size() == 9);
+
+    std::string error;
+    CHECK_FALSE(parse(v1.dump(), error));
+    CHECK_FALSE(error.empty());
+    error.clear();
+    CHECK_FALSE(parse(v2.dump(), error));
+    CHECK_FALSE(error.empty());
+    error.clear();
+    CHECK(parse(v3.dump(), error));
+    CHECK(error.empty());
 }
 
 TEST_CASE("request account is mandatory and uses the canonical account-name grammar",
@@ -169,16 +237,81 @@ TEST_CASE("request context nullables round-trip as null", "[proto]") {
     req.context.timeout_seconds.reset();
     req.context.media_dir.reset();
     req.context.write_authority = WriteAuthority::Unset;
+    req.context.idempotency_key.reset();
 
     auto doc = json::parse(serialize(req));
     CHECK(doc["context"]["timeout"].is_null());
     CHECK(doc["context"]["media_dir"].is_null());
     CHECK(doc["context"]["write_authority"] == "unset");
+    CHECK(doc["context"]["idempotency_key"].is_null());
 
     auto parsed = std::get<Request>(round_trip(req));
     CHECK_FALSE(parsed.context.timeout_seconds.has_value());
     CHECK_FALSE(parsed.context.media_dir.has_value());
     CHECK(parsed.context.write_authority == WriteAuthority::Unset);
+    CHECK_FALSE(parsed.context.idempotency_key.has_value());
+}
+
+TEST_CASE("idempotency keys use one exact grammar and the closed 17-operation allowlist",
+          "[proto][protocol-v3][idempotency]") {
+    for (const auto& key : {std::string("A"), std::string("a.b_c:d-e"), std::string(128, '9')}) {
+        INFO(key);
+        CHECK(valid_idempotency_key(key));
+        for (const auto& identity : m3_operation_identities()) {
+            auto request = make_request();
+            request.command = command_parts(identity.command_path);
+            request.context.idempotency_key = key;
+            std::string error;
+            const auto parsed = parse(serialize(request), error);
+            INFO(identity.command_path);
+            REQUIRE(parsed);
+            CHECK(std::get<Request>(*parsed).context.idempotency_key == key);
+            REQUIRE(m3_operation_for_command(request.command));
+            CHECK(*m3_operation_for_command(request.command) == identity.operation);
+        }
+    }
+
+    for (const auto& key :
+         {std::string{}, std::string(129, 'a'), std::string(".first"), std::string("-first"),
+          std::string("a/b"), std::string("a b"), std::string("m\xC3\xA4in")}) {
+        INFO(key);
+        CHECK_FALSE(valid_idempotency_key(key));
+        auto document = json::parse(serialize(make_request()));
+        document["context"]["idempotency_key"] = key;
+        std::string error;
+        CHECK_FALSE(parse(document.dump(), error));
+        if (!key.empty()) {
+            CHECK(error.find(key) == std::string::npos);
+        }
+    }
+
+    auto unsupported = json::parse(serialize(make_request()));
+    unsupported["command"] = json::array({"version"});
+    std::string error;
+    CHECK_FALSE(parse(unsupported.dump(), error));
+    CHECK(error.find("unsupported") != std::string::npos);
+
+    auto dry_run = json::parse(serialize(make_request()));
+    dry_run["context"]["dry_run"] = true;
+    error.clear();
+    CHECK_FALSE(parse(dry_run.dump(), error));
+    CHECK(error.find("mutually exclusive") != std::string::npos);
+}
+
+TEST_CASE("protocol v3 request context has exactly nine fields", "[proto][protocol-v3][mutation]") {
+    const auto valid = json::parse(serialize(make_request()));
+    for (const auto& mutate : std::vector<std::function<void(json&)>>{
+             [](json& value) { value["context"].erase("idempotency_key"); },
+             [](json& value) { value["context"].erase("write_authority"); },
+             [](json& value) { value["context"]["unknown"] = true; },
+             [](json& value) { value["context"]["idempotency_key"] = 1; }}) {
+        auto invalid = valid;
+        mutate(invalid);
+        std::string error;
+        INFO(invalid.dump());
+        CHECK_FALSE(parse(invalid.dump(), error));
+        CHECK_FALSE(error.empty());
+    }
 }
 
 TEST_CASE("write authority values cover the §6 tri-state", "[proto]") {
@@ -478,7 +611,7 @@ TEST_CASE("request timeout distinguishes default from invalid present values", "
                 request_document_with_timeout(-1).dump(),
                 request_document_with_timeout(18446744073709551615ULL).dump(),
                 std::string(
-                    R"({"type":"request","id":42,"account":"main","command":["version"],"args":{},"context":{"tty":true,"json":false,"yes":false,"dry_run":false,"timeout":1.7976931348623157e308,"cwd":"/","media_dir":null,"write_authority":"unset"}})"),
+                    R"({"type":"request","id":42,"account":"main","command":["version"],"args":{},"context":{"tty":true,"json":false,"yes":false,"dry_run":false,"timeout":1.7976931348623157e308,"cwd":"/","media_dir":null,"write_authority":"unset","idempotency_key":null}})"),
             })) {
             std::string error;
             INFO(line);

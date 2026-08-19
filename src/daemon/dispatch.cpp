@@ -12,27 +12,32 @@ namespace tgcli::daemon {
 
 namespace {
 
+constexpr M3OperationPolicy policy(M3Operation operation, Tier tier, M3BotPolicy bot_policy) {
+    const auto* identity = proto::m3_operation_identity(operation);
+    return {operation, identity->canonical_name, identity->command_path, tier, bot_policy};
+}
+
 constexpr std::array<M3OperationPolicy, 17> kM3OperationPolicies{{
-    {M3Operation::Send, "send", "send", Tier::Write, M3BotPolicy::ImmediateOnly},
-    {M3Operation::MsgEdit, "msg_edit", "msg edit", Tier::Write, M3BotPolicy::Allowed},
-    {M3Operation::MsgDelete, "msg_delete", "msg delete", Tier::Destructive, M3BotPolicy::Allowed},
-    {M3Operation::MsgForward, "msg_forward", "msg forward", Tier::Write, M3BotPolicy::Allowed},
-    {M3Operation::MsgReact, "msg_react", "msg react", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::MsgPin, "msg_pin", "msg pin", Tier::Write, M3BotPolicy::Allowed},
-    {M3Operation::MsgUnpin, "msg_unpin", "msg unpin", Tier::Write, M3BotPolicy::Allowed},
-    {M3Operation::ChatMarkRead, "chat_mark_read", "chat mark-read", Tier::Write,
-     M3BotPolicy::UserOnly},
-    {M3Operation::ChatMute, "chat_mute", "chat mute", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::ChatUnmute, "chat_unmute", "chat unmute", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::ChatPin, "chat_pin", "chat pin", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::ChatUnpin, "chat_unpin", "chat unpin", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::ChatArchive, "chat_archive", "chat archive", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::ChatUnarchive, "chat_unarchive", "chat unarchive", Tier::Write,
-     M3BotPolicy::UserOnly},
-    {M3Operation::ChatJoin, "chat_join", "chat join", Tier::Write, M3BotPolicy::UserOnly},
-    {M3Operation::ChatLeave, "chat_leave", "chat leave", Tier::Destructive, M3BotPolicy::Allowed},
-    {M3Operation::SavedAttach, "saved_attach", "saved attach", Tier::Write, M3BotPolicy::UserOnly},
+    policy(M3Operation::Send, Tier::Write, M3BotPolicy::ImmediateOnly),
+    policy(M3Operation::MsgEdit, Tier::Write, M3BotPolicy::Allowed),
+    policy(M3Operation::MsgDelete, Tier::Destructive, M3BotPolicy::Allowed),
+    policy(M3Operation::MsgForward, Tier::Write, M3BotPolicy::Allowed),
+    policy(M3Operation::MsgReact, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::MsgPin, Tier::Write, M3BotPolicy::Allowed),
+    policy(M3Operation::MsgUnpin, Tier::Write, M3BotPolicy::Allowed),
+    policy(M3Operation::ChatMarkRead, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatMute, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatUnmute, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatPin, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatUnpin, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatArchive, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatUnarchive, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatJoin, Tier::Write, M3BotPolicy::UserOnly),
+    policy(M3Operation::ChatLeave, Tier::Destructive, M3BotPolicy::Allowed),
+    policy(M3Operation::SavedAttach, Tier::Write, M3BotPolicy::UserOnly),
 }};
+
+static_assert(kM3OperationPolicies.size() == proto::kM3OperationIdentities.size());
 
 constexpr bool is_m1_destructive_command(std::string_view path) noexcept {
     return path == "logout" || path == "account remove";
@@ -59,6 +64,29 @@ std::string command_key(const std::vector<std::string>& command) {
     return key;
 }
 
+bool reject_invalid_idempotency(const proto::Request& request, RequestSession& session) {
+    if (!request.context.idempotency_key) {
+        return false;
+    }
+    if (!proto::valid_idempotency_key(*request.context.idempotency_key)) {
+        session.error("USAGE", "invalid idempotency key",
+                      {{"argument", "--idempotency-key"}, {"reason", "invalid_argument"}}, kUsage);
+        return true;
+    }
+    if (request.context.dry_run) {
+        session.error("USAGE", "idempotency key cannot be combined with dry-run",
+                      {{"argument", "--idempotency-key"}, {"reason", "mutually_exclusive"}},
+                      kUsage);
+        return true;
+    }
+    if (!proto::m3_operation_for_command(request.command)) {
+        session.error("USAGE", "idempotency key is unsupported for this command",
+                      {{"argument", "--idempotency-key"}, {"reason", "unsupported_mode"}}, kUsage);
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 std::span<const M3OperationPolicy> m3_operation_policies() {
@@ -72,15 +100,11 @@ const M3OperationPolicy* m3_operation_policy(M3Operation operation) {
 }
 
 std::optional<M3Operation> parse_m3_operation(std::string_view canonical_name) {
-    const auto* const found =
-        std::ranges::find(kM3OperationPolicies, canonical_name, &M3OperationPolicy::canonical_name);
-    return found == kM3OperationPolicies.end() ? std::nullopt : std::optional{found->operation};
+    return proto::parse_m3_operation(canonical_name);
 }
 
 std::optional<M3Operation> m3_operation_for_command(std::string_view command_path) {
-    const auto* const found =
-        std::ranges::find(kM3OperationPolicies, command_path, &M3OperationPolicy::command_path);
-    return found == kM3OperationPolicies.end() ? std::nullopt : std::optional{found->operation};
+    return proto::m3_operation_for_command(command_path);
 }
 
 M3BotAdmission evaluate_m3_bot_admission(M3Operation operation, bool is_bot,
@@ -188,6 +212,9 @@ void Dispatcher::set_request_preflight(
 
 void Dispatcher::dispatch(RequestSession& session) const {
     const auto& request = session.request();
+    if (reject_invalid_idempotency(request, session)) {
+        return;
+    }
     const auto key = command_key(request.command);
     if (request_observer_) {
         request_observer_(testing::RequestObservationStage::DispatcherLookup);

@@ -49,6 +49,11 @@
 
 namespace tgcli::cli {
 
+bool uses_client_local_dry_run(const std::vector<std::string>& command, bool dry_run) {
+    return dry_run && (command == std::vector<std::string>{"logout"} ||
+                       command == std::vector<std::string>{"account", "remove"});
+}
+
 namespace {
 
 using nlohmann::json;

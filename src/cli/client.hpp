@@ -6,6 +6,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace tgcli::cli {
 
@@ -46,6 +47,10 @@ struct RunOptions {
     // the production TDLib client; the caller retains ownership when set.
     core::TdClient* in_process_td_client = nullptr;
 };
+
+// Only the two M1 dry-runs bypass daemon routing. M3/M4 dry-runs are
+// auth-bound and therefore remain eligible for normal daemon autospawn.
+bool uses_client_local_dry_run(const std::vector<std::string>& command, bool dry_run);
 
 // Runs one command end to end: connect to (or spawn) the account daemon —
 // or dispatch in-process under --no-daemon — then render response frames

@@ -453,6 +453,45 @@ TEST_CASE("real CLI rejects unsupported global dry-run before routing or runtime
     CHECK_FALSE(std::filesystem::exists(environment.root() + "/data/tgcli"));
 }
 
+TEST_CASE("real CLI validates idempotency keys before routing or persistent side effects",
+          "[cli][process][idempotency][safety]") {
+    const ProcessEnvironment environment;
+    struct Case {
+        const char* name;
+        std::vector<std::string> arguments;
+        const char* reason;
+        std::string_view secret_value;
+    };
+    const std::vector<Case> cases{
+        {"invalid grammar",
+         {"--idempotency-key", "raw/key-sentinel", "version"},
+         "invalid_argument",
+         "raw/key-sentinel"},
+        {"unsupported operation",
+         {"--idempotency-key", "valid-key", "version"},
+         "unsupported_mode",
+         "valid-key"},
+        {"dry-run conflict",
+         {"--idempotency-key", "valid-key", "--dry-run", "logout"},
+         "mutually_exclusive",
+         "valid-key"},
+    };
+
+    for (const auto& test_case : cases) {
+        DYNAMIC_SECTION(test_case.name) {
+            const auto outcome = run_cli(environment, test_case.arguments);
+            REQUIRE(outcome.exit_code == kUsage);
+            CHECK(outcome.out.empty());
+            const auto error = json::parse(outcome.err);
+            CHECK(error["error"]["code"] == "USAGE");
+            CHECK(error["error"]["details"] ==
+                  json{{"argument", "--idempotency-key"}, {"reason", test_case.reason}});
+            CHECK(outcome.err.find(test_case.secret_value) == std::string::npos);
+            check_no_cli_state(environment);
+        }
+    }
+}
+
 TEST_CASE("reserved raw and full modes fail before routing or persistent side effects",
           "[cli][process][unsupported-mode][safety]") {
     const ProcessEnvironment environment;

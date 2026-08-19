@@ -2,6 +2,7 @@
 
 #include "common/paths.hpp"
 #include "proto/destructive_plan.hpp"
+#include "proto/operation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -186,6 +187,38 @@ std::optional<WriteAuthority> authority_from_json(const json& value) {
     return std::nullopt;
 }
 
+enum class IdempotencyValidation { Valid, InvalidGrammar, DryRun, UnsupportedOperation };
+
+IdempotencyValidation validate_idempotency(const Request& request) {
+    if (!request.context.idempotency_key) {
+        return IdempotencyValidation::Valid;
+    }
+    if (!valid_idempotency_key(*request.context.idempotency_key)) {
+        return IdempotencyValidation::InvalidGrammar;
+    }
+    if (request.context.dry_run) {
+        return IdempotencyValidation::DryRun;
+    }
+    if (!m3_operation_for_command(request.command)) {
+        return IdempotencyValidation::UnsupportedOperation;
+    }
+    return IdempotencyValidation::Valid;
+}
+
+std::string_view idempotency_validation_error(IdempotencyValidation validation) {
+    switch (validation) {
+    case IdempotencyValidation::Valid:
+        return {};
+    case IdempotencyValidation::InvalidGrammar:
+        return "request context: invalid 'idempotency_key'";
+    case IdempotencyValidation::DryRun:
+        return "request context: 'idempotency_key' and 'dry_run' are mutually exclusive";
+    case IdempotencyValidation::UnsupportedOperation:
+        return "request context: 'idempotency_key' is unsupported for this command";
+    }
+    return "request context: invalid 'idempotency_key'";
+}
+
 struct FrameWriter {
     json operator()(const Hello& f) const {
         return {{"type", "hello"},
@@ -197,6 +230,10 @@ struct FrameWriter {
         if (!paths::valid_account_name(f.account)) {
             throw std::invalid_argument("request account is invalid");
         }
+        if (const auto validation = validate_idempotency(f);
+            validation != IdempotencyValidation::Valid) {
+            throw std::invalid_argument(std::string(idempotency_validation_error(validation)));
+        }
         json context{
             {"tty", f.context.tty},
             {"json", f.context.json},
@@ -206,7 +243,9 @@ struct FrameWriter {
              f.context.timeout_seconds ? json(*f.context.timeout_seconds) : json(nullptr)},
             {"cwd", f.context.cwd},
             {"media_dir", f.context.media_dir ? json(*f.context.media_dir) : json(nullptr)},
-            {"write_authority", authority_to_json(f.context.write_authority)}};
+            {"write_authority", authority_to_json(f.context.write_authority)},
+            {"idempotency_key",
+             f.context.idempotency_key ? json(*f.context.idempotency_key) : json(nullptr)}};
         return {{"type", "request"},    {"id", f.id},     {"account", f.account},
                 {"command", f.command}, {"args", f.args}, {"context", std::move(context)}};
     }
@@ -303,6 +342,9 @@ class Parser {
     }
 
     std::optional<Frame> parse_hello() {
+        if (!exact_fields(*doc_, {"type", "binary_version", "protocol_version"})) {
+            return fail("hello: frame must contain exactly the protocol fields");
+        }
         const json* binary = field("binary_version");
         const json* protocol = field("protocol_version");
         if (binary == nullptr || !binary->is_string()) {
@@ -362,10 +404,19 @@ class Parser {
         } else {
             return std::nullopt;
         }
+        if (const auto validation = validate_idempotency(req);
+            validation != IdempotencyValidation::Valid) {
+            return fail(std::string(idempotency_validation_error(validation)));
+        }
         return req;
     }
 
     std::optional<RequestContext> parse_context(const json& context) {
+        if (!exact_fields(context, {"tty", "json", "yes", "dry_run", "timeout", "cwd", "media_dir",
+                                    "write_authority", "idempotency_key"})) {
+            fail("request context: must contain exactly the protocol fields");
+            return std::nullopt;
+        }
         RequestContext out;
         struct BoolField {
             const char* name;
@@ -421,7 +472,28 @@ class Parser {
                  "\"grant\", \"deny\", \"unset\"");
             return std::nullopt;
         }
+        if (!parse_idempotency_key(context, out)) {
+            return std::nullopt;
+        }
         return out;
+    }
+
+    bool parse_idempotency_key(const json& context, RequestContext& out) {
+        const auto idempotency_key = context.find("idempotency_key");
+        if (idempotency_key == context.end() ||
+            (!idempotency_key->is_null() && !idempotency_key->is_string())) {
+            fail("request context: 'idempotency_key' must be a string or null");
+            return false;
+        }
+        if (idempotency_key->is_string()) {
+            const auto& key = idempotency_key->get_ref<const std::string&>();
+            if (!valid_idempotency_key(key)) {
+                fail("request context: invalid 'idempotency_key'");
+                return false;
+            }
+            out.idempotency_key = key;
+        }
+        return true;
     }
 
     template <typename FrameT> std::optional<Frame> parse_data_frame(const char* payload_key) {

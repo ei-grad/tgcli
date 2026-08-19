@@ -19,7 +19,7 @@
 // the spec-bound part.
 namespace tgcli::proto {
 
-inline constexpr int kProtocolVersion = 2;
+inline constexpr int kProtocolVersion = 3;
 
 // The client folds --allow-write and TGCLI_ALLOW_WRITE into this field; the
 // daemon cannot see the invoking shell's environment (DESIGN.md §6/§10).
@@ -72,6 +72,7 @@ struct RequestContext {
     std::string cwd;
     std::optional<std::string> media_dir;
     WriteAuthority write_authority = WriteAuthority::Unset;
+    std::optional<std::string> idempotency_key;
 };
 
 struct Request {
