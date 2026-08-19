@@ -37071,8 +37071,12 @@
         },
         "completed_stages": {
           "enum": [
+            [],
             [
               "spool_ready"
+            ],
+            [
+              "idempotency_pending"
             ],
             [
               "idempotency_pending",

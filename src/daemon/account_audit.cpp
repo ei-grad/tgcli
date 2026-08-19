@@ -1270,6 +1270,9 @@ bool valid_forward_error_details(std::string_view code, const json& details) {
             !valid_forward_items(details["items"], true, true)) {
             return false;
         }
+        if (details["items"].empty()) {
+            return true;
+        }
         std::int64_t maximum_retry = 0;
         for (const auto& item : details["items"]) {
             if (item["status"] != "failed" || item["failure_reason"] != "tdlib_error" ||
@@ -2564,7 +2567,11 @@ bool terminal_matches_latest_forward(const AccountAuditOpenGroup& group, const j
         return true;
     }
     const auto* durable_items = final_forward_items(group);
-    if (durable_items == nullptr || !canonical_json_equal(*terminal_items, *durable_items)) {
+    if (durable_items == nullptr) {
+        return terminal["kind"] == "error" && terminal["code"] == "RATE_LIMITED" &&
+               terminal_items->empty();
+    }
+    if (!canonical_json_equal(*terminal_items, *durable_items)) {
         return false;
     }
     const auto& source_ids = group.intent["arguments"]["message_ids"];

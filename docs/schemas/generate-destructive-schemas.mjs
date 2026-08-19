@@ -1834,7 +1834,7 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
       v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
   ];
   if (operation === 'saved_attach') {
-    const spoolPrefixes = undispatched.filter((value) => value.includes('spool_ready'));
+    const spoolPrefixes = undispatched;
     branches.push(v2OutcomeBranch(
       operation,
       false,
