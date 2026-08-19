@@ -2094,6 +2094,7 @@ TEST_CASE("QR wait timeout restarts the generation after the request response se
     const auto outcome = pending.get();
     REQUIRE(outcome.error);
     CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+    REQUIRE(auth.runtime().wait_for_sent(4));
     sent = auth.runtime().sent_functions();
     REQUIRE(sent.size() >= 4);
     CHECK(sent.at(2).function.kind() == core::TdFunctionKind::Close);
