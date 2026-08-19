@@ -68,7 +68,10 @@ std::vector<daemon::AuditStage> removal_branch(daemon::AuditStage remote, bool s
         daemon::AuditStage::DataRemoveStarted,   daemon::AuditStage::DataRemoved,
         daemon::AuditStage::StateRemoveStarted,  daemon::AuditStage::StateRemoved,
     };
-    result.insert(result.end(), suffix.begin(), suffix.end());
+    result.reserve(result.size() + suffix.size());
+    for (const auto stage : suffix) {
+        result.push_back(stage);
+    }
     return result;
 }
 

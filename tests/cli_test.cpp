@@ -341,6 +341,28 @@ void write_private_file(const std::string& filename, std::string_view bytes, mod
     REQUIRE(::chmod(filename.c_str(), mode) == 0);
 }
 
+bool write_child_status(int fd, bool ready) noexcept {
+    const char value = ready ? '1' : '0';
+    ssize_t count = -1;
+    do {
+        count = ::write(fd, &value, 1);
+    } while (count < 0 && errno == EINTR);
+    return count == 1;
+}
+
+[[noreturn]] void exit_child_startup_failure(int fd, int exit_code) noexcept {
+    if (!write_child_status(fd, false)) {
+        ::_exit(126);
+    }
+    ::_exit(exit_code);
+}
+
+void report_child_ready_or_exit(int fd) noexcept {
+    if (!write_child_status(fd, true)) {
+        ::_exit(126);
+    }
+}
+
 std::string read_file_bytes(const std::string& filename) {
     std::ifstream input(filename, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -573,24 +595,19 @@ class ChildProtocolDaemon {
         daemon_lock::Identity identity;
         const int lock_fd = daemon_lock::acquire(state_dir + "/daemon.lock", identity, error);
         if (lock_fd < 0 || !socket_path || !control_socket_path) {
-            const char failed = '0';
-            static_cast<void>(::write(ready_fd, &failed, 1));
-            ::_exit(2);
+            exit_child_startup_failure(ready_fd, 2);
         }
         if (options.malformed_identity) {
             constexpr std::string_view malformed = "malformed\n";
             if (::ftruncate(lock_fd, 0) != 0 ||
                 ::pwrite(lock_fd, malformed.data(), malformed.size(), 0) !=
                     static_cast<ssize_t>(malformed.size())) {
-                const char failed = '0';
-                static_cast<void>(::write(ready_fd, &failed, 1));
-                ::_exit(3);
+                exit_child_startup_failure(ready_fd, 3);
             }
         }
         bool ready_reported = false;
         if (options.report_ready_before_endpoints) {
-            const char ready = '1';
-            static_cast<void>(::write(ready_fd, &ready, 1));
+            report_child_ready_or_exit(ready_fd);
             ::close(ready_fd);
             ready_reported = true;
             std::this_thread::sleep_for(options.startup_delay);
@@ -620,14 +637,12 @@ class ChildProtocolDaemon {
         daemon::register_commands(dispatcher, context);
         if (!server.start(error)) {
             if (!ready_reported) {
-                const char failed = '0';
-                static_cast<void>(::write(ready_fd, &failed, 1));
+                exit_child_startup_failure(ready_fd, 4);
             }
             ::_exit(4);
         }
         if (!ready_reported) {
-            const char ready = '1';
-            static_cast<void>(::write(ready_fd, &ready, 1));
+            report_child_ready_or_exit(ready_fd);
             ::close(ready_fd);
         }
         server.wait_for_stop();
@@ -750,16 +765,14 @@ class ChildBinaryRaceDaemon {
         daemon_lock::Identity identity;
         const int lock_fd = daemon_lock::acquire(state_dir + "/daemon.lock", identity, error);
         if (lock_fd < 0 || !socket_path || !control_path) {
-            report_ready(ready_fd, false);
-            ::_exit(2);
+            exit_child_startup_failure(ready_fd, 2);
         }
         auto main = bind_private_endpoint(*socket_path, SOCK_STREAM, error);
         auto control = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
         if (!main || !control) {
-            report_ready(ready_fd, false);
-            ::_exit(3);
+            exit_child_startup_failure(ready_fd, 3);
         }
-        report_ready(ready_fd, true);
+        report_child_ready_or_exit(ready_fd);
         ::close(ready_fd);
 
         std::array<int, 2> connections{-1, -1};
@@ -787,11 +800,6 @@ class ChildBinaryRaceDaemon {
         paths::unlink_socket_endpoint_if_same(*control_path, control->identity);
         ::close(lock_fd);
         ::_exit(first_stop && duplicate_stop ? 0 : 5);
-    }
-
-    static void report_ready(int fd, bool ready) {
-        const char value = ready ? '1' : '0';
-        static_cast<void>(::write(fd, &value, 1));
     }
 
     void reap_blocking() {
@@ -911,16 +919,14 @@ class ChildCompatibleStopRaceDaemon {
         daemon_lock::Identity identity;
         const int lock_fd = daemon_lock::acquire(state_dir + "/daemon.lock", identity, error);
         if (lock_fd < 0 || !socket_path || !control_path) {
-            report_ready(ready_fd, false);
-            ::_exit(2);
+            exit_child_startup_failure(ready_fd, 2);
         }
         auto main = bind_private_endpoint(*socket_path, SOCK_STREAM, error);
         auto control = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
         if (!main || !control) {
-            report_ready(ready_fd, false);
-            ::_exit(3);
+            exit_child_startup_failure(ready_fd, 3);
         }
-        report_ready(ready_fd, true);
+        report_child_ready_or_exit(ready_fd);
         ::close(ready_fd);
 
         std::array<int, 2> connections{-1, -1};
@@ -961,11 +967,6 @@ class ChildCompatibleStopRaceDaemon {
         paths::unlink_socket_endpoint_if_same(*control_path, control->identity);
         ::close(lock_fd);
         ::_exit(0);
-    }
-
-    static void report_ready(int fd, bool ready) {
-        const char value = ready ? '1' : '0';
-        static_cast<void>(::write(fd, &value, 1));
     }
 
     void reap_blocking() {
@@ -1219,30 +1220,26 @@ class ChildBootstrapDaemon {
         const int lock_fd =
             acquire_frozen_fixture_lock(state_dir + "/daemon.lock", identity, error);
         if (lock_fd < 0 || !socket_path || !control_path) {
-            report_ready(ready_fd, false);
-            ::_exit(2);
+            exit_child_startup_failure(ready_fd, 2);
         }
         if (options.malformed_identity) {
             constexpr std::string_view malformed = "malformed\n";
             if (::ftruncate(lock_fd, 0) != 0 ||
                 ::pwrite(lock_fd, malformed.data(), malformed.size(), 0) !=
                     static_cast<ssize_t>(malformed.size())) {
-                report_ready(ready_fd, false);
-                ::_exit(3);
+                exit_child_startup_failure(ready_fd, 3);
             }
         }
         auto main = bind_private_endpoint(*socket_path, SOCK_STREAM, error);
         auto control = bind_private_endpoint(*control_path, SOCK_DGRAM, error);
         if (!main || !control) {
-            report_ready(ready_fd, false);
-            ::_exit(4);
+            exit_child_startup_failure(ready_fd, 4);
         }
         const int control_flags = ::fcntl(control->fd, F_GETFL);
         if (control_flags < 0 || ::fcntl(control->fd, F_SETFL, control_flags | O_NONBLOCK) != 0) {
-            report_ready(ready_fd, false);
-            ::_exit(5);
+            exit_child_startup_failure(ready_fd, 5);
         }
-        report_ready(ready_fd, true);
+        report_child_ready_or_exit(ready_fd);
         ::close(ready_fd);
 
         std::vector<int> connections;
@@ -1312,11 +1309,6 @@ class ChildBootstrapDaemon {
         paths::unlink_socket_endpoint_if_same(*control_path, control->identity);
         ::close(lock_fd);
         ::_exit(0);
-    }
-
-    static void report_ready(int fd, bool ready) {
-        const char value = ready ? '1' : '0';
-        static_cast<void>(::write(fd, &value, 1));
     }
 
     void reap_blocking() {

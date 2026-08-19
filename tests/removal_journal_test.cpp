@@ -90,7 +90,14 @@ tgcli::proto::AccountRemovePlan plan(bool keep = false, std::string account = "w
 enum class RemoteBranch { Confirmed, SentNotPresent, NotPresent, Kept };
 
 std::vector<AuditStage> completed(RemoteBranch branch) {
-    std::vector<AuditStage> result{AuditStage::Planned, AuditStage::IntentSynced};
+    constexpr std::array suffix{AuditStage::ClientCloseStarted,  AuditStage::ClientClosed,
+                                AuditStage::ConfigRemoveStarted, AuditStage::ConfigRemoved,
+                                AuditStage::DataRemoveStarted,   AuditStage::DataRemoved,
+                                AuditStage::StateRemoveStarted,  AuditStage::StateRemoved};
+    std::vector<AuditStage> result;
+    result.reserve(4 + suffix.size());
+    result.push_back(AuditStage::Planned);
+    result.push_back(AuditStage::IntentSynced);
     if (branch == RemoteBranch::Confirmed || branch == RemoteBranch::SentNotPresent) {
         result.push_back(AuditStage::RemoteLogoutSendStarted);
     }
@@ -106,11 +113,9 @@ std::vector<AuditStage> completed(RemoteBranch branch) {
         result.push_back(AuditStage::RemoteKept);
         break;
     }
-    const std::array suffix{AuditStage::ClientCloseStarted,  AuditStage::ClientClosed,
-                            AuditStage::ConfigRemoveStarted, AuditStage::ConfigRemoved,
-                            AuditStage::DataRemoveStarted,   AuditStage::DataRemoved,
-                            AuditStage::StateRemoveStarted,  AuditStage::StateRemoved};
-    result.insert(result.end(), suffix.begin(), suffix.end());
+    for (const auto stage : suffix) {
+        result.push_back(stage);
+    }
     return result;
 }
 

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <climits>
 #include <mutex>
 #include <stdexcept>
@@ -314,13 +315,47 @@ std::string_view process_log_failure_message(bool json) {
     return json ? kJsonLogFailureMessage : kHumanLogFailureMessage;
 }
 
-void report_process_log_failure() noexcept {
+ssize_t write_process_log_message(void* /*context*/, int fd, const void* bytes,
+                                  std::size_t size) noexcept {
+    return ::write(fd, bytes, size);
+}
+
+void write_process_log_message_best_effort(std::string_view message,
+                                           detail::ProcessLogWriteFunction writer,
+                                           void* context) noexcept {
+    std::size_t offset = 0;
+    while (offset < message.size()) {
+        const auto count =
+            writer(context, STDERR_FILENO, message.data() + offset, message.size() - offset);
+        if (count > 0) {
+            const auto progress = static_cast<std::size_t>(count);
+            if (progress >= message.size() - offset) {
+                break;
+            }
+            offset += progress;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+}
+
+void report_process_log_failure(detail::ProcessLogWriteFunction writer, void* context) noexcept {
+    const int incoming_errno = errno;
     if (process_log_state().failure_reported.exchange(true, std::memory_order_relaxed)) {
+        errno = incoming_errno;
         return;
     }
     const auto message = process_log_failure_message(
         process_log_state().json_diagnostics.load(std::memory_order_relaxed));
-    static_cast<void>(::write(STDERR_FILENO, message.data(), message.size()));
+    write_process_log_message_best_effort(message, writer, context);
+    errno = incoming_errno;
+}
+
+void report_process_log_failure() noexcept {
+    report_process_log_failure(write_process_log_message, nullptr);
 }
 
 void td_log_callback(int verbosity, const char* message) noexcept {
@@ -749,6 +784,11 @@ void reset_process_log_failure_for_test(bool json) {
 
 void report_process_log_failure_for_test() {
     report_process_log_failure();
+}
+
+void report_process_log_failure_with_writer_for_test(ProcessLogWriteFunction writer,
+                                                     void* context) {
+    report_process_log_failure(writer, context);
 }
 
 } // namespace detail

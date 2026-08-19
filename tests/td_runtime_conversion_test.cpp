@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <sys/types.h>
@@ -113,6 +115,52 @@ void check_delivery(td_api::object_ptr<td_api::AuthenticationCodeType> type,
     CHECK(metadata.resend_timeout == 17);
 }
 
+struct ScriptedLogWrite {
+    struct Result {
+        ssize_t count = 0;
+        int error = 0;
+    };
+
+    static ssize_t invoke(void* context, int fd, const void* bytes, std::size_t size) noexcept {
+        auto& script = *static_cast<ScriptedLogWrite*>(context);
+        if (script.calls >= script.result_count || script.calls >= script.results.size()) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        const auto index = script.calls++;
+        script.descriptors.at(index) = fd;
+        script.requests.at(index) = static_cast<const char*>(bytes);
+        script.request_sizes.at(index) = size;
+        const auto result = script.results.at(index);
+        errno = result.error;
+        if (result.count > 0) {
+            const auto count = static_cast<std::size_t>(result.count);
+            const auto available = script.output.size() - script.output_size;
+            const auto copied = std::min(std::min(count, size), available);
+            std::memcpy(script.output.data() + script.output_size, bytes, copied);
+            script.output_size += copied;
+        }
+        return result.count;
+    }
+
+    [[nodiscard]] std::string_view request(std::size_t index) const {
+        return {requests.at(index), request_sizes.at(index)};
+    }
+
+    [[nodiscard]] std::string_view written() const {
+        return {output.data(), output_size};
+    }
+
+    std::array<Result, 4> results{};
+    std::size_t result_count = 0;
+    std::size_t calls = 0;
+    std::array<int, 4> descriptors{};
+    std::array<const char*, 4> requests{};
+    std::array<std::size_t, 4> request_sizes{};
+    std::array<char, 512> output{};
+    std::size_t output_size = 0;
+};
+
 } // namespace
 
 TEST_CASE("async TDLib log failure diagnostics remain one sanitized NDJSON record",
@@ -151,6 +199,78 @@ TEST_CASE("async TDLib log failure diagnostics remain one sanitized NDJSON recor
 
     const auto human_message = detail::process_log_failure_message_for_test(false);
     CHECK(human_message == "warning: TDLib log sink failed; further records suppressed\n");
+}
+
+TEST_CASE("async TDLib log failure diagnostics handle best-effort write outcomes",
+          "[core][tdlib][logging]") {
+    const auto message = detail::process_log_failure_message_for_test(true);
+
+    SECTION("EINTR is retried without changing the incoming errno") {
+        ScriptedLogWrite script;
+        script.results[0] = {-1, EINTR};
+        script.results[1] = {static_cast<ssize_t>(message.size()), 0};
+        script.result_count = 2;
+        detail::reset_process_log_failure_for_test(true);
+        errno = EDOM;
+
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+
+        CHECK(errno == EDOM);
+        REQUIRE(script.calls == 2);
+        CHECK(script.descriptors[0] == STDERR_FILENO);
+        CHECK(script.descriptors[1] == STDERR_FILENO);
+        CHECK(script.request(0) == message);
+        CHECK(script.request(1) == message);
+        CHECK(script.written() == message);
+    }
+
+    SECTION("partial writes advance to the unwritten remainder") {
+        ScriptedLogWrite script;
+        script.results[0] = {3, 0};
+        script.results[1] = {static_cast<ssize_t>(message.size() - 3), 0};
+        script.result_count = 2;
+        detail::reset_process_log_failure_for_test(true);
+        errno = ERANGE;
+
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+
+        CHECK(errno == ERANGE);
+        REQUIRE(script.calls == 2);
+        CHECK(script.request(0) == message);
+        CHECK(script.request(1) == message.substr(3));
+        CHECK(script.written() == message);
+    }
+
+    SECTION("a zero-byte write stops without spinning") {
+        ScriptedLogWrite script;
+        script.results[0] = {0, 0};
+        script.result_count = 1;
+        detail::reset_process_log_failure_for_test(true);
+        errno = EBUSY;
+
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+
+        CHECK(errno == EBUSY);
+        CHECK(script.calls == 1);
+        CHECK(script.written().empty());
+    }
+
+    SECTION("a terminal error stops without recursive reporting") {
+        ScriptedLogWrite script;
+        script.results[0] = {-1, EIO};
+        script.result_count = 1;
+        detail::reset_process_log_failure_for_test(true);
+        errno = ENOTTY;
+
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+        detail::report_process_log_failure_with_writer_for_test(ScriptedLogWrite::invoke, &script);
+
+        CHECK(errno == ENOTTY);
+        CHECK(script.calls == 1);
+        CHECK(script.written().empty());
+    }
 }
 
 TEST_CASE("production converter covers all pinned authorization states and metadata",
