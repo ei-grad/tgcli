@@ -55,6 +55,9 @@
     "session terminate": {
       "result": "session-terminate.result.schema.json"
     },
+    "unread": {
+      "result": "unread.result.schema.json"
+    },
     "version": {
       "result": "version.result.schema.json"
     },

@@ -91,6 +91,7 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.chats != nullptr) {
         register_chats_command(dispatcher, *context.chats);
+        register_unread_command(dispatcher, *context.chats);
     }
     if (context.resolver != nullptr) {
         register_resolve_command(dispatcher, *context.resolver);

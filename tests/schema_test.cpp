@@ -117,6 +117,20 @@ std::vector<SchemaCase> schema_cases() {
           {"next", "cursor-2"}},
          "items",
          true},
+        {"unread.result.schema.json",
+         {{"items", json::array({json{{"id", -1001},
+                                      {"title", "Project"},
+                                      {"type", "supergroup"},
+                                      {"is_bot", false},
+                                      {"is_archived", false},
+                                      {"is_marked_unread", false},
+                                      {"unread_count", 3},
+                                      {"unread_mention_count", 1},
+                                      {"unread_reaction_count", 0},
+                                      {"unread_poll_vote_count", 0}}})},
+          {"next", nullptr}},
+         "items",
+         true},
         {"version.result.schema.json",
          {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}},
          "version"},
@@ -300,10 +314,11 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
           {"session list", {{"result", "session-list.result.schema.json"}}},
           {"session terminate", {{"result", "session-terminate.result.schema.json"}}},
+          {"unread", {{"result", "unread.result.schema.json"}}},
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 20);
+    CHECK(manifest["commands"].size() == 21);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -400,6 +415,49 @@ TEST_CASE("chats schema keeps identity folder and tagged-topic bounds exact", "[
         result["items"][0]["is_bot"] = true;
         CHECK_THAT(result, !tgcli::test::matches_json_schema("chats.result.schema.json"));
     }
+}
+
+TEST_CASE("unread schema is unpaginated unbounded and keeps private bot identity exact",
+          "[schema][unread]") {
+    const auto cases = schema_cases();
+    const auto found = std::ranges::find_if(cases, [](const SchemaCase& test_case) {
+        return test_case.filename == "unread.result.schema.json";
+    });
+    REQUIRE(found != cases.end());
+    auto result = found->instance;
+    CHECK_THAT(result, tgcli::test::matches_json_schema("unread.result.schema.json"));
+
+    for (const bool is_bot : {false, true}) {
+        result = found->instance;
+        result["items"][0].update({{"id", 42}, {"type", "private"}, {"is_bot", is_bot}});
+        CHECK_THAT(result, tgcli::test::matches_json_schema("unread.result.schema.json"));
+    }
+    for (const std::string_view type : {"basic_group", "supergroup", "channel"}) {
+        result = found->instance;
+        result["items"][0]["type"] = type;
+        result["items"][0]["is_bot"] = true;
+        CHECK_THAT(result, !tgcli::test::matches_json_schema("unread.result.schema.json"));
+    }
+
+    result = found->instance;
+    result["next"] = "cursor";
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("unread.result.schema.json"));
+    result = found->instance;
+    result["items"][0]["unread_count"] = -1;
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("unread.result.schema.json"));
+    result = found->instance;
+    result["items"][0]["usernames"] = json::array();
+    CHECK_THAT(result, !tgcli::test::matches_json_schema("unread.result.schema.json"));
+
+    result = found->instance;
+    const auto item = result["items"][0];
+    result["items"] = json::array();
+    for (std::size_t index = 0; index < 101; ++index) {
+        auto next = item;
+        next["id"] = static_cast<std::int64_t>(index + 1);
+        result["items"].push_back(std::move(next));
+    }
+    CHECK_THAT(result, tgcli::test::matches_json_schema("unread.result.schema.json"));
 }
 
 TEST_CASE("resolver errors have exact command-specific shapes", "[schema][resolver][error]") {

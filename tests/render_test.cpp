@@ -235,6 +235,34 @@ TEST_CASE("chats human renderer matches its reviewed golden", "[chats][render][g
                         {"next", "cursor-2"}}) == golden("chats.txt"));
 }
 
+TEST_CASE("unread human renderer preserves every field and explicit empty state",
+          "[unread][render][golden]") {
+    const json first{{"id", -1001},
+                     {"title", "Project\nAlpha"},
+                     {"type", "supergroup"},
+                     {"is_bot", false},
+                     {"is_archived", false},
+                     {"is_marked_unread", false},
+                     {"unread_count", 3},
+                     {"unread_mention_count", 1},
+                     {"unread_reaction_count", 0},
+                     {"unread_poll_vote_count", 0}};
+    const json second{{"id", 42},
+                      {"title", "Build Bot"},
+                      {"type", "private"},
+                      {"is_bot", true},
+                      {"is_archived", true},
+                      {"is_marked_unread", true},
+                      {"unread_count", 0},
+                      {"unread_mention_count", 0},
+                      {"unread_reaction_count", 2},
+                      {"unread_poll_vote_count", 1}};
+    CHECK(tgcli::cli::render_human("unread", {{"items", json::array({first, second})},
+                                              {"next", nullptr}}) == golden("unread.txt"));
+    CHECK(tgcli::cli::render_human("unread", {{"items", json::array()}, {"next", nullptr}}) ==
+          golden("unread-empty.txt"));
+}
+
 TEST_CASE("resolve human renderer matches its reviewed golden", "[resolver][render][golden]") {
     CHECK(tgcli::cli::render_human("resolve", {{"kind", "message"},
                                                {"chat",

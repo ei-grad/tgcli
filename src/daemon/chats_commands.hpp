@@ -38,6 +38,7 @@ class ChatsCoordinator {
         : client_(client), account_(std::move(account)) {}
 
     void chats(const proto::Request& request, RequestSession& session);
+    void unread(const proto::Request& request, RequestSession& session);
 
   private:
     std::reference_wrapper<core::TdClient> client_;
@@ -45,5 +46,6 @@ class ChatsCoordinator {
 };
 
 void register_chats_command(Dispatcher& dispatcher, ChatsCoordinator& coordinator);
+void register_unread_command(Dispatcher& dispatcher, ChatsCoordinator& coordinator);
 
 } // namespace tgcli::daemon

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "int53_nonzero": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    },
+    "private_chat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "is_bot",
+        "is_archived",
+        "is_marked_unread",
+        "unread_count",
+        "unread_mention_count",
+        "unread_reaction_count",
+        "unread_poll_vote_count"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53_nonzero" },
+        "title": { "type": "string" },
+        "type": { "const": "private" },
+        "is_bot": { "type": "boolean" },
+        "is_archived": { "type": "boolean" },
+        "is_marked_unread": { "type": "boolean" },
+        "unread_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "unread_mention_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "unread_reaction_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "unread_poll_vote_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      }
+    },
+    "non_private_chat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "is_bot",
+        "is_archived",
+        "is_marked_unread",
+        "unread_count",
+        "unread_mention_count",
+        "unread_reaction_count",
+        "unread_poll_vote_count"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53_nonzero" },
+        "title": { "type": "string" },
+        "type": { "enum": ["basic_group", "supergroup", "channel"] },
+        "is_bot": { "const": false },
+        "is_archived": { "type": "boolean" },
+        "is_marked_unread": { "type": "boolean" },
+        "unread_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "unread_mention_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "unread_reaction_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "unread_poll_vote_count": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      }
+    },
+    "chat": {
+      "oneOf": [
+        { "$ref": "#/$defs/private_chat" },
+        { "$ref": "#/$defs/non_private_chat" }
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "next"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/chat" }
+    },
+    "next": { "type": "null" }
+  }
+}

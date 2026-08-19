@@ -1,0 +1,23 @@
+unread chat:
+  id: -1001
+  title: "Project\nAlpha"
+  type: supergroup
+  bot: no
+  archived: no
+  marked unread: no
+  unread: 3
+  mentions: 1
+  reactions: 0
+  poll votes: 0
+unread chat:
+  id: 42
+  title: "Build Bot"
+  type: private
+  bot: yes
+  archived: yes
+  marked unread: yes
+  unread: 0
+  mentions: 0
+  reactions: 2
+  poll votes: 1
+next: null

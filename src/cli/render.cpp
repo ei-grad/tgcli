@@ -342,6 +342,32 @@ std::string render_chats(const nlohmann::json& data) {
     return out;
 }
 
+std::string render_unread(const nlohmann::json& data) {
+    std::string out;
+    const auto& items = data.at("items");
+    if (items.empty()) {
+        out = "unread: (none)\n";
+    }
+    for (const auto& chat : items) {
+        out += fmt::format(
+            "unread chat:\n  id: {}\n  title: {}\n  type: {}\n  bot: {}\n  archived: {}\n"
+            "  marked unread: {}\n  unread: {}\n  mentions: {}\n  reactions: {}\n"
+            "  poll votes: {}\n",
+            chat.at("id").get<std::int64_t>(), chat.at("title").dump(),
+            chat.at("type").get<std::string>(), yes_no(chat.at("is_bot").get<bool>()),
+            yes_no(chat.at("is_archived").get<bool>()),
+            yes_no(chat.at("is_marked_unread").get<bool>()),
+            chat.at("unread_count").get<std::int32_t>(),
+            chat.at("unread_mention_count").get<std::int32_t>(),
+            chat.at("unread_reaction_count").get<std::int32_t>(),
+            chat.at("unread_poll_vote_count").get<std::int32_t>());
+    }
+    out += data.at("next").is_null()
+               ? "next: null\n"
+               : fmt::format("next: {}\n", data.at("next").get<std::string>());
+    return out;
+}
+
 std::string render_resolve(const nlohmann::json& data) {
     const auto& chat = data.at("chat");
     std::string usernames;
@@ -426,6 +452,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "chats") {
         return render_chats(data);
+    }
+    if (command_key == "unread") {
+        return render_unread(data);
     }
     if (command_key == "resolve") {
         return render_resolve(data);

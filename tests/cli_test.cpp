@@ -2298,6 +2298,102 @@ TEST_CASE("chats no-daemon fake boundary returns a strict empty result",
     CHECK_THAT(result, test::matches_json_schema("chats.result.schema.json"));
 }
 
+TEST_CASE("unread parser exposes its flagless surface and rejects cursors locally",
+          "[cli][unread][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "unread-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("unread") != std::string::npos);
+
+    const auto help = run_binary_captured({"unread", "--help"}, env, "unread-help");
+    REQUIRE(help.exit_code == kOk);
+    CHECK((help.out + help.err).find("list chats with unread activity") != std::string::npos);
+
+    const auto cursor = run_binary_captured({"unread", "--cursor", "opaque"}, env, "unread-cursor");
+    CHECK(cursor.exit_code == kUsage);
+    CHECK(cursor.out.empty());
+    CHECK(json::parse(cursor.err)["error"] ==
+          json{{"code", "USAGE"},
+               {"message", "--cursor is not supported for this command"},
+               {"details", {{"argument", "--cursor"}, {"reason", "unsupported_mode"}}}});
+
+    const auto limit = run_binary_captured({"unread", "-n", "1"}, env, "unread-limit");
+    CHECK(limit.exit_code == kUsage);
+    CHECK(limit.out.empty());
+    CHECK(json::parse(limit.err)["error"]["details"]["reason"] == "unknown_command");
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("unread no-daemon fake boundary returns a strict empty unpaginated result",
+          "[cli][unread][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    REQUIRE(scripted->clients().size() == 1);
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"unread"};
+    request.args = json::object();
+    request.context.json = true;
+    request.context.cwd = "/";
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+
+    REQUIRE(scripted->wait_for_sent(2));
+    auto sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                                    .first_name = "Ada",
+                                                                    .last_name = "",
+                                                                    .usernames = {"ada"},
+                                                                    .phone_number = "12025550123",
+                                                                    .is_bot = false,
+                                                                    .is_premium = false}));
+    for (const auto& list : {std::string("main"), std::string("archive")}) {
+        REQUIRE(scripted->wait_for_sent(sent.size() + 1));
+        sent = scripted->sent_functions();
+        REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetChats);
+        const auto list_field =
+            std::ranges::find_if(sent.back().function.fields(),
+                                 [](const auto& field) { return field.has_name("list"); });
+        REQUIRE(list_field != sent.back().function.fields().end());
+        REQUIRE(std::get<std::string>(list_field->value()) == list);
+        scripted->push_response(td_client, sent.back().query_id,
+                                core::TdValue::from(core::TdChats{.chat_ids = {}}));
+
+        REQUIRE(scripted->wait_for_sent(sent.size() + 1));
+        sent = scripted->sent_functions();
+        REQUIRE(sent.back().function.kind() == core::TdFunctionKind::LoadChats);
+        scripted->push_response(td_client, sent.back().query_id,
+                                core::TdValue::from(core::TdError{404, "Not Found"}));
+    }
+
+    const auto outcome = pending.get();
+    CHECK(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    const auto result = json::parse(outcome.out);
+    CHECK(result == json{{"items", json::array()}, {"next", nullptr}});
+    CHECK_THAT(result, test::matches_json_schema("unread.result.schema.json"));
+}
+
 TEST_CASE("resolve parser exposes its surface and rejects invalid selectors locally",
           "[cli][resolver][process][schema]") {
     const IsolatedEnv env;

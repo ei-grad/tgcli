@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,7 @@ constexpr std::int32_t kDialogBatch = 100;
 constexpr std::string_view kBase64Alphabet =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 constexpr std::string_view kOperation = "chats";
+constexpr std::string_view kUnreadOperation = "unread";
 
 struct ChatKey {
     std::int64_t order = 0;
@@ -386,6 +388,23 @@ std::optional<json> summary_json(const core::TdChat& chat, const ChatIdentity& i
                    {"unread_poll_vote_count", chat.unread_poll_vote_count},
                    {"last_message", std::move(last_message)}});
     return result;
+}
+
+std::optional<json> unread_summary_json(const core::TdChat& chat, const ChatIdentity& identity,
+                                        const Membership& lists) {
+    if (!valid_unread_fields(chat) || (identity.type != "private" && identity.is_bot)) {
+        return std::nullopt;
+    }
+    return json{{"id", identity.id},
+                {"title", identity.title},
+                {"type", identity.type},
+                {"is_bot", identity.is_bot},
+                {"is_archived", lists.archived},
+                {"is_marked_unread", chat.is_marked_unread},
+                {"unread_count", chat.unread_count},
+                {"unread_mention_count", chat.unread_mention_count},
+                {"unread_reaction_count", chat.unread_reaction_count},
+                {"unread_poll_vote_count", chat.unread_poll_vote_count}};
 }
 
 void usage(RequestSession& session, std::string_view message, const json& argument,
@@ -801,6 +820,247 @@ class ChatsRun {
     std::int64_t user_id_ = 0;
 };
 
+class UnreadRun {
+  public:
+    UnreadRun(core::TdClient& client, std::string_view account, RequestSession& session)
+        : client_(client), account_(account), session_(session), reads_(client, session) {}
+
+    void run() {
+        if (!preflight()) {
+            return;
+        }
+        const auto main = load_complete_list(core::TdChatListKind::Main);
+        if (!main) {
+            return;
+        }
+        const auto archive = load_complete_list(core::TdChatListKind::Archive);
+        if (!archive) {
+            return;
+        }
+
+        json items = json::array();
+        std::unordered_set<std::int64_t> seen;
+        if (!append_list(*main, core::TdChatListKind::Main, seen, items) ||
+            !append_list(*archive, core::TdChatListKind::Archive, seen, items)) {
+            return;
+        }
+        session_.result({{"items", std::move(items)}, {"next", nullptr}});
+    }
+
+  private:
+    std::optional<std::vector<std::int64_t>> load_complete_list(core::TdChatListKind kind) {
+        const core::TdChatList list{.kind = kind, .folder_id = 0, .tdlib_type_id = 0};
+        std::int32_t prefix_limit = kDialogBatch;
+        for (;;) {
+            auto listed = read([&](const auto& current) {
+                return client_.get_chats(current, list, prefix_limit);
+            });
+            if (!listed) {
+                return std::nullopt;
+            }
+            if (const auto* error = listed->value.get_if<core::TdError>()) {
+                td_error(*error);
+                return std::nullopt;
+            }
+            const auto* chats = listed->value.get_if<core::TdChats>();
+            if (chats == nullptr || !std::ranges::all_of(chats->chat_ids, [](std::int64_t id) {
+                    return valid_int53(id);
+                })) {
+                internal_error();
+                return std::nullopt;
+            }
+            auto ids = chats->chat_ids;
+
+            auto loaded = read([&](const auto& current) {
+                return client_.load_chats(current, list, kDialogBatch);
+            });
+            if (!loaded) {
+                return std::nullopt;
+            }
+            if (const auto* error = loaded->value.get_if<core::TdError>()) {
+                if (error->code == 404) {
+                    return ids;
+                }
+                td_error(*error);
+                return std::nullopt;
+            }
+            if (loaded->value.get_if<core::TdOk>() == nullptr) {
+                internal_error();
+                return std::nullopt;
+            }
+            if (prefix_limit <= std::numeric_limits<std::int32_t>::max() - kDialogBatch) {
+                prefix_limit += kDialogBatch;
+            } else {
+                prefix_limit = std::numeric_limits<std::int32_t>::max();
+            }
+        }
+    }
+
+    bool append_list(const std::vector<std::int64_t>& ids, core::TdChatListKind kind,
+                     std::unordered_set<std::int64_t>& seen, json& items) {
+        const core::TdChatList selected{.kind = kind, .folder_id = 0, .tdlib_type_id = 0};
+        for (const auto chat_id : ids) {
+            if (seen.contains(chat_id)) {
+                continue;
+            }
+            if (!append_chat(chat_id, selected, seen, items)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool append_chat(std::int64_t chat_id, const core::TdChatList& selected,
+                     std::unordered_set<std::int64_t>& seen, json& items) {
+        auto fetched =
+            read([&](const auto& current) { return client_.get_chat(current, chat_id); });
+        if (!fetched) {
+            return false;
+        }
+        if (const auto* error = fetched->value.get_if<core::TdError>()) {
+            td_error(*error);
+            return false;
+        }
+        const auto* chat = fetched->value.get_if<core::TdChat>();
+        if (chat == nullptr || chat->id != chat_id || !valid_int53(chat->id)) {
+            internal_error();
+            return false;
+        }
+        const auto lists = membership(*chat, selected);
+        if (!lists.valid) {
+            internal_error();
+            return false;
+        }
+        if (!lists.selected) {
+            return true;
+        }
+        seen.insert(chat_id);
+        if (chat->kind == core::TdChatKind::Secret) {
+            return true;
+        }
+        if (!valid_unread_fields(*chat)) {
+            internal_error();
+            return false;
+        }
+        if (!is_unread(*chat)) {
+            return true;
+        }
+        return append_summary(*chat, lists, items);
+    }
+
+    bool append_summary(const core::TdChat& chat, const Membership& lists, json& items) {
+        const auto identity = materialize_chat_identity(
+            client_, chat, [&](const auto& start) { return read(start); });
+        if (identity.status == ChatIdentityStatus::ReadStopped) {
+            return false;
+        }
+        if (identity.status == ChatIdentityStatus::TdError && identity.error) {
+            td_error(*identity.error);
+            return false;
+        }
+        if (identity.status != ChatIdentityStatus::Success || !identity.identity) {
+            internal_error();
+            return false;
+        }
+        const auto summary = unread_summary_json(chat, *identity.identity, lists);
+        if (!summary) {
+            internal_error();
+            return false;
+        }
+        items.push_back(*summary);
+        return true;
+    }
+
+    bool preflight() {
+        snapshot_ = reads_.current();
+        if (!snapshot_ || snapshot_->data.state != AuthState::Ready) {
+            not_authed(snapshot_, "not_ready");
+            return false;
+        }
+        auto response = read([&](const auto& current) { return client_.get_me(current); });
+        if (!response) {
+            return false;
+        }
+        if (const auto* error = response->value.get_if<core::TdError>()) {
+            td_error(*error);
+            return false;
+        }
+        const auto* user = response->value.get_if<core::TdUserSummary>();
+        if (user == nullptr || !valid_user_id(user->id)) {
+            internal_error();
+            return false;
+        }
+        if (user->is_bot) {
+            session_.error("BOT_UNSUPPORTED", "unread requires a user account",
+                           {{"operation", kUnreadOperation}}, kUsage);
+            return false;
+        }
+        return true;
+    }
+
+    std::optional<ReadyReadResult> read(const ReadyReadStart& start) {
+        auto waited = reads_.read(start, snapshot_);
+        if (waited.status == ReadyReadStatus::AuthorizationLost) {
+            if (!session_.cancellation_requested()) {
+                not_authed(waited.snapshot, "authorization_lost");
+            }
+            return std::nullopt;
+        }
+        if (waited.status == ReadyReadStatus::TimedOut) {
+            if (!session_.cancellation_requested()) {
+                const auto current = reads_.current();
+                session_.error("TIMEOUT", "unread request timed out",
+                               {{"operation", kUnreadOperation},
+                                {"state", current ? json(core::auth_state_name(current->data.state))
+                                                  : json(nullptr)}},
+                               kTimeout);
+            }
+            return std::nullopt;
+        }
+        if (waited.status != ReadyReadStatus::Response || session_.cancellation_requested()) {
+            if (waited.status == ReadyReadStatus::Failed && !session_.cancellation_requested()) {
+                internal_error();
+            }
+            return std::nullopt;
+        }
+        return waited;
+    }
+
+    void not_authed(const std::shared_ptr<const AuthStateSnapshot>& snapshot,
+                    std::string_view reason) {
+        session_.error("NOT_AUTHED", "unread requires an authenticated account",
+                       {{"account", account_},
+                        {"state", snapshot ? json(core::auth_state_name(snapshot->data.state))
+                                           : json("unknown")},
+                        {"reason", reason}},
+                       kNotAuthed);
+    }
+
+    void td_error(const core::TdError& error) {
+        if (error.code == 429) {
+            session_.error("RATE_LIMITED", "Telegram rate limit",
+                           {{"operation", kUnreadOperation},
+                            {"tdlib_code", 429},
+                            {"retry_after", retry_after(error.message)}},
+                           kRateLimited);
+            return;
+        }
+        session_.error("TDLIB_ERROR", "unread TDLib request failed",
+                       {{"operation", kUnreadOperation}, {"tdlib_code", error.code}}, kGeneric);
+    }
+
+    void internal_error() {
+        session_.error("INTERNAL", "unread returned an unexpected object",
+                       {{"operation", kUnreadOperation}, {"reason", "internal_error"}}, kGeneric);
+    }
+
+    core::TdClient& client_;
+    std::string_view account_;
+    RequestSession& session_;
+    ReadyReadSession reads_;
+    std::shared_ptr<const AuthStateSnapshot> snapshot_;
+};
+
 } // namespace
 
 std::string encode_chats_cursor(const ChatsCursor& cursor) {
@@ -890,11 +1150,26 @@ void ChatsCoordinator::chats(const proto::Request& request, RequestSession& sess
     ChatsRun(client_.get(), account_, session, *state).run();
 }
 
+void ChatsCoordinator::unread(const proto::Request& request, RequestSession& session) {
+    if (!request.args.is_object() || !request.args.empty()) {
+        usage(session, "unread received malformed arguments", nullptr);
+        return;
+    }
+    UnreadRun(client_.get(), account_, session).run();
+}
+
 void register_chats_command(Dispatcher& dispatcher, ChatsCoordinator& coordinator) {
     dispatcher.register_command("chats", {Tier::Read, [&coordinator](const proto::Request& request,
                                                                      RequestSession& session) {
                                               coordinator.chats(request, session);
                                           }});
+}
+
+void register_unread_command(Dispatcher& dispatcher, ChatsCoordinator& coordinator) {
+    dispatcher.register_command("unread", {Tier::Read, [&coordinator](const proto::Request& request,
+                                                                      RequestSession& session) {
+                                               coordinator.unread(request, session);
+                                           }});
 }
 
 } // namespace tgcli::daemon

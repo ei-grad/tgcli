@@ -54,6 +54,7 @@ class FakeChats {
         coordinator_ =
             std::make_unique<tgcli::daemon::ChatsCoordinator>(*client_, std::string("main"));
         tgcli::daemon::register_chats_command(dispatcher_, *coordinator_);
+        tgcli::daemon::register_unread_command(dispatcher_, *coordinator_);
     }
 
     std::future<Outcome> dispatch(
@@ -216,6 +217,16 @@ tgcli::proto::Request chats_request(std::optional<std::int32_t> folder = std::nu
                     {"folder", folder ? json(*folder) : json(nullptr)},
                     {"limit", limit ? json(*limit) : json(nullptr)},
                     {"unread", unread}};
+    request.context.timeout_seconds = 2.0;
+    request.context.cwd = "/";
+    return request;
+}
+
+tgcli::proto::Request unread_request(json args = json::object()) {
+    tgcli::proto::Request request("main");
+    request.id = 1;
+    request.command = {"unread"};
+    request.args = std::move(args);
     request.context.timeout_seconds = 2.0;
     request.context.cwd = "/";
     return request;
@@ -514,4 +525,239 @@ TEST_CASE("chats rejects list responses observed at or after its absolute deadli
             CHECK(fake.count(tgcli::core::TdFunctionKind::LoadChats) == 0);
         }
     }
+}
+
+TEST_CASE("unread completely loads Main then Archive and emits exact deduplicated summaries",
+          "[unread][contract][lists][schema]") {
+    FakeChats fake;
+    auto future = fake.dispatch(unread_request());
+    fake.respond_me();
+
+    auto listed =
+        fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdChats{.chat_ids = {-1}});
+    CHECK(field_as<std::string>(listed, "list") == "main");
+    CHECK(field_as<std::int64_t>(listed, "limit") == 100);
+    auto loaded = fake.respond(tgcli::core::TdFunctionKind::LoadChats, tgcli::core::TdOk{});
+    CHECK(field_as<std::string>(loaded, "list") == "main");
+    CHECK(field_as<std::int64_t>(loaded, "limit") == 100);
+
+    const std::vector<std::int64_t> main_ids{-1, -2, -3, -4, -5, -6, -7, -8, -9};
+    listed = fake.respond(tgcli::core::TdFunctionKind::GetChats,
+                          tgcli::core::TdChats{.chat_ids = main_ids});
+    CHECK(field_as<std::string>(listed, "list") == "main");
+    CHECK(field_as<std::int64_t>(listed, "limit") == 200);
+    fake.respond(tgcli::core::TdFunctionKind::LoadChats, tgcli::core::TdError{404, "Not Found"});
+
+    const std::vector<std::int64_t> archive_ids{-2, -3, -10};
+    listed = fake.respond(tgcli::core::TdFunctionKind::GetChats,
+                          tgcli::core::TdChats{.chat_ids = archive_ids});
+    CHECK(field_as<std::string>(listed, "list") == "archive");
+    CHECK(field_as<std::int64_t>(listed, "limit") == 100);
+    loaded = fake.respond(tgcli::core::TdFunctionKind::LoadChats,
+                          tgcli::core::TdError{404, "Not Found"});
+    CHECK(field_as<std::string>(loaded, "list") == "archive");
+
+    auto marked = chat(-1, 900, main_list());
+    marked.title = "Marked";
+    marked.is_marked_unread = true;
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(marked));
+
+    auto stale_main = chat(-2, 800, archive_list(), true);
+    stale_main.title = "Moved to archive";
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(stale_main));
+
+    auto mention = chat(-3, 700, main_list());
+    mention.title = "Mention";
+    mention.unread_mention_count = 1;
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(mention));
+
+    auto reaction = chat(-4, 600, main_list());
+    reaction.title = "Reaction";
+    reaction.unread_reaction_count = 2;
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(reaction));
+
+    auto poll = chat(-5, 500, main_list());
+    poll.title = "Poll";
+    poll.unread_poll_vote_count = 3;
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(poll));
+
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, chat(-6, 400, main_list()));
+
+    auto secret = chat(-7, 300, main_list(), true);
+    secret.kind = tgcli::core::TdChatKind::Secret;
+    secret.related_id = 707;
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(secret));
+
+    auto private_bot = chat(-8, 200, main_list(), true);
+    private_bot.title = "Build Bot";
+    private_bot.kind = tgcli::core::TdChatKind::Private;
+    private_bot.related_id = 808;
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(private_bot));
+    fake.respond(tgcli::core::TdFunctionKind::GetUser,
+                 tgcli::core::TdUserSummary{.id = 808,
+                                            .first_name = "Build",
+                                            .last_name = "Bot",
+                                            .usernames = {"build_bot"},
+                                            .phone_number = "",
+                                            .is_bot = true,
+                                            .is_premium = false});
+
+    auto channel = chat(-9, 100, main_list(), true);
+    channel.title = "Announcements";
+    channel.kind = tgcli::core::TdChatKind::Channel;
+    channel.related_id = 909;
+    channel.chat_lists = {main_list(), archive_list()};
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(channel));
+    fake.respond(
+        tgcli::core::TdFunctionKind::GetSupergroup,
+        tgcli::core::TdSupergroup{.id = 909, .usernames = {"announcements"}, .is_channel = true});
+
+    auto archived = chat(-2, 90, archive_list(), true);
+    archived.title = "Moved to archive";
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(archived));
+    fake.respond(tgcli::core::TdFunctionKind::GetChat, chat(-10, 80, archive_list()));
+
+    const auto outcome = future.get();
+    REQUIRE(outcome.result);
+    CHECK(outcome.exit_code == tgcli::kOk);
+    CHECK(outcome.terminal_count == 1);
+    CHECK(outcome.result->at("next").is_null());
+    const auto& items = outcome.result->at("items");
+    REQUIRE(items.size() == 7);
+    CHECK(items[0].at("id") == -1);
+    CHECK(items[0].at("is_marked_unread") == true);
+    CHECK(items[1].at("id") == -3);
+    CHECK(items[1].at("unread_mention_count") == 1);
+    CHECK(items[2].at("id") == -4);
+    CHECK(items[2].at("unread_reaction_count") == 2);
+    CHECK(items[3].at("id") == -5);
+    CHECK(items[3].at("unread_poll_vote_count") == 3);
+    CHECK(items[4].at("id") == -8);
+    CHECK(items[4].at("type") == "private");
+    CHECK(items[4].at("is_bot") == true);
+    CHECK(items[5].at("id") == -9);
+    CHECK(items[5].at("type") == "channel");
+    CHECK(items[5].at("is_bot") == false);
+    CHECK(items[5].at("is_archived") == true);
+    CHECK(items[6].at("id") == -2);
+    CHECK(items[6].at("unread_count") == 1);
+    CHECK(items[6].at("is_archived") == true);
+    for (const auto& item : items) {
+        CHECK(item.size() == 10);
+        CHECK_FALSE(item.contains("usernames"));
+        CHECK_FALSE(item.contains("folder_ids"));
+        CHECK_FALSE(item.contains("last_message"));
+    }
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetChats) == 3);
+    CHECK(fake.count(tgcli::core::TdFunctionKind::LoadChats) == 3);
+    CHECK_THAT(*outcome.result, tgcli::test::matches_json_schema("unread.result.schema.json"));
+}
+
+TEST_CASE("unread preflight and TD failures keep exact terminal errors", "[unread][error]") {
+    SECTION("malformed arguments stop before getMe") {
+        FakeChats fake;
+        const auto outcome = fake.dispatch(unread_request({{"extra", true}})).get();
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("error").at("code") == "USAGE");
+        CHECK(outcome.error->at("error").at("details") ==
+              json{{"argument", nullptr}, {"reason", "invalid_argument"}});
+        CHECK(outcome.exit_code == tgcli::kUsage);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetMe) == 0);
+    }
+
+    SECTION("non-ready account stops before getMe") {
+        FakeChats fake(tgcli::core::AuthState::WaitCode);
+        const auto outcome = fake.dispatch(unread_request()).get();
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("error").at("code") == "NOT_AUTHED");
+        CHECK(outcome.error->at("error").at("details") ==
+              json{{"account", "main"}, {"state", "wait_code"}, {"reason", "not_ready"}});
+        CHECK(outcome.exit_code == tgcli::kNotAuthed);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetMe) == 0);
+    }
+
+    SECTION("bot stops before user-only list reads") {
+        FakeChats fake;
+        auto future = fake.dispatch(unread_request());
+        fake.respond_me(true);
+        const auto outcome = future.get();
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("error").at("code") == "BOT_UNSUPPORTED");
+        CHECK(outcome.error->at("error").at("details") == json{{"operation", "unread"}});
+        CHECK(outcome.exit_code == tgcli::kUsage);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetChats) == 0);
+    }
+
+    SECTION("getChats 404 is not list exhaustion") {
+        FakeChats fake;
+        auto future = fake.dispatch(unread_request());
+        fake.respond_me();
+        fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdError{404, "Not Found"});
+        const auto outcome = future.get();
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("error").at("code") == "TDLIB_ERROR");
+        CHECK(outcome.error->at("error").at("details") ==
+              json{{"operation", "unread"}, {"tdlib_code", 404}});
+        CHECK(outcome.exit_code == tgcli::kGeneric);
+    }
+
+    SECTION("loadChats 429 preserves rate-limit details") {
+        FakeChats fake;
+        auto future = fake.dispatch(unread_request());
+        fake.respond_me();
+        fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdChats{.chat_ids = {}});
+        fake.respond(tgcli::core::TdFunctionKind::LoadChats,
+                     tgcli::core::TdError{429, "FLOOD_WAIT_17"});
+        const auto outcome = future.get();
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("error").at("code") == "RATE_LIMITED");
+        CHECK(outcome.error->at("error").at("details") ==
+              json{{"operation", "unread"}, {"tdlib_code", 429}, {"retry_after", 17}});
+        CHECK(outcome.exit_code == tgcli::kRateLimited);
+    }
+
+    SECTION("invalid unread counters are internal errors") {
+        FakeChats fake;
+        auto future = fake.dispatch(unread_request());
+        fake.respond_me();
+        fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdChats{.chat_ids = {-1}});
+        fake.respond(tgcli::core::TdFunctionKind::LoadChats,
+                     tgcli::core::TdError{404, "Not Found"});
+        fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdChats{.chat_ids = {}});
+        fake.respond(tgcli::core::TdFunctionKind::LoadChats,
+                     tgcli::core::TdError{404, "Not Found"});
+        auto invalid = chat(-1, 1, main_list(), true);
+        invalid.unread_count = -1;
+        fake.respond(tgcli::core::TdFunctionKind::GetChat, std::move(invalid));
+        const auto outcome = future.get();
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("error").at("code") == "INTERNAL");
+        CHECK(outcome.error->at("error").at("details") ==
+              json{{"operation", "unread"}, {"reason", "internal_error"}});
+        CHECK(outcome.exit_code == tgcli::kGeneric);
+    }
+}
+
+TEST_CASE("unread returns no partial Main result when Archive reaches the deadline",
+          "[unread][deadline][error]") {
+    const auto deadline = tgcli::core::TdEventClock::now() + 5s;
+    FakeChats fake;
+    auto future = fake.dispatch(unread_request(), deadline);
+    fake.respond_me(false, 42, deadline - 5ns);
+    fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdChats{.chat_ids = {-1}},
+                 deadline - 4ns);
+    fake.respond(tgcli::core::TdFunctionKind::LoadChats, tgcli::core::TdError{404, "Not Found"},
+                 deadline - 3ns);
+    fake.respond(tgcli::core::TdFunctionKind::GetChats, tgcli::core::TdChats{.chat_ids = {}},
+                 deadline);
+
+    const auto outcome = future.get();
+    REQUIRE(outcome.error);
+    CHECK_FALSE(outcome.result);
+    CHECK(outcome.error->at("error").at("code") == "TIMEOUT");
+    CHECK(outcome.error->at("error").at("details") ==
+          json{{"operation", "unread"}, {"state", "ready"}});
+    CHECK(outcome.exit_code == tgcli::kTimeout);
+    CHECK(outcome.terminal_count == 1);
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetChat) == 0);
 }

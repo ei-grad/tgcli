@@ -574,6 +574,7 @@ int run(int argc, char** argv) {
     chats.unread_option =
         chats_cmd->add_flag("--unread", chats.unread, "only include unread chats");
     chats.limit_option = chats_cmd->add_option("-n", chats.limit, "page size (1-100; default 20)");
+    app.add_subcommand("unread", "list chats with unread activity");
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");

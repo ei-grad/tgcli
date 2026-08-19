@@ -170,7 +170,7 @@ before the milestone is closed.
       and contract coverage for NOT_AUTHED/BOT_UNSUPPORTED preflight, malformed
       selectors/cursors, cursor/filter mismatches, paid/unknown variants, empty
       matches, and reaction tags vs emoji text
-- [ ] `tgcli unread`: fully load and deduplicate Main then Archive, apply the
+- [x] `tgcli unread`: fully load and deduplicate Main then Archive, apply the
       shared unread predicate, skip secret chats, and return `next:null`
 - [ ] `tgcli fetch <chat>`: default/finite/since/all targets, continuous local
       prefix plus live fill, resumable progress/timeout details, and the public-
