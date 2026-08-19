@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <set>
 #include <string>
 #include <string_view>
@@ -40,6 +41,15 @@ json chat_identity() {
             {"usernames", json::array({"project"})}};
 }
 
+json private_chat_identity(bool is_bot) {
+    auto result = chat_identity();
+    result.update({{"id", 42},
+                   {"title", is_bot ? "Build Bot" : "Ada"},
+                   {"type", "private"},
+                   {"is_bot", is_bot}});
+    return result;
+}
+
 json chat_summary() {
     auto result = chat_identity();
     result.update({{"is_archived", false},
@@ -50,6 +60,12 @@ json chat_summary() {
                    {"unread_reaction_count", 0},
                    {"unread_poll_vote_count", 0},
                    {"last_message", message_summary()}});
+    return result;
+}
+
+json private_chat_summary(bool is_bot) {
+    auto result = chat_summary();
+    result.update(private_chat_identity(is_bot));
     return result;
 }
 
@@ -215,6 +231,16 @@ std::vector<std::pair<std::string, json>> listen_items() {
           {"change", "marked_unread"},
           {"chat_id", -1001},
           {"is_marked_unread", true}}},
+        {"chat_new_private_user",
+         {{"event", "chat_change"}, {"change", "new"}, {"chat", private_chat_summary(false)}}},
+        {"chat_new_private_bot",
+         {{"event", "chat_change"}, {"change", "new"}, {"chat", private_chat_summary(true)}}},
+        {"chat_identity_private_user",
+         {{"event", "chat_change"},
+          {"change", "identity"},
+          {"chat", private_chat_identity(false)}}},
+        {"chat_identity_private_bot",
+         {{"event", "chat_change"}, {"change", "identity"}, {"chat", private_chat_identity(true)}}},
     };
 }
 
@@ -234,6 +260,16 @@ std::vector<std::pair<std::string, json>> inherited_stream_errors() {
          terminal_error("AMBIGUOUS", {{"selector", "dev"},
                                       {"scope", "active_dialogs"},
                                       {"candidates", json::array({chat_identity()})},
+                                      {"truncated", false}})},
+        {"ambiguous_private_user",
+         terminal_error("AMBIGUOUS", {{"selector", "Ada"},
+                                      {"scope", "active_dialogs"},
+                                      {"candidates", json::array({private_chat_identity(false)})},
+                                      {"truncated", false}})},
+        {"ambiguous_private_bot",
+         terminal_error("AMBIGUOUS", {{"selector", "Build Bot"},
+                                      {"scope", "active_dialogs"},
+                                      {"candidates", json::array({private_chat_identity(true)})},
                                       {"truncated", false}})},
         {"ambiguous_user",
          terminal_error("AMBIGUOUS",
@@ -312,8 +348,7 @@ std::vector<std::pair<std::string, json>> capacity_errors() {
                                             {"phase", "bootstrap"},
                                             {"resource", "metadata_bootstrap_bytes"},
                                             {"limit_bytes", 16777216},
-                                            {"used_bytes", 16777200},
-                                            {"incoming_bytes", 17}})},
+                                            {"would_use_bytes", 16777217}})},
         {"metadata_order_items",
          terminal_error("STREAM_CAPACITY", {{"operation", "listen"},
                                             {"phase", "active"},
@@ -326,8 +361,7 @@ std::vector<std::pair<std::string, json>> capacity_errors() {
                                             {"phase", "active"},
                                             {"resource", "metadata_order_bytes"},
                                             {"limit_bytes", 16777216},
-                                            {"used_bytes", 16777216},
-                                            {"incoming_bytes", 1}})},
+                                            {"would_use_bytes", 16777217}})},
         {"metadata_item_bytes",
          terminal_error("STREAM_CAPACITY", {{"operation", "listen"},
                                             {"phase", "active"},
@@ -356,8 +390,7 @@ std::vector<std::pair<std::string, json>> capacity_errors() {
                                                                {"phase", phase},
                                                                {"resource", "metadata_bytes"},
                                                                {"limit_bytes", 67108864},
-                                                               {"used_bytes", 67108864},
-                                                               {"incoming_bytes", 1}}));
+                                                               {"would_use_bytes", 67108865}}));
     }
     for (const auto& atomic :
          {"slot_pointer", "publisher_count", "descriptor_index", "byte_index"}) {
@@ -366,6 +399,34 @@ std::vector<std::pair<std::string, json>> capacity_errors() {
                                                                {"phase", "admission"},
                                                                {"resource", "lock_free_ingress"},
                                                                {"atomic", atomic}}));
+    }
+    constexpr auto kMaximumBytes = std::numeric_limits<std::uint64_t>::max();
+    result.emplace_back("metadata_bootstrap_bytes_max",
+                        terminal_error("STREAM_CAPACITY", {{"operation", "listen"},
+                                                           {"phase", "bootstrap"},
+                                                           {"resource", "metadata_bootstrap_bytes"},
+                                                           {"limit_bytes", 16777216},
+                                                           {"would_use_bytes", kMaximumBytes}}));
+    result.emplace_back("metadata_order_bytes_max",
+                        terminal_error("STREAM_CAPACITY", {{"operation", "wait_for"},
+                                                           {"phase", "active"},
+                                                           {"resource", "metadata_order_bytes"},
+                                                           {"limit_bytes", 16777216},
+                                                           {"would_use_bytes", kMaximumBytes}}));
+    result.emplace_back("metadata_item_bytes_max",
+                        terminal_error("STREAM_CAPACITY", {{"operation", "listen"},
+                                                           {"phase", "active"},
+                                                           {"resource", "metadata_item_bytes"},
+                                                           {"limit_bytes", 262144},
+                                                           {"incoming_bytes", kMaximumBytes}}));
+    for (const auto& phase : {"bootstrap", "active"}) {
+        result.emplace_back(
+            std::string("metadata_bytes_") + phase + "_max",
+            terminal_error("STREAM_CAPACITY", {{"operation", "wait_for"},
+                                               {"phase", phase},
+                                               {"resource", "metadata_bytes"},
+                                               {"limit_bytes", 67108864},
+                                               {"would_use_bytes", kMaximumBytes}}));
     }
     return result;
 }
@@ -532,6 +593,15 @@ TEST_CASE("listen item schema covers every event and chat-change branch",
     auto wrong_chat_list = cases.at(13).second;
     wrong_chat_list["list"]["folder_id"] = 2;
     CHECK_THAT(wrong_chat_list, !tgcli::test::matches_json_schema("listen.item.schema.json"));
+
+    auto non_private_bot_identity = cases.at(9).second;
+    non_private_bot_identity["chat"]["is_bot"] = true;
+    CHECK_THAT(non_private_bot_identity,
+               !tgcli::test::matches_json_schema("listen.item.schema.json"));
+    auto non_private_bot_summary = cases.at(8).second;
+    non_private_bot_summary["chat"]["is_bot"] = true;
+    CHECK_THAT(non_private_bot_summary,
+               !tgcli::test::matches_json_schema("listen.item.schema.json"));
 }
 
 TEST_CASE("stream error schema accepts every inherited and overflow branch",
@@ -580,6 +650,15 @@ TEST_CASE("stream error schema accepts every inherited and overflow branch",
     auto unknown_envelope = inherited_stream_errors().front().second;
     unknown_envelope["request_id"] = 1;
     CHECK_THAT(unknown_envelope, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+
+    auto non_private_bot_candidate =
+        terminal_error("AMBIGUOUS", {{"selector", "dev"},
+                                     {"scope", "active_dialogs"},
+                                     {"candidates", json::array({chat_identity()})},
+                                     {"truncated", false}});
+    non_private_bot_candidate["error"]["details"]["candidates"][0]["is_bot"] = true;
+    CHECK_THAT(non_private_bot_candidate,
+               !tgcli::test::matches_json_schema("stream.error.schema.json"));
 }
 
 TEST_CASE("stream capacity schema covers every exact resource and phase",
@@ -595,6 +674,44 @@ TEST_CASE("stream capacity schema covers every exact resource and phase",
         auto missing = error;
         missing["error"]["details"].erase("resource");
         CHECK_THAT(missing, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+
+        const auto& details = error["error"]["details"];
+        if (details.contains("used_items")) {
+            auto non_exhausting = error;
+            non_exhausting["error"]["details"]["used_items"] =
+                details["limit_items"].get<std::int64_t>() - 1;
+            CHECK_THAT(non_exhausting,
+                       !tgcli::test::matches_json_schema("stream.error.schema.json"));
+        }
+        if (details.contains("used")) {
+            auto non_exhausting = error;
+            non_exhausting["error"]["details"]["used"] = details["limit"].get<std::int64_t>() - 1;
+            CHECK_THAT(non_exhausting,
+                       !tgcli::test::matches_json_schema("stream.error.schema.json"));
+        }
+        if (details.contains("would_use_bytes")) {
+            auto non_overflow = error;
+            non_overflow["error"]["details"]["would_use_bytes"] = details["limit_bytes"];
+            CHECK_THAT(non_overflow, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+
+            auto zero = error;
+            zero["error"]["details"]["would_use_bytes"] = 0;
+            CHECK_THAT(zero, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+
+            auto legacy_tuple = error;
+            legacy_tuple["error"]["details"]["used_bytes"] = 1;
+            legacy_tuple["error"]["details"]["incoming_bytes"] = 1;
+            CHECK_THAT(legacy_tuple, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+        }
+        if (details["resource"] == "metadata_item_bytes") {
+            auto non_overflow = error;
+            non_overflow["error"]["details"]["incoming_bytes"] = details["limit_bytes"];
+            CHECK_THAT(non_overflow, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+
+            auto zero = error;
+            zero["error"]["details"]["incoming_bytes"] = 0;
+            CHECK_THAT(zero, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+        }
 
         for (const auto* limit : {"limit", "limit_items", "limit_bytes"}) {
             if (!error["error"]["details"].contains(limit)) {

@@ -200,8 +200,83 @@ for schema_file in \
 done
 ln -s "$root/docs/schemas/listen.item.schema.json" \
     "$symlink_schema_package/docs/schemas/listen.item.schema.json"
-expect_failure_message symlink-packaged-stream-schema 'listen.item.schema.json is missing or unsafe' \
+expect_failure_message symlink-packaged-stream-schema \
+    'packaged docs/schemas/listen.item.schema.json cannot be a symlink' \
     bash "$checker" verify-schema-package "$symlink_schema_package" "$root/docs/schemas"
+
+parent_symlink_target="$fixture_root/parent-symlink-target"
+mkdir -p "$parent_symlink_target/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" "$parent_symlink_target/schemas/$schema_file"
+done
+parent_symlink_package="$fixture_root/parent-symlink-package"
+mkdir -p "$parent_symlink_package"
+ln -s "$parent_symlink_target" "$parent_symlink_package/docs"
+expect_failure_message symlink-packaged-schema-parent 'packaged docs cannot be a symlink' \
+    bash "$checker" verify-schema-package "$parent_symlink_package" "$root/docs/schemas"
+
+directory_symlink_target="$fixture_root/directory-symlink-target"
+mkdir -p "$directory_symlink_target"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" "$directory_symlink_target/$schema_file"
+done
+directory_symlink_package="$fixture_root/directory-symlink-package"
+mkdir -p "$directory_symlink_package/docs"
+ln -s "$directory_symlink_target" "$directory_symlink_package/docs/schemas"
+expect_failure_message symlink-packaged-schema-directory \
+    'packaged docs/schemas cannot be a symlink' \
+    bash "$checker" verify-schema-package "$directory_symlink_package" "$root/docs/schemas"
+
+non_directory_package="$fixture_root/non-directory-package"
+mkdir -p "$non_directory_package"
+printf 'not a directory\n' > "$non_directory_package/docs"
+expect_failure_message non-directory-packaged-schema-parent 'packaged docs is not a directory' \
+    bash "$checker" verify-schema-package "$non_directory_package" "$root/docs/schemas"
+
+for unsafe_reference in '../listen.item.schema.json' '/listen.item.schema.json'; do
+    if [[ "$unsafe_reference" == /* ]]; then
+        unsafe_name=absolute
+    else
+        unsafe_name=traversal
+    fi
+    unsafe_source="$fixture_root/$unsafe_name-source-schemas"
+    unsafe_package="$fixture_root/$unsafe_name-schema-package"
+    mkdir -p "$unsafe_source" "$unsafe_package/docs/schemas"
+    for schema_file in \
+        listen.item.schema.json \
+        stream-manifest.json \
+        stream.error.schema.json \
+        wait-for.result.schema.json; do
+        cp "$root/docs/schemas/$schema_file" "$unsafe_source/$schema_file"
+        cp "$root/docs/schemas/$schema_file" "$unsafe_package/docs/schemas/$schema_file"
+    done
+    python3 - \
+        "$unsafe_source/stream-manifest.json" \
+        "$unsafe_package/docs/schemas/stream-manifest.json" \
+        "$unsafe_reference" <<'PY'
+import json
+import pathlib
+import sys
+
+
+for filename in sys.argv[1:3]:
+    manifest_file = pathlib.Path(filename)
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest["commands"]["listen"]["item"] = sys.argv[3]
+    manifest_file.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+PY
+    expect_failure_message "$unsafe_name-packaged-schema-reference" \
+        'stream manifest contains unsafe schema reference' \
+        bash "$checker" verify-schema-package "$unsafe_package" "$unsafe_source"
+done
 
 python3 - \
     "$fixture_root" \

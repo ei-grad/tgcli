@@ -2553,18 +2553,20 @@ Every branch has `additionalProperties:false`, requires `operation` exactly
 |---|---|---|
 | `subscriber_slots` | `admission` | `limit:32` |
 | `lock_free_ingress` | `admission` | `atomic`, exactly `slot_pointer`, `publisher_count`, `descriptor_index`, `byte_index`, or `terminal_cause`; no numeric field |
-| `metadata_bootstrap_items` | `bootstrap` | `limit_items:4096`, `used_items:0..4096`, `incoming_items:1` |
-| `metadata_bootstrap_bytes` | `bootstrap` | `limit_bytes:16777216`, `used_bytes:0..16777216`, positive `incoming_bytes` |
-| `metadata_chats` | `bootstrap\|active` | `limit:65536`, `used:0..65536`, `incoming:1` |
-| `metadata_entities` | `bootstrap\|active` | `limit:131072`, `used:0..131072`, `incoming:1` |
-| `metadata_bytes` | `bootstrap\|active` | `limit_bytes:67108864`, `used_bytes:0..67108864`, positive `incoming_bytes` |
-| `metadata_order_items` | `active` | `limit_items:4096`, `used_items:0..4096`, `incoming_items:1` |
-| `metadata_order_bytes` | `active` | `limit_bytes:16777216`, `used_bytes:0..16777216`, positive `incoming_bytes` |
+| `metadata_bootstrap_items` | `bootstrap` | `limit_items:4096`, `used_items:4096`, `incoming_items:1` |
+| `metadata_bootstrap_bytes` | `bootstrap` | `limit_bytes:16777216`, `would_use_bytes` with minimum 16777217 |
+| `metadata_chats` | `bootstrap\|active` | `limit:65536`, `used:65536`, `incoming:1` |
+| `metadata_entities` | `bootstrap\|active` | `limit:131072`, `used:131072`, `incoming:1` |
+| `metadata_bytes` | `bootstrap\|active` | `limit_bytes:67108864`, `would_use_bytes` with minimum 67108865 |
+| `metadata_order_items` | `active` | `limit_items:4096`, `used_items:4096`, `incoming_items:1` |
+| `metadata_order_bytes` | `active` | `limit_bytes:16777216`, `would_use_bytes` with minimum 16777217 |
 | `metadata_item_bytes` | `active` | `limit_bytes:262144`, `incoming_bytes` with minimum 262145 |
 
-For every byte/item/map occupancy branch, the reported values are those immediately
-before the rejected insertion and must prove that insertion would exceed the stated
-constant. `bootstrap` happens before any slot can be active and rejects the admission
+For every byte/item/map occupancy branch, the reported values must prove that the
+rejected insertion exceeds the stated constant. `would_use_bytes` is the authoritative
+overflow-checked sum of the prior occupancy and the incoming logical byte charge; the
+runtime must compute it with checked addition and must never publish a wrapped value.
+`bootstrap` happens before any slot can be active and rejects the admission
 that is waiting for stream-ready. `subscriber_slots` and `lock_free_ingress` reject
 only the current admission. An `active` metadata failure is generation-wide: it
 claims the same retained cause for every open subscription using that subscription's

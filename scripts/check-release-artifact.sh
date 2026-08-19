@@ -829,6 +829,7 @@ verify_schema_package() {
     python3 - "$package_root" "$source_directory" <<'PY'
 import json
 import pathlib
+import stat
 import sys
 
 
@@ -843,7 +844,6 @@ def require(condition: bool, message: str) -> None:
 
 package_root = pathlib.Path(sys.argv[1])
 source_directory = pathlib.Path(sys.argv[2])
-package_directory = package_root / "docs/schemas"
 expected_catalog = {
     "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
     "commands": {
@@ -864,11 +864,54 @@ expected_files = {
     "wait-for.result.schema.json",
 }
 
-require(package_root.is_dir() and not package_root.is_symlink(), "package root is missing or unsafe")
-require(
-    package_directory.is_dir() and not package_directory.is_symlink(),
-    "packaged schema directory is missing or unsafe",
-)
+try:
+    package_root_mode = package_root.lstat().st_mode
+except OSError as error:
+    fail(f"package root is missing or unsafe: {error}")
+require(not stat.S_ISLNK(package_root_mode), "package root cannot be a symlink")
+require(stat.S_ISDIR(package_root_mode), "package root is not a directory")
+try:
+    resolved_package_root = package_root.resolve(strict=True)
+except OSError as error:
+    fail(f"cannot resolve package root: {error}")
+
+
+def packaged_component(relative_name: str, expected_type: str) -> pathlib.Path:
+    relative = pathlib.PurePosixPath(relative_name)
+    require(
+        not relative.is_absolute()
+        and relative.parts
+        and all(part not in {"", ".", ".."} for part in relative.parts),
+        f"unsafe packaged relative path: {relative_name}",
+    )
+
+    candidate = package_root
+    for index, component in enumerate(relative.parts):
+        candidate /= component
+        owner = f"packaged {'/'.join(relative.parts[: index + 1])}"
+        try:
+            mode = candidate.lstat().st_mode
+        except OSError as error:
+            fail(f"{owner} is missing: {error}")
+        require(not stat.S_ISLNK(mode), f"{owner} cannot be a symlink")
+
+        is_leaf = index == len(relative.parts) - 1
+        required_type = expected_type if is_leaf else "directory"
+        if required_type == "directory":
+            require(stat.S_ISDIR(mode), f"{owner} is not a directory")
+        else:
+            require(stat.S_ISREG(mode), f"{owner} is not a regular file")
+
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_package_root)
+        except (OSError, ValueError) as error:
+            fail(f"{owner} escapes the package root: {error}")
+    return candidate
+
+
+packaged_component("docs", "directory")
+package_directory = packaged_component("docs/schemas", "directory")
 require(
     source_directory.is_dir() and not source_directory.is_symlink(),
     "source schema directory is missing or unsafe",
@@ -878,12 +921,8 @@ actual_entries = {entry.name for entry in package_directory.iterdir()}
 require(actual_entries == expected_files, "packaged stream schema file set differs")
 
 for filename in sorted(expected_files):
-    packaged_file = package_directory / filename
+    packaged_file = packaged_component(f"docs/schemas/{filename}", "file")
     source_file = source_directory / filename
-    require(
-        packaged_file.is_file() and not packaged_file.is_symlink(),
-        f"packaged {filename} is missing or unsafe",
-    )
     require(
         source_file.is_file() and not source_file.is_symlink(),
         f"source {filename} is missing or unsafe",
@@ -894,13 +933,25 @@ try:
     catalog = json.loads((package_directory / "stream-manifest.json").read_text(encoding="utf-8"))
 except (OSError, UnicodeError, json.JSONDecodeError) as error:
     fail(f"stream manifest is invalid: {error}")
-require(catalog == expected_catalog, "stream manifest contract differs")
 
-referenced = {
-    filename
-    for contracts in catalog["commands"].values()
-    for filename in contracts.values()
-}
+commands = catalog.get("commands") if isinstance(catalog, dict) else None
+require(isinstance(commands, dict), "stream manifest commands are invalid")
+referenced_files = []
+for contracts in commands.values():
+    require(isinstance(contracts, dict), "stream manifest command contract is invalid")
+    for filename in contracts.values():
+        require(isinstance(filename, str), "stream manifest schema reference is invalid")
+        reference = pathlib.PurePosixPath(filename)
+        require(
+            not reference.is_absolute()
+            and len(reference.parts) == 1
+            and reference.parts[0] not in {"", ".", ".."},
+            f"stream manifest contains unsafe schema reference: {filename}",
+        )
+        referenced_files.append(filename)
+
+require(catalog == expected_catalog, "stream manifest contract differs")
+referenced = set(referenced_files)
 require(
     referenced == expected_files - {"stream-manifest.json"},
     "stream manifest and packaged schemas are not bijective",

@@ -243,7 +243,8 @@ before the milestone is closed.
 ## M5 — Streaming
 
 - [x] Add strict `listen` item, `wait-for` result, and stream error schemas plus
-      the separate exact stream catalog/package bijection
+      the separate exact stream catalog/package bijection and schema-provable
+      checked-sum byte-capacity diagnostics
 - [ ] Land the shared M2 resolver, MessageSummary/ChatIdentity/ChatSummary DTOs,
       sender matching, int53 handling, and local-history components M5 reuses
 - [ ] Integrate the measured google/re2 `2022-12-01` full-commit archive as a

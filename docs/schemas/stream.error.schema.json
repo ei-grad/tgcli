@@ -41,20 +41,41 @@
       "minimum": 1,
       "maximum": 9007199254740991
     },
-    "chatIdentity": {
+    "privateChatIdentity": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "title", "type", "is_bot", "usernames"],
       "properties": {
         "id": { "$ref": "#/$defs/int53" },
         "title": { "type": "string" },
-        "type": { "enum": ["private", "basic_group", "supergroup", "channel"] },
+        "type": { "const": "private" },
         "is_bot": { "type": "boolean" },
         "usernames": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         }
       }
+    },
+    "nonPrivateChatIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "type", "is_bot", "usernames"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53" },
+        "title": { "type": "string" },
+        "type": { "enum": ["basic_group", "supergroup", "channel"] },
+        "is_bot": { "const": false },
+        "usernames": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "chatIdentity": {
+      "oneOf": [
+        { "$ref": "#/$defs/privateChatIdentity" },
+        { "$ref": "#/$defs/nonPrivateChatIdentity" }
+      ]
     },
     "userIdentity": {
       "type": "object",
@@ -471,7 +492,7 @@
                 "phase": { "const": "bootstrap" },
                 "resource": { "const": "metadata_bootstrap_items" },
                 "limit_items": { "const": 4096 },
-                "used_items": { "type": "integer", "minimum": 0, "maximum": 4096 },
+                "used_items": { "const": 4096 },
                 "incoming_items": { "const": 1 }
               }
             },
@@ -483,16 +504,14 @@
                 "phase",
                 "resource",
                 "limit_bytes",
-                "used_bytes",
-                "incoming_bytes"
+                "would_use_bytes"
               ],
               "properties": {
                 "operation": { "enum": ["listen", "wait_for"] },
                 "phase": { "const": "bootstrap" },
                 "resource": { "const": "metadata_bootstrap_bytes" },
                 "limit_bytes": { "const": 16777216 },
-                "used_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
-                "incoming_bytes": { "type": "integer", "minimum": 1 }
+                "would_use_bytes": { "type": "integer", "minimum": 16777217 }
               }
             },
             {
@@ -504,7 +523,7 @@
                 "phase": { "enum": ["bootstrap", "active"] },
                 "resource": { "const": "metadata_chats" },
                 "limit": { "const": 65536 },
-                "used": { "type": "integer", "minimum": 0, "maximum": 65536 },
+                "used": { "const": 65536 },
                 "incoming": { "const": 1 }
               }
             },
@@ -517,7 +536,7 @@
                 "phase": { "enum": ["bootstrap", "active"] },
                 "resource": { "const": "metadata_entities" },
                 "limit": { "const": 131072 },
-                "used": { "type": "integer", "minimum": 0, "maximum": 131072 },
+                "used": { "const": 131072 },
                 "incoming": { "const": 1 }
               }
             },
@@ -529,16 +548,14 @@
                 "phase",
                 "resource",
                 "limit_bytes",
-                "used_bytes",
-                "incoming_bytes"
+                "would_use_bytes"
               ],
               "properties": {
                 "operation": { "enum": ["listen", "wait_for"] },
                 "phase": { "enum": ["bootstrap", "active"] },
                 "resource": { "const": "metadata_bytes" },
                 "limit_bytes": { "const": 67108864 },
-                "used_bytes": { "type": "integer", "minimum": 0, "maximum": 67108864 },
-                "incoming_bytes": { "type": "integer", "minimum": 1 }
+                "would_use_bytes": { "type": "integer", "minimum": 67108865 }
               }
             },
             {
@@ -557,7 +574,7 @@
                 "phase": { "const": "active" },
                 "resource": { "const": "metadata_order_items" },
                 "limit_items": { "const": 4096 },
-                "used_items": { "type": "integer", "minimum": 0, "maximum": 4096 },
+                "used_items": { "const": 4096 },
                 "incoming_items": { "const": 1 }
               }
             },
@@ -569,16 +586,14 @@
                 "phase",
                 "resource",
                 "limit_bytes",
-                "used_bytes",
-                "incoming_bytes"
+                "would_use_bytes"
               ],
               "properties": {
                 "operation": { "enum": ["listen", "wait_for"] },
                 "phase": { "const": "active" },
                 "resource": { "const": "metadata_order_bytes" },
                 "limit_bytes": { "const": 16777216 },
-                "used_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
-                "incoming_bytes": { "type": "integer", "minimum": 1 }
+                "would_use_bytes": { "type": "integer", "minimum": 16777217 }
               }
             },
             {
