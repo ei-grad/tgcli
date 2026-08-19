@@ -179,7 +179,13 @@ before the milestone is closed.
 - [ ] Implement the frozen protocol-v3 precursor: strict nine-field context
       with `idempotency_key`, Hello-first parsing/writing, v1/v2↔v3 frozen
       control replacement, exact status/stop/restart/autospawn behavior, and
-      auth-bound M3/M4 dry-run read allowlist/effect fixtures
+      auth-bound M3/M4 dry-run read allowlist/effect fixtures, including
+      type- and id-bound `getUser`/`getSupergroup` `ChatIdentity` enrichment
+      with no direct/raw/title-candidate admission or non-identity field
+      retention; exact `resolve`-attributed enrichment failures and same-Ready
+      arbitration; and zero config/audit/idempotency/spool/prior-group-
+      reconciliation or other tgcli persistence mutation across all seventeen
+      planner dry-runs
 - [ ] Reuse exact M2 resolver/principal DTOs, add static operation tiers and
       the user/bot/schedule admission matrix, and extend the single daemon-side
       safety chokepoint to every M3 Write/Destructive descriptor

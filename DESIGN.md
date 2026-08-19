@@ -936,6 +936,21 @@ Write selectors — exact id, `@username` или supported t.me link. Title
 substring никогда не становится target; resolver может вернуть только
 `AMBIGUOUS` candidates.
 
+Exact M3/M4 target resolution reuses M2 `ChatIdentity` materialization,
+including its entity metadata reads. The chat object comes from the selected
+exact resolver branch (`getChat`, `searchPublicChat`, a supported link lookup,
+or the restricted Saved `createPrivateChat`). A private chat is enriched by
+the matching `getUser`; a supergroup/channel is enriched by the matching
+`getSupergroup`; a basic group needs no enrichment. The immutable plan
+captures the returned title, type, active usernames and private-user bot bit
+without re-resolution. This is an observed, receive-ordered identity, not a
+claim of an atomic Telegram snapshot across separate read calls.
+
+Nothing in this addition applies the two metadata reads to title-substring
+resolution or `AMBIGUOUS.candidates`. A title-like M3/M4 target is rejected by
+the existing exact-write-selector rule before either metadata read. Candidate
+list construction and M2 title resolution remain outside this closure.
+
 #### 4.5.3 Strict results, plans и errors
 
 Success DTO:
@@ -1093,6 +1108,37 @@ forward-specific 429:
 
 `items` обязателен и содержит full all-failed vector, если vector существовал,
 иначе `[]`.
+
+Entity metadata enrichment is part of the embedded exact M2 resolver and uses
+`operation:"resolve"`, not the outer write operation. A `getUser` or
+`getSupergroup` TD error 429 is exactly `RATE_LIMITED` / exit 5 with
+`{"operation":"resolve","tdlib_code":429,"retry_after":<nonnegative integer>}`;
+retry-after uses the existing ceiling parser. Any other TD error is exactly
+`TDLIB_ERROR` / exit 1 with
+`{"operation":"resolve","tdlib_code":<integer>}`. A null or unknown response,
+invalid related entity id, returned identifier mismatch, returned object/type
+mismatch, supergroup/channel-bit mismatch, or malformed returned active
+username is exactly `INTERNAL` / exit 1 with
+`{"operation":"resolve","reason":"internal_error"}`. These branches emit no
+plan. The `msg_forward` all-failed-vector 429 exception applies only after a
+forward operation owns a forward vector; pre-plan identity enrichment
+therefore uses the common `operation:"resolve"` branch and never fabricates
+`items`.
+
+Existing primary M2 resolver mappings remain exact and precede this enrichment
+mapping: malformed selector syntax is `USAGE` before a metadata call;
+documented numeric 400/404 and username `USERNAME_NOT_OCCUPIED` or
+`USERNAME_INVALID` misses use the contextual `NOT_FOUND` shape; other primary
+resolver TD errors retain their existing `operation:"resolve"`
+`RATE_LIMITED`/`TDLIB_ERROR` shapes. An invalid id obtained from a returned
+chat type is an integrity failure (`INTERNAL`), not caller `USAGE` or
+`NOT_FOUND`. No branch includes a TDLib message.
+
+Each strict M3/M4 command error schema must admit those three exact embedded
+resolver branches, with `additionalProperties:false`, alongside its
+operation-owned branches. The `msg_forward` schema must keep the embedded
+`operation:"resolve"` RATE_LIMITED branch distinct from its existing
+`operation:"msg_forward"` branch with required `items`.
 
 #### 4.5.4 Grammar, topics и command defaults
 
@@ -1793,8 +1839,17 @@ Required fake-boundary/contract gates:
 
 - v3 exact frame/context, v1/v2↔v3 frozen replacement, status/stop/restart,
   absent/mismatch M3 dry-run autospawn;
-- named dry-run allowlist and observed TDLib cache effects; zero
-  audit/store/spool/config writes and zero mutating TD call;
+- named dry-run allowlist and observed TDLib cache effects, including
+  type-bound private `getUser` and supergroup/channel `getSupergroup`
+  `ChatIdentity` enrichment; reject an unrelated entity id, mismatched
+  channel bit, direct/raw use of either function, and every non-allowlisted TD
+  function before the fake boundary; basic-group, title-like, and rejected
+  secret/unknown branches issue neither enrichment call; assert the exact
+  §4.5.3 `resolve`-attributed 429, other TD error, null/unknown, invalid-id,
+  mismatch, and malformed-returned-username branches; zero config, audit,
+  idempotency-store, spool, prior-group-reconciliation, or other tgcli
+  persistence writes and zero mutating TD call for every one of the seventeen
+  planners;
 - bot immediate send positive; bot date/online/reaction negative before
   user-only calls;
 - folded request grant audits `authority_source=request`; config grant audits
@@ -4159,17 +4214,59 @@ Supporting mechanisms:
   read allowlist is:
 
   ```text
-  getMe, getChat, searchPublicChat, getInternalLinkType, getMessageLinkInfo,
-  checkChatInviteLink, getSupergroupFullInfo, createPrivateChat,
+  getMe, getChat, getUser, getSupergroup, searchPublicChat,
+  getInternalLinkType, getMessageLinkInfo, checkChatInviteLink,
+  getSupergroupFullInfo, createPrivateChat,
   getMessage, getMessages, getMessageProperties, getOption,
   getMessageAvailableReactions, parseTextEntities
   ```
 
   `createPrivateChat` is allowed only as
   `createPrivateChat(me.id,false)` for Saved materialization; `getOption` is
-  allowed only for `"unix_time"`. Local file open/stat/read/SHA-256 is
-  allowed. These reads may access Telegram and mutate only TDLib's internal
-  cache/database; any other TD function is a contract-test failure. M1
+  allowed only for `"unix_time"`.
+
+  `getUser` and `getSupergroup` are not general dry-run escape hatches. They
+  are admitted only by the shared exact-only chat resolver while constructing
+  an exact M2 `ChatIdentity` from a chat object already returned in the same
+  request. For `chatTypePrivate(user_id)`, exactly `getUser(user_id)` may
+  supply `usernames.active_usernames` and `is_bot`. For
+  `chatTypeSupergroup(supergroup_id,is_channel)`, exactly
+  `getSupergroup(supergroup_id)` may supply `usernames.active_usernames` and
+  must confirm the same `is_channel` value. A basic-group identity performs
+  neither call. A secret or unknown chat type fails before either call. A
+  returned identifier mismatch, kind mismatch, malformed username, null
+  object, or unknown variant is `INTERNAL`; tgcli never substitutes empty
+  usernames or `is_bot:false`. Only the exact `ChatIdentity` fields are
+  retained in the plan/audit/store. These functions may update only TDLib's
+  cache/database and never authorize a Telegram-side mutation.
+
+  Each admitted identity read uses §4.5.9's receive-event arbitration. A
+  same-generation later Ready snapshot is not a terminal competitor and does
+  not invalidate or retry an eligible correlated response. The response
+  survives whether the later Ready event's receive sequence is before or after
+  the response sequence; only an earlier eligible first non-Ready event wins.
+  A response observed at or after the absolute deadline loses to the deadline
+  and is never retried because Ready advanced. Retrying the identical function
+  and entity id is permitted only when the lower descriptor/auth gate rejected
+  the attempt with `GenerationMismatch`, `AuthSequenceMismatch`, or
+  `GenerationClosed` before a TD request crossed the fake boundary, and the
+  newest eligible snapshot is Ready and strictly supersedes the rejected
+  descriptor. Such pre-boundary supersession may repeat only until the same
+  deadline or cancellation. A TD response, TD error, null/unknown object,
+  integrity failure, or generic exception is never retried under this rule.
+
+  Each of the seventeen §4.5.1 M3/M4 planner dry-runs performs zero tgcli
+  persistence mutation: no config, general audit, idempotency store, spool, or
+  other tgcli write, and no invocation of prior-group reconciliation that can
+  append or sync a recovery record. DESIGN §4.7.5's distinct M6 session
+  prior-group-recovery paths (`session list` and
+  `session terminate --dry-run`) are the sole explicit reconciliation
+  exception; neither is one of these seventeen planners, and they do not
+  weaken or generalize this rule.
+
+  Local file open/stat/read/SHA-256 is allowed. These reads may access Telegram
+  and mutate only TDLib's internal cache/database; any other TD function is a
+  contract-test failure. M1
   `logout` and `account remove` dry-runs retain their client-local/no-spawn
   behavior. M3/M4 write dry-runs are auth-bound: an absent daemon is spawned,
   while `--no-daemon` creates an isolated in-process client.
@@ -5333,9 +5430,17 @@ What makes tgcli specifically LLM-agent-friendly:
        only absent-daemon-starting control command, one shared monotonic
        deadline, and `DAEMON_CONTROL_FAILED` for every unverified surface.
        Dry-run fakes admit only the closed read allowlist and local file hash
-       operations; they observe no Telegram mutation and no tgcli
-       audit/store/spool/config mutation, while TDLib cache/database effects
-       are permitted.
+       operations. `getUser`/`getSupergroup` are accepted only through §6's
+       type-bound `ChatIdentity` enrichment and expose no fields outside the
+       exact identity. For every one of the seventeen §4.5.1 planner dry-runs,
+       the fakes observe no Telegram mutation and no config, audit,
+       idempotency-store, spool, prior-group-reconciliation, or other tgcli
+       persistence mutation, while TDLib cache/database effects are permitted.
+       The sole explicit reconciliation exception is §4.7.5's distinct M6
+       session recovery for `session list` and
+       `session terminate --dry-run`; those paths recover prior incomplete
+       groups, create no current-invocation group, and do not weaken the
+       seventeen-planner rule.
   - Golden files for human renderers.
   - E2E: a small opt-in suite (`TGCLI_TEST_DC=1`) against Telegram's **test
     DC** (`use_test_dc`), which provides synthetic phone numbers with fixed
