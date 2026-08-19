@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,6 +22,43 @@ struct Identity {
     std::string control_token;
 
     friend bool operator==(const Identity&, const Identity&) = default;
+};
+
+class LifetimeLease final {
+  public:
+    LifetimeLease(const LifetimeLease&) = delete;
+    LifetimeLease& operator=(const LifetimeLease&) = delete;
+    LifetimeLease(LifetimeLease&&) = delete;
+    LifetimeLease& operator=(LifetimeLease&&) = delete;
+    ~LifetimeLease();
+
+    [[nodiscard]] const std::string& path() const {
+        return path_;
+    }
+    [[nodiscard]] const Identity& identity() const {
+        return identity_;
+    }
+    [[nodiscard]] std::uint64_t device() const {
+        return device_;
+    }
+    [[nodiscard]] std::uint64_t inode() const {
+        return inode_;
+    }
+    bool validate(uid_t expected_uid, std::string& error) const;
+
+  private:
+    friend std::shared_ptr<LifetimeLease> acquire_lifetime(const std::string& lock_path,
+                                                           Identity& identity, std::string& error);
+    LifetimeLease(int fd, std::string path, Identity identity, std::uint64_t device,
+                  std::uint64_t inode)
+        : fd_(fd), path_(std::move(path)), identity_(std::move(identity)), device_(device),
+          inode_(inode) {}
+
+    int fd_ = -1;
+    std::string path_;
+    Identity identity_;
+    std::uint64_t device_ = 0;
+    std::uint64_t inode_ = 0;
 };
 
 namespace detail {
@@ -86,6 +125,11 @@ class OwnerWatch {
 // lifetime.
 int acquire(const std::string& lock_path, Identity& identity, std::string& error,
             const detail::AcquireHooks* hooks = nullptr);
+
+// Typed lifetime owner for consumers that must retain proof of the current
+// process's record lock without exposing an unlock-capable descriptor.
+std::shared_ptr<LifetimeLease> acquire_lifetime(const std::string& lock_path, Identity& identity,
+                                                std::string& error);
 
 // Frozen bootstrap-record parser. Kept public so compatibility fixtures can
 // pin the record independently from the main JSONL protocol.

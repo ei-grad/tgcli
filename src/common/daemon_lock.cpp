@@ -590,6 +590,81 @@ int acquire(const std::string& lock_path, Identity& identity, std::string& error
     return fd;
 }
 
+LifetimeLease::~LifetimeLease() {
+    if (fd_ >= 0) {
+        ::close(fd_);
+    }
+}
+
+bool LifetimeLease::validate(uid_t expected_uid, std::string& error) const {
+    if (fd_ < 0 || identity_.pid != ::getpid() || path_.empty()) {
+        error = "daemon lock lifetime lease is not held";
+        return false;
+    }
+    struct stat descriptor_metadata {};
+    if (::fstat(fd_, &descriptor_metadata) != 0 || !validate_lock_file(fd_, expected_uid, error) ||
+        static_cast<std::uint64_t>(descriptor_metadata.st_dev) != device_ ||
+        static_cast<std::uint64_t>(descriptor_metadata.st_ino) != inode_) {
+        if (error.empty()) {
+            error = "daemon lock lifetime lease changed";
+        }
+        return false;
+    }
+    const int named_fd = ::open(path_.c_str(), open_flags(O_RDONLY));
+    if (named_fd < 0) {
+        error = "daemon lock lifetime path is unavailable";
+        return false;
+    }
+    struct stat named_metadata {};
+    const bool named_matches = ::fstat(named_fd, &named_metadata) == 0 &&
+                               named_metadata.st_dev == descriptor_metadata.st_dev &&
+                               named_metadata.st_ino == descriptor_metadata.st_ino;
+    ::close(named_fd);
+    if (!named_matches) {
+        error = "daemon lock lifetime path changed";
+        return false;
+    }
+    std::string record;
+    Identity parsed;
+    if (!read_record(fd_, record, error) || !parse_record(record, parsed, error) ||
+        parsed != identity_) {
+        if (error.empty()) {
+            error = "daemon lock lifetime identity changed";
+        }
+        return false;
+    }
+    std::string process_start;
+    if (!process_start_token(identity_.pid, process_start, error) ||
+        process_start != identity_.process_start) {
+        if (error.empty()) {
+            error = "daemon lock lifetime owner changed";
+        }
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+std::shared_ptr<LifetimeLease> acquire_lifetime(const std::string& lock_path, Identity& identity,
+                                                std::string& error) {
+    Identity acquired_identity;
+    const int fd = acquire(lock_path, acquired_identity, error);
+    if (fd < 0) {
+        return {};
+    }
+    struct stat metadata {};
+    if (::fstat(fd, &metadata) != 0) {
+        error = std::string("cannot stat acquired daemon lock: ") + std::strerror(errno);
+        ::close(fd);
+        return {};
+    }
+    identity = acquired_identity;
+    error.clear();
+    return std::shared_ptr<LifetimeLease>(new LifetimeLease(
+        fd, lock_path, std::move(acquired_identity), static_cast<std::uint64_t>(metadata.st_dev),
+        static_cast<std::uint64_t>(metadata.st_ino)));
+}
+
 bool parse_identity_record(std::string_view record, Identity& identity, std::string& error) {
     return parse_record(record, identity, error);
 }

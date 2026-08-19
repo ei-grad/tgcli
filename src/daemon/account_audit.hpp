@@ -3,6 +3,7 @@
 #include "daemon/account_audit_limits.hpp"
 #include "daemon/logout_audit.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -11,10 +12,15 @@
 #include <string>
 #include <string_view>
 #include <sys/types.h>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+namespace tgcli::daemon_lock {
+class LifetimeLease;
+}
 
 namespace tgcli::daemon {
 
@@ -180,8 +186,21 @@ using AccountAuditPinSource = std::variant<KnownAccountAuditPins, UnavailableAcc
                                            AbsentAccountAuditPinsByPolicy>;
 
 struct AccountAuditFailure {
+    enum class Interruption { Deadline, Cancelled };
+
+    AccountAuditFailure() = default;
+    AccountAuditFailure(AccountAuditDurabilityReason reason_value, std::string detail_value,
+                        std::optional<Interruption> interruption_value = std::nullopt)
+        : reason(reason_value), detail(std::move(detail_value)), interruption(interruption_value) {}
+
     AccountAuditDurabilityReason reason = AccountAuditDurabilityReason::PathInvalid;
     std::string detail;
+    std::optional<Interruption> interruption;
+};
+
+struct AccountAuditScanControl {
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    std::function<bool()> cancelled;
 };
 
 struct AccountAuditAppendReceipt {
@@ -203,7 +222,14 @@ struct AccountAuditOpenGroup {
     bool any_forward_sent = false;
 };
 
-enum class AccountAuditInspectionStatus { Clean, LegacyOpen, Open, Contradiction, Unavailable };
+enum class AccountAuditInspectionStatus {
+    Clean,
+    LegacyOpen,
+    Open,
+    Contradiction,
+    Unavailable,
+    Interrupted,
+};
 
 struct AccountAuditInspection {
     AccountAuditInspectionStatus status = AccountAuditInspectionStatus::Clean;
@@ -249,11 +275,12 @@ namespace testing {
 struct AccountAuditHooks {
     std::function<bool(AccountAuditFault)> should_fail;
     std::function<void(std::string_view)> after_rotation_step;
+    std::function<void()> before_identity_rescan;
     std::uint64_t rotation_bytes = account_audit_limits::kRotationBytes;
 };
 } // namespace testing
 
-class AccountAuditCoordinator final {
+class AccountAuditCoordinator final : public std::enable_shared_from_this<AccountAuditCoordinator> {
   public:
     class Guard final {
       public:
@@ -271,29 +298,28 @@ class AccountAuditCoordinator final {
       private:
         friend class AccountAuditCoordinator;
         friend class AccountAuditLog;
-        Guard(std::unique_lock<std::mutex> lock, const AccountAuditCoordinator* owner);
+        Guard(std::unique_lock<std::mutex> lock,
+              std::shared_ptr<const AccountAuditCoordinator> owner,
+              AccountAuditScanControl scan_control);
         std::unique_lock<std::mutex> lock_;
-        const AccountAuditCoordinator* owner_ = nullptr;
+        std::shared_ptr<const AccountAuditCoordinator> owner_;
+        AccountAuditScanControl scan_control_;
     };
 
-    static std::unique_ptr<AccountAuditCoordinator> create(std::string state_directory,
-                                                           std::string account, uid_t expected_uid,
-                                                           int daemon_lock_descriptor,
-                                                           std::string& error);
-    [[nodiscard]] Guard lock();
+    static std::shared_ptr<AccountAuditCoordinator>
+    create(std::string state_directory, std::string account, uid_t expected_uid,
+           std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease, std::string& error);
+    [[nodiscard]] Guard lock(AccountAuditScanControl scan_control = {});
     [[nodiscard]] bool validate_lease(std::string& error) const;
 
   private:
     AccountAuditCoordinator(std::string state_directory, std::string account, uid_t expected_uid,
-                            int daemon_lock_descriptor, std::uint64_t lock_device,
-                            std::uint64_t lock_inode);
+                            std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease);
 
     std::string state_directory_;
     std::string account_;
     uid_t expected_uid_ = 0;
-    int daemon_lock_descriptor_ = -1;
-    std::uint64_t lock_device_ = 0;
-    std::uint64_t lock_inode_ = 0;
+    std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease_;
     mutable std::mutex mutex_;
 };
 

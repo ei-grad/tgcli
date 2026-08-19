@@ -339,7 +339,7 @@
     },
     "v2Timestamp": {
       "type": "string",
-      "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)Z$"
+      "pattern": "^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
     },
     "v2ConfigSnapshot": {
       "type": "string",
@@ -378,54 +378,106 @@
       ]
     },
     "chatIdentity": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "type",
-        "is_bot",
-        "usernames"
-      ],
-      "properties": {
-        "id": {
-          "allOf": [
+      "allOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "title",
+            "type",
+            "is_bot",
+            "usernames"
+          ],
+          "properties": {
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/int53"
+                },
+                {
+                  "not": {
+                    "const": 0
+                  }
+                }
+              ]
+            },
+            "title": {
+              "type": "string",
+              "maxLength": 1048576,
+              "x-tgcli-maxUtf8Bytes": 1048576
+            },
+            "type": {
+              "enum": [
+                "private",
+                "basic_group",
+                "supergroup",
+                "channel"
+              ]
+            },
+            "is_bot": {
+              "type": "boolean"
+            },
+            "usernames": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32,
+                "x-tgcli-maxUtf8Bytes": 32,
+                "pattern": "^[A-Za-z0-9_]+$"
+              }
+            }
+          }
+        },
+        {
+          "oneOf": [
             {
-              "$ref": "#/$defs/int53"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title",
+                "type",
+                "is_bot",
+                "usernames"
+              ],
+              "properties": {
+                "id": true,
+                "title": true,
+                "type": true,
+                "is_bot": {
+                  "const": false
+                },
+                "usernames": true
+              }
             },
             {
-              "not": {
-                "const": 0
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "title",
+                "type",
+                "is_bot",
+                "usernames"
+              ],
+              "properties": {
+                "id": true,
+                "title": true,
+                "type": {
+                  "const": "private"
+                },
+                "is_bot": {
+                  "const": true
+                },
+                "usernames": true
               }
             }
           ]
-        },
-        "title": {
-          "type": "string",
-          "maxLength": 1048576
-        },
-        "type": {
-          "enum": [
-            "private",
-            "basic_group",
-            "supergroup",
-            "channel"
-          ]
-        },
-        "is_bot": {
-          "type": "boolean"
-        },
-        "usernames": {
-          "type": "array",
-          "maxItems": 100,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 32,
-            "pattern": "^[A-Za-z0-9_]+$"
-          }
         }
-      }
+      ]
     },
     "forumTopic": {
       "type": "object",
@@ -622,7 +674,9 @@
         },
         "text": {
           "type": "string",
-          "maxLength": 4096
+          "maxLength": 4096,
+          "x-tgcli-maxUtf8Bytes": 16384,
+          "pattern": "^[^\\u0000]*$"
         },
         "scheduled": {
           "type": "boolean"
@@ -676,13 +730,19 @@
       ],
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16842751,
+          "x-tgcli-maxUtf8Bytes": 16842751,
+          "pattern": "^[^\\u0000]+$"
         },
         "name": {
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^[^/]+$"
+          "x-tgcli-maxUtf8Bytes": 255,
+          "pattern": "^(?!\\.{1,2}$)[^/]+$",
+          "x-tgcli-forbidControlScalars": true
         },
         "size": {
           "$ref": "#/$defs/uint64"
@@ -771,23 +831,28 @@
         },
         "application_name": {
           "type": "string",
-          "maxLength": 1048576
+          "maxLength": 1048576,
+          "x-tgcli-maxUtf8Bytes": 1048576
         },
         "application_version": {
           "type": "string",
-          "maxLength": 1048576
+          "maxLength": 1048576,
+          "x-tgcli-maxUtf8Bytes": 1048576
         },
         "device_model": {
           "type": "string",
-          "maxLength": 1048576
+          "maxLength": 1048576,
+          "x-tgcli-maxUtf8Bytes": 1048576
         },
         "platform": {
           "type": "string",
-          "maxLength": 1048576
+          "maxLength": 1048576,
+          "x-tgcli-maxUtf8Bytes": 1048576
         },
         "system_version": {
           "type": "string",
-          "maxLength": 1048576
+          "maxLength": 1048576,
+          "x-tgcli-maxUtf8Bytes": 1048576
         },
         "last_active_date": {
           "oneOf": [
@@ -800,56 +865,6 @@
           ]
         }
       }
-    },
-    "storedResultTerminal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "data"
-      ],
-      "properties": {
-        "kind": {
-          "const": "result"
-        },
-        "data": true
-      }
-    },
-    "storedErrorTerminal": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "code",
-        "message",
-        "details",
-        "exit_code"
-      ],
-      "properties": {
-        "kind": {
-          "const": "error"
-        },
-        "code": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "details": true,
-        "exit_code": {
-          "type": "integer"
-        }
-      }
-    },
-    "storedTerminal": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/storedResultTerminal"
-        },
-        {
-          "$ref": "#/$defs/storedErrorTerminal"
-        }
-      ]
     },
     "forwardItem": {
       "oneOf": [
@@ -911,32 +926,106 @@
               "const": "failed"
             },
             "failure_reason": {
-              "enum": [
-                "upstream_null",
-                "tdlib_error",
-                "deleted_before_confirmation"
-              ]
+              "const": "upstream_null"
             },
             "tdlib_code": {
-              "oneOf": [
+              "type": "null"
+            },
+            "retry_after": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "status",
+            "failure_reason",
+            "tdlib_code",
+            "retry_after"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/positiveInt53"
+            },
+            "status": {
+              "const": "failed"
+            },
+            "failure_reason": {
+              "const": "deleted_before_confirmation"
+            },
+            "tdlib_code": {
+              "type": "null"
+            },
+            "retry_after": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "status",
+            "failure_reason",
+            "tdlib_code",
+            "retry_after"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/positiveInt53"
+            },
+            "status": {
+              "const": "failed"
+            },
+            "failure_reason": {
+              "const": "tdlib_error"
+            },
+            "tdlib_code": {
+              "allOf": [
                 {
-                  "type": "integer"
+                  "$ref": "#/$defs/int32"
                 },
                 {
-                  "type": "null"
+                  "not": {
+                    "const": 429
+                  }
                 }
               ]
             },
             "retry_after": {
-              "oneOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "status",
+            "failure_reason",
+            "tdlib_code",
+            "retry_after"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/positiveInt53"
+            },
+            "status": {
+              "const": "failed"
+            },
+            "failure_reason": {
+              "const": "tdlib_error"
+            },
+            "tdlib_code": {
+              "const": 429
+            },
+            "retry_after": {
+              "$ref": "#/$defs/positiveInt32"
             }
           }
         }
@@ -1161,6 +1250,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
+              "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/int53"
               }
@@ -1234,7 +1324,49 @@
                   }
                 },
                 {
-                  "$ref": "#/$defs/storedErrorTerminal"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "details",
+                    "exit_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "error"
+                    },
+                    "code": {
+                      "const": "INTERNAL"
+                    },
+                    "message": {
+                      "enum": [
+                        "internal error",
+                        "TDLib returned data outside the supported persistence bounds",
+                        "TDLib returned malformed session data"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "operation",
+                        "reason"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "const": "send"
+                        },
+                        "reason": {
+                          "const": "internal_error"
+                        }
+                      }
+                    },
+                    "exit_code": {
+                      "const": 1
+                    }
+                  }
                 }
               ]
             }
@@ -1435,7 +1567,49 @@
                   }
                 },
                 {
-                  "$ref": "#/$defs/storedErrorTerminal"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "details",
+                    "exit_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "error"
+                    },
+                    "code": {
+                      "const": "INTERNAL"
+                    },
+                    "message": {
+                      "enum": [
+                        "internal error",
+                        "TDLib returned data outside the supported persistence bounds",
+                        "TDLib returned malformed session data"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "operation",
+                        "reason"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "const": "msg_edit"
+                        },
+                        "reason": {
+                          "const": "internal_error"
+                        }
+                      }
+                    },
+                    "exit_code": {
+                      "const": 1
+                    }
+                  }
                 }
               ]
             }
@@ -1647,6 +1821,8 @@
                           "type": "array",
                           "minItems": 1,
                           "maxItems": 100,
+                          "uniqueItems": true,
+                          "x-tgcli-strictlyIncreasing": true,
                           "items": {
                             "$ref": "#/$defs/positiveInt53"
                           }
@@ -1660,9 +1836,6 @@
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -1848,6 +2021,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
+              "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/int53"
               }
@@ -1906,6 +2080,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
+              "x-tgcli-strictlyIncreasingField": "source_id",
               "items": {
                 "$ref": "#/$defs/forwardItem"
               }
@@ -1992,6 +2167,7 @@
                           "type": "array",
                           "minItems": 1,
                           "maxItems": 100,
+                          "x-tgcli-strictlyIncreasingField": "source_id",
                           "items": {
                             "allOf": [
                               {
@@ -2025,7 +2201,107 @@
                   }
                 },
                 {
-                  "$ref": "#/$defs/storedErrorTerminal"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "details",
+                    "exit_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "error"
+                    },
+                    "code": {
+                      "const": "INTERNAL"
+                    },
+                    "message": {
+                      "enum": [
+                        "internal error",
+                        "TDLib returned data outside the supported persistence bounds",
+                        "TDLib returned malformed session data"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "operation",
+                        "reason"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "const": "msg_forward"
+                        },
+                        "reason": {
+                          "const": "internal_error"
+                        }
+                      }
+                    },
+                    "exit_code": {
+                      "const": 1
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "details",
+                    "exit_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "error"
+                    },
+                    "code": {
+                      "const": "FORWARD_PARTIAL"
+                    },
+                    "message": {
+                      "enum": [
+                        "some messages could not be forwarded"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "operation",
+                        "from_chat_id",
+                        "to_chat_id",
+                        "items"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "const": "msg_forward"
+                        },
+                        "from_chat_id": {
+                          "$ref": "#/$defs/chatId"
+                        },
+                        "to_chat_id": {
+                          "$ref": "#/$defs/chatId"
+                        },
+                        "items": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 100,
+                          "x-tgcli-strictlyIncreasingField": "source_id",
+                          "items": {
+                            "$ref": "#/$defs/forwardItem"
+                          },
+                          "x-tgcli-terminalClass": "FORWARD_PARTIAL"
+                        }
+                      }
+                    },
+                    "exit_code": {
+                      "const": 1
+                    }
+                  }
                 }
               ]
             }
@@ -2239,7 +2515,11 @@
                           "$ref": "#/$defs/positiveInt53"
                         },
                         "reaction": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64,
+                          "x-tgcli-maxUtf8Bytes": 64,
+                          "pattern": "^[^\\u0000]+$"
                         },
                         "removed": {
                           "type": "boolean"
@@ -2250,9 +2530,6 @@
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -2463,14 +2740,11 @@
                           "$ref": "#/$defs/positiveInt53"
                         },
                         "pinned": {
-                          "type": "boolean"
+                          "const": true
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -2681,14 +2955,11 @@
                           "$ref": "#/$defs/positiveInt53"
                         },
                         "pinned": {
-                          "type": "boolean"
+                          "const": false
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -2911,9 +3182,6 @@
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -3121,17 +3389,16 @@
                           "$ref": "#/$defs/chatId"
                         },
                         "muted": {
-                          "type": "boolean"
+                          "const": true
                         },
                         "duration_seconds": {
-                          "$ref": "#/$defs/int32"
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 31622400
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -3339,17 +3606,14 @@
                           "$ref": "#/$defs/chatId"
                         },
                         "muted": {
-                          "type": "boolean"
+                          "const": false
                         },
                         "duration_seconds": {
-                          "$ref": "#/$defs/int32"
+                          "const": 0
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -3563,14 +3827,11 @@
                           ]
                         },
                         "pinned": {
-                          "type": "boolean"
+                          "const": true
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -3784,14 +4045,11 @@
                           ]
                         },
                         "pinned": {
-                          "type": "boolean"
+                          "const": false
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -3998,14 +4256,11 @@
                           "$ref": "#/$defs/chatId"
                         },
                         "archived": {
-                          "type": "boolean"
+                          "const": true
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -4212,14 +4467,11 @@
                           "$ref": "#/$defs/chatId"
                         },
                         "archived": {
-                          "type": "boolean"
+                          "const": false
                         }
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -4459,9 +4711,6 @@
                       ]
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -4673,9 +4922,6 @@
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }
@@ -4919,6 +5165,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
+              "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/int53"
               }
@@ -4992,7 +5239,49 @@
                   }
                 },
                 {
-                  "$ref": "#/$defs/storedErrorTerminal"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "details",
+                    "exit_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "error"
+                    },
+                    "code": {
+                      "const": "INTERNAL"
+                    },
+                    "message": {
+                      "enum": [
+                        "internal error",
+                        "TDLib returned data outside the supported persistence bounds",
+                        "TDLib returned malformed session data"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "operation",
+                        "reason"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "const": "saved_attach"
+                        },
+                        "reason": {
+                          "const": "internal_error"
+                        }
+                      }
+                    },
+                    "exit_code": {
+                      "const": 1
+                    }
+                  }
                 }
               ]
             }
@@ -5139,9 +5428,6 @@
                       }
                     }
                   }
-                },
-                {
-                  "$ref": "#/$defs/storedErrorTerminal"
                 }
               ]
             }

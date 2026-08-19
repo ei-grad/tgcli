@@ -26,6 +26,16 @@ const relation = (fields, constrained) =>
   );
 const constrained = (base, branches) => ({ allOf: [base, { oneOf: branches }] });
 const reference = (name) => ({ $ref: `#/$defs/${name}` });
+const utf8String = ({ minScalars = 0, maxScalars, maxBytes, pattern } = {}) => ({
+  type: 'string',
+  ...(minScalars > 0 ? { minLength: minScalars } : {}),
+  ...(maxScalars !== undefined ? { maxLength: maxScalars } : {}),
+  ...(maxBytes !== undefined ? { 'x-tgcli-maxUtf8Bytes': maxBytes } : {}),
+  ...(pattern !== undefined ? { pattern } : {}),
+});
+const noNulString = (limits = {}) => utf8String({ ...limits, pattern: '^[^\\u0000]*$' });
+const nonemptyNoNulString = (limits = {}) =>
+  utf8String({ minScalars: 1, ...limits, pattern: '^[^\\u0000]+$' });
 
 const stateNames = [
   'unknown',
@@ -248,23 +258,36 @@ const v2Definitions = () => ({
   v2Timestamp: {
     type: 'string',
     pattern:
-      '^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' +
-      'T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)Z$',
+      '^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' +
+      'T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$',
   },
   v2ConfigSnapshot: { type: 'string', pattern: snapshotPattern },
   v2Operation: { enum: v2Operations },
   v2Stage: { enum: v2Stages },
-  chatIdentity: object(['id', 'title', 'type', 'is_bot', 'usernames'], {
-    id: { allOf: [reference('int53'), { not: { const: 0 } }] },
-    title: { type: 'string', maxLength: 1048576 },
-    type: { enum: ['private', 'basic_group', 'supergroup', 'channel'] },
-    is_bot: { type: 'boolean' },
-    usernames: {
-      type: 'array',
-      maxItems: 100,
-      items: { type: 'string', minLength: 1, maxLength: 32, pattern: '^[A-Za-z0-9_]+$' },
-    },
-  }),
+  chatIdentity: constrained(
+    object(['id', 'title', 'type', 'is_bot', 'usernames'], {
+      id: { allOf: [reference('int53'), { not: { const: 0 } }] },
+      title: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
+      type: { enum: ['private', 'basic_group', 'supergroup', 'channel'] },
+      is_bot: { type: 'boolean' },
+      usernames: {
+        type: 'array',
+        maxItems: 100,
+        items: {
+          type: 'string', minLength: 1, maxLength: 32,
+          'x-tgcli-maxUtf8Bytes': 32, pattern: '^[A-Za-z0-9_]+$',
+        },
+      },
+    }),
+    [
+      relation(['id', 'title', 'type', 'is_bot', 'usernames'], {
+        is_bot: { const: false },
+      }),
+      relation(['id', 'title', 'type', 'is_bot', 'usernames'], {
+        is_bot: { const: true }, type: { const: 'private' },
+      }),
+    ],
+  ),
   forumTopic: object(['kind', 'id'], {
     kind: { const: 'forum' },
     id: reference('positiveInt32'),
@@ -297,7 +320,7 @@ const v2Definitions = () => ({
       is_outgoing: { type: 'boolean' },
       topic: nullable(reference('topicRef')),
       type: { enum: ['text', 'photo', 'video', 'doc', 'voice', 'other'] },
-      text: { type: 'string', maxLength: 4096 },
+      text: noNulString({ maxScalars: 4096, maxBytes: 16384 }),
       scheduled: { type: 'boolean' },
     },
   ),
@@ -313,8 +336,14 @@ const v2Definitions = () => ({
   fileSnapshot: object(
     ['path', 'name', 'size', 'sha256', 'device', 'inode', 'mtime_ns', 'ctime_ns'],
     {
-      path: { type: 'string' },
-      name: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[^/]+$' },
+      path: nonemptyNoNulString({ maxScalars: 16842751, maxBytes: 16842751 }),
+      name: {
+        ...utf8String({
+          minScalars: 1, maxScalars: 255, maxBytes: 255,
+          pattern: '^(?!\\.{1,2}$)[^/]+$',
+        }),
+        'x-tgcli-forbidControlScalars': true,
+      },
       size: reference('uint64'),
       sha256: reference('sha256'),
       device: reference('uint64'),
@@ -356,28 +385,14 @@ const v2Definitions = () => ({
           'xbox',
         ],
       },
-      application_name: { type: 'string', maxLength: 1048576 },
-      application_version: { type: 'string', maxLength: 1048576 },
-      device_model: { type: 'string', maxLength: 1048576 },
-      platform: { type: 'string', maxLength: 1048576 },
-      system_version: { type: 'string', maxLength: 1048576 },
+      application_name: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
+      application_version: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
+      device_model: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
+      platform: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
+      system_version: utf8String({ maxScalars: 1048576, maxBytes: 1048576 }),
       last_active_date: nullable(reference('v2Timestamp')),
     },
   ),
-  storedResultTerminal: object(['kind', 'data'], {
-    kind: { const: 'result' },
-    data: true,
-  }),
-  storedErrorTerminal: object(['kind', 'code', 'message', 'details', 'exit_code'], {
-    kind: { const: 'error' },
-    code: { type: 'string' },
-    message: { type: 'string' },
-    details: true,
-    exit_code: { type: 'integer' },
-  }),
-  storedTerminal: {
-    oneOf: [reference('storedResultTerminal'), reference('storedErrorTerminal')],
-  },
   forwardItem: {
     oneOf: [
       object(['source_id', 'status', 'temporary_message_id'], {
@@ -390,14 +405,27 @@ const v2Definitions = () => ({
         status: { const: 'sent' },
         message: reference('messageWriteResult'),
       }),
+      ...['upstream_null', 'deleted_before_confirmation'].map((failureReason) =>
+        object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
+          source_id: reference('positiveInt53'),
+          status: { const: 'failed' },
+          failure_reason: { const: failureReason },
+          tdlib_code: { type: 'null' },
+          retry_after: { type: 'null' },
+        })),
       object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
         source_id: reference('positiveInt53'),
         status: { const: 'failed' },
-        failure_reason: {
-          enum: ['upstream_null', 'tdlib_error', 'deleted_before_confirmation'],
-        },
-        tdlib_code: nullable({ type: 'integer' }),
-        retry_after: nullable({ type: 'integer', minimum: 0 }),
+        failure_reason: { const: 'tdlib_error' },
+        tdlib_code: { allOf: [reference('int32'), { not: { const: 429 } }] },
+        retry_after: { type: 'null' },
+      }),
+      object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
+        source_id: reference('positiveInt53'),
+        status: { const: 'failed' },
+        failure_reason: { const: 'tdlib_error' },
+        tdlib_code: { const: 429 },
+        retry_after: reference('positiveInt32'),
       }),
     ],
   },
@@ -408,20 +436,23 @@ const int53Array = (minimum = 1) => ({
   type: 'array',
   minItems: minimum,
   maxItems: 100,
+  uniqueItems: true,
   items: reference('int53'),
 });
 const positiveInt53Array = () => ({
   type: 'array',
   minItems: 1,
   maxItems: 100,
+  uniqueItems: true,
+  'x-tgcli-strictlyIncreasing': true,
   items: reference('positiveInt53'),
 });
 const v2Arguments = (operation) => {
-  const string = { type: 'string' };
+  const string = nonemptyNoNulString({ maxScalars: 16842751, maxBytes: 16842751 });
   const byOperation = {
     send: object(['chat', 'text', 'parse_mode', 'reply_to', 'topic', 'silent', 'schedule'], {
       chat: string,
-      text: string,
+      text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
       parse_mode: { enum: ['plain', 'markdown_v2', 'html'] },
       reply_to: nullable(reference('positiveInt53')),
       topic: nullable(reference('forumTopic')),
@@ -431,7 +462,7 @@ const v2Arguments = (operation) => {
     msg_edit: object(['chat', 'message_id', 'text'], {
       chat: string,
       message_id: reference('positiveInt53'),
-      text: string,
+      text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
     }),
     msg_delete: object(['chat', 'message_ids', 'for_all'], {
       chat: string,
@@ -444,18 +475,32 @@ const v2Arguments = (operation) => {
       message_ids: positiveInt53Array(),
       drop_author: { type: 'boolean' },
     }),
-    msg_react: object(['chat', 'message_id', 'reaction', 'remove', 'big'], {
-      chat: string,
-      message_id: reference('positiveInt53'),
-      reaction: { type: 'string', maxLength: 64 },
-      remove: { type: 'boolean' },
-      big: { type: 'boolean' },
-    }),
+    msg_react: constrained(
+      object(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+        chat: string,
+        message_id: reference('positiveInt53'),
+        reaction: nonemptyNoNulString({ maxScalars: 64, maxBytes: 64 }),
+        remove: { type: 'boolean' },
+        big: { type: 'boolean' },
+      }),
+      [
+        relation(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+          remove: { const: false },
+        }),
+        relation(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+          remove: { const: true }, big: { const: false },
+        }),
+      ],
+    ),
     msg_pin: object(['chat', 'message_id'], { chat: string, message_id: reference('positiveInt53') }),
     msg_unpin: object(['chat', 'message_id'], { chat: string, message_id: reference('positiveInt53') }),
     chat_mark_read: object(['chat'], { chat: string }),
-    chat_mute: object(['chat', 'duration_seconds'], { chat: string, duration_seconds: reference('int32') }),
-    chat_unmute: object(['chat', 'duration_seconds'], { chat: string, duration_seconds: reference('int32') }),
+    chat_mute: object(['chat', 'duration_seconds'], {
+      chat: string, duration_seconds: { type: 'integer', minimum: 1, maximum: 31622400 },
+    }),
+    chat_unmute: object(['chat', 'duration_seconds'], {
+      chat: string, duration_seconds: { const: 0 },
+    }),
     chat_pin: object(['chat'], { chat: string }),
     chat_unpin: object(['chat'], { chat: string }),
     chat_archive: object(['chat'], { chat: string }),
@@ -464,7 +509,7 @@ const v2Arguments = (operation) => {
       oneOf: [
         object(['source', 'username'], {
           source: { const: 'username' },
-          username: { type: 'string' },
+          username: string,
         }),
         object(['source', 'invite_link_sha256'], {
           source: { const: 'invite_link' },
@@ -475,8 +520,8 @@ const v2Arguments = (operation) => {
     chat_leave: object(['chat'], { chat: string }),
     saved_attach: object(['message_id', 'path', 'caption'], {
       message_id: reference('positiveInt53'),
-      path: { type: 'string', maxLength: 16842751 },
-      caption: { type: 'string', maxLength: 16842751 },
+      path: string,
+      caption: noNulString({ maxScalars: 1024, maxBytes: 4096 }),
     }),
     session_terminate: object(['session_id'], { session_id: reference('sessionId') }),
   };
@@ -492,24 +537,58 @@ const v2Plan = (operation) => {
     ['operation', 'account', 'tdlib_request', ...fields],
     { ...common, ...properties },
   );
+  const planRelation = (fields, properties) =>
+    relation(['operation', 'account', 'tdlib_request', ...fields], properties);
   const chat = reference('chatIdentity');
   const byOperation = {
-    send: plan(
-      ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
-        'schedule', 'observed_server_unix_time'],
-      {
-        tdlib_request: { const: 'sendMessage' }, chat, text: { type: 'string' },
+    send: constrained(
+      plan(
+        ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
+          'schedule', 'observed_server_unix_time'],
+        {
+        tdlib_request: { const: 'sendMessage' }, chat,
+        text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
         parse_mode: { enum: ['plain', 'markdown_v2', 'html'] },
         reply_to: nullable(reference('positiveInt53')),
         requested_topic: nullable(reference('forumTopic')),
         effective_topic: nullable(reference('forumTopic')),
         silent: { type: 'boolean' }, schedule: nullable(reference('schedule')),
         observed_server_unix_time: nullable(reference('int64')),
-      },
+        },
+      ),
+      [
+        planRelation(
+          ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
+            'schedule', 'observed_server_unix_time'],
+          { schedule: { type: 'null' }, observed_server_unix_time: { type: 'null' } },
+        ),
+        planRelation(
+          ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
+            'schedule', 'observed_server_unix_time'],
+          {
+            schedule: object(['kind'], { kind: { const: 'online' } }),
+            observed_server_unix_time: { type: 'null' },
+          },
+        ),
+        {
+          ...planRelation(
+            ['chat', 'text', 'parse_mode', 'reply_to', 'requested_topic', 'effective_topic', 'silent',
+              'schedule', 'observed_server_unix_time'],
+            {
+            schedule: object(['kind', 'send_date'], {
+              kind: { const: 'at' }, send_date: reference('positiveInt32'),
+            }),
+            observed_server_unix_time: reference('int64'),
+            },
+          ),
+          'x-tgcli-serverWindow': { minimumLeadSeconds: 11, maximumLeadSeconds: 31622400 },
+        },
+      ],
     ),
     msg_edit: plan(['chat', 'message_id', 'text'], {
       tdlib_request: { const: 'editMessageText' }, chat,
-      message_id: reference('positiveInt53'), text: { type: 'string' },
+      message_id: reference('positiveInt53'),
+      text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
     }),
     msg_delete: plan(['chat', 'message_ids', 'requested_for_all', 'effective_for_all'], {
       tdlib_request: { const: 'deleteMessages' }, chat, message_ids: positiveInt53Array(),
@@ -519,55 +598,96 @@ const v2Plan = (operation) => {
       tdlib_request: { const: 'forwardMessages' }, from: chat, to: chat,
       message_ids: positiveInt53Array(), drop_author: { type: 'boolean' },
     }),
-    msg_react: plan(['chat', 'message_id', 'reaction', 'remove', 'big'], {
-      tdlib_request: { enum: ['addMessageReaction', 'removeMessageReaction'] }, chat,
-      message_id: reference('positiveInt53'), reaction: { type: 'string', maxLength: 64 },
-      remove: { type: 'boolean' }, big: { type: 'boolean' },
-    }),
+    msg_react: constrained(
+      plan(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+        tdlib_request: { enum: ['addMessageReaction', 'removeMessageReaction'] }, chat,
+        message_id: reference('positiveInt53'),
+        reaction: nonemptyNoNulString({ maxScalars: 64, maxBytes: 64 }),
+        remove: { type: 'boolean' }, big: { type: 'boolean' },
+      }),
+      [
+        planRelation(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+            remove: { const: false }, tdlib_request: { const: 'addMessageReaction' },
+          }),
+        planRelation(['chat', 'message_id', 'reaction', 'remove', 'big'], {
+            remove: { const: true }, big: { const: false },
+            tdlib_request: { const: 'removeMessageReaction' },
+          }),
+      ],
+    ),
     msg_pin: plan(['chat', 'message_id', 'pinned'], {
       tdlib_request: { const: 'pinChatMessage' }, chat,
-      message_id: reference('positiveInt53'), pinned: { type: 'boolean' },
+      message_id: reference('positiveInt53'), pinned: { const: true },
     }),
     msg_unpin: plan(['chat', 'message_id', 'pinned'], {
       tdlib_request: { const: 'unpinChatMessage' }, chat,
-      message_id: reference('positiveInt53'), pinned: { type: 'boolean' },
+      message_id: reference('positiveInt53'), pinned: { const: false },
     }),
-    chat_mark_read: plan(['chat', 'last_message_id'], {
-      tdlib_request: { oneOf: [{ const: 'viewMessages' }, { type: 'null' }] }, chat,
-      last_message_id: nullable(reference('positiveInt53')),
-    }),
+    chat_mark_read: constrained(
+      plan(['chat', 'last_message_id'], {
+        tdlib_request: { oneOf: [{ const: 'viewMessages' }, { type: 'null' }] }, chat,
+        last_message_id: nullable(reference('positiveInt53')),
+      }),
+      [
+        planRelation(['chat', 'last_message_id'], {
+          tdlib_request: { type: 'null' }, last_message_id: { type: 'null' },
+        }),
+        planRelation(['chat', 'last_message_id'], {
+            tdlib_request: { const: 'viewMessages' },
+            last_message_id: reference('positiveInt53'),
+          }),
+      ],
+    ),
     chat_mute: plan(['chat', 'muted', 'duration_seconds'], {
       tdlib_request: { const: 'setChatNotificationSettings' }, chat,
-      muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+      muted: { const: true }, duration_seconds: { type: 'integer', minimum: 1, maximum: 31622400 },
     }),
     chat_unmute: plan(['chat', 'muted', 'duration_seconds'], {
       tdlib_request: { const: 'setChatNotificationSettings' }, chat,
-      muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+      muted: { const: false }, duration_seconds: { const: 0 },
     }),
     chat_pin: plan(['chat', 'chat_list', 'pinned'], {
       tdlib_request: { const: 'toggleChatIsPinned' }, chat,
-      chat_list: { enum: ['main', 'archive'] }, pinned: { type: 'boolean' },
+      chat_list: { enum: ['main', 'archive'] }, pinned: { const: true },
     }),
     chat_unpin: plan(['chat', 'chat_list', 'pinned'], {
       tdlib_request: { const: 'toggleChatIsPinned' }, chat,
-      chat_list: { enum: ['main', 'archive'] }, pinned: { type: 'boolean' },
+      chat_list: { enum: ['main', 'archive'] }, pinned: { const: false },
     }),
     chat_archive: plan(['chat', 'archived'], {
-      tdlib_request: { const: 'addChatToList' }, chat, archived: { type: 'boolean' },
+      tdlib_request: { const: 'addChatToList' }, chat, archived: { const: true },
     }),
     chat_unarchive: plan(['chat', 'archived'], {
-      tdlib_request: { const: 'addChatToList' }, chat, archived: { type: 'boolean' },
+      tdlib_request: { const: 'addChatToList' }, chat, archived: { const: false },
     }),
-    chat_join: plan(['source', 'chat', 'invite_link_sha256'], {
-      tdlib_request: { enum: ['joinChat', 'joinChatByInviteLink'] },
-      source: { enum: ['username', 'invite_link'] }, chat: nullable(chat),
-      invite_link_sha256: nullable(reference('sha256')),
+    chat_join: constrained(
+      plan(['source', 'chat', 'invite_link_sha256'], {
+        tdlib_request: { enum: ['joinChat', 'joinChatByInviteLink'] },
+        source: { enum: ['username', 'invite_link'] }, chat: nullable(chat),
+        invite_link_sha256: nullable(reference('sha256')),
+      }),
+      [
+        planRelation(['source', 'chat', 'invite_link_sha256'], {
+            source: { const: 'username' }, tdlib_request: { const: 'joinChat' },
+            chat, invite_link_sha256: { type: 'null' },
+          }),
+        planRelation(['source', 'chat', 'invite_link_sha256'], {
+            source: { const: 'invite_link' }, tdlib_request: { const: 'joinChatByInviteLink' },
+            chat: nullable(chat), invite_link_sha256: reference('sha256'),
+          }),
+      ],
+    ),
+    chat_leave: plan(['chat'], {
+      tdlib_request: { const: 'leaveChat' },
+      chat: { allOf: [chat, relation(['id', 'title', 'type', 'is_bot', 'usernames'], {
+        type: { enum: ['basic_group', 'supergroup', 'channel'] },
+      })] },
     }),
-    chat_leave: plan(['chat'], { tdlib_request: { const: 'leaveChat' }, chat }),
     saved_attach: plan(['chat', 'message_id', 'effective_topic', 'caption', 'file'], {
       tdlib_request: { const: 'sendMessage' }, chat,
       message_id: reference('positiveInt53'), effective_topic: nullable(reference('savedTopic')),
-      caption: { type: 'string', maxLength: 4096 }, file: reference('fileSnapshot'),
+      caption: noNulString({ maxScalars: 1024, maxBytes: 4096 }),
+      file: reference('fileSnapshot'),
     }),
     session_terminate: plan(['session'], {
       tdlib_request: { const: 'terminateSession' }, session: reference('sessionTarget'),
@@ -592,6 +712,7 @@ const v2ResultData = (operation) => {
       to_chat_id: reference('chatId'),
       items: {
         type: 'array', minItems: 1, maxItems: 100,
+        'x-tgcli-strictlyIncreasingField': 'source_id',
         items: {
           allOf: [
             reference('forwardItem'),
@@ -606,39 +727,41 @@ const v2ResultData = (operation) => {
     }),
     msg_react: object(['chat_id', 'message_id', 'reaction', 'removed', 'big'], {
       chat_id: reference('chatId'), message_id: reference('positiveInt53'),
-      reaction: { type: 'string' }, removed: { type: 'boolean' }, big: { type: 'boolean' },
+      reaction: nonemptyNoNulString({ maxScalars: 64, maxBytes: 64 }),
+      removed: { type: 'boolean' }, big: { type: 'boolean' },
     }),
     msg_pin: object(['chat_id', 'message_id', 'pinned'], {
       chat_id: reference('chatId'), message_id: reference('positiveInt53'),
-      pinned: { type: 'boolean' },
+      pinned: { const: true },
     }),
     msg_unpin: object(['chat_id', 'message_id', 'pinned'], {
       chat_id: reference('chatId'), message_id: reference('positiveInt53'),
-      pinned: { type: 'boolean' },
+      pinned: { const: false },
     }),
     chat_mark_read: object(['chat_id', 'last_read_message_id', 'marked_read'], {
       chat_id: reference('chatId'), last_read_message_id: nullable(reference('positiveInt53')),
       marked_read: { const: true },
     }),
     chat_mute: object(['chat_id', 'muted', 'duration_seconds'], {
-      chat_id: reference('chatId'), muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+      chat_id: reference('chatId'), muted: { const: true },
+      duration_seconds: { type: 'integer', minimum: 1, maximum: 31622400 },
     }),
     chat_unmute: object(['chat_id', 'muted', 'duration_seconds'], {
-      chat_id: reference('chatId'), muted: { type: 'boolean' }, duration_seconds: reference('int32'),
+      chat_id: reference('chatId'), muted: { const: false }, duration_seconds: { const: 0 },
     }),
     chat_pin: object(['chat_id', 'chat_list', 'pinned'], {
       chat_id: reference('chatId'), chat_list: { enum: ['main', 'archive'] },
-      pinned: { type: 'boolean' },
+      pinned: { const: true },
     }),
     chat_unpin: object(['chat_id', 'chat_list', 'pinned'], {
       chat_id: reference('chatId'), chat_list: { enum: ['main', 'archive'] },
-      pinned: { type: 'boolean' },
+      pinned: { const: false },
     }),
     chat_archive: object(['chat_id', 'archived'], {
-      chat_id: reference('chatId'), archived: { type: 'boolean' },
+      chat_id: reference('chatId'), archived: { const: true },
     }),
     chat_unarchive: object(['chat_id', 'archived'], {
-      chat_id: reference('chatId'), archived: { type: 'boolean' },
+      chat_id: reference('chatId'), archived: { const: false },
     }),
     chat_join: {
       oneOf: [
@@ -662,9 +785,226 @@ const v2ResultData = (operation) => {
 
 const v2ResultTerminal = (operation) =>
   object(['kind', 'data'], { kind: { const: 'result' }, data: v2ResultData(operation) });
-const v2StoredTerminal = (operation) => ({
-  oneOf: [v2ResultTerminal(operation), reference('storedErrorTerminal')],
+const storedMessages = {
+  AUDIT_INCOMPLETE: ['a prior audited invocation did not reach a terminal proof'],
+  TIMEOUT: ['request timed out'],
+  DAEMON_SHUTDOWN: ['daemon is shutting down'],
+  NOT_AUTHED: ['authorization was lost'],
+  TDLIB_ERROR: ['Telegram request failed'],
+  RATE_LIMITED: ['Telegram rate limit exceeded'],
+  INTERNAL: ['internal error', 'TDLib returned data outside the supported persistence bounds',
+    'TDLib returned malformed session data'],
+  SEND_FAILED: ['message was deleted before confirmation'],
+  FORWARD_FAILED: ['messages could not be forwarded'],
+  FORWARD_PARTIAL: ['some messages could not be forwarded'],
+  JOIN_APPROVAL_REQUIRED: ['join request requires approval'],
+  JOIN_DECLINED: ['join request was declined'],
+  INPUT_CHANGED: ['input file changed while being read'],
+  SPOOL_UNAVAILABLE: ['attachment spool is unavailable'],
+  PRECONDITION_FAILED: ['operation precondition failed'],
+};
+const storedError = (code, details, exitCode, message) => ({
+  code,
+  schema: object(['kind', 'code', 'message', 'details', 'exit_code'], {
+    kind: { const: 'error' }, code: { const: code },
+    message: message ?? { enum: storedMessages[code] }, details,
+    exit_code: { const: exitCode },
+  }),
 });
+const operationDetails = (operation, fields, properties) =>
+  object(['operation', ...fields], { operation: { const: operation }, ...properties });
+const storedForwardItems = (minimum = 1) => ({
+  type: 'array', minItems: minimum, maxItems: 100,
+  'x-tgcli-strictlyIncreasingField': 'source_id', items: reference('forwardItem'),
+});
+const storedTimeoutDetails = (operation) => {
+  if (operation === 'session_terminate') {
+    return {
+      oneOf: ['preflight', 'dispatch'].map((phase) =>
+        operationDetails(operation, ['phase', 'state', 'outcome', 'idempotency'], {
+          phase: { const: phase }, state: reference('nullableState'),
+          outcome: { const: phase === 'preflight' ? 'not_started' : 'unknown' },
+          idempotency: { const: 'not_requested' },
+        })),
+    };
+  }
+  const branches = [
+    operationDetails(operation, ['phase', 'state', 'outcome', 'idempotency'], {
+      phase: { const: 'preflight' }, state: reference('nullableState'),
+      outcome: { const: 'not_started' },
+      idempotency: { enum: ['not_requested', 'not_created', 'removed'] },
+    }),
+  ];
+  if (['msg_delete', 'chat_leave'].includes(operation)) {
+    branches.push(operationDetails(operation, ['phase', 'state', 'outcome', 'idempotency'], {
+      phase: { const: 'replay_confirmation' }, state: reference('nullableState'),
+      outcome: { const: 'not_started' }, idempotency: { const: 'completed_unchanged' },
+    }));
+  }
+  if (!['send', 'saved_attach', 'msg_forward'].includes(operation)) {
+    branches.push(operationDetails(operation, ['phase', 'state', 'outcome', 'idempotency'], {
+      phase: { const: 'dispatch' }, state: reference('nullableState'),
+      outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
+    }));
+  } else if (operation === 'msg_forward') {
+    branches.push(operationDetails(
+      operation, ['phase', 'state', 'outcome', 'idempotency', 'items'], {
+        phase: { const: 'confirmation' }, state: reference('nullableState'),
+        outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
+        items: storedForwardItems(0),
+      },
+    ));
+  } else {
+    branches.push(operationDetails(
+      operation, ['phase', 'state', 'outcome', 'idempotency', 'temporary_message_id'], {
+        phase: { const: 'confirmation' }, state: reference('nullableState'),
+        outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
+        temporary_message_id: nullable(reference('int53')),
+      },
+    ));
+  }
+  return { oneOf: branches };
+};
+const preconditionReasons = {
+  send: ['not_replyable', 'wrong_topic', 'online_schedule_unsupported',
+    'schedule_window_elapsed', 'schedule_too_far'],
+  msg_edit: ['not_editable', 'wrong_content_type', 'reply_markup_preservation_unsupported'],
+  msg_delete: ['not_deletable_for_self', 'not_deletable_for_all'],
+  msg_forward: ['not_forwardable', 'not_copyable'],
+  msg_react: ['reaction_unavailable'],
+  msg_pin: ['not_pinnable'],
+  chat_mute: ['saved_notifications_unsupported'],
+  chat_pin: ['chat_not_listed'],
+  chat_unpin: ['chat_not_listed'],
+  chat_leave: ['wrong_chat_type'],
+  saved_attach: ['wrong_content_type', 'wrong_topic'],
+};
+const v2StoredErrorBranches = (operation) => {
+  const branches = [
+    storedError(
+      'AUDIT_INCOMPLETE',
+      object(['account', 'path', 'mutation_state', 'completed_stages'], {
+        account: reference('account'), path: nonemptyNoNulString({ maxBytes: 16842751 }),
+        mutation_state: { enum: ['none', 'possible', 'confirmed'] },
+        completed_stages: {
+          type: 'array', maxItems: 6, uniqueItems: true, items: reference('v2Stage'),
+          'x-tgcli-legalStagePrefixFor': operation,
+        },
+      }),
+      1,
+      { const: 'a prior audited invocation did not reach a terminal proof' },
+    ),
+    storedError('TIMEOUT', storedTimeoutDetails(operation), 7),
+    storedError('DAEMON_SHUTDOWN', object(['reason'], { reason: { const: 'daemon_shutdown' } }), 1),
+    storedError('NOT_AUTHED', object(['account', 'state', 'reason'], {
+      account: reference('account'), state: reference('state'),
+      reason: { const: 'authorization_lost' },
+    }), 3),
+    storedError('TDLIB_ERROR', operationDetails(operation, ['tdlib_code'], {
+      tdlib_code: reference('int32'),
+    }), 1),
+    storedError('INTERNAL', operation === 'session_terminate'
+      ? operationDetails(operation, ['reason', 'tdlib_type_id'], {
+        reason: { const: 'malformed_tdlib_response' },
+        tdlib_type_id: nullable(reference('int32')),
+      })
+      : operationDetails(operation, ['reason'], { reason: { const: 'internal_error' } }), 1),
+  ];
+  if (operation === 'msg_forward') {
+    const failed429 = object(
+      ['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'],
+      {
+        source_id: reference('positiveInt53'), status: { const: 'failed' },
+        failure_reason: { const: 'tdlib_error' }, tdlib_code: { const: 429 },
+        retry_after: reference('positiveInt32'),
+      },
+    );
+    branches.push(storedError('RATE_LIMITED', operationDetails(
+      operation, ['tdlib_code', 'retry_after', 'items'], {
+        tdlib_code: { const: 429 }, retry_after: reference('positiveInt32'),
+        items: {
+          type: 'array', minItems: 0, maxItems: 100,
+          'x-tgcli-strictlyIncreasingField': 'source_id',
+          'x-tgcli-retryAfterEqualsMaximum': true, items: failed429,
+        },
+      },
+    ), 5));
+    for (const code of ['FORWARD_FAILED', 'FORWARD_PARTIAL']) {
+      branches.push(storedError(code, operationDetails(
+        operation, ['from_chat_id', 'to_chat_id', 'items'], {
+          from_chat_id: reference('chatId'), to_chat_id: reference('chatId'),
+          items: { ...storedForwardItems(), 'x-tgcli-terminalClass': code },
+        },
+      ), 1));
+    }
+  } else {
+    branches.push(storedError('RATE_LIMITED', operationDetails(
+      operation, ['tdlib_code', 'retry_after'], {
+        tdlib_code: { const: 429 },
+        retry_after: operation === 'session_terminate'
+          ? { type: 'integer', minimum: 0, maximum: 2147483647 }
+          : reference('positiveInt32'),
+      },
+    ), 5));
+  }
+  if (['send', 'saved_attach'].includes(operation)) {
+    branches.push(storedError('SEND_FAILED', operationDetails(
+      operation, ['chat_id', 'temporary_message_id', 'reason'], {
+        chat_id: reference('chatId'), temporary_message_id: reference('int53'),
+        reason: { const: 'deleted_before_confirmation' },
+      },
+    ), 1));
+  }
+  if (operation === 'chat_join') {
+    branches.push(storedError('JOIN_APPROVAL_REQUIRED', operationDetails(
+      operation, ['bot_user_id', 'query_id'], {
+        bot_user_id: reference('positiveInt53'), query_id: reference('positiveInt53'),
+      },
+    ), 1));
+    branches.push(storedError('JOIN_DECLINED', operationDetails(operation, [], {}), 1));
+  }
+  if (operation === 'saved_attach') {
+    branches.push(storedError('INPUT_CHANGED', operationDetails(operation, ['path'], {
+      path: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 4096 }),
+    }), 1));
+  }
+  branches.push(storedError('SPOOL_UNAVAILABLE', operationDetails(
+    operation, ['path', 'reason'], {
+      path: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 4096 }),
+      reason: { enum: [
+        'path_invalid', 'wrong_owner', 'wrong_type', 'wrong_mode', 'wrong_link_count',
+        'too_large', 'capacity_exhausted', 'open_failed', 'lock_failed', 'read_failed',
+        'write_failed', 'sync_failed', 'rename_failed', 'directory_sync_failed',
+        'parse_error', 'schema_error', 'contradiction',
+      ] },
+    },
+  ), 1));
+  if (preconditionReasons[operation]) {
+    branches.push(storedError('PRECONDITION_FAILED', operationDetails(
+      operation, ['chat_id', 'message_id', 'reason'], {
+        chat_id: nullable(reference('chatId')), message_id: nullable(reference('positiveInt53')),
+        reason: { enum: preconditionReasons[operation] },
+      },
+    ), 1));
+  }
+  return branches;
+};
+const v2StoredErrorTerminal = (operation, allowedCodes) => ({
+  oneOf: v2StoredErrorBranches(operation)
+    .filter(({ code }) => allowedCodes === undefined || allowedCodes.includes(code))
+    .map(({ schema: branch }) => branch),
+});
+const v2StoredTerminal = (operation) => ({
+  oneOf: [v2ResultTerminal(operation), ...v2StoredErrorTerminal(operation).oneOf],
+});
+const v2MutationTerminal = (operation) => {
+  const allowed = operation === 'msg_forward'
+    ? ['FORWARD_PARTIAL', 'INTERNAL']
+    : ['send', 'msg_edit', 'saved_attach'].includes(operation) ? ['INTERNAL'] : [];
+  return {
+    oneOf: [v2ResultTerminal(operation), ...v2StoredErrorTerminal(operation, allowed).oneOf],
+  };
+};
 
 const detail = object;
 const structuredError = (code, details) =>
@@ -1209,6 +1549,7 @@ for (const operation of v2Operations) {
             type: 'array',
             minItems: 1,
             maxItems: 100,
+            'x-tgcli-strictlyIncreasingField': 'source_id',
             items: reference('forwardItem'),
           },
         }),
@@ -1219,7 +1560,7 @@ for (const operation of v2Operations) {
     v2CheckpointBranch(
       operation,
       'mutation_confirmed',
-      object(['terminal'], { terminal: v2StoredTerminal(operation) }),
+      object(['terminal'], { terminal: v2MutationTerminal(operation) }),
     ),
   );
 }
@@ -1347,16 +1688,21 @@ const v2OutcomeBranch = (operation, success, mutation, prefixes, terminal) =>
   });
 const v2OutcomeBranches = v2Operations.flatMap((operation) => {
   const prefixes = v2CompletedStagePrefixes(operation);
+  const undispatched = prefixes.filter((value) => !value.includes('dispatch_started'));
   const dispatched = prefixes.filter((value) => value.includes('dispatch_started'));
+  const ambiguous = dispatched.filter((value) => !value.includes('mutation_confirmed'));
   const confirmed = dispatched.filter(
     (value) => value.includes('mutation_confirmed') || value.includes('forward_progress'),
   );
+  const none = [...undispatched,
+    ...dispatched.filter((value) => value.includes('forward_progress') &&
+      !value.includes('mutation_confirmed'))];
   const successful = confirmed.filter((value) => value.at(-1) === 'mutation_confirmed');
   return [
     v2OutcomeBranch(operation, true, 'confirmed', successful, v2ResultTerminal(operation)),
-    v2OutcomeBranch(operation, false, 'none', prefixes, reference('storedErrorTerminal')),
-    v2OutcomeBranch(operation, false, 'possible', dispatched, reference('storedErrorTerminal')),
-    v2OutcomeBranch(operation, false, 'confirmed', confirmed, reference('storedErrorTerminal')),
+    v2OutcomeBranch(operation, false, 'none', none, v2StoredErrorTerminal(operation)),
+    v2OutcomeBranch(operation, false, 'possible', ambiguous, v2StoredErrorTerminal(operation)),
+    v2OutcomeBranch(operation, false, 'confirmed', confirmed, v2StoredErrorTerminal(operation)),
   ];
 });
 const outcomeBase = object(outcomeFields, {

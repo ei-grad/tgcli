@@ -1,6 +1,7 @@
 #include "daemon/account_audit.hpp"
 
 #include "common/daemon_lock.hpp"
+#include "common/exit_codes.hpp"
 #include "common/paths.hpp"
 #include "common/utf8.hpp"
 #include "proto/destructive_plan.hpp"
@@ -124,6 +125,54 @@ bool exact_fields(const json& value, std::initializer_list<std::string_view> nam
     });
 }
 
+bool serialized_size_at_most(const json& value, std::uint64_t maximum) {
+    try {
+        return value.dump().size() <= maximum;
+    } catch (const json::exception&) {
+        return false;
+    }
+}
+
+struct ParsedAuditJson {
+    json document;
+    bool valid = false;
+    bool duplicate_key = false;
+    bool duplicate_schema_version = false;
+    std::size_t top_level_schema_versions = 0;
+};
+
+ParsedAuditJson parse_audit_json(std::string_view bytes) {
+    ParsedAuditJson result;
+    std::map<int, std::set<std::string>> object_keys;
+    try {
+        const json::parser_callback_t callback = [&](int depth, json::parse_event_t event,
+                                                     json& parsed) {
+            if (event == json::parse_event_t::object_start) {
+                object_keys[depth + 1].clear();
+            } else if (event == json::parse_event_t::key && parsed.is_string()) {
+                const auto& key = parsed.get_ref<const std::string&>();
+                if (!object_keys[depth].emplace(key).second) {
+                    result.duplicate_key = true;
+                    if (depth == 1 && key == "schema_version") {
+                        result.duplicate_schema_version = true;
+                    }
+                }
+                if (depth == 1 && key == "schema_version") {
+                    ++result.top_level_schema_versions;
+                }
+            } else if (event == json::parse_event_t::object_end) {
+                object_keys.erase(depth + 1);
+            }
+            return true;
+        };
+        result.document = json::parse(bytes, callback, false, true);
+        result.valid = !result.document.is_discarded();
+    } catch (const json::exception&) {
+        result.valid = false;
+    }
+    return result;
+}
+
 std::optional<std::size_t> utf8_scalar_count(std::string_view value) {
     if (!common::valid_utf8(value)) {
         return std::nullopt;
@@ -136,6 +185,93 @@ std::optional<std::size_t> utf8_scalar_count(std::string_view value) {
 bool valid_string(const json& value, std::uint64_t maximum = kRequestSourceBytes) {
     return value.is_string() && value.get_ref<const std::string&>().size() <= maximum &&
            common::valid_utf8(value.get_ref<const std::string&>());
+}
+
+std::optional<std::int64_t> json_int64(const json& value) {
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<std::uint64_t>();
+        if (number > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            return std::nullopt;
+        }
+        return static_cast<std::int64_t>(number);
+    }
+    if (!value.is_number_integer()) {
+        return std::nullopt;
+    }
+    return value.get<std::int64_t>();
+}
+
+bool valid_int64(const json& value) {
+    return json_int64(value).has_value();
+}
+
+bool valid_int32(const json& value) {
+    const auto number = json_int64(value);
+    return number && *number >= std::numeric_limits<std::int32_t>::min() &&
+           *number <= std::numeric_limits<std::int32_t>::max();
+}
+
+bool valid_nonnegative_int32(const json& value) {
+    const auto number = json_int64(value);
+    return number && *number >= 0 && *number <= std::numeric_limits<std::int32_t>::max();
+}
+
+bool valid_positive_int32(const json& value) {
+    const auto number = json_int64(value);
+    return number && *number >= 1 && *number <= std::numeric_limits<std::int32_t>::max();
+}
+
+bool contains_nul(std::string_view value) {
+    return value.find('\0') != std::string_view::npos;
+}
+
+bool valid_utf8_text(const json& value, std::uint64_t maximum_bytes, std::size_t maximum_scalars,
+                     bool allow_empty) {
+    if (!valid_string(value, maximum_bytes)) {
+        return false;
+    }
+    const auto& text = value.get_ref<const std::string&>();
+    const auto scalars = utf8_scalar_count(text);
+    return (allow_empty || !text.empty()) && !contains_nul(text) && scalars &&
+           *scalars <= maximum_scalars;
+}
+
+bool valid_selector_string(const json& value) {
+    return valid_string(value) && !value.get_ref<const std::string&>().empty() &&
+           !contains_nul(value.get_ref<const std::string&>());
+}
+
+bool valid_safe_basename(const json& value) {
+    if (!valid_string(value, 255)) {
+        return false;
+    }
+    const auto& name = value.get_ref<const std::string&>();
+    if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos) {
+        return false;
+    }
+    for (std::size_t index = 0; index < name.size();) {
+        const auto lead = static_cast<unsigned char>(name[index]);
+        std::uint32_t scalar = lead;
+        std::size_t width = 1;
+        if ((lead & 0xe0U) == 0xc0U) {
+            scalar = lead & 0x1fU;
+            width = 2;
+        } else if ((lead & 0xf0U) == 0xe0U) {
+            scalar = lead & 0x0fU;
+            width = 3;
+        } else if ((lead & 0xf8U) == 0xf0U) {
+            scalar = lead & 0x07U;
+            width = 4;
+        }
+        for (std::size_t offset = 1; offset < width; ++offset) {
+            scalar = (scalar << 6U) | (static_cast<unsigned char>(name[index + offset]) & 0x3fU);
+        }
+        if (scalar <= 0x1fU || (scalar >= 0x7fU && scalar <= 0x9fU)) {
+            return false;
+        }
+        index += width;
+    }
+    return true;
 }
 
 bool valid_hex(std::string_view value, std::size_t size) {
@@ -168,39 +304,53 @@ bool valid_timestamp(const json& value) {
                            [](char character) { return character >= '0' && character <= '9'; });
     };
     if (!digits(0, 4) || !digits(5, 2) || !digits(8, 2) || !digits(11, 2) || !digits(14, 2) ||
-        !digits(17, 2) || text.substr(0, 4) == "0000") {
+        !digits(17, 2)) {
         return false;
     }
     const auto number = [&text](std::size_t begin) {
         return (text[begin] - '0') * 10 + (text[begin + 1] - '0');
     };
-    const auto date =
-        std::chrono::year_month_day{std::chrono::year{std::stoi(text.substr(0, 4))},
-                                    std::chrono::month{static_cast<unsigned>(number(5))},
-                                    std::chrono::day{static_cast<unsigned>(number(8))}};
-    return date.ok() && number(11) <= 23 && number(14) <= 59 && number(17) <= 60;
+    const auto year = std::stoi(text.substr(0, 4));
+    const auto date = std::chrono::year_month_day{
+        std::chrono::year{year}, std::chrono::month{static_cast<unsigned>(number(5))},
+        std::chrono::day{static_cast<unsigned>(number(8))}};
+    return year >= 1970 && date.ok() && number(11) <= 23 && number(14) <= 59 && number(17) <= 59;
 }
 
 bool valid_int53(const json& value, bool positive = false) {
     constexpr std::int64_t maximum = 9'007'199'254'740'991LL;
-    if (!value.is_number_integer()) {
-        return false;
-    }
-    const auto number = value.get<std::int64_t>();
-    return number >= (positive ? 1 : -maximum) && number <= maximum;
+    const auto number = json_int64(value);
+    return number && *number >= (positive ? 1 : -maximum) && *number <= maximum;
 }
 
 bool valid_int53_array(const json& value, std::size_t minimum = 1, std::size_t maximum = 100) {
-    return value.is_array() && value.size() >= minimum && value.size() <= maximum &&
-           std::all_of(value.begin(), value.end(),
-                       [](const json& item) { return valid_int53(item); });
+    if (!value.is_array() || value.size() < minimum || value.size() > maximum) {
+        return false;
+    }
+    std::set<std::int64_t> unique;
+    for (const auto& item : value) {
+        const auto number = json_int64(item);
+        if (!number || !valid_int53(item) || !unique.emplace(*number).second) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool valid_positive_int53_array(const json& value, std::size_t minimum = 1,
                                 std::size_t maximum = 100) {
-    return value.is_array() && value.size() >= minimum && value.size() <= maximum &&
-           std::all_of(value.begin(), value.end(),
-                       [](const json& item) { return valid_int53(item, true); });
+    if (!value.is_array() || value.size() < minimum || value.size() > maximum) {
+        return false;
+    }
+    std::int64_t previous = 0;
+    for (const auto& item : value) {
+        const auto number = json_int64(item);
+        if (!number || !valid_int53(item, true) || *number <= previous) {
+            return false;
+        }
+        previous = *number;
+    }
+    return true;
 }
 
 bool valid_session_id(const json& value) {
@@ -269,19 +419,30 @@ bool valid_schedule(const json& value) {
         return exact_fields(value, {"kind"});
     }
     return value["kind"] == "at" && exact_fields(value, {"kind", "send_date"}) &&
-           value["send_date"].is_number_integer() && value["send_date"].get<std::int64_t>() > 0 &&
-           value["send_date"].get<std::int64_t>() <= std::numeric_limits<std::int32_t>::max();
+           valid_positive_int32(value["send_date"]);
 }
 
 bool valid_file_snapshot(const json& value) {
     return exact_fields(value, {"path", "name", "size", "sha256", "device", "inode", "mtime_ns",
                                 "ctime_ns"}) &&
-           valid_string(value["path"]) && valid_string(value["name"], 255) &&
-           !value["name"].get_ref<const std::string&>().empty() &&
-           value["name"].get_ref<const std::string&>().find('/') == std::string::npos &&
+           valid_selector_string(value["path"]) && valid_safe_basename(value["name"]) &&
            value["size"].is_number_unsigned() && valid_hash(value["sha256"]) &&
            value["device"].is_number_unsigned() && value["inode"].is_number_unsigned() &&
-           value["mtime_ns"].is_number_integer() && value["ctime_ns"].is_number_integer();
+           valid_int64(value["mtime_ns"]) && valid_int64(value["ctime_ns"]);
+}
+
+bool valid_schedule_plan(const json& schedule, const json& observed_server_unix_time) {
+    if (!valid_schedule(schedule)) {
+        return false;
+    }
+    if (schedule.is_null() || schedule["kind"] == "online") {
+        return observed_server_unix_time.is_null();
+    }
+    const auto send_date = json_int64(schedule["send_date"]);
+    const auto server_now = json_int64(observed_server_unix_time);
+    constexpr std::int64_t maximum_window = 367LL * 86'400LL;
+    return send_date && server_now && *server_now <= *send_date - 11 &&
+           *server_now >= *send_date - maximum_window;
 }
 
 bool valid_arguments(AccountAuditOperation operation, const json& value) {
@@ -289,58 +450,61 @@ bool valid_arguments(AccountAuditOperation operation, const json& value) {
     case AccountAuditOperation::Send:
         return exact_fields(value, {"chat", "text", "parse_mode", "reply_to", "topic", "silent",
                                     "schedule"}) &&
-               valid_string(value["chat"]) && valid_string(value["text"]) &&
+               valid_selector_string(value["chat"]) &&
+               valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false) &&
                (value["parse_mode"] == "plain" || value["parse_mode"] == "markdown_v2" ||
                 value["parse_mode"] == "html") &&
                (value["reply_to"].is_null() || valid_int53(value["reply_to"], true)) &&
                valid_topic(value["topic"], "forum", true) && value["silent"].is_boolean() &&
                valid_schedule(value["schedule"]);
     case AccountAuditOperation::MsgEdit:
-        return exact_fields(value, {"chat", "message_id", "text"}) && valid_string(value["chat"]) &&
-               valid_int53(value["message_id"], true) && valid_string(value["text"]);
+        return exact_fields(value, {"chat", "message_id", "text"}) &&
+               valid_selector_string(value["chat"]) && valid_int53(value["message_id"], true) &&
+               valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false);
     case AccountAuditOperation::MsgDelete:
         return exact_fields(value, {"chat", "message_ids", "for_all"}) &&
-               valid_string(value["chat"]) && valid_positive_int53_array(value["message_ids"]) &&
-               value["for_all"].is_boolean();
+               valid_selector_string(value["chat"]) &&
+               valid_positive_int53_array(value["message_ids"]) && value["for_all"].is_boolean();
     case AccountAuditOperation::MsgForward:
         return exact_fields(value, {"from", "to", "message_ids", "drop_author"}) &&
-               valid_string(value["from"]) && valid_string(value["to"]) &&
+               valid_selector_string(value["from"]) && valid_selector_string(value["to"]) &&
                valid_positive_int53_array(value["message_ids"]) &&
                value["drop_author"].is_boolean();
     case AccountAuditOperation::MsgReact:
         return exact_fields(value, {"chat", "message_id", "reaction", "remove", "big"}) &&
-               valid_string(value["chat"]) && valid_int53(value["message_id"], true) &&
-               valid_string(value["reaction"], 64) && value["remove"].is_boolean() &&
-               value["big"].is_boolean();
+               valid_selector_string(value["chat"]) && valid_int53(value["message_id"], true) &&
+               valid_utf8_text(value["reaction"], 64, 64, false) && value["remove"].is_boolean() &&
+               value["big"].is_boolean() && !(value["remove"] == true && value["big"] == true);
     case AccountAuditOperation::MsgPin:
     case AccountAuditOperation::MsgUnpin:
-        return exact_fields(value, {"chat", "message_id"}) && valid_string(value["chat"]) &&
-               valid_int53(value["message_id"], true);
+        return exact_fields(value, {"chat", "message_id"}) &&
+               valid_selector_string(value["chat"]) && valid_int53(value["message_id"], true);
     case AccountAuditOperation::ChatMarkRead:
     case AccountAuditOperation::ChatPin:
     case AccountAuditOperation::ChatUnpin:
     case AccountAuditOperation::ChatArchive:
     case AccountAuditOperation::ChatUnarchive:
     case AccountAuditOperation::ChatLeave:
-        return exact_fields(value, {"chat"}) && valid_string(value["chat"]);
+        return exact_fields(value, {"chat"}) && valid_selector_string(value["chat"]);
     case AccountAuditOperation::ChatMute:
     case AccountAuditOperation::ChatUnmute:
-        return exact_fields(value, {"chat", "duration_seconds"}) && valid_string(value["chat"]) &&
-               value["duration_seconds"].is_number_integer() &&
-               value["duration_seconds"].get<std::int64_t>() >=
-                   std::numeric_limits<std::int32_t>::min() &&
-               value["duration_seconds"].get<std::int64_t>() <=
-                   std::numeric_limits<std::int32_t>::max();
+        return exact_fields(value, {"chat", "duration_seconds"}) &&
+               valid_selector_string(value["chat"]) &&
+               (operation == AccountAuditOperation::ChatMute
+                    ? (json_int64(value["duration_seconds"]).value_or(0) >= 1 &&
+                       json_int64(value["duration_seconds"])
+                               .value_or(std::numeric_limits<std::int64_t>::max()) <= 31'622'400)
+                    : json_int64(value["duration_seconds"]) == std::optional<std::int64_t>{0});
     case AccountAuditOperation::ChatJoin:
         if (exact_fields(value, {"source", "username"})) {
-            return value["source"] == "username" && valid_string(value["username"]);
+            return value["source"] == "username" && valid_selector_string(value["username"]);
         }
         return exact_fields(value, {"source", "invite_link_sha256"}) &&
                value["source"] == "invite_link" && valid_hash(value["invite_link_sha256"]);
     case AccountAuditOperation::SavedAttach:
         return exact_fields(value, {"message_id", "path", "caption"}) &&
-               valid_int53(value["message_id"], true) && valid_string(value["path"]) &&
-               valid_string(value["caption"]);
+               valid_int53(value["message_id"], true) && valid_selector_string(value["path"]) &&
+               valid_utf8_text(value["caption"], 4'096, 1'024, true);
     case AccountAuditOperation::SessionTerminate:
         return exact_fields(value, {"session_id"}) && valid_session_id(value["session_id"]);
     }
@@ -434,25 +598,30 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "text",
                                     "parse_mode", "reply_to", "requested_topic", "effective_topic",
                                     "silent", "schedule", "observed_server_unix_time"}) &&
-               chat("chat") && valid_string(value["text"]) &&
+               chat("chat") &&
+               valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false) &&
                (value["parse_mode"] == "plain" || value["parse_mode"] == "markdown_v2" ||
                 value["parse_mode"] == "html") &&
                (value["reply_to"].is_null() || valid_int53(value["reply_to"], true)) &&
                valid_topic(value["requested_topic"], "forum", true) &&
                valid_topic(value["effective_topic"], "forum", true) &&
-               value["silent"].is_boolean() && valid_schedule(value["schedule"]) &&
-               (value["observed_server_unix_time"].is_null() ||
-                value["observed_server_unix_time"].is_number_integer());
+               value["silent"].is_boolean() &&
+               valid_schedule_plan(value["schedule"], value["observed_server_unix_time"]);
     case AccountAuditOperation::MsgEdit:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "text"}) &&
                chat("chat") && valid_int53(value["message_id"], true) &&
-               valid_string(value["text"]);
+               valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false);
     case AccountAuditOperation::MsgDelete:
-        return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_ids",
-                                    "requested_for_all", "effective_for_all"}) &&
-               chat("chat") && valid_positive_int53_array(value["message_ids"]) &&
-               value["requested_for_all"].is_boolean() && value["effective_for_all"].is_boolean();
+        if (!exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_ids",
+                                  "requested_for_all", "effective_for_all"}) ||
+            !chat("chat") || !valid_positive_int53_array(value["message_ids"]) ||
+            !value["requested_for_all"].is_boolean() || !value["effective_for_all"].is_boolean()) {
+            return false;
+        }
+        return value["chat"]["type"] == "supergroup" || value["chat"]["type"] == "channel"
+                   ? value["effective_for_all"] == true
+                   : value["effective_for_all"] == value["requested_for_all"];
     case AccountAuditOperation::MsgForward:
         return exact_fields(value, {"operation", "account", "tdlib_request", "from", "to",
                                     "message_ids", "drop_author"}) &&
@@ -462,8 +631,10 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "reaction", "remove", "big"}) &&
                chat("chat") && valid_int53(value["message_id"], true) &&
-               valid_string(value["reaction"], 64) && value["remove"].is_boolean() &&
-               value["big"].is_boolean();
+               valid_utf8_text(value["reaction"], 64, 64, false) && value["remove"].is_boolean() &&
+               value["big"].is_boolean() && !(value["remove"] == true && value["big"] == true) &&
+               value["tdlib_request"] ==
+                   (value["remove"] == true ? "removeMessageReaction" : "addMessageReaction");
     case AccountAuditOperation::MsgPin:
     case AccountAuditOperation::MsgUnpin:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
@@ -474,17 +645,21 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
         return exact_fields(value,
                             {"operation", "account", "tdlib_request", "chat", "last_message_id"}) &&
                chat("chat") &&
-               (value["last_message_id"].is_null() || valid_int53(value["last_message_id"], true));
+               (value["last_message_id"].is_null() ||
+                valid_int53(value["last_message_id"], true)) &&
+               (value["last_message_id"].is_null() ? value["tdlib_request"].is_null()
+                                                   : value["tdlib_request"] == "viewMessages");
     case AccountAuditOperation::ChatMute:
     case AccountAuditOperation::ChatUnmute:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "muted",
                                     "duration_seconds"}) &&
                chat("chat") && value["muted"].is_boolean() &&
-               value["duration_seconds"].is_number_integer() &&
-               value["duration_seconds"].get<std::int64_t>() >=
-                   std::numeric_limits<std::int32_t>::min() &&
-               value["duration_seconds"].get<std::int64_t>() <=
-                   std::numeric_limits<std::int32_t>::max();
+               value["muted"] == (operation == AccountAuditOperation::ChatMute) &&
+               (operation == AccountAuditOperation::ChatMute
+                    ? (json_int64(value["duration_seconds"]).value_or(0) >= 1 &&
+                       json_int64(value["duration_seconds"])
+                               .value_or(std::numeric_limits<std::int64_t>::max()) <= 31'622'400)
+                    : json_int64(value["duration_seconds"]) == std::optional<std::int64_t>{0});
     case AccountAuditOperation::ChatPin:
     case AccountAuditOperation::ChatUnpin:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "chat_list",
@@ -496,20 +671,28 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "archived"}) &&
                chat("chat") && value["archived"].is_boolean();
     case AccountAuditOperation::ChatJoin:
-        return exact_fields(value, {"operation", "account", "tdlib_request", "source", "chat",
-                                    "invite_link_sha256"}) &&
-               (value["source"] == "username" || value["source"] == "invite_link") &&
+        if (!exact_fields(value, {"operation", "account", "tdlib_request", "source", "chat",
+                                  "invite_link_sha256"})) {
+            return false;
+        }
+        if (value["source"] == "username") {
+            return value["tdlib_request"] == "joinChat" && valid_chat_identity(value["chat"]) &&
+                   value["invite_link_sha256"].is_null();
+        }
+        return value["source"] == "invite_link" &&
+               value["tdlib_request"] == "joinChatByInviteLink" &&
                (value["chat"].is_null() || valid_chat_identity(value["chat"])) &&
-               (value["invite_link_sha256"].is_null() || valid_hash(value["invite_link_sha256"]));
+               valid_hash(value["invite_link_sha256"]);
     case AccountAuditOperation::ChatLeave:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat"}) &&
-               chat("chat");
+               chat("chat") && value["chat"]["type"] != "private";
     case AccountAuditOperation::SavedAttach:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "effective_topic", "caption", "file"}) &&
                chat("chat") && valid_int53(value["message_id"], true) &&
                valid_topic(value["effective_topic"], "saved", false) &&
-               valid_string(value["caption"]) && valid_file_snapshot(value["file"]);
+               valid_utf8_text(value["caption"], 4'096, 1'024, true) &&
+               valid_file_snapshot(value["file"]);
     case AccountAuditOperation::SessionTerminate:
         return exact_fields(value, {"operation", "account", "tdlib_request", "session"}) &&
                valid_session_target(value["session"]);
@@ -621,7 +804,8 @@ bool valid_message_write_result(const json& value) {
 
 bool valid_forward_item(const json& value);
 
-bool valid_result_data(AccountAuditOperation operation, const json& value) {
+bool valid_result_data( // NOLINT(readability-function-cognitive-complexity)
+    AccountAuditOperation operation, const json& value) {
     switch (operation) {
     case AccountAuditOperation::Send:
     case AccountAuditOperation::MsgEdit:
@@ -633,25 +817,39 @@ bool valid_result_data(AccountAuditOperation operation, const json& value) {
                valid_positive_int53_array(value["message_ids"]) && value["for_all"].is_boolean() &&
                value["deleted"] == true;
     case AccountAuditOperation::MsgForward:
-        return exact_fields(value, {"from_chat_id", "to_chat_id", "items"}) &&
-               valid_int53(value["from_chat_id"]) && value["from_chat_id"] != 0 &&
-               valid_int53(value["to_chat_id"]) && value["to_chat_id"] != 0 &&
-               value["items"].is_array() && !value["items"].empty() &&
-               value["items"].size() <= kForwardItemCount &&
-               std::all_of(value["items"].begin(), value["items"].end(), [](const json& item) {
-                   return item.is_object() && item.value("status", std::string{}) == "sent" &&
-                          valid_forward_item(item);
-               });
+        if (!exact_fields(value, {"from_chat_id", "to_chat_id", "items"}) ||
+            !valid_int53(value["from_chat_id"]) || value["from_chat_id"] == 0 ||
+            !valid_int53(value["to_chat_id"]) || value["to_chat_id"] == 0 ||
+            !value["items"].is_array() || value["items"].empty() ||
+            value["items"].size() > kForwardItemCount) {
+            return false;
+        }
+        {
+            std::int64_t previous = 0;
+            for (const auto& item : value["items"]) {
+                if (!valid_forward_item(item) || item["status"] != "sent") {
+                    return false;
+                }
+                const auto source = json_int64(item["source_id"]);
+                if (!source || *source <= previous) {
+                    return false;
+                }
+                previous = *source;
+            }
+        }
+        return true;
     case AccountAuditOperation::MsgReact:
         return exact_fields(value, {"chat_id", "message_id", "reaction", "removed", "big"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
-               valid_int53(value["message_id"], true) && valid_string(value["reaction"]) &&
-               value["removed"].is_boolean() && value["big"].is_boolean();
+               valid_int53(value["message_id"], true) &&
+               valid_utf8_text(value["reaction"], 64, 64, false) && value["removed"].is_boolean() &&
+               value["big"].is_boolean();
     case AccountAuditOperation::MsgPin:
     case AccountAuditOperation::MsgUnpin:
         return exact_fields(value, {"chat_id", "message_id", "pinned"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
-               valid_int53(value["message_id"], true) && value["pinned"].is_boolean();
+               valid_int53(value["message_id"], true) && value["pinned"].is_boolean() &&
+               value["pinned"] == (operation == AccountAuditOperation::MsgPin);
     case AccountAuditOperation::ChatMarkRead:
         return exact_fields(value, {"chat_id", "last_read_message_id", "marked_read"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
@@ -662,21 +860,25 @@ bool valid_result_data(AccountAuditOperation operation, const json& value) {
     case AccountAuditOperation::ChatUnmute:
         return exact_fields(value, {"chat_id", "muted", "duration_seconds"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
-               value["muted"].is_boolean() && value["duration_seconds"].is_number_integer() &&
-               value["duration_seconds"].get<std::int64_t>() >=
-                   std::numeric_limits<std::int32_t>::min() &&
-               value["duration_seconds"].get<std::int64_t>() <=
-                   std::numeric_limits<std::int32_t>::max();
+               value["muted"].is_boolean() &&
+               value["muted"] == (operation == AccountAuditOperation::ChatMute) &&
+               (operation == AccountAuditOperation::ChatMute
+                    ? (json_int64(value["duration_seconds"]).value_or(0) >= 1 &&
+                       json_int64(value["duration_seconds"])
+                               .value_or(std::numeric_limits<std::int64_t>::max()) <= 31'622'400)
+                    : json_int64(value["duration_seconds"]) == std::optional<std::int64_t>{0});
     case AccountAuditOperation::ChatPin:
     case AccountAuditOperation::ChatUnpin:
         return exact_fields(value, {"chat_id", "chat_list", "pinned"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
                (value["chat_list"] == "main" || value["chat_list"] == "archive") &&
-               value["pinned"].is_boolean();
+               value["pinned"].is_boolean() &&
+               value["pinned"] == (operation == AccountAuditOperation::ChatPin);
     case AccountAuditOperation::ChatArchive:
     case AccountAuditOperation::ChatUnarchive:
         return exact_fields(value, {"chat_id", "archived"}) && valid_int53(value["chat_id"]) &&
-               value["chat_id"] != 0 && value["archived"].is_boolean();
+               value["chat_id"] != 0 && value["archived"].is_boolean() &&
+               value["archived"] == (operation == AccountAuditOperation::ChatArchive);
     case AccountAuditOperation::ChatJoin:
         if (exact_fields(value, {"status", "chat_id"}) && value["status"] == "joined") {
             return valid_int53(value["chat_id"]) && value["chat_id"] != 0;
@@ -694,14 +896,488 @@ bool valid_result_data(AccountAuditOperation operation, const json& value) {
     return false;
 }
 
+bool valid_json_tree(const json& value, std::size_t depth, std::size_t& nodes) {
+    std::vector<std::pair<const json*, std::size_t>> pending{{&value, depth}};
+    while (!pending.empty()) {
+        const auto [current, current_depth] = pending.back();
+        pending.pop_back();
+        if (current_depth > 32 || ++nodes > 16'384) {
+            return false;
+        }
+        if (current->is_string()) {
+            if (!valid_string(*current) || contains_nul(current->get_ref<const std::string&>())) {
+                return false;
+            }
+            continue;
+        }
+        if (current->is_array()) {
+            for (const auto& item : *current) {
+                pending.emplace_back(&item, current_depth + 1);
+            }
+            continue;
+        }
+        if (!current->is_object()) {
+            continue;
+        }
+        for (const auto& [key, item] : current->items()) {
+            if (!common::valid_utf8(key) || contains_nul(key) || key == "idempotency_key" ||
+                key == "invite" || key == "invite_link") {
+                return false;
+            }
+            pending.emplace_back(&item, current_depth + 1);
+        }
+    }
+    return true;
+}
+
+bool valid_auth_state(const json& value, bool nullable = true) {
+    if (nullable && value.is_null()) {
+        return true;
+    }
+    if (!value.is_string()) {
+        return false;
+    }
+    constexpr std::array<std::string_view, 14> states{"unknown",
+                                                      "wait_tdlib_parameters",
+                                                      "wait_phone_number",
+                                                      "wait_premium_purchase",
+                                                      "wait_email_address",
+                                                      "wait_email_code",
+                                                      "wait_code",
+                                                      "wait_other_device_confirmation",
+                                                      "wait_registration",
+                                                      "wait_password",
+                                                      "ready",
+                                                      "logging_out",
+                                                      "closing",
+                                                      "closed"};
+    return std::find(states.begin(), states.end(), value.get_ref<const std::string&>()) !=
+           states.end();
+}
+
+bool valid_operation_field(AccountAuditOperation operation, const json& details) {
+    return details.contains("operation") && details["operation"].is_string() &&
+           details["operation"] == account_audit_operation_name(operation);
+}
+
+bool valid_forward_items(const json& items, bool allow_empty, bool require_terminal) {
+    if (!items.is_array() || (!allow_empty && items.empty()) || items.size() > kForwardItemCount) {
+        return false;
+    }
+    std::int64_t previous = 0;
+    std::set<std::int64_t> temporary_ids;
+    for (const auto& item : items) {
+        if (!valid_forward_item(item)) {
+            return false;
+        }
+        const auto source = json_int64(item["source_id"]);
+        if (!source || *source <= previous || (require_terminal && item["status"] == "pending")) {
+            return false;
+        }
+        previous = *source;
+        if (item["status"] == "pending") {
+            const auto temporary = json_int64(item["temporary_message_id"]);
+            if (!temporary || !temporary_ids.emplace(*temporary).second) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool legal_completed_stages( // NOLINT(readability-function-cognitive-complexity)
+    AccountAuditOperation operation, const std::vector<AccountAuditStage>& completed) {
+    const auto is_prefix = [&completed](const std::vector<AccountAuditStage>& complete) {
+        return completed.size() <= complete.size() &&
+               std::equal(completed.begin(), completed.end(), complete.begin());
+    };
+    if (completed.empty()) {
+        return true;
+    }
+    for (const bool keyed : {false, true}) {
+        for (const bool temporary : {false, true}) {
+            for (const bool progress : {false, true}) {
+                for (const bool mutation_proof : {false, true}) {
+                    std::vector<AccountAuditStage> complete;
+                    if (keyed && operation != AccountAuditOperation::SessionTerminate) {
+                        complete.push_back(AccountAuditStage::IdempotencyPending);
+                    }
+                    if (operation == AccountAuditOperation::SavedAttach) {
+                        complete.push_back(AccountAuditStage::SpoolReady);
+                    }
+                    complete.push_back(AccountAuditStage::DispatchStarted);
+                    if (temporary && (operation == AccountAuditOperation::Send ||
+                                      operation == AccountAuditOperation::SavedAttach ||
+                                      operation == AccountAuditOperation::MsgForward)) {
+                        complete.push_back(AccountAuditStage::TemporaryIdsObserved);
+                    }
+                    if (progress && operation == AccountAuditOperation::MsgForward) {
+                        complete.push_back(AccountAuditStage::ForwardProgress);
+                    }
+                    if (mutation_proof) {
+                        complete.push_back(AccountAuditStage::MutationConfirmed);
+                    }
+                    if (is_prefix(complete)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool valid_audit_incomplete_details(AccountAuditOperation operation, const json& details) {
+    if (!exact_fields(details, {"account", "path", "mutation_state", "completed_stages"}) ||
+        !details["account"].is_string() ||
+        !paths::valid_account_name(details["account"].get_ref<const std::string&>()) ||
+        !valid_selector_string(details["path"]) || !details["mutation_state"].is_string() ||
+        !details["completed_stages"].is_array()) {
+        return false;
+    }
+    const auto& mutation = details["mutation_state"].get_ref<const std::string&>();
+    if (mutation != "none" && mutation != "possible" && mutation != "confirmed") {
+        return false;
+    }
+    std::set<AccountAuditStage> seen;
+    std::vector<AccountAuditStage> completed;
+    for (const auto& item : details["completed_stages"]) {
+        if (!item.is_string()) {
+            return false;
+        }
+        const auto stage = parse_account_audit_stage(item.get_ref<const std::string&>());
+        if (!stage || !seen.emplace(*stage).second) {
+            return false;
+        }
+        completed.push_back(*stage);
+    }
+    if (!legal_completed_stages(operation, completed)) {
+        return false;
+    }
+    const bool dispatch = seen.contains(AccountAuditStage::DispatchStarted);
+    const bool progress = seen.contains(AccountAuditStage::ForwardProgress);
+    const bool proof = seen.contains(AccountAuditStage::MutationConfirmed);
+    if (!dispatch) {
+        return mutation == "none";
+    }
+    if (proof) {
+        return mutation == "confirmed";
+    }
+    return progress ? (mutation == "none" || mutation == "possible" || mutation == "confirmed")
+                    : mutation == "possible";
+}
+
+bool valid_timeout_details(AccountAuditOperation operation, const json& details) {
+    if (operation == AccountAuditOperation::SessionTerminate) {
+        return exact_fields(details, {"operation", "phase", "state", "outcome", "idempotency"}) &&
+               valid_operation_field(operation, details) && valid_auth_state(details["state"]) &&
+               (details["phase"] == "preflight" || details["phase"] == "dispatch") &&
+               details["outcome"] ==
+                   (details["phase"] == "preflight" ? "not_started" : "unknown") &&
+               details["idempotency"] == "not_requested";
+    }
+    if (!valid_operation_field(operation, details) || !details.contains("phase") ||
+        !details["phase"].is_string() || !details.contains("state") ||
+        !valid_auth_state(details["state"]) || !details.contains("outcome") ||
+        !details["outcome"].is_string() || !details.contains("idempotency") ||
+        !details["idempotency"].is_string()) {
+        return false;
+    }
+    const auto idempotency = details["idempotency"].get_ref<const std::string&>();
+    if (details["phase"] == "preflight") {
+        return exact_fields(details, {"operation", "phase", "state", "outcome", "idempotency"}) &&
+               details["outcome"] == "not_started" &&
+               (idempotency == "not_requested" || idempotency == "not_created" ||
+                idempotency == "removed");
+    }
+    if (details["phase"] == "replay_confirmation") {
+        return exact_fields(details, {"operation", "phase", "state", "outcome", "idempotency"}) &&
+               (operation == AccountAuditOperation::MsgDelete ||
+                operation == AccountAuditOperation::ChatLeave) &&
+               details["outcome"] == "not_started" && idempotency == "completed_unchanged";
+    }
+    if (details["phase"] == "dispatch") {
+        const bool direct = operation != AccountAuditOperation::Send &&
+                            operation != AccountAuditOperation::SavedAttach &&
+                            operation != AccountAuditOperation::MsgForward;
+        return direct &&
+               exact_fields(details, {"operation", "phase", "state", "outcome", "idempotency"}) &&
+               details["outcome"] == "unknown" &&
+               (idempotency == "not_requested" || idempotency == "pending");
+    }
+    if (details["phase"] != "confirmation" || details["outcome"] != "unknown" ||
+        (idempotency != "not_requested" && idempotency != "pending")) {
+        return false;
+    }
+    if (operation == AccountAuditOperation::MsgForward) {
+        return exact_fields(details,
+                            {"operation", "phase", "state", "outcome", "idempotency", "items"}) &&
+               valid_forward_items(details["items"], true, false);
+    }
+    return (operation == AccountAuditOperation::Send ||
+            operation == AccountAuditOperation::SavedAttach) &&
+           exact_fields(details, {"operation", "phase", "state", "outcome", "idempotency",
+                                  "temporary_message_id"}) &&
+           (details["temporary_message_id"].is_null() ||
+            valid_int53(details["temporary_message_id"]));
+}
+
+bool valid_forward_error_details(std::string_view code, const json& details) {
+    if (code == "RATE_LIMITED") {
+        if (!exact_fields(details, {"operation", "tdlib_code", "retry_after", "items"}) ||
+            details["operation"] != "msg_forward" || details["tdlib_code"] != 429 ||
+            !valid_positive_int32(details["retry_after"]) ||
+            !valid_forward_items(details["items"], true, true)) {
+            return false;
+        }
+        std::int64_t maximum_retry = 0;
+        for (const auto& item : details["items"]) {
+            if (item["status"] != "failed" || item["failure_reason"] != "tdlib_error" ||
+                item["tdlib_code"] != 429 || !valid_positive_int32(item["retry_after"])) {
+                return false;
+            }
+            maximum_retry = std::max(maximum_retry, json_int64(item["retry_after"]).value_or(0));
+        }
+        return details["retry_after"] == maximum_retry;
+    }
+    if (!exact_fields(details, {"operation", "from_chat_id", "to_chat_id", "items"}) ||
+        details["operation"] != "msg_forward" || !valid_int53(details["from_chat_id"]) ||
+        details["from_chat_id"] == 0 || !valid_int53(details["to_chat_id"]) ||
+        details["to_chat_id"] == 0 || !valid_forward_items(details["items"], false, true)) {
+        return false;
+    }
+    const auto sent = static_cast<std::size_t>(
+        std::count_if(details["items"].begin(), details["items"].end(),
+                      [](const json& item) { return item["status"] == "sent"; }));
+    return code == "FORWARD_PARTIAL" ? sent > 0 && sent < details["items"].size() : sent == 0;
+}
+
+bool valid_stored_error_message(std::string_view code, const json& message) {
+    if (!message.is_string()) {
+        return false;
+    }
+    const auto& text = message.get_ref<const std::string&>();
+    static const std::map<std::string_view, std::set<std::string_view>> messages{
+        {"AUDIT_INCOMPLETE", {"a prior audited invocation did not reach a terminal proof"}},
+        {"TIMEOUT", {"request timed out"}},
+        {"DAEMON_SHUTDOWN", {"daemon is shutting down"}},
+        {"NOT_AUTHED", {"authorization was lost"}},
+        {"TDLIB_ERROR", {"Telegram request failed"}},
+        {"RATE_LIMITED", {"Telegram rate limit exceeded"}},
+        {"INTERNAL",
+         {"internal error", "TDLib returned data outside the supported persistence bounds",
+          "TDLib returned malformed session data"}},
+        {"SEND_FAILED", {"message was deleted before confirmation"}},
+        {"FORWARD_FAILED", {"messages could not be forwarded"}},
+        {"FORWARD_PARTIAL", {"some messages could not be forwarded"}},
+        {"JOIN_APPROVAL_REQUIRED", {"join request requires approval"}},
+        {"JOIN_DECLINED", {"join request was declined"}},
+        {"INPUT_CHANGED", {"input file changed while being read"}},
+        {"SPOOL_UNAVAILABLE", {"attachment spool is unavailable"}},
+        {"PRECONDITION_FAILED", {"operation precondition failed"}},
+    };
+    const auto found = messages.find(code);
+    return found != messages.end() && found->second.contains(text);
+}
+
+bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
+    AccountAuditOperation operation, const json& value) {
+    if (!exact_fields(value, {"kind", "code", "message", "details", "exit_code"}) ||
+        value["kind"] != "error" || !value["code"].is_string() || !value["details"].is_object() ||
+        !valid_int32(value["exit_code"])) {
+        return false;
+    }
+    std::size_t nodes = 0;
+    if (!valid_json_tree(value, 0, nodes)) {
+        return false;
+    }
+    const auto& code = value["code"].get_ref<const std::string&>();
+    if (!valid_stored_error_message(code, value["message"])) {
+        return false;
+    }
+    const auto& details = value["details"];
+    const auto exit = json_int64(value["exit_code"]).value_or(0);
+    if (code == "AUDIT_INCOMPLETE") {
+        return exit == kGeneric &&
+               value["message"] == "a prior audited invocation did not reach a terminal proof" &&
+               valid_audit_incomplete_details(operation, details);
+    }
+    if (code == "TIMEOUT") {
+        return exit == kTimeout && valid_timeout_details(operation, details);
+    }
+    if (code == "DAEMON_SHUTDOWN") {
+        return exit == kGeneric && exact_fields(details, {"reason"}) &&
+               details["reason"] == "daemon_shutdown";
+    }
+    if (code == "NOT_AUTHED") {
+        return exit == kNotAuthed && exact_fields(details, {"account", "state", "reason"}) &&
+               details["account"].is_string() &&
+               paths::valid_account_name(details["account"].get_ref<const std::string&>()) &&
+               valid_auth_state(details["state"], false) &&
+               details["reason"] == "authorization_lost";
+    }
+    if (code == "TDLIB_ERROR") {
+        return exit == kGeneric && exact_fields(details, {"operation", "tdlib_code"}) &&
+               valid_operation_field(operation, details) && valid_int32(details["tdlib_code"]);
+    }
+    if (code == "RATE_LIMITED") {
+        if (exit != kRateLimited) {
+            return false;
+        }
+        if (operation == AccountAuditOperation::MsgForward && details.contains("items")) {
+            return valid_forward_error_details(code, details);
+        }
+        return exact_fields(details, {"operation", "tdlib_code", "retry_after"}) &&
+               valid_operation_field(operation, details) && details["tdlib_code"] == 429 &&
+               (operation == AccountAuditOperation::SessionTerminate
+                    ? valid_nonnegative_int32(details["retry_after"])
+                    : valid_positive_int32(details["retry_after"]));
+    }
+    if (code == "INTERNAL") {
+        if (exit != kGeneric || !valid_operation_field(operation, details)) {
+            return false;
+        }
+        if (operation == AccountAuditOperation::SessionTerminate) {
+            return exact_fields(details, {"operation", "reason", "tdlib_type_id"}) &&
+                   details["reason"] == "malformed_tdlib_response" &&
+                   (details["tdlib_type_id"].is_null() || valid_int32(details["tdlib_type_id"]));
+        }
+        return exact_fields(details, {"operation", "reason"}) &&
+               details["reason"] == "internal_error";
+    }
+    if (code == "SEND_FAILED") {
+        return exit == kGeneric &&
+               (operation == AccountAuditOperation::Send ||
+                operation == AccountAuditOperation::SavedAttach) &&
+               exact_fields(details, {"operation", "chat_id", "temporary_message_id", "reason"}) &&
+               valid_operation_field(operation, details) && valid_int53(details["chat_id"]) &&
+               details["chat_id"] != 0 && valid_int53(details["temporary_message_id"]) &&
+               details["reason"] == "deleted_before_confirmation";
+    }
+    if (code == "FORWARD_FAILED" || code == "FORWARD_PARTIAL") {
+        return exit == kGeneric && operation == AccountAuditOperation::MsgForward &&
+               valid_forward_error_details(code, details);
+    }
+    if (code == "JOIN_APPROVAL_REQUIRED") {
+        return exit == kGeneric && operation == AccountAuditOperation::ChatJoin &&
+               exact_fields(details, {"operation", "bot_user_id", "query_id"}) &&
+               valid_operation_field(operation, details) &&
+               valid_int53(details["bot_user_id"], true) && valid_int53(details["query_id"], true);
+    }
+    if (code == "JOIN_DECLINED") {
+        return exit == kGeneric && operation == AccountAuditOperation::ChatJoin &&
+               exact_fields(details, {"operation"}) && valid_operation_field(operation, details);
+    }
+    if (code == "INPUT_CHANGED") {
+        return exit == kGeneric && operation == AccountAuditOperation::SavedAttach &&
+               exact_fields(details, {"operation", "path"}) &&
+               valid_operation_field(operation, details) && valid_selector_string(details["path"]);
+    }
+    if (code == "SPOOL_UNAVAILABLE") {
+        if (exit != kGeneric || !exact_fields(details, {"operation", "path", "reason"}) ||
+            !valid_operation_field(operation, details) || !valid_selector_string(details["path"]) ||
+            !details["reason"].is_string()) {
+            return false;
+        }
+        const auto& reason = details["reason"].get_ref<const std::string&>();
+        return std::any_of(kDurabilityReasons.begin(), kDurabilityReasons.end(),
+                           [&](const auto& item) { return item.second == reason; });
+    }
+    if (code == "PRECONDITION_FAILED") {
+        constexpr std::array<std::string_view, 17> reasons{"not_editable",
+                                                           "not_deletable_for_self",
+                                                           "not_deletable_for_all",
+                                                           "not_forwardable",
+                                                           "not_copyable",
+                                                           "not_pinnable",
+                                                           "not_replyable",
+                                                           "wrong_content_type",
+                                                           "wrong_chat_type",
+                                                           "wrong_topic",
+                                                           "chat_not_listed",
+                                                           "saved_notifications_unsupported",
+                                                           "online_schedule_unsupported",
+                                                           "schedule_window_elapsed",
+                                                           "schedule_too_far",
+                                                           "reply_markup_preservation_unsupported",
+                                                           "reaction_unavailable"};
+        if (exit != kGeneric ||
+            !exact_fields(details, {"operation", "chat_id", "message_id", "reason"}) ||
+            !valid_operation_field(operation, details) ||
+            !(details["chat_id"].is_null() ||
+              (valid_int53(details["chat_id"]) && details["chat_id"] != 0)) ||
+            !(details["message_id"].is_null() || valid_int53(details["message_id"], true)) ||
+            !details["reason"].is_string()) {
+            return false;
+        }
+        const auto& reason = details["reason"].get_ref<const std::string&>();
+        if (std::find(reasons.begin(), reasons.end(), reason) == reasons.end()) {
+            return false;
+        }
+        const auto one_of = [&reason](std::initializer_list<std::string_view> allowed) {
+            return std::find(allowed.begin(), allowed.end(), reason) != allowed.end();
+        };
+        switch (operation) {
+        case AccountAuditOperation::Send:
+            return one_of({"not_replyable", "wrong_topic", "online_schedule_unsupported",
+                           "schedule_window_elapsed", "schedule_too_far"});
+        case AccountAuditOperation::MsgEdit:
+            return one_of(
+                {"not_editable", "wrong_content_type", "reply_markup_preservation_unsupported"});
+        case AccountAuditOperation::MsgDelete:
+            return one_of({"not_deletable_for_self", "not_deletable_for_all"});
+        case AccountAuditOperation::MsgForward:
+            return one_of({"not_forwardable", "not_copyable"});
+        case AccountAuditOperation::MsgReact:
+            return reason == "reaction_unavailable";
+        case AccountAuditOperation::MsgPin:
+            return reason == "not_pinnable";
+        case AccountAuditOperation::ChatMute:
+            return reason == "saved_notifications_unsupported";
+        case AccountAuditOperation::ChatPin:
+        case AccountAuditOperation::ChatUnpin:
+            return reason == "chat_not_listed";
+        case AccountAuditOperation::ChatLeave:
+            return reason == "wrong_chat_type";
+        case AccountAuditOperation::SavedAttach:
+            return one_of({"wrong_content_type", "wrong_topic"});
+        case AccountAuditOperation::MsgUnpin:
+        case AccountAuditOperation::ChatMarkRead:
+        case AccountAuditOperation::ChatUnmute:
+        case AccountAuditOperation::ChatArchive:
+        case AccountAuditOperation::ChatUnarchive:
+        case AccountAuditOperation::ChatJoin:
+        case AccountAuditOperation::SessionTerminate:
+            return false;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool valid_terminal(AccountAuditOperation operation, const json& value) {
     if (exact_fields(value, {"kind", "data"})) {
-        return value["kind"] == "result" && valid_result_data(operation, value["data"]);
+        std::size_t nodes = 0;
+        return value["kind"] == "result" && valid_json_tree(value, 0, nodes) &&
+               valid_result_data(operation, value["data"]);
     }
-    return exact_fields(value, {"kind", "code", "message", "details", "exit_code"}) &&
-           value["kind"] == "error" && valid_string(value["code"], 128) &&
-           valid_string(value["message"]) && value["details"].is_object() &&
-           value["exit_code"].is_number_integer();
+    return valid_stored_error(operation, value);
+}
+
+bool terminal_proves_mutation(AccountAuditOperation operation, const json& terminal) {
+    if (!valid_terminal(operation, terminal)) {
+        return false;
+    }
+    if (terminal["kind"] == "result") {
+        return true;
+    }
+    const auto& code = terminal["code"].get_ref<const std::string&>();
+    if (operation == AccountAuditOperation::MsgForward) {
+        return code == "FORWARD_PARTIAL" || code == "INTERNAL";
+    }
+    return code == "INTERNAL" && (operation == AccountAuditOperation::Send ||
+                                  operation == AccountAuditOperation::MsgEdit ||
+                                  operation == AccountAuditOperation::SavedAttach);
 }
 
 std::uint64_t terminal_byte_ceiling(AccountAuditOperation operation) {
@@ -740,11 +1416,9 @@ bool valid_forward_item(const json& value) {
         reason != "deleted_before_confirmation") {
         return false;
     }
-    const bool code_valid =
-        value["tdlib_code"].is_null() || value["tdlib_code"].is_number_integer();
+    const bool code_valid = value["tdlib_code"].is_null() || valid_int32(value["tdlib_code"]);
     const bool retry_valid =
-        value["retry_after"].is_null() ||
-        (value["retry_after"].is_number_integer() && value["retry_after"].get<std::int64_t>() >= 0);
+        value["retry_after"].is_null() || valid_positive_int32(value["retry_after"]);
     if (!code_valid || !retry_valid) {
         return false;
     }
@@ -793,7 +1467,8 @@ bool valid_checkpoint_data(AccountAuditOperation operation, AccountAuditStage st
                value["items"].size() <= kForwardItemCount &&
                std::all_of(value["items"].begin(), value["items"].end(), valid_forward_item);
     case AccountAuditStage::MutationConfirmed:
-        return exact_fields(value, {"terminal"}) && valid_terminal(operation, value["terminal"]);
+        return exact_fields(value, {"terminal"}) &&
+               terminal_proves_mutation(operation, value["terminal"]);
     }
     return false;
 }
@@ -852,7 +1527,9 @@ bool validate_intent_impl(const json& document, std::string& error) {
         error = "invalid v2 intent fields";
         return false;
     }
-    if (serialize_account_audit_record(document).size() > kIntentJsonBytes) {
+    std::size_t nodes = 0;
+    if (!valid_json_tree(document, 0, nodes) ||
+        !serialized_size_at_most(document, kIntentJsonBytes)) {
         error = "v2 intent exceeds its byte ceiling";
         return false;
     }
@@ -900,8 +1577,7 @@ bool validate_checkpoint_impl(const json& document, std::string& error) {
         }
     }
     if (*stage == AccountAuditStage::MutationConfirmed &&
-        serialize_account_audit_record(document["data"]["terminal"]).size() >
-            terminal_byte_ceiling(operation)) {
+        !serialized_size_at_most(document["data"]["terminal"], terminal_byte_ceiling(operation))) {
         error = "v2 mutation terminal exceeds its operation ceiling";
         return false;
     }
@@ -909,7 +1585,8 @@ bool validate_checkpoint_impl(const json& document, std::string& error) {
                                  *stage == AccountAuditStage::MutationConfirmed
                              ? kVectorJsonBytes
                              : kNonVectorJsonBytes;
-    if (serialize_account_audit_record(document).size() > maximum) {
+    std::size_t nodes = 0;
+    if (!valid_json_tree(document, 0, nodes) || !serialized_size_at_most(document, maximum)) {
         error = "v2 checkpoint exceeds its byte ceiling";
         return false;
     }
@@ -924,11 +1601,14 @@ bool validate_outcome_impl(const json& document, std::string& error) {
                        "command", "success", "mutation_state", "completed_stages", "terminal"}) ||
         document["schema_version"] != 2 || document["phase"] != "outcome" ||
         !valid_common_identity(document) || !document["success"].is_boolean() ||
-        !document["mutation_state"].is_string() || !document["completed_stages"].is_array() ||
-        !valid_terminal(
-            parse_account_audit_operation(document["command"].get<std::string>()).value(),
-            document["terminal"])) {
+        !document["mutation_state"].is_string() || !document["completed_stages"].is_array()) {
         error = "invalid v2 outcome envelope";
+        return false;
+    }
+    const auto parsed_operation =
+        parse_account_audit_operation(document["command"].get_ref<const std::string&>());
+    if (!parsed_operation || !valid_terminal(*parsed_operation, document["terminal"])) {
+        error = "invalid v2 outcome terminal";
         return false;
     }
     const auto& mutation = document["mutation_state"].get_ref<const std::string&>();
@@ -950,50 +1630,20 @@ bool validate_outcome_impl(const json& document, std::string& error) {
         }
         completed.push_back(*stage);
     }
-    const auto operation =
-        parse_account_audit_operation(document["command"].get_ref<const std::string&>()).value();
-    const auto is_prefix = [&completed](const std::vector<AccountAuditStage>& complete) {
-        return completed.size() <= complete.size() &&
-               std::equal(completed.begin(), completed.end(), complete.begin());
-    };
-    bool legal_prefix = completed.empty();
-    for (const bool keyed : {false, true}) {
-        for (const bool temporary : {false, true}) {
-            for (const bool progress : {false, true}) {
-                for (const bool mutation_proof : {false, true}) {
-                    std::vector<AccountAuditStage> complete;
-                    if (keyed && operation != AccountAuditOperation::SessionTerminate) {
-                        complete.push_back(AccountAuditStage::IdempotencyPending);
-                    }
-                    if (operation == AccountAuditOperation::SavedAttach) {
-                        complete.push_back(AccountAuditStage::SpoolReady);
-                    }
-                    complete.push_back(AccountAuditStage::DispatchStarted);
-                    if (temporary && (operation == AccountAuditOperation::Send ||
-                                      operation == AccountAuditOperation::SavedAttach ||
-                                      operation == AccountAuditOperation::MsgForward)) {
-                        complete.push_back(AccountAuditStage::TemporaryIdsObserved);
-                    }
-                    if (progress && operation == AccountAuditOperation::MsgForward) {
-                        complete.push_back(AccountAuditStage::ForwardProgress);
-                    }
-                    if (mutation_proof) {
-                        complete.push_back(AccountAuditStage::MutationConfirmed);
-                    }
-                    legal_prefix = legal_prefix || is_prefix(complete);
-                }
-            }
-        }
-    }
+    const auto operation = *parsed_operation;
+    const bool legal_prefix = legal_completed_stages(operation, completed);
     const bool has_dispatch = unique.contains(AccountAuditStage::DispatchStarted);
+    const bool has_progress = unique.contains(AccountAuditStage::ForwardProgress);
+    const bool has_proof = unique.contains(AccountAuditStage::MutationConfirmed);
     const bool success = document["success"].get<bool>();
     if (!legal_prefix || (document["terminal"]["kind"] == "result") != success ||
-        (success &&
-         (mutation != "confirmed" || !unique.contains(AccountAuditStage::MutationConfirmed))) ||
+        (success && (mutation != "confirmed" || !has_proof)) ||
+        (!has_dispatch && mutation != "none") || (has_proof && mutation != "confirmed") ||
+        (has_dispatch && !has_progress && !has_proof && mutation != "possible") ||
+        (mutation == "confirmed" && !has_proof && !has_progress) ||
         ((mutation == "possible" || mutation == "confirmed") && !has_dispatch) ||
-        serialize_account_audit_record(document["terminal"]).size() >
-            terminal_byte_ceiling(operation) ||
-        serialize_account_audit_record(document).size() > kVectorJsonBytes) {
+        !serialized_size_at_most(document["terminal"], terminal_byte_ceiling(operation)) ||
+        !serialized_size_at_most(document, kVectorJsonBytes)) {
         error = "invalid v2 outcome terminal";
         return false;
     }
@@ -1212,6 +1862,20 @@ bool injected(const std::shared_ptr<const testing::AccountAuditHooks>& hooks,
     return hooks && hooks->should_fail && hooks->should_fail(fault);
 }
 
+bool scan_interrupted(const AccountAuditScanControl& control, AccountAuditFailure& failure) {
+    if (control.cancelled && control.cancelled()) {
+        failure.interruption = AccountAuditFailure::Interruption::Cancelled;
+        failure.detail = "account audit scan was cancelled";
+        return true;
+    }
+    if (std::chrono::steady_clock::now() >= control.deadline) {
+        failure.interruption = AccountAuditFailure::Interruption::Deadline;
+        failure.detail = "account audit scan reached its absolute deadline";
+        return true;
+    }
+    return false;
+}
+
 bool exclusive_rename(int directory, const char* source, const char* destination) {
 #if defined(__linux__)
     return ::syscall(SYS_renameat2, directory, source, directory, destination, RENAME_NOREPLACE) ==
@@ -1264,7 +1928,9 @@ std::optional<std::vector<SegmentIdentity>> inspect_segments(int directory, uid_
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): bounded streaming JSONL validation.
 bool segment_contains_pin_relation(int directory, std::string_view name, uid_t uid,
-                                   const AccountAuditPin& pin, AccountAuditFailure& failure) {
+                                   const AccountAuditPin& pin,
+                                   const AccountAuditScanControl& scan_control,
+                                   AccountAuditFailure& failure) {
     const Descriptor file(
         ::openat(directory, std::string(name).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
     struct stat metadata {};
@@ -1280,6 +1946,9 @@ bool segment_contains_pin_relation(int directory, std::string_view name, uid_t u
     std::string line;
     std::array<char, kIoChunkBytes> chunk{};
     for (;;) {
+        if (scan_interrupted(scan_control, failure)) {
+            return false;
+        }
         const auto count = ::read(file.get(), chunk.data(), chunk.size());
         if (count < 0 && errno == EINTR) {
             continue;
@@ -1300,14 +1969,22 @@ bool segment_contains_pin_relation(int directory, std::string_view name, uid_t u
                 line.push_back(chunk.at(index));
                 continue;
             }
-            auto document = json::parse(line, nullptr, false);
-            if (!document.is_discarded() && document.is_object() &&
-                document.value("schema_version", 0) == 2 &&
-                document.value("phase", std::string{}) == "intent" &&
-                document.value("invocation_id", std::string{}) == pin.invocation_id &&
-                document.value("request_fingerprint", std::string{}) == pin.request_fingerprint &&
-                document.value("command", std::string{}) ==
-                    account_audit_operation_name(pin.operation)) {
+            const auto parsed = parse_audit_json(line);
+            const auto& document = parsed.document;
+            if (!parsed.valid || parsed.duplicate_key) {
+                failure.reason = AccountAuditDurabilityReason::Contradiction;
+                return false;
+            }
+            if (document.is_object() && document.contains("schema_version") &&
+                document["schema_version"] == 2 && document.contains("phase") &&
+                document["phase"].is_string() && document["phase"] == "intent" &&
+                document.contains("invocation_id") && document["invocation_id"].is_string() &&
+                document["invocation_id"] == pin.invocation_id &&
+                document.contains("request_fingerprint") &&
+                document["request_fingerprint"].is_string() &&
+                document["request_fingerprint"] == pin.request_fingerprint &&
+                document.contains("command") && document["command"].is_string() &&
+                document["command"] == account_audit_operation_name(pin.operation)) {
                 return true;
             }
             line.clear();
@@ -1324,6 +2001,7 @@ bool segment_contains_pin_relation(int directory, std::string_view name, uid_t u
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): exact hole-first crash automaton.
 bool rotate_for_intent(int directory, uid_t uid, std::uint64_t incoming,
                        const AccountAuditPinSource& pins,
+                       const AccountAuditScanControl& scan_control,
                        const std::shared_ptr<const testing::AccountAuditHooks>& hooks,
                        AccountAuditFailure& failure) {
     if (const auto* unavailable = std::get_if<UnavailableAccountAuditPins>(&pins)) {
@@ -1333,6 +2011,24 @@ bool rotate_for_intent(int directory, uid_t uid, std::uint64_t incoming,
     auto segments = inspect_segments(directory, uid, failure);
     if (!segments) {
         return false;
+    }
+    std::set<std::uint64_t> pinned_inodes;
+    if (const auto* known = std::get_if<KnownAccountAuditPins>(&pins)) {
+        for (const auto& pin : known->pins) {
+            const auto found =
+                std::find_if(segments->begin(), segments->end(), [&pin](const auto& item) {
+                    return item.present && item.inode == pin.audit_generation;
+                });
+            if (found == segments->end() ||
+                !segment_contains_pin_relation(directory, found->name, uid, pin, scan_control,
+                                               failure)) {
+                if (!failure.interruption) {
+                    failure.reason = AccountAuditDurabilityReason::Contradiction;
+                }
+                return false;
+            }
+            pinned_inodes.insert(pin.audit_generation);
+        }
     }
     auto& active = segments->at(0);
     if (!active.present) {
@@ -1361,18 +2057,6 @@ bool rotate_for_intent(int directory, uid_t uid, std::uint64_t incoming,
         if (!std::holds_alternative<KnownAccountAuditPins>(pins)) {
             failure.reason = AccountAuditDurabilityReason::CapacityExhausted;
             return false;
-        }
-        std::set<std::uint64_t> pinned_inodes;
-        for (const auto& pin : std::get<KnownAccountAuditPins>(pins).pins) {
-            auto found = std::find_if(segments->begin(), segments->end(), [&pin](const auto& item) {
-                return item.present && item.inode == pin.audit_generation;
-            });
-            if (found == segments->end() ||
-                !segment_contains_pin_relation(directory, found->name, uid, pin, failure)) {
-                failure.reason = AccountAuditDurabilityReason::Contradiction;
-                return false;
-            }
-            pinned_inodes.insert(pin.audit_generation);
         }
         for (std::size_t index = segments->size() - 1; index > 0; --index) {
             if (!pinned_inodes.contains(segments->at(index).inode)) {
@@ -1500,6 +2184,71 @@ std::optional<json> derive_forward_terminal(const AccountAuditOpenGroup& group,
                 {"exit_code", 1}};
 }
 
+bool terminal_matches_plan(AccountAuditOperation operation, const json& terminal,
+                           const json& intent) {
+    if (terminal["kind"] == "error") {
+        const auto& details = terminal["details"];
+        if (details.contains("account") && details["account"] != intent["account"]) {
+            return false;
+        }
+        return !details.contains("operation") ||
+               details["operation"] == account_audit_operation_name(operation);
+    }
+    const auto& data = terminal["data"];
+    const auto& plan = intent["plan"];
+    switch (operation) {
+    case AccountAuditOperation::Send:
+    case AccountAuditOperation::MsgEdit:
+    case AccountAuditOperation::SavedAttach:
+        return data["chat_id"] == plan["chat"]["id"] &&
+               (operation != AccountAuditOperation::MsgEdit || data["id"] == plan["message_id"]);
+    case AccountAuditOperation::MsgDelete:
+        return data["chat_id"] == plan["chat"]["id"] &&
+               data["message_ids"] == plan["message_ids"] &&
+               data["for_all"] == plan["effective_for_all"];
+    case AccountAuditOperation::MsgForward:
+        return data["from_chat_id"] == plan["from"]["id"] && data["to_chat_id"] == plan["to"]["id"];
+    case AccountAuditOperation::MsgReact:
+        return data["chat_id"] == plan["chat"]["id"] && data["message_id"] == plan["message_id"] &&
+               data["reaction"] == plan["reaction"] && data["removed"] == plan["remove"] &&
+               data["big"] == plan["big"];
+    case AccountAuditOperation::MsgPin:
+    case AccountAuditOperation::MsgUnpin:
+        return data["chat_id"] == plan["chat"]["id"] && data["message_id"] == plan["message_id"] &&
+               data["pinned"] == plan["pinned"];
+    case AccountAuditOperation::ChatMarkRead:
+        return data["chat_id"] == plan["chat"]["id"] &&
+               data["last_read_message_id"] == plan["last_message_id"];
+    case AccountAuditOperation::ChatMute:
+    case AccountAuditOperation::ChatUnmute:
+        return data["chat_id"] == plan["chat"]["id"] && data["muted"] == plan["muted"] &&
+               data["duration_seconds"] == plan["duration_seconds"];
+    case AccountAuditOperation::ChatPin:
+    case AccountAuditOperation::ChatUnpin:
+        return data["chat_id"] == plan["chat"]["id"] && data["chat_list"] == plan["chat_list"] &&
+               data["pinned"] == plan["pinned"];
+    case AccountAuditOperation::ChatArchive:
+    case AccountAuditOperation::ChatUnarchive:
+        return data["chat_id"] == plan["chat"]["id"] && data["archived"] == plan["archived"];
+    case AccountAuditOperation::ChatJoin:
+        return data["chat_id"].is_null() || plan["chat"].is_null() ||
+               data["chat_id"] == plan["chat"]["id"];
+    case AccountAuditOperation::ChatLeave:
+        return data["chat_id"] == plan["chat"]["id"];
+    case AccountAuditOperation::SessionTerminate:
+        return data["session_id"] == plan["session"]["id"];
+    }
+    return false;
+}
+
+bool canonical_json_equal(const json& left, const json& right) {
+    try {
+        return left.dump() == right.dump();
+    } catch (const json::exception&) {
+        return false;
+    }
+}
+
 struct ScanState {
     std::optional<AccountAuditOpenGroup> open;
     bool positive_v2 = false;
@@ -1512,10 +2261,17 @@ std::optional<bool>
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): bounded five-segment rescan.
 prior_invocation_seen(int directory, uid_t uid, std::size_t current_segment,
                       std::uint64_t current_record_offset, std::string_view invocation,
+                      const AccountAuditScanControl& scan_control,
                       const std::shared_ptr<const testing::AccountAuditHooks>& hooks,
                       AccountAuditFailure& failure) {
+    if (hooks && hooks->before_identity_rescan) {
+        hooks->before_identity_rescan();
+    }
     std::array<char, kIoChunkBytes> chunk{};
     for (std::size_t segment = 0; segment <= current_segment; ++segment) {
+        if (scan_interrupted(scan_control, failure)) {
+            return std::nullopt;
+        }
         struct stat named_metadata {};
         if (::fstatat(directory, kSegmentNames.at(segment), &named_metadata, AT_SYMLINK_NOFOLLOW) !=
             0) {
@@ -1550,6 +2306,9 @@ prior_invocation_seen(int directory, uid_t uid, std::size_t current_segment,
         line.reserve(static_cast<std::size_t>(std::min(limit, kIoChunkBytes)));
         std::uint64_t offset = 0;
         while (offset < limit) {
+            if (scan_interrupted(scan_control, failure)) {
+                return std::nullopt;
+            }
             if (injected(hooks, AccountAuditFault::Read)) {
                 failure = {AccountAuditDurabilityReason::ReadFailed, {}};
                 return std::nullopt;
@@ -1575,11 +2334,16 @@ prior_invocation_seen(int directory, uid_t uid, std::size_t current_segment,
                     line.push_back(chunk.at(index));
                     continue;
                 }
-                const auto document = json::parse(line, nullptr, false);
-                if (document.is_discarded()) {
+                const auto parsed = parse_audit_json(line);
+                if (!parsed.valid) {
                     failure = {AccountAuditDurabilityReason::ParseError, {}};
                     return std::nullopt;
                 }
+                if (parsed.duplicate_key) {
+                    failure = {AccountAuditDurabilityReason::PathInvalid, {}};
+                    return std::nullopt;
+                }
+                const auto& document = parsed.document;
                 if (document.is_object() && document.contains("invocation_id") &&
                     document["invocation_id"].is_string() &&
                     document["invocation_id"].get_ref<const std::string&>() == invocation) {
@@ -1609,10 +2373,42 @@ bool forward_vector_complete(const json& items) {
                         [](const json& item) { return item["status"] == "pending"; });
 }
 
+const json* final_forward_items(const AccountAuditOpenGroup& group) {
+    const auto found = std::find_if(
+        group.checkpoints.rbegin(), group.checkpoints.rend(),
+        [](const json& checkpoint) { return checkpoint["stage"] == "forward_progress"; });
+    return found == group.checkpoints.rend() ? nullptr : &(*found)["data"]["items"];
+}
+
+AccountAuditMutationState derive_mutation_state(const AccountAuditOpenGroup& group) {
+    if (group.mutation_confirmed || group.any_forward_sent) {
+        return AccountAuditMutationState::Confirmed;
+    }
+    if (!group.dispatch_started) {
+        return AccountAuditMutationState::None;
+    }
+    if (!group.forward_complete) {
+        return AccountAuditMutationState::Possible;
+    }
+    const auto* items = final_forward_items(group);
+    if (items == nullptr) {
+        return AccountAuditMutationState::Possible;
+    }
+    const bool deletion_ambiguity = std::any_of(items->begin(), items->end(), [](const json& item) {
+        return item["status"] == "failed" &&
+               item["failure_reason"] == "deleted_before_confirmation";
+    });
+    return deletion_ambiguity ? AccountAuditMutationState::Possible
+                              : AccountAuditMutationState::None;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): strict v2 group automaton.
 bool consume_v2(const json& document, ScanState& state, std::string& error) {
-    const auto invocation = document.value("invocation_id", std::string{});
-    const auto phase = document.value("phase", std::string{});
+    if (!document.is_object() || !document.contains("phase") || !document["phase"].is_string()) {
+        error = "invalid v2 record phase";
+        return false;
+    }
+    const auto& phase = document["phase"].get_ref<const std::string&>();
     if (phase == "intent") {
         if (state.open || !validate_intent_impl(document, error)) {
             error = error.empty() ? "v2 intent contradicts chronology" : error;
@@ -1624,24 +2420,32 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
         state.open = std::move(group);
         return true;
     }
-    if (!state.open || state.open->intent.value("invocation_id", std::string{}) != invocation ||
-        state.open->intent.value("command", std::string{}) !=
-            document.value("command", std::string{}) ||
-        state.open->intent.value("account", std::string{}) !=
-            document.value("account", std::string{})) {
-        error = "v2 record has no matching open group";
+    if (phase != "checkpoint" && phase != "outcome") {
+        error = "invalid v2 record phase";
         return false;
     }
     if (phase == "checkpoint") {
         if (!validate_checkpoint_impl(document, error)) {
             return false;
         }
+    } else if (!validate_outcome_impl(document, error)) {
+        return false;
+    }
+    const auto& invocation = document["invocation_id"].get_ref<const std::string&>();
+    if (!state.open || state.open->intent["invocation_id"] != invocation ||
+        state.open->intent["command"] != document["command"] ||
+        state.open->intent["account"] != document["account"]) {
+        error = "v2 record has no matching open group";
+        return false;
+    }
+    if (phase == "checkpoint") {
         AccountAuditCheckpointInput checkpoint;
-        checkpoint.identity = {invocation, document.value("timestamp", std::string{})};
-        checkpoint.account = document.value("account", std::string{});
+        checkpoint.identity = {invocation, document["timestamp"].get<std::string>()};
+        checkpoint.account = document["account"].get<std::string>();
         const auto operation =
-            parse_account_audit_operation(document.value("command", std::string{}));
-        const auto stage = parse_account_audit_stage(document.value("stage", std::string{}));
+            parse_account_audit_operation(document["command"].get_ref<const std::string&>());
+        const auto stage =
+            parse_account_audit_stage(document["stage"].get_ref<const std::string&>());
         if (!operation || !stage) {
             error = "validated v2 checkpoint lost its enum identity";
             return false;
@@ -1665,10 +2469,12 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
             return false;
         }
         if (checkpoint.stage == AccountAuditStage::TemporaryIdsObserved) {
-            const auto expected_count = checkpoint.operation == AccountAuditOperation::MsgForward
-                                            ? state.open->intent["arguments"]["message_ids"].size()
-                                            : std::size_t{1};
-            if (checkpoint.data["temporary_message_ids"].size() != expected_count) {
+            const auto maximum_count = checkpoint.operation == AccountAuditOperation::MsgForward
+                                           ? state.open->intent["arguments"]["message_ids"].size()
+                                           : std::size_t{1};
+            if (checkpoint.data["temporary_message_ids"].size() > maximum_count ||
+                (checkpoint.operation != AccountAuditOperation::MsgForward &&
+                 checkpoint.data["temporary_message_ids"].size() != 1)) {
                 error = "temporary id vector does not match the intent";
                 return false;
             }
@@ -1686,28 +2492,77 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
                     return false;
                 }
             }
+            const auto temporary = std::find_if(
+                state.open->checkpoints.begin(), state.open->checkpoints.end(),
+                [](const json& prior) { return prior["stage"] == "temporary_ids_observed"; });
+            json pending_ids = json::array();
+            for (const auto& item : items) {
+                if (item["status"] == "pending") {
+                    pending_ids.push_back(item["temporary_message_id"]);
+                }
+            }
+            const auto prior_progress = std::find_if(
+                state.open->checkpoints.begin(), state.open->checkpoints.end(),
+                [](const json& prior) { return prior["stage"] == "forward_progress"; });
+            if (prior_progress == state.open->checkpoints.end()) {
+                if ((temporary == state.open->checkpoints.end() && !pending_ids.empty()) ||
+                    (temporary != state.open->checkpoints.end() &&
+                     (*temporary)["data"]["temporary_message_ids"] != pending_ids)) {
+                    error = "forward pending ids do not match the durable temporary ids";
+                    return false;
+                }
+            }
         }
         std::vector<AccountAuditCheckpointInput> history;
         history.reserve(state.open->checkpoints.size() + 1);
         for (const auto& prior : state.open->checkpoints) {
             const auto prior_operation =
-                parse_account_audit_operation(prior.value("command", std::string{}));
-            const auto prior_stage = parse_account_audit_stage(prior.value("stage", std::string{}));
+                parse_account_audit_operation(prior["command"].get_ref<const std::string&>());
+            const auto prior_stage =
+                parse_account_audit_stage(prior["stage"].get_ref<const std::string&>());
             if (!prior_operation || !prior_stage) {
                 error = "validated v2 history lost its enum identity";
                 return false;
             }
-            history.push_back({{prior.value("invocation_id", std::string{}),
-                                prior.value("timestamp", std::string{})},
-                               prior.value("account", std::string{}),
-                               *prior_operation,
-                               prior["checkpoint_sequence"].get<std::uint32_t>(),
-                               *prior_stage,
-                               prior["data"]});
+            history.push_back(
+                {{prior["invocation_id"].get<std::string>(), prior["timestamp"].get<std::string>()},
+                 prior["account"].get<std::string>(),
+                 *prior_operation,
+                 prior["checkpoint_sequence"].get<std::uint32_t>(),
+                 *prior_stage,
+                 prior["data"]});
         }
         history.push_back(checkpoint);
         if (!transition_history(checkpoint.operation, history, error)) {
             return false;
+        }
+        if (checkpoint.stage == AccountAuditStage::MutationConfirmed &&
+            !terminal_matches_plan(checkpoint.operation, checkpoint.data["terminal"],
+                                   state.open->intent)) {
+            error = "mutation proof terminal contradicts the immutable plan";
+            return false;
+        }
+        if (checkpoint.stage == AccountAuditStage::MutationConfirmed &&
+            checkpoint.operation == AccountAuditOperation::MsgForward) {
+            const bool oversized_internal = checkpoint.data["terminal"]["kind"] == "error" &&
+                                            checkpoint.data["terminal"]["code"] == "INTERNAL";
+            if (oversized_internal) {
+                if (final_forward_items(*state.open) != nullptr) {
+                    error = "forward oversized terminal follows a persisted vector";
+                    return false;
+                }
+            } else if (!state.open->forward_complete) {
+                error = "forward mutation proof precedes a complete vector";
+                return false;
+            } else {
+                auto derived = derive_forward_terminal(*state.open, error);
+                if (!derived || !canonical_json_equal(checkpoint.data["terminal"], *derived)) {
+                    if (error.empty()) {
+                        error = "forward mutation proof contradicts the terminal vector";
+                    }
+                    return false;
+                }
+            }
         }
         state.open->checkpoints.push_back(document);
         if (checkpoint.stage != AccountAuditStage::ForwardProgress) {
@@ -1731,10 +2586,6 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
                                          checkpoint.stage == AccountAuditStage::MutationConfirmed;
         return true;
     }
-    if (phase != "outcome" || !validate_outcome_impl(document, error)) {
-        error = error.empty() ? "invalid v2 outcome phase" : error;
-        return false;
-    }
     json completed = json::array();
     for (const auto stage : state.open->completed_stages) {
         completed.push_back(account_audit_stage_name(stage));
@@ -1743,24 +2594,16 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
         error = "v2 outcome stages do not match the durable prefix";
         return false;
     }
-    AccountAuditMutationState expected_mutation = AccountAuditMutationState::None;
-    if (state.open->mutation_confirmed || state.open->any_forward_sent) {
-        expected_mutation = AccountAuditMutationState::Confirmed;
-    } else if (state.open->dispatch_started) {
-        expected_mutation = AccountAuditMutationState::Possible;
-        if (state.open->forward_complete) {
-            const auto& items = state.open->checkpoints.back()["data"]["items"];
-            const bool deletion_ambiguity =
-                std::any_of(items.begin(), items.end(), [](const json& item) {
-                    return item["status"] == "failed" &&
-                           item["failure_reason"] == "deleted_before_confirmation";
-                });
-            expected_mutation = deletion_ambiguity ? AccountAuditMutationState::Possible
-                                                   : AccountAuditMutationState::None;
-        }
-    }
+    const auto expected_mutation = derive_mutation_state(*state.open);
     if (document["mutation_state"] != account_audit_mutation_state_name(expected_mutation)) {
         error = "v2 outcome mutation state contradicts the durable prefix";
+        return false;
+    }
+    const auto operation =
+        parse_account_audit_operation(state.open->intent["command"].get_ref<const std::string&>());
+    if (!operation ||
+        !terminal_matches_plan(*operation, document["terminal"], state.open->intent)) {
+        error = "v2 outcome terminal contradicts the immutable plan";
         return false;
     }
     if (state.open->mutation_confirmed) {
@@ -1768,8 +2611,16 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
             state.open->checkpoints.rbegin(), state.open->checkpoints.rend(),
             [](const json& checkpoint) { return checkpoint["stage"] == "mutation_confirmed"; });
         if (found == state.open->checkpoints.rend() ||
-            document["terminal"] != (*found)["data"]["terminal"]) {
+            !canonical_json_equal(document["terminal"], (*found)["data"]["terminal"])) {
             error = "v2 outcome terminal contradicts the mutation proof";
+            return false;
+        }
+    } else if (state.open->forward_complete) {
+        auto derived = derive_forward_terminal(*state.open, error);
+        if (!derived || !canonical_json_equal(document["terminal"], *derived)) {
+            if (error.empty()) {
+                error = "v2 outcome contradicts the terminal forward vector";
+            }
             return false;
         }
     }
@@ -1783,12 +2634,8 @@ AccountAuditInspection contradiction(const ScanState& state, std::string_view ac
     result.status = AccountAuditInspectionStatus::Contradiction;
     result.oldest_open = state.open;
     result.failure = {AccountAuditDurabilityReason::Contradiction, std::move(detail)};
-    auto mutation = AccountAuditMutationState::None;
-    if (state.open && state.open->any_forward_sent) {
-        mutation = AccountAuditMutationState::Confirmed;
-    } else if (state.open && state.open->dispatch_started) {
-        mutation = AccountAuditMutationState::Possible;
-    }
+    const auto mutation =
+        state.open ? derive_mutation_state(*state.open) : AccountAuditMutationState::None;
     result.terminal = incomplete_terminal(account, path, mutation,
                                           state.open ? state.open->completed_stages
                                                      : std::vector<AccountAuditStage>{});
@@ -1971,8 +2818,7 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
         return result;
     }
     if (!group.mutation_confirmed && !group.forward_complete) {
-        result.mutation_state = group.any_forward_sent ? AccountAuditMutationState::Confirmed
-                                                       : AccountAuditMutationState::Possible;
+        result.mutation_state = derive_mutation_state(group);
         result.terminal =
             incomplete_terminal(account, audit_path, result.mutation_state, group.completed_stages);
         result.boundaries.push_back(AccountAuditRecoveryBoundary::AppendOutcomeAndSync);
@@ -1981,27 +2827,13 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
         error.clear();
         return result;
     }
-    result.mutation_state = group.any_forward_sent || group.mutation_confirmed
-                                ? AccountAuditMutationState::Confirmed
-                                : AccountAuditMutationState::None;
+    result.mutation_state = derive_mutation_state(group);
     if (group.forward_complete && !group.mutation_confirmed) {
         auto terminal = derive_forward_terminal(group, error);
         if (!terminal) {
             return std::nullopt;
         }
         result.terminal = std::move(*terminal);
-        if (!group.any_forward_sent) {
-            const auto found = std::find_if(
-                group.checkpoints.rbegin(), group.checkpoints.rend(),
-                [](const json& checkpoint) { return checkpoint["stage"] == "forward_progress"; });
-            const bool deletion_ambiguity =
-                std::any_of((*found)["data"]["items"].begin(), (*found)["data"]["items"].end(),
-                            [](const json& item) {
-                                return item["failure_reason"] == "deleted_before_confirmation";
-                            });
-            result.mutation_state = deletion_ambiguity ? AccountAuditMutationState::Possible
-                                                       : AccountAuditMutationState::None;
-        }
     }
     if (group.forward_complete && group.any_forward_sent && !group.mutation_confirmed) {
         result.boundaries.push_back(AccountAuditRecoveryBoundary::AppendMutationProofAndSync);
@@ -2030,10 +2862,11 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
 // NOLINTEND(readability-function-cognitive-complexity)
 
 AccountAuditCoordinator::Guard::Guard(std::unique_lock<std::mutex> lock,
-                                      const AccountAuditCoordinator* owner)
-    : lock_(std::move(lock)), owner_(owner) {}
+                                      std::shared_ptr<const AccountAuditCoordinator> owner,
+                                      AccountAuditScanControl scan_control)
+    : lock_(std::move(lock)), owner_(std::move(owner)), scan_control_(std::move(scan_control)) {}
 bool AccountAuditCoordinator::Guard::valid() const {
-    return owner_ != nullptr && lock_.owns_lock();
+    return owner_ && lock_.owns_lock();
 }
 bool AccountAuditCoordinator::Guard::validate_lease(std::string& error) const {
     if (!valid()) {
@@ -2053,78 +2886,52 @@ bool AccountAuditCoordinator::Guard::validate_lease(std::string_view state_direc
     return owner_->validate_lease(error);
 }
 
-AccountAuditCoordinator::AccountAuditCoordinator(std::string state_directory, std::string account,
-                                                 uid_t expected_uid, int daemon_lock_descriptor,
-                                                 std::uint64_t lock_device,
-                                                 std::uint64_t lock_inode)
+AccountAuditCoordinator::AccountAuditCoordinator(
+    std::string state_directory, std::string account, uid_t expected_uid,
+    std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease)
     : state_directory_(std::move(state_directory)), account_(std::move(account)),
-      expected_uid_(expected_uid), daemon_lock_descriptor_(daemon_lock_descriptor),
-      lock_device_(lock_device), lock_inode_(lock_inode) {}
+      expected_uid_(expected_uid), daemon_lock_lease_(std::move(daemon_lock_lease)) {}
 
-std::unique_ptr<AccountAuditCoordinator>
-AccountAuditCoordinator::create(std::string state_directory, std::string account,
-                                uid_t expected_uid, int daemon_lock_descriptor,
-                                std::string& error) {
+std::shared_ptr<AccountAuditCoordinator> AccountAuditCoordinator::create(
+    std::string state_directory, std::string account, uid_t expected_uid,
+    std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease, std::string& error) {
     const auto separator = state_directory.rfind('/');
-    if (!paths::valid_account_name(account) || daemon_lock_descriptor < 0 ||
-        separator == std::string::npos || state_directory.substr(separator + 1) != account) {
+    if (!paths::valid_account_name(account) || !daemon_lock_lease ||
+        separator == std::string::npos || state_directory.substr(separator + 1) != account ||
+        daemon_lock_lease->path() != state_directory + "/daemon.lock") {
         error = "invalid account audit coordinator input";
         return {};
     }
-    struct stat descriptor_metadata {};
-    struct stat named_metadata {};
-    const Descriptor directory(
-        ::open(state_directory.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW));
-    if (directory.get() < 0 || ::fstat(daemon_lock_descriptor, &descriptor_metadata) != 0 ||
-        ::fstatat(directory.get(), "daemon.lock", &named_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
-        !S_ISREG(descriptor_metadata.st_mode) || descriptor_metadata.st_uid != expected_uid ||
-        (descriptor_metadata.st_mode & 07777) != 0600 || descriptor_metadata.st_nlink != 1 ||
-        descriptor_metadata.st_dev != named_metadata.st_dev ||
-        descriptor_metadata.st_ino != named_metadata.st_ino) {
-        error = "daemon.lock lifetime lease is invalid";
+    if (!daemon_lock_lease->validate(expected_uid, error)) {
         return {};
     }
-    std::array<char, 512> record{};
-    const auto count = ::pread(daemon_lock_descriptor, record.data(), record.size(), 0);
-    daemon_lock::Identity identity;
-    std::string parse_error;
-    if (count <= 0 ||
-        !daemon_lock::parse_identity_record(
-            std::string_view(record.data(), static_cast<std::size_t>(count)), identity,
-            parse_error) ||
-        identity.pid != ::getpid()) {
-        error = "daemon.lock lifetime lease was not created by the current owner";
-        return {};
+    const std::string key = state_directory + '\0' + account + '\0' + std::to_string(expected_uid) +
+                            ':' + std::to_string(daemon_lock_lease->device()) + ':' +
+                            std::to_string(daemon_lock_lease->inode());
+    static std::mutex registry_mutex;
+    static std::map<std::string, std::weak_ptr<AccountAuditCoordinator>> registry;
+    const std::lock_guard lock(registry_mutex);
+    if (const auto found = registry.find(key); found != registry.end()) {
+        if (auto existing = found->second.lock()) {
+            error.clear();
+            return existing;
+        }
+        registry.erase(found);
     }
+    auto created = std::shared_ptr<AccountAuditCoordinator>(
+        new AccountAuditCoordinator(std::move(state_directory), std::move(account), expected_uid,
+                                    std::move(daemon_lock_lease)));
+    registry.emplace(key, created);
     error.clear();
-    return std::unique_ptr<AccountAuditCoordinator>(new AccountAuditCoordinator(
-        std::move(state_directory), std::move(account), expected_uid, daemon_lock_descriptor,
-        static_cast<std::uint64_t>(descriptor_metadata.st_dev),
-        static_cast<std::uint64_t>(descriptor_metadata.st_ino)));
+    return created;
 }
 
-AccountAuditCoordinator::Guard AccountAuditCoordinator::lock() {
-    return {std::unique_lock(mutex_), this};
+AccountAuditCoordinator::Guard AccountAuditCoordinator::lock(AccountAuditScanControl scan_control) {
+    return {std::unique_lock(mutex_), shared_from_this(), std::move(scan_control)};
 }
 
 bool AccountAuditCoordinator::validate_lease(std::string& error) const {
-    struct stat descriptor_metadata {};
-    const Descriptor directory(
-        ::open(state_directory_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW));
-    struct stat named_metadata {};
-    if (directory.get() < 0 || ::fstat(daemon_lock_descriptor_, &descriptor_metadata) != 0 ||
-        ::fstatat(directory.get(), "daemon.lock", &named_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
-        static_cast<std::uint64_t>(descriptor_metadata.st_dev) != lock_device_ ||
-        static_cast<std::uint64_t>(descriptor_metadata.st_ino) != lock_inode_ ||
-        descriptor_metadata.st_dev != named_metadata.st_dev ||
-        descriptor_metadata.st_ino != named_metadata.st_ino ||
-        descriptor_metadata.st_uid != expected_uid_ || !S_ISREG(descriptor_metadata.st_mode) ||
-        (descriptor_metadata.st_mode & 07777) != 0600 || descriptor_metadata.st_nlink != 1) {
-        error = "daemon.lock lifetime lease changed";
-        return false;
-    }
-    error.clear();
-    return true;
+    return daemon_lock_lease_ && daemon_lock_lease_->validate(expected_uid_, error);
 }
 
 AccountAuditLog::AccountAuditLog(std::string state_directory, std::string account,
@@ -2146,6 +2953,10 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
     if (!guard.validate_lease(state_directory_, account_, expected_uid_, lease_error)) {
         result.status = AccountAuditInspectionStatus::Unavailable;
         result.failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
+        return result;
+    }
+    if (scan_interrupted(guard.scan_control_, result.failure)) {
+        result.status = AccountAuditInspectionStatus::Interrupted;
         return result;
     }
     if (injected(hooks_, AccountAuditFault::Open)) {
@@ -2171,6 +2982,10 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
     LogoutAuditRecordAdapter v1_adapter(account_);
     bool prior_nonempty = false;
     for (std::size_t segment_index = 0; segment_index < kSegmentNames.size(); ++segment_index) {
+        if (scan_interrupted(guard.scan_control_, result.failure)) {
+            result.status = AccountAuditInspectionStatus::Interrupted;
+            return result;
+        }
         const auto* name = kSegmentNames.at(segment_index);
         struct stat metadata {};
         if (::fstatat(directory.get(), name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
@@ -2213,6 +3028,10 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
         std::uint64_t segment_offset = 0;
         std::uint64_t line_offset = 0;
         for (;;) {
+            if (scan_interrupted(guard.scan_control_, result.failure)) {
+                result.status = AccountAuditInspectionStatus::Interrupted;
+                return result;
+            }
             if (injected(hooks_, AccountAuditFault::Read)) {
                 result.status = AccountAuditInspectionStatus::Unavailable;
                 result.failure = {AccountAuditDurabilityReason::ReadFailed, {}};
@@ -2253,8 +3072,8 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
                     result.failure = {AccountAuditDurabilityReason::PathInvalid, {}};
                     return result;
                 }
-                auto document = json::parse(line, nullptr, false);
-                if (document.is_discarded()) {
+                const auto parsed = parse_audit_json(line);
+                if (!parsed.valid) {
                     if (state.open) {
                         return contradiction(state, account_, audit_path_, "malformed v2 tail");
                     }
@@ -2266,25 +3085,42 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
                                       {}};
                     return result;
                 }
-                const bool recognizable_v2 = document.is_object() &&
-                                             document.contains("schema_version") &&
-                                             document["schema_version"].is_number_integer() &&
+                const auto& document = parsed.document;
+                const bool one_integer_version = document.is_object() &&
+                                                 parsed.top_level_schema_versions == 1 &&
+                                                 document.contains("schema_version") &&
+                                                 document["schema_version"].is_number_integer();
+                const bool recognizable_v2 = one_integer_version &&
+                                             !parsed.duplicate_schema_version &&
                                              document["schema_version"] == 2;
                 if (recognizable_v2) {
                     state.positive_v2 = true;
                     segment_positive_v2 = true;
-                    if (document.value("phase", std::string{}) == "intent") {
+                    if (parsed.duplicate_key) {
+                        return contradiction(state, account_, audit_path_,
+                                             "duplicate key in recognized v2 record");
+                    }
+                    const bool intent_phase = document.contains("phase") &&
+                                              document["phase"].is_string() &&
+                                              document["phase"] == "intent";
+                    std::string intent_error;
+                    const bool valid_intent =
+                        intent_phase && validate_intent_impl(document, intent_error);
+                    if (valid_intent) {
                         if (v1_adapter.has_incomplete()) {
                             return contradiction(state, account_, audit_path_,
                                                  "v2 intent interleaves a v1 group");
                         }
-                        const auto invocation = document.value("invocation_id", std::string{});
+                        const auto& invocation =
+                            document["invocation_id"].get_ref<const std::string&>();
                         AccountAuditFailure rescan_failure;
-                        const auto seen =
-                            prior_invocation_seen(directory.get(), expected_uid_, segment_index,
-                                                  line_offset, invocation, hooks_, rescan_failure);
+                        const auto seen = prior_invocation_seen(
+                            directory.get(), expected_uid_, segment_index, line_offset, invocation,
+                            guard.scan_control_, hooks_, rescan_failure);
                         if (!seen) {
-                            result.status = AccountAuditInspectionStatus::Unavailable;
+                            result.status = rescan_failure.interruption
+                                                ? AccountAuditInspectionStatus::Interrupted
+                                                : AccountAuditInspectionStatus::Unavailable;
                             result.failure = std::move(rescan_failure);
                             return result;
                         }
@@ -2297,17 +3133,25 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
                     if (!consume_v2(document, state, record_error)) {
                         return contradiction(state, account_, audit_path_, std::move(record_error));
                     }
-                } else if (document.is_object() && document.value("schema_version", 0) == 1 &&
-                           !state.positive_v2) {
+                } else if (state.positive_v2) {
+                    return contradiction(state, account_, audit_path_,
+                                         "unsupported or malformed version after v2 recognition");
+                } else if (one_integer_version && !parsed.duplicate_key &&
+                           document["schema_version"] == 1) {
                     bool previously_seen = false;
-                    if (document.value("phase", std::string{}) == "intent") {
-                        const auto invocation = document.value("invocation_id", std::string{});
+                    if (document.contains("phase") && document["phase"].is_string() &&
+                        document["phase"] == "intent" && document.contains("invocation_id") &&
+                        document["invocation_id"].is_string()) {
+                        const auto& invocation =
+                            document["invocation_id"].get_ref<const std::string&>();
                         AccountAuditFailure rescan_failure;
-                        const auto seen =
-                            prior_invocation_seen(directory.get(), expected_uid_, segment_index,
-                                                  line_offset, invocation, hooks_, rescan_failure);
+                        const auto seen = prior_invocation_seen(
+                            directory.get(), expected_uid_, segment_index, line_offset, invocation,
+                            guard.scan_control_, hooks_, rescan_failure);
                         if (!seen) {
-                            result.status = AccountAuditInspectionStatus::Unavailable;
+                            result.status = rescan_failure.interruption
+                                                ? AccountAuditInspectionStatus::Interrupted
+                                                : AccountAuditInspectionStatus::Unavailable;
                             result.failure = std::move(rescan_failure);
                             return result;
                         }
@@ -2326,11 +3170,6 @@ AccountAuditLog::inspect( // NOLINT(readability-function-cognitive-complexity):
                                           std::move(legacy_failure.reason)};
                         return result;
                     }
-                } else if (state.positive_v2 && document.is_object() &&
-                           document.contains("schema_version") &&
-                           document["schema_version"].is_number_integer()) {
-                    return contradiction(state, account_, audit_path_,
-                                         "unsupported schema version after v2 recognition");
                 } else {
                     result.status = AccountAuditInspectionStatus::Unavailable;
                     result.failure = {AccountAuditDurabilityReason::PathInvalid, {}};
@@ -2458,7 +3297,8 @@ bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
     }
     const auto inspection = inspect(guard);
     if (inspection.status != AccountAuditInspectionStatus::Clean) {
-        failure = inspection.status == AccountAuditInspectionStatus::Unavailable
+        failure = (inspection.status == AccountAuditInspectionStatus::Unavailable ||
+                   inspection.status == AccountAuditInspectionStatus::Interrupted)
                       ? inspection.failure
                       : AccountAuditFailure{AccountAuditDurabilityReason::Contradiction,
                                             "prior audit history is not terminal"};
@@ -2477,7 +3317,8 @@ bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
         }
         return false;
     }
-    if (!rotate_for_intent(directory.get(), expected_uid_, line_size, pins, hooks_, failure)) {
+    if (!rotate_for_intent(directory.get(), expected_uid_, line_size, pins, guard.scan_control_,
+                           hooks_, failure)) {
         return false;
     }
     struct stat metadata {};
@@ -2504,7 +3345,8 @@ bool AccountAuditLog::append_checkpoint(const AccountAuditCheckpoint& checkpoint
                                         AccountAuditFailure& failure) const {
     const auto inspection = inspect(guard);
     if (inspection.status != AccountAuditInspectionStatus::Open || !inspection.oldest_open) {
-        failure = inspection.status == AccountAuditInspectionStatus::Unavailable
+        failure = (inspection.status == AccountAuditInspectionStatus::Unavailable ||
+                   inspection.status == AccountAuditInspectionStatus::Interrupted)
                       ? inspection.failure
                       : AccountAuditFailure{AccountAuditDurabilityReason::Contradiction,
                                             "checkpoint has no matching open group"};
@@ -2526,7 +3368,8 @@ bool AccountAuditLog::append_outcome(const AccountAuditOutcome& outcome,
                                      AccountAuditFailure& failure) const {
     const auto inspection = inspect(guard);
     if (inspection.status != AccountAuditInspectionStatus::Open || !inspection.oldest_open) {
-        failure = inspection.status == AccountAuditInspectionStatus::Unavailable
+        failure = (inspection.status == AccountAuditInspectionStatus::Unavailable ||
+                   inspection.status == AccountAuditInspectionStatus::Interrupted)
                       ? inspection.failure
                       : AccountAuditFailure{AccountAuditDurabilityReason::Contradiction,
                                             "outcome has no matching open group"};
