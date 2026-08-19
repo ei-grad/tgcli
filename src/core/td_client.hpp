@@ -147,6 +147,8 @@ class TdClient {
     std::future<TdValue>
     search_saved_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                           TdSearchSavedMessagesRequest request);
+    std::future<TdValue>
+    get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization);
 
     [[nodiscard]] bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const;
 

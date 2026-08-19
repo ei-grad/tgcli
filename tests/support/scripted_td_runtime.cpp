@@ -101,6 +101,18 @@ ScriptedTdRuntime::make_search_saved_messages(core::TdSearchSavedMessagesRequest
                               {"limit", static_cast<std::int64_t>(request.limit)}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_active_sessions() {
+    before_make(core::TdFunctionKind::GetActiveSessions);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetActiveSessions});
+}
+
+core::TdValue ScriptedTdRuntime::make_terminate_session(std::int64_t session_id) {
+    before_make(core::TdFunctionKind::TerminateSession);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::TerminateSession, {{"session_id", session_id}}});
+}
+
 void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_generation,
                              std::uint64_t query_id, core::TdValue function) {
     if (!function.function_data().has_value()) {

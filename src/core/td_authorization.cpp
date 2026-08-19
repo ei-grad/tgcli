@@ -37,7 +37,9 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetMe:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
+    case TdFunctionKind::GetActiveSessions:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
+    case TdFunctionKind::TerminateSession:
     case TdFunctionKind::LogOut:
         return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::Close:

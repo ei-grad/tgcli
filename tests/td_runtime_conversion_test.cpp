@@ -8,10 +8,12 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <sys/types.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -87,6 +89,18 @@ class UnsupportedMessageContent final : public td_api::MessageContent {
     }
 };
 
+class UnsupportedSessionDeviceType final : public td_api::SessionDeviceType {
+  public:
+    static constexpr std::int32_t ID = 700'000'006;
+    [[nodiscard]] std::int32_t get_id() const final {
+        return ID;
+    }
+    void store(td::TlStorerToString& storer, const char* field_name) const final {
+        static_cast<void>(storer);
+        static_cast<void>(field_name);
+    }
+};
+
 AuthStateData convert(NativeObjectPtr native, bool authorization_state_response = true) {
     const auto erased = TdValue::from(std::move(native));
     const auto converted = detail::convert_production_authorization_state_for_test(
@@ -97,6 +111,56 @@ AuthStateData convert(NativeObjectPtr native, bool authorization_state_response 
 
 TdValue convert_response(NativeObjectPtr native) {
     return detail::convert_production_response_for_test(TdValue::from(std::move(native)));
+}
+
+TdValue convert_sessions(NativeObjectPtr native) {
+    return detail::convert_production_sessions_for_test(TdValue::from(std::move(native)));
+}
+
+td_api::object_ptr<td_api::session>
+session(std::int64_t id, td_api::object_ptr<td_api::SessionDeviceType> device_type =
+                             td_api::make_object<td_api::sessionDeviceTypeLinux>()) {
+    auto value = td_api::make_object<td_api::session>();
+    value->id_ = id;
+    value->is_current_ = true;
+    value->is_password_pending_ = true;
+    value->is_unconfirmed_ = true;
+    value->can_accept_secret_chats_ = true;
+    value->can_accept_calls_ = false;
+    value->device_type_ = std::move(device_type);
+    value->api_id_ = -2'147'483'648;
+    value->application_name_ = "tgcli 🧪";
+    value->application_version_ = "1.2.3";
+    value->is_official_application_ = false;
+    value->device_model_ = "workstation";
+    value->platform_ = "Linux";
+    value->system_version_ = "6.8";
+    value->log_in_date_ = 1;
+    value->last_active_date_ = std::numeric_limits<std::int32_t>::max();
+    value->ip_address_ = "203.0.113.7";
+    value->location_ = "Athens";
+    return value;
+}
+
+NativeObjectPtr session_result(std::vector<td_api::object_ptr<td_api::session>> items,
+                               std::int32_t ttl = 180) {
+    return td_api::make_object<td_api::sessions>(std::move(items), ttl);
+}
+
+const TdSessionConversionError& require_session_error(TdValue& converted) {
+    CHECK(converted.get_if<TdSessions>() == nullptr);
+    const auto* error = converted.get_if<TdSessionConversionError>();
+    REQUIRE(error != nullptr);
+    return *error;
+}
+
+const TdFieldValue* function_field(const TdFunctionData& function, std::string_view name) {
+    for (const auto& candidate : function.fields()) {
+        if (candidate.has_name(name)) {
+            return &candidate.value();
+        }
+    }
+    return nullptr;
 }
 
 void check_delivery(td_api::object_ptr<td_api::AuthenticationCodeType> type,
@@ -534,4 +598,228 @@ TEST_CASE("production converter gives Saved text and non-text messages the exact
     CHECK(found->messages == std::vector<TdSavedMessageSummary>{
                                  {.id = 200, .chat_id = 42, .date = 1782993600, .text = "idea 🧪"},
                                  {.id = 199, .chat_id = 42, .date = 1782993540, .text = ""}});
+}
+
+TEST_CASE("production session factories retain exact descriptors and native types",
+          "[core][tdlib][td-runtime-converter][session]") {
+    static_assert(
+        std::is_same_v<td_api::terminateSession::ReturnType, td_api::object_ptr<td_api::ok>>);
+
+    auto list = detail::make_production_get_active_sessions_for_test();
+    REQUIRE(list.function_data().has_value());
+    CHECK(list.function_data()->kind() == TdFunctionKind::GetActiveSessions);
+    CHECK(list.function_data()->fields().empty());
+    CHECK(detail::production_function_matches_for_test(list, TdFunctionKind::GetActiveSessions));
+    CHECK_FALSE(
+        detail::production_function_matches_for_test(list, TdFunctionKind::TerminateSession));
+
+    for (const auto id : {std::numeric_limits<std::int64_t>::min(), std::int64_t{0},
+                          std::numeric_limits<std::int64_t>::max()}) {
+        CAPTURE(id);
+        auto terminate = detail::make_production_terminate_session_for_test(id);
+        REQUIRE(terminate.function_data().has_value());
+        CHECK(terminate.function_data()->kind() == TdFunctionKind::TerminateSession);
+        REQUIRE(terminate.function_data()->fields().size() == 1);
+        const auto* session_id = function_field(*terminate.function_data(), "session_id");
+        REQUIRE(session_id != nullptr);
+        CHECK(std::get<std::int64_t>(*session_id) == id);
+        CHECK(detail::production_function_matches_for_test(terminate,
+                                                           TdFunctionKind::TerminateSession));
+        CHECK_FALSE(detail::production_function_matches_for_test(
+            terminate, TdFunctionKind::GetActiveSessions));
+    }
+}
+
+TEST_CASE("production converter covers all pinned session device variants",
+          "[core][tdlib][td-runtime-converter][session]") {
+    std::vector<std::pair<td_api::object_ptr<td_api::SessionDeviceType>, TdSessionDeviceType>>
+        cases;
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeAndroid>(),
+                       TdSessionDeviceType::Android);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeApple>(),
+                       TdSessionDeviceType::Apple);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeBrave>(),
+                       TdSessionDeviceType::Brave);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeChrome>(),
+                       TdSessionDeviceType::Chrome);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeEdge>(),
+                       TdSessionDeviceType::Edge);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeFirefox>(),
+                       TdSessionDeviceType::Firefox);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeIpad>(),
+                       TdSessionDeviceType::Ipad);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeIphone>(),
+                       TdSessionDeviceType::Iphone);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeLinux>(),
+                       TdSessionDeviceType::Linux);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeMac>(),
+                       TdSessionDeviceType::Mac);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeOpera>(),
+                       TdSessionDeviceType::Opera);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeSafari>(),
+                       TdSessionDeviceType::Safari);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeUbuntu>(),
+                       TdSessionDeviceType::Ubuntu);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeUnknown>(),
+                       TdSessionDeviceType::Unknown);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeVivaldi>(),
+                       TdSessionDeviceType::Vivaldi);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeWindows>(),
+                       TdSessionDeviceType::Windows);
+    cases.emplace_back(td_api::make_object<td_api::sessionDeviceTypeXbox>(),
+                       TdSessionDeviceType::Xbox);
+
+    constexpr std::array<std::string_view, 17> expected_names{
+        "android", "apple", "brave",  "chrome", "edge",    "firefox", "ipad",    "iphone", "linux",
+        "mac",     "opera", "safari", "ubuntu", "unknown", "vivaldi", "windows", "xbox",
+    };
+    REQUIRE(cases.size() == 17);
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        auto& [device, expected] = cases[index];
+        CAPTURE(expected_names.at(index));
+        CHECK(td_session_device_type_name(expected) == expected_names.at(index));
+        std::vector<td_api::object_ptr<td_api::session>> items;
+        items.push_back(session(42, std::move(device)));
+        auto converted = convert_sessions(session_result(std::move(items)));
+        const auto* sessions = converted.get_if<TdSessions>();
+        REQUIRE(sessions != nullptr);
+        REQUIRE(sessions->items.size() == 1);
+        CHECK(sessions->items.front().device_type == expected);
+        CHECK(td_session_device_type_name(sessions->items.front().device_type) ==
+              expected_names.at(index));
+    }
+}
+
+TEST_CASE("production session conversion is strict lossless and order preserving",
+          "[core][tdlib][td-runtime-converter][session]") {
+    std::vector<td_api::object_ptr<td_api::session>> items;
+    items.push_back(session(std::numeric_limits<std::int64_t>::min()));
+    auto zero = session(0, td_api::make_object<td_api::sessionDeviceTypeUnknown>());
+    zero->is_current_ = false;
+    zero->is_password_pending_ = false;
+    zero->is_unconfirmed_ = false;
+    zero->can_accept_secret_chats_ = false;
+    zero->can_accept_calls_ = true;
+    zero->api_id_ = std::numeric_limits<std::int32_t>::max();
+    zero->application_name_ = "tabs\tand\nlines";
+    zero->application_version_.clear();
+    zero->is_official_application_ = true;
+    zero->log_in_date_ = 0;
+    zero->last_active_date_ = 0;
+    zero->ip_address_.clear();
+    zero->location_.clear();
+    items.push_back(std::move(zero));
+    items.push_back(session(std::numeric_limits<std::int64_t>::max(),
+                            td_api::make_object<td_api::sessionDeviceTypeWindows>()));
+
+    auto converted = convert_sessions(session_result(std::move(items), 366));
+    const auto* sessions = converted.get_if<TdSessions>();
+    REQUIRE(sessions != nullptr);
+    CHECK(sessions->inactive_session_ttl_days == 366);
+    REQUIRE(sessions->items.size() == 3);
+    CHECK(sessions->items[0] == TdSession{.id = "-9223372036854775808",
+                                          .is_current = true,
+                                          .is_password_pending = true,
+                                          .is_unconfirmed = true,
+                                          .can_accept_secret_chats = true,
+                                          .can_accept_calls = false,
+                                          .device_type = TdSessionDeviceType::Linux,
+                                          .api_id = std::numeric_limits<std::int32_t>::min(),
+                                          .application_name = "tgcli 🧪",
+                                          .application_version = "1.2.3",
+                                          .is_official_application = false,
+                                          .device_model = "workstation",
+                                          .platform = "Linux",
+                                          .system_version = "6.8",
+                                          .log_in_date = "1970-01-01T00:00:01Z",
+                                          .last_active_date = "2038-01-19T03:14:07Z",
+                                          .ip_address = "203.0.113.7",
+                                          .location = "Athens"});
+    CHECK(sessions->items[1].id == "0");
+    CHECK(sessions->items[1].device_type == TdSessionDeviceType::Unknown);
+    CHECK(sessions->items[1].application_name == "tabs\tand\nlines");
+    CHECK_FALSE(sessions->items[1].log_in_date.has_value());
+    CHECK_FALSE(sessions->items[1].last_active_date.has_value());
+    CHECK(sessions->items[2].id == "9223372036854775807");
+    CHECK(sessions->items[2].device_type == TdSessionDeviceType::Windows);
+}
+
+TEST_CASE("production session conversion rejects malformed input all or nothing",
+          "[core][tdlib][td-runtime-converter][session]") {
+    SECTION("null result") {
+        NativeObjectPtr native;
+        auto converted = convert_sessions(std::move(native));
+        CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+    }
+
+    SECTION("unexpected result type preserves its type id") {
+        auto converted = convert_sessions(td_api::make_object<td_api::ok>());
+        CHECK(require_session_error(converted).tdlib_type_id == td_api::ok::ID);
+    }
+
+    SECTION("null session") {
+        std::vector<td_api::object_ptr<td_api::session>> items;
+        items.emplace_back();
+        auto converted = convert_sessions(session_result(std::move(items)));
+        CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+    }
+
+    SECTION("null device") {
+        auto item = session(1);
+        item->device_type_ = nullptr;
+        std::vector<td_api::object_ptr<td_api::session>> items;
+        items.push_back(std::move(item));
+        auto converted = convert_sessions(session_result(std::move(items)));
+        CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+    }
+
+    SECTION("future device type is not folded to unknown") {
+        std::vector<td_api::object_ptr<td_api::session>> items;
+        items.push_back(session(1, td_api::make_object<UnsupportedSessionDeviceType>()));
+        auto converted = convert_sessions(session_result(std::move(items)));
+        CHECK(require_session_error(converted).tdlib_type_id == UnsupportedSessionDeviceType::ID);
+    }
+
+    SECTION("duplicate ids") {
+        std::vector<td_api::object_ptr<td_api::session>> items;
+        items.push_back(session(7));
+        items.push_back(session(7));
+        auto converted = convert_sessions(session_result(std::move(items)));
+        CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+    }
+
+    SECTION("invalid TTL") {
+        for (const auto ttl : {0, 367}) {
+            CAPTURE(ttl);
+            std::vector<td_api::object_ptr<td_api::session>> items;
+            items.push_back(session(1));
+            auto converted = convert_sessions(session_result(std::move(items), ttl));
+            CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+        }
+    }
+
+    SECTION("negative dates") {
+        for (const bool login_date : {false, true}) {
+            CAPTURE(login_date);
+            auto item = session(1);
+            if (login_date) {
+                item->log_in_date_ = -1;
+            } else {
+                item->last_active_date_ = -1;
+            }
+            std::vector<td_api::object_ptr<td_api::session>> items;
+            items.push_back(std::move(item));
+            auto converted = convert_sessions(session_result(std::move(items)));
+            CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+        }
+    }
+
+    SECTION("invalid UTF-8") {
+        auto item = session(1);
+        item->location_ = std::string("\xC3\x28", 2);
+        std::vector<td_api::object_ptr<td_api::session>> items;
+        items.push_back(std::move(item));
+        auto converted = convert_sessions(session_result(std::move(items)));
+        CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+    }
 }

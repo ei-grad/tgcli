@@ -2,13 +2,16 @@
 #include "support/scripted_td_runtime.hpp"
 #include "support/td_client_test_access.hpp"
 
+#include <algorithm>
 #include <barrier>
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -32,8 +35,12 @@ using tgcli::core::AuthWaitPassword;
 using tgcli::core::AuthWaitPremiumPurchase;
 using tgcli::core::AuthWaitRegistration;
 using tgcli::core::TdClient;
+using tgcli::core::TdFunctionData;
+using tgcli::core::TdFunctionField;
 using tgcli::core::TdFunctionKind;
 using tgcli::core::TdSendDescriptor;
+using tgcli::core::TdSession;
+using tgcli::core::TdSessions;
 using tgcli::core::TdValue;
 using tgcli::test::ScriptedClient;
 using tgcli::test::ScriptedTdRuntime;
@@ -108,6 +115,15 @@ std::future<TdValue> send_test_read(TdClient& client) {
         TdValue::scripted_function(tgcli::core::TdFunctionData{TdFunctionKind::GetOption}));
 }
 
+const tgcli::core::TdFieldValue* field(const TdFunctionData& function, std::string_view name) {
+    for (const TdFunctionField& candidate : function.fields()) {
+        if (candidate.has_name(name)) {
+            return &candidate.value();
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 TEST_CASE("activation emits no unsolicited update before exact query-1 bootstrap",
@@ -128,6 +144,54 @@ TEST_CASE("activation emits no unsolicited update before exact query-1 bootstrap
     CHECK(snapshot->client_generation == 1);
     CHECK(snapshot->auth_sequence == 0);
     CHECK(snapshot->data.state == AuthState::Unknown);
+}
+
+TEST_CASE("scripted session factories mirror exact dormant descriptors",
+          "[core][td-runtime][session][fake-boundary]") {
+    ScriptedTdRuntime runtime;
+    auto list = runtime.make_get_active_sessions();
+    REQUIRE(list.function_data().has_value());
+    CHECK(list.function_data()->kind() == TdFunctionKind::GetActiveSessions);
+    CHECK(list.function_data()->fields().empty());
+
+    for (const auto id : {std::numeric_limits<std::int64_t>::min(), std::int64_t{0},
+                          std::numeric_limits<std::int64_t>::max()}) {
+        CAPTURE(id);
+        auto terminate = runtime.make_terminate_session(id);
+        REQUIRE(terminate.function_data().has_value());
+        CHECK(terminate.function_data()->kind() == TdFunctionKind::TerminateSession);
+        REQUIRE(terminate.function_data()->fields().size() == 1);
+        const auto* session_id = field(*terminate.function_data(), "session_id");
+        REQUIRE(session_id != nullptr);
+        CHECK(std::get<std::int64_t>(*session_id) == id);
+    }
+}
+
+TEST_CASE("TdClient exposes only the dormant session read seam",
+          "[core][td-runtime][session][fake-boundary]") {
+    auto fake = make_fake_client();
+    fake.runtime->push_response(fake.first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return fake.client->auth_state()->data.state == AuthState::Ready; }));
+
+    auto response = fake.client->get_active_sessions(fake.client->auth_state());
+    REQUIRE(fake.runtime->wait_for_sent(2));
+    const auto sent = fake.runtime->sent_functions();
+    REQUIRE(sent.size() == 2);
+    CHECK(sent[1].function.kind() == TdFunctionKind::GetActiveSessions);
+    CHECK(sent[1].function.fields().empty());
+
+    TdSession expected_item;
+    expected_item.id = "0";
+    TdSessions expected{.items = {std::move(expected_item)}, .inactive_session_ttl_days = 180};
+    fake.runtime->push_response(fake.first, sent[1].query_id, TdValue::from(expected));
+    REQUIRE(response.wait_for(2s) == std::future_status::ready);
+    const auto value = response.get();
+    const auto* sessions = value.get_if<TdSessions>();
+    REQUIRE(sessions != nullptr);
+    CHECK(*sessions == expected);
+    CHECK(std::ranges::none_of(fake.runtime->sent_functions(), [](const auto& request) {
+        return request.function.kind() == TdFunctionKind::TerminateSession;
+    }));
 }
 
 TEST_CASE("process logging configuration is frozen before the first client id",

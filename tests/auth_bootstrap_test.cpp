@@ -310,9 +310,10 @@ TEST_CASE("read functions require Ready in every authorization state",
             .auth_sequence = 1,
             .data = core::AuthStateData{state},
         };
-        for (const auto function : {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
-                                    core::TdFunctionKind::GetSavedMessagesTags,
-                                    core::TdFunctionKind::SearchSavedMessages}) {
+        for (const auto function :
+             {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
+              core::TdFunctionKind::GetSavedMessagesTags, core::TdFunctionKind::SearchSavedMessages,
+              core::TdFunctionKind::GetActiveSessions}) {
             const core::TdFunctionData function_data{function};
             const auto denied = core::authorize_td_send(
                 descriptor_for(snapshot, function, core::DescriptorKind::Read,
@@ -321,6 +322,39 @@ TEST_CASE("read functions require Ready in every authorization state",
             CHECK(denied.has_value() == (state != core::AuthState::Ready));
         }
     }
+}
+
+TEST_CASE("dormant session termination policy is destructive Ready-only and request-owned",
+          "[core][auth-bootstrap][safety][session]") {
+    const core::AuthStateSnapshot ready{
+        .client_id = 1001,
+        .client_generation = 1,
+        .auth_sequence = 1,
+        .data = core::AuthStateData{core::AuthState::Ready},
+    };
+    const core::TdFunctionData function{core::TdFunctionKind::TerminateSession,
+                                        {{"session_id", std::int64_t{0}}}};
+    const auto descriptor =
+        descriptor_for(ready, core::TdFunctionKind::TerminateSession,
+                       core::DescriptorKind::Destructive, {core::TdOwnerKind::Request, 1});
+    CHECK_FALSE(core::authorize_td_send(descriptor, &function, ready, false));
+
+    auto wrong_tier = descriptor;
+    wrong_tier.tier = core::DescriptorKind::Read;
+    CHECK(core::authorize_td_send(wrong_tier, &function, ready, false) ==
+          core::TdAuthorizationFailure::TierMismatch);
+
+    auto wrong_owner = descriptor;
+    wrong_owner.owner = {core::TdOwnerKind::Login, 1};
+    CHECK(core::authorize_td_send(wrong_owner, &function, ready, false) ==
+          core::TdAuthorizationFailure::OwnerMismatch);
+
+    auto not_ready = ready;
+    not_ready.data = core::AuthStateData{core::AuthState::WaitPhoneNumber};
+    auto stale_state = descriptor;
+    stale_state.auth_state = core::AuthState::WaitPhoneNumber;
+    CHECK(core::authorize_td_send(stale_state, &function, not_ready, false) ==
+          core::TdAuthorizationFailure::FunctionDenied);
 }
 
 TEST_CASE("TdClient read admission is an exact closed function allowlist",
@@ -346,6 +380,8 @@ TEST_CASE("TdClient read admission is an exact closed function allowlist",
         Entry{core::TdFunctionKind::GetMe, true},
         Entry{core::TdFunctionKind::GetSavedMessagesTags, true},
         Entry{core::TdFunctionKind::SearchSavedMessages, true},
+        Entry{core::TdFunctionKind::GetActiveSessions, true},
+        Entry{core::TdFunctionKind::TerminateSession, false},
         Entry{core::TdFunctionKind::LogOut, false},
         Entry{core::TdFunctionKind::Close, false},
     };

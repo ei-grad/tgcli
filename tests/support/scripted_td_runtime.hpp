@@ -41,6 +41,8 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_auth_function(core::TdAuthRequest request) override;
     core::TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) override;
     core::TdValue make_search_saved_messages(core::TdSearchSavedMessagesRequest request) override;
+    core::TdValue make_get_active_sessions() override;
+    core::TdValue make_terminate_session(std::int64_t session_id) override;
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               core::TdValue function) override;
     std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;

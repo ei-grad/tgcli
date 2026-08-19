@@ -389,6 +389,8 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetOption:
     case core::TdFunctionKind::GetSavedMessagesTags:
     case core::TdFunctionKind::SearchSavedMessages:
+    case core::TdFunctionKind::GetActiveSessions:
+    case core::TdFunctionKind::TerminateSession:
     case core::TdFunctionKind::LogOut:
     case core::TdFunctionKind::Close:
         break;

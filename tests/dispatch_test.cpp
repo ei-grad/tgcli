@@ -322,6 +322,26 @@ TEST_CASE("M3 operation registry is closed and has exact tier and bot policy",
     }
 }
 
+TEST_CASE("dormant M6 session functions do not extend or activate the M3 command registry",
+          "[dispatch][m3][m6][session][safety]") {
+    CHECK(daemon::m3_operation_policies().size() == 17);
+    CHECK_FALSE(daemon::m3_operation_for_command("session list").has_value());
+    CHECK_FALSE(daemon::m3_operation_for_command("session terminate").has_value());
+    CHECK_FALSE(daemon::parse_m3_operation("session_list").has_value());
+    CHECK_FALSE(daemon::parse_m3_operation("session_terminate").has_value());
+
+    auto context = test_context();
+    daemon::Dispatcher dispatcher;
+    daemon::register_commands(dispatcher, context);
+    for (const auto& command : {std::vector<std::string>{"session", "list"},
+                                std::vector<std::string>{"session", "terminate"}}) {
+        const auto outcome = dispatch(dispatcher, command);
+        CHECK(outcome.error_code == "USAGE");
+        CHECK(outcome.exit_code == kUsage);
+        CHECK_FALSE(outcome.result.has_value());
+    }
+}
+
 TEST_CASE("M3 descriptors must match the closed registry and remain fail closed",
           "[dispatch][m3][safety]") {
     const auto handler = [](const proto::Request&, daemon::RequestSession& sink) {

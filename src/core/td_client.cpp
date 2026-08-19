@@ -131,7 +131,8 @@ class TdClient::Impl {
         if (!authorization ||
             (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
              function != TdFunctionKind::GetSavedMessagesTags &&
-             function != TdFunctionKind::SearchSavedMessages)) {
+             function != TdFunctionKind::SearchSavedMessages &&
+             function != TdFunctionKind::GetActiveSessions)) {
             return failed_future(TdAuthorizationFailure::FunctionDenied);
         }
         auto owner = issue_owner(TdOwnerKind::Request);
@@ -167,6 +168,12 @@ class TdClient::Impl {
                           TdSearchSavedMessagesRequest request) {
         return send_read(authorization, TdFunctionKind::SearchSavedMessages,
                          runtime_->make_search_saved_messages(std::move(request)));
+    }
+
+    std::future<TdValue>
+    get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+        return send_read(authorization, TdFunctionKind::GetActiveSessions,
+                         runtime_->make_get_active_sessions());
     }
 
     std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -1092,6 +1099,11 @@ std::future<TdValue>
 TdClient::search_saved_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                 TdSearchSavedMessagesRequest request) {
     return impl_->search_saved_messages(authorization, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::get_active_sessions(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+    return impl_->get_active_sessions(authorization);
 }
 
 std::future<TdValue>

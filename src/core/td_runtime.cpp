@@ -3,9 +3,11 @@
 #include "core/td_runtime_test_adapter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <climits>
+#include <ctime>
 #include <mutex>
 #include <stdexcept>
 #include <unistd.h>
@@ -187,6 +189,182 @@ TdSavedMessageSummary convert_saved_message(const td_api::message& message) {
             .text = std::move(text)};
 }
 
+bool valid_utf8(std::string_view value) {
+    for (std::size_t index = 0; index < value.size();) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        std::size_t length = 0;
+        std::uint32_t codepoint = 0;
+        if (first <= 0x7F) {
+            length = 1;
+            codepoint = first;
+        } else if (first >= 0xC2 && first <= 0xDF) {
+            length = 2;
+            codepoint = first & 0x1FU;
+        } else if (first >= 0xE0 && first <= 0xEF) {
+            length = 3;
+            codepoint = first & 0x0FU;
+        } else if (first >= 0xF0 && first <= 0xF4) {
+            length = 4;
+            codepoint = first & 0x07U;
+        } else {
+            return false;
+        }
+        if (index + length > value.size()) {
+            return false;
+        }
+        for (std::size_t continuation = 1; continuation < length; ++continuation) {
+            const auto byte = static_cast<unsigned char>(value[index + continuation]);
+            if ((byte & 0xC0U) != 0x80U) {
+                return false;
+            }
+            codepoint = (codepoint << 6U) | (byte & 0x3FU);
+        }
+        if ((length == 3 && codepoint < 0x800U) || (length == 4 && codepoint < 0x10000U) ||
+            (codepoint >= 0xD800U && codepoint <= 0xDFFFU) || codepoint > 0x10FFFFU) {
+            return false;
+        }
+        index += length;
+    }
+    return true;
+}
+
+std::optional<TdSessionDeviceType>
+convert_session_device_type(const td_api::SessionDeviceType* device,
+                            std::optional<std::int32_t>& unsupported_type_id) {
+    if (device == nullptr) {
+        return std::nullopt;
+    }
+    switch (device->get_id()) {
+    case td_api::sessionDeviceTypeAndroid::ID:
+        return TdSessionDeviceType::Android;
+    case td_api::sessionDeviceTypeApple::ID:
+        return TdSessionDeviceType::Apple;
+    case td_api::sessionDeviceTypeBrave::ID:
+        return TdSessionDeviceType::Brave;
+    case td_api::sessionDeviceTypeChrome::ID:
+        return TdSessionDeviceType::Chrome;
+    case td_api::sessionDeviceTypeEdge::ID:
+        return TdSessionDeviceType::Edge;
+    case td_api::sessionDeviceTypeFirefox::ID:
+        return TdSessionDeviceType::Firefox;
+    case td_api::sessionDeviceTypeIpad::ID:
+        return TdSessionDeviceType::Ipad;
+    case td_api::sessionDeviceTypeIphone::ID:
+        return TdSessionDeviceType::Iphone;
+    case td_api::sessionDeviceTypeLinux::ID:
+        return TdSessionDeviceType::Linux;
+    case td_api::sessionDeviceTypeMac::ID:
+        return TdSessionDeviceType::Mac;
+    case td_api::sessionDeviceTypeOpera::ID:
+        return TdSessionDeviceType::Opera;
+    case td_api::sessionDeviceTypeSafari::ID:
+        return TdSessionDeviceType::Safari;
+    case td_api::sessionDeviceTypeUbuntu::ID:
+        return TdSessionDeviceType::Ubuntu;
+    case td_api::sessionDeviceTypeUnknown::ID:
+        return TdSessionDeviceType::Unknown;
+    case td_api::sessionDeviceTypeVivaldi::ID:
+        return TdSessionDeviceType::Vivaldi;
+    case td_api::sessionDeviceTypeWindows::ID:
+        return TdSessionDeviceType::Windows;
+    case td_api::sessionDeviceTypeXbox::ID:
+        return TdSessionDeviceType::Xbox;
+    default:
+        unsupported_type_id = device->get_id();
+        return std::nullopt;
+    }
+}
+
+bool convert_session_timestamp(std::int32_t seconds, std::optional<std::string>& output) {
+    if (seconds < 0) {
+        return false;
+    }
+    if (seconds == 0) {
+        output.reset();
+        return true;
+    }
+    const auto value = static_cast<std::time_t>(seconds);
+    std::tm utc{};
+    if (::gmtime_r(&value, &utc) == nullptr) {
+        return false;
+    }
+    std::array<char, 32> buffer{};
+    if (std::strftime(buffer.data(), buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return false;
+    }
+    output = buffer.data();
+    return true;
+}
+
+TdValue session_conversion_error(std::optional<std::int32_t> tdlib_type_id = std::nullopt) {
+    return TdValue::from(TdSessionConversionError{tdlib_type_id});
+}
+
+TdValue convert_sessions(td_api::object_ptr<td_api::sessions> sessions) {
+    if (sessions == nullptr || sessions->inactive_session_ttl_days_ < 1 ||
+        sessions->inactive_session_ttl_days_ > 366) {
+        return session_conversion_error();
+    }
+
+    TdSessions converted;
+    converted.inactive_session_ttl_days = sessions->inactive_session_ttl_days_;
+    converted.items.reserve(sessions->sessions_.size());
+    std::unordered_set<std::int64_t> ids;
+    for (auto& item : sessions->sessions_) {
+        if (item == nullptr || !ids.emplace(item->id_).second) {
+            return session_conversion_error();
+        }
+        std::optional<std::int32_t> unsupported_type_id;
+        const auto device_type =
+            convert_session_device_type(item->device_type_.get(), unsupported_type_id);
+        if (!device_type) {
+            return session_conversion_error(unsupported_type_id);
+        }
+        std::optional<std::string> log_in_date;
+        std::optional<std::string> last_active_date;
+        if (!convert_session_timestamp(item->log_in_date_, log_in_date) ||
+            !convert_session_timestamp(item->last_active_date_, last_active_date)) {
+            return session_conversion_error();
+        }
+        if (!valid_utf8(item->application_name_) || !valid_utf8(item->application_version_) ||
+            !valid_utf8(item->device_model_) || !valid_utf8(item->platform_) ||
+            !valid_utf8(item->system_version_) || !valid_utf8(item->ip_address_) ||
+            !valid_utf8(item->location_)) {
+            return session_conversion_error();
+        }
+        converted.items.push_back({.id = std::to_string(item->id_),
+                                   .is_current = item->is_current_,
+                                   .is_password_pending = item->is_password_pending_,
+                                   .is_unconfirmed = item->is_unconfirmed_,
+                                   .can_accept_secret_chats = item->can_accept_secret_chats_,
+                                   .can_accept_calls = item->can_accept_calls_,
+                                   .device_type = *device_type,
+                                   .api_id = item->api_id_,
+                                   .application_name = std::move(item->application_name_),
+                                   .application_version = std::move(item->application_version_),
+                                   .is_official_application = item->is_official_application_,
+                                   .device_model = std::move(item->device_model_),
+                                   .platform = std::move(item->platform_),
+                                   .system_version = std::move(item->system_version_),
+                                   .log_in_date = std::move(log_in_date),
+                                   .last_active_date = std::move(last_active_date),
+                                   .ip_address = std::move(item->ip_address_),
+                                   .location = std::move(item->location_)});
+    }
+    return TdValue::from(std::move(converted));
+}
+
+TdValue make_native_get_active_sessions() {
+    NativeFunctionPtr native = td_api::make_object<td_api::getActiveSessions>();
+    return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::GetActiveSessions});
+}
+
+TdValue make_native_terminate_session(std::int64_t session_id) {
+    NativeFunctionPtr native = td_api::make_object<td_api::terminateSession>(session_id);
+    return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::TerminateSession,
+                                                               {{"session_id", session_id}}});
+}
+
 TdValue convert_response(NativeObjectPtr object) {
     if (object == nullptr) {
         return {};
@@ -245,6 +423,8 @@ TdValue convert_response(NativeObjectPtr object) {
         }
         return TdValue::from(std::move(converted));
     }
+    case td_api::sessions::ID:
+        return convert_sessions(td_api::move_object_as<td_api::sessions>(object));
     default:
         return TdValue::from(std::move(object));
     }
@@ -280,6 +460,10 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getSavedMessagesTags::ID;
     case TdFunctionKind::SearchSavedMessages:
         return function.get_id() == td_api::searchSavedMessages::ID;
+    case TdFunctionKind::GetActiveSessions:
+        return function.get_id() == td_api::getActiveSessions::ID;
+    case TdFunctionKind::TerminateSession:
+        return function.get_id() == td_api::terminateSession::ID;
     case TdFunctionKind::LogOut:
         return function.get_id() == td_api::logOut::ID;
     case TdFunctionKind::Close:
@@ -683,6 +867,14 @@ class ProductionTdRuntime final : public TdRuntime {
                             {"limit", static_cast<std::int64_t>(request.limit)}}});
     }
 
+    TdValue make_get_active_sessions() override {
+        return make_native_get_active_sessions();
+    }
+
+    TdValue make_terminate_session(std::int64_t session_id) override {
+        return make_native_terminate_session(session_id);
+    }
+
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               TdValue function) override {
         static_cast<void>(client_generation);
@@ -761,6 +953,30 @@ TdValue convert_production_response_for_test(TdValue object) {
         return {};
     }
     return convert_response(std::move(*native));
+}
+
+TdValue convert_production_sessions_for_test(TdValue object) {
+    auto* native = object.get_if<NativeObjectPtr>();
+    if (native == nullptr || *native == nullptr) {
+        return session_conversion_error();
+    }
+    if ((*native)->get_id() != td_api::sessions::ID) {
+        return session_conversion_error((*native)->get_id());
+    }
+    return convert_sessions(td_api::move_object_as<td_api::sessions>(std::move(*native)));
+}
+
+TdValue make_production_get_active_sessions_for_test() {
+    return make_native_get_active_sessions();
+}
+
+TdValue make_production_terminate_session_for_test(std::int64_t session_id) {
+    return make_native_terminate_session(session_id);
+}
+
+bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    return native != nullptr && *native != nullptr && native_function_matches(**native, kind);
 }
 
 std::optional<AuthStateData>

@@ -315,6 +315,8 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
+    case TdFunctionKind::GetActiveSessions:
+    case TdFunctionKind::TerminateSession:
         return "other";
     }
     return "other";

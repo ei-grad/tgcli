@@ -32,6 +32,8 @@ enum class TdFunctionKind {
     GetMe,
     GetSavedMessagesTags,
     SearchSavedMessages,
+    GetActiveSessions,
+    TerminateSession,
     LogOut,
     Close,
 };
@@ -66,6 +68,10 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getSavedMessagesTags";
     case TdFunctionKind::SearchSavedMessages:
         return "searchSavedMessages";
+    case TdFunctionKind::GetActiveSessions:
+        return "getActiveSessions";
+    case TdFunctionKind::TerminateSession:
+        return "terminateSession";
     case TdFunctionKind::LogOut:
         return "logOut";
     case TdFunctionKind::Close:
@@ -549,6 +555,102 @@ struct TdSearchSavedMessagesRequest {
     std::int32_t limit = 0;
 };
 
+enum class TdSessionDeviceType {
+    Android,
+    Apple,
+    Brave,
+    Chrome,
+    Edge,
+    Firefox,
+    Ipad,
+    Iphone,
+    Linux,
+    Mac,
+    Opera,
+    Safari,
+    Ubuntu,
+    Unknown,
+    Vivaldi,
+    Windows,
+    Xbox,
+};
+
+constexpr std::string_view td_session_device_type_name(TdSessionDeviceType type) {
+    switch (type) {
+    case TdSessionDeviceType::Android:
+        return "android";
+    case TdSessionDeviceType::Apple:
+        return "apple";
+    case TdSessionDeviceType::Brave:
+        return "brave";
+    case TdSessionDeviceType::Chrome:
+        return "chrome";
+    case TdSessionDeviceType::Edge:
+        return "edge";
+    case TdSessionDeviceType::Firefox:
+        return "firefox";
+    case TdSessionDeviceType::Ipad:
+        return "ipad";
+    case TdSessionDeviceType::Iphone:
+        return "iphone";
+    case TdSessionDeviceType::Linux:
+        return "linux";
+    case TdSessionDeviceType::Mac:
+        return "mac";
+    case TdSessionDeviceType::Opera:
+        return "opera";
+    case TdSessionDeviceType::Safari:
+        return "safari";
+    case TdSessionDeviceType::Ubuntu:
+        return "ubuntu";
+    case TdSessionDeviceType::Unknown:
+        return "unknown";
+    case TdSessionDeviceType::Vivaldi:
+        return "vivaldi";
+    case TdSessionDeviceType::Windows:
+        return "windows";
+    case TdSessionDeviceType::Xbox:
+        return "xbox";
+    }
+    return "unknown";
+}
+
+struct TdSession {
+    std::string id;
+    bool is_current = false;
+    bool is_password_pending = false;
+    bool is_unconfirmed = false;
+    bool can_accept_secret_chats = false;
+    bool can_accept_calls = false;
+    TdSessionDeviceType device_type = TdSessionDeviceType::Unknown;
+    std::int32_t api_id = 0;
+    std::string application_name;
+    std::string application_version;
+    bool is_official_application = false;
+    std::string device_model;
+    std::string platform;
+    std::string system_version;
+    std::optional<std::string> log_in_date;
+    std::optional<std::string> last_active_date;
+    std::string ip_address;
+    std::string location;
+
+    bool operator==(const TdSession&) const = default;
+};
+
+struct TdSessions {
+    std::vector<TdSession> items;
+    std::int32_t inactive_session_ttl_days = 0;
+
+    bool operator==(const TdSessions&) const = default;
+};
+
+struct TdSessionConversionError {
+    std::optional<std::int32_t> tdlib_type_id;
+
+    bool operator==(const TdSessionConversionError&) const = default;
+};
+
 enum class TdBuiltinFunction { GetAuthorizationState, LogOut, Close };
 
 struct TdRuntimeEvent {
@@ -580,6 +682,8 @@ class TdRuntime {
     virtual TdValue make_auth_function(TdAuthRequest request) = 0;
     virtual TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) = 0;
     virtual TdValue make_search_saved_messages(TdSearchSavedMessagesRequest request) = 0;
+    virtual TdValue make_get_active_sessions() = 0;
+    virtual TdValue make_terminate_session(std::int64_t session_id) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
                       std::uint64_t query_id, TdValue function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;

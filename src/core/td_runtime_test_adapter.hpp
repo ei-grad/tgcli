@@ -10,6 +10,10 @@
 namespace tgcli::core::detail {
 
 TdValue convert_production_response_for_test(TdValue object);
+TdValue convert_production_sessions_for_test(TdValue object);
+TdValue make_production_get_active_sessions_for_test();
+TdValue make_production_terminate_session_for_test(std::int64_t session_id);
+bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind);
 
 std::optional<AuthStateData>
 convert_production_authorization_state_for_test(const TdValue& object,
