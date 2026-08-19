@@ -36,6 +36,7 @@ add_executable(tgcli_unit_tests
     prompt_test.cpp
     render_test.cpp
     schema_matcher.cpp
+    schema_catalog_test.cpp
     schema_test.cpp
     session_schema_test.cpp
     stream_schema_test.cpp
@@ -47,7 +48,7 @@ add_executable(tgcli_unit_tests
     td_runtime_test.cpp
     support/scripted_td_runtime.cpp)
 target_link_libraries(tgcli_unit_tests
-    PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_cli tgcli_core Td::TdStatic
+    PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_cli tgcli_core tgcli_schema Td::TdStatic
         Catch2::Catch2WithMain jsoncons)
 target_include_directories(tgcli_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(tgcli_unit_tests tgcli)
@@ -62,7 +63,14 @@ target_compile_definitions(tgcli_unit_tests
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).
 catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS)
 
-find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME schema-asset-generator
+    COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}"
+        -p "test_schema_asset_generator.py")
+set_tests_properties(
+    schema-asset-generator
+    PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 add_test(
     NAME dependency-lock-offline
     COMMAND "${Python3_EXECUTABLE}"

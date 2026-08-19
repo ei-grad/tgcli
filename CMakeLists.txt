@@ -14,6 +14,8 @@ option(TGCLI_SYSTEM_TDLIB
 option(TGCLI_BUILD_TESTS "Build tests" ON)
 option(TGCLI_WERROR "Treat compiler warnings as errors" OFF)
 
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+
 # These exact source commits are mirrored in release/dependencies.lock.json.
 # A TDLib bump is a contract-change-class PR (REVIEW.md §7).
 set(TGCLI_TDLIB_REV a17f87c4cff7b90b278d12b91ba0614383aaee82)
@@ -135,6 +137,30 @@ target_include_directories(tgcli_common INTERFACE
 target_compile_options(tgcli_common INTERFACE
     -Wall -Wextra -Wpedantic
     $<$<BOOL:${TGCLI_WERROR}>:-Werror>)
+
+file(GLOB TGCLI_SCHEMA_ASSET_INPUTS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/docs/schemas/*.json")
+set(TGCLI_GENERATED_SCHEMA_ASSETS
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/schema_assets.cpp")
+add_custom_command(
+    OUTPUT "${TGCLI_GENERATED_SCHEMA_ASSETS}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_schema_assets.py"
+        emit-cpp
+        --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+        --output "${TGCLI_GENERATED_SCHEMA_ASSETS}"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_schema_assets.py"
+        ${TGCLI_SCHEMA_ASSET_INPUTS}
+    VERBATIM)
+set_source_files_properties("${TGCLI_GENERATED_SCHEMA_ASSETS}" PROPERTIES GENERATED TRUE)
+
+add_library(tgcli_schema STATIC
+    src/cli/schema_catalog.cpp
+    "${TGCLI_GENERATED_SCHEMA_ASSETS}")
+target_link_libraries(tgcli_schema PUBLIC tgcli_common)
 
 add_library(tgcli_proto STATIC
     src/proto/destructive_plan.cpp

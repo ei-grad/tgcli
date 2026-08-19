@@ -1,0 +1,53 @@
+{
+  "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "commands": {
+    "account add": {
+      "error": "account.error.schema.json"
+    },
+    "account list": {
+      "error": "account.error.schema.json"
+    },
+    "account remove": {
+      "error": "account-remove.error.schema.json"
+    },
+    "account show": {
+      "error": "account.error.schema.json"
+    },
+    "account use": {
+      "error": "account.error.schema.json"
+    },
+    "daemon restart": {
+      "error": "daemon.error.schema.json"
+    },
+    "daemon status": {
+      "error": "daemon.error.schema.json"
+    },
+    "daemon stop": {
+      "error": "daemon.error.schema.json"
+    },
+    "login": {
+      "error": "auth.error.schema.json"
+    },
+    "logout": {
+      "error": "logout.error.schema.json"
+    },
+    "me": {
+      "error": "auth.error.schema.json"
+    },
+    "resolve": {
+      "error": "resolve.error.schema.json"
+    },
+    "saved search": {
+      "error": "saved.error.schema.json"
+    },
+    "saved tags": {
+      "error": "saved.error.schema.json"
+    },
+    "session list": {
+      "error": "session.error.schema.json"
+    },
+    "session terminate": {
+      "error": "session.error.schema.json"
+    }
+  }
+}
