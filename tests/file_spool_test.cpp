@@ -849,6 +849,266 @@ TEST_CASE("file spool detects destination replacement and retains contradiction"
     CHECK(std::filesystem::is_symlink(destination));
 }
 
+TEST_CASE("file spool revalidates durable destination bytes before publication", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto destination = temp.state() / "spool" / std::string(kInvocation) / "source.bin";
+
+    SECTION("truncate") {
+        bool file_synced = false;
+        bool invocation_synced = false;
+        auto hooks = std::make_shared<testing::FileSpoolHooks>();
+        hooks->sync = [&](FileSpoolStage stage, int descriptor) {
+            file_synced = file_synced || stage == FileSpoolStage::BeforeFileSync;
+            invocation_synced = invocation_synced || stage == FileSpoolStage::BeforeInvocationSync;
+            return ::fsync(descriptor);
+        };
+        hooks->at_stage = [&](FileSpoolStage stage) {
+            if (stage == FileSpoolStage::BeforeDestinationRevalidate) {
+                REQUIRE(file_synced);
+                REQUIRE(invocation_synced);
+                REQUIRE(::truncate(destination.c_str(), 3) == 0);
+            }
+        };
+        const auto error = require_error(create_spool_file(
+            source, temp.state().string(), std::string(kInvocation), ::getuid(), {}, hooks));
+        CHECK(error.kind == FileSpoolErrorKind::Contradiction);
+    }
+    SECTION("same-size rewrite") {
+        auto hooks = mutation_hook(FileSpoolStage::BeforeDestinationRevalidate,
+                                   [&] { temp.write(destination, "changed"); });
+        const auto error = require_error(create_spool_file(
+            source, temp.state().string(), std::string(kInvocation), ::getuid(), {}, hooks));
+        CHECK(error.kind == FileSpoolErrorKind::Contradiction);
+    }
+}
+
+TEST_CASE("file spool revalidates retained invocation edge before publication", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto invocation = temp.state() / "spool" / std::string(kInvocation);
+    const auto moved = temp.state() / "spool" / "moved";
+    auto hooks = mutation_hook(FileSpoolStage::BeforeDestinationCreate, [&] {
+        REQUIRE(::rename(invocation.c_str(), moved.c_str()) == 0);
+        std::filesystem::create_directory(invocation);
+        REQUIRE(::chmod(invocation.c_str(), 0700) == 0);
+    });
+    const auto error = require_error(create_spool_file(
+        source, temp.state().string(), std::string(kInvocation), ::getuid(), {}, hooks));
+    CHECK(error.kind == FileSpoolErrorKind::Contradiction);
+    CHECK_FALSE(std::filesystem::exists(invocation / "source.bin"));
+    CHECK(std::filesystem::exists(moved / "source.bin"));
+}
+
+TEST_CASE("file spool cleanup retry proves an already absent invocation durable", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto created = require_created(
+        create_spool_file(source, temp.state().string(), std::string(kInvocation), ::getuid()));
+
+    auto fail_sync = std::make_shared<testing::FileSpoolHooks>();
+    fail_sync->should_fail = [](FileSpoolStage stage) {
+        return stage == FileSpoolStage::BeforeCleanupRootSync;
+    };
+    CHECK(require_error(cleanup_spool_file(temp.state().string(), created.reference, ::getuid(), {},
+                                           fail_sync))
+              .durability_reason == DurabilityReason::DirectorySyncFailed);
+    CHECK_FALSE(std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation)));
+
+    std::size_t root_syncs = 0;
+    auto retry_hooks = std::make_shared<testing::FileSpoolHooks>();
+    retry_hooks->sync = [&](FileSpoolStage stage, int descriptor) {
+        if (stage == FileSpoolStage::BeforeCleanupRootSync) {
+            ++root_syncs;
+        }
+        return ::fsync(descriptor);
+    };
+    const auto retry =
+        cleanup_spool_file(temp.state().string(), created.reference, ::getuid(), {}, retry_hooks);
+    REQUIRE(std::holds_alternative<SpoolCleanupResult>(retry));
+    CHECK_FALSE(std::get<SpoolCleanupResult>(retry).removed);
+    CHECK(root_syncs == 1);
+}
+
+TEST_CASE("file spool defers cleanup cancellation through namespace durability", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto created = require_created(
+        create_spool_file(source, temp.state().string(), std::string(kInvocation), ::getuid()));
+    std::stop_source stop;
+    const FileSpoolControl control{std::nullopt, stop.get_token()};
+    std::size_t root_syncs = 0;
+    auto hooks = std::make_shared<testing::FileSpoolHooks>();
+    hooks->at_stage = [&](FileSpoolStage stage) {
+        if (stage == FileSpoolStage::BeforeCleanupInvocationRemove) {
+            stop.request_stop();
+        }
+    };
+    hooks->sync = [&](FileSpoolStage stage, int descriptor) {
+        if (stage == FileSpoolStage::BeforeCleanupRootSync) {
+            ++root_syncs;
+        }
+        return ::fsync(descriptor);
+    };
+    const auto error = require_error(
+        cleanup_spool_file(temp.state().string(), created.reference, ::getuid(), control, hooks));
+    CHECK(error.kind == FileSpoolErrorKind::Cancelled);
+    CHECK(root_syncs == 1);
+    CHECK_FALSE(std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation)));
+}
+
+TEST_CASE("file spool retries uncertain root creation parent sync", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    auto fail_parent_sync = std::make_shared<testing::FileSpoolHooks>();
+    fail_parent_sync->should_fail = [](FileSpoolStage stage) {
+        return stage == FileSpoolStage::BeforeAccountStateSync;
+    };
+    CHECK(require_error(create_spool_file(source, temp.state().string(), std::string(kInvocation),
+                                          ::getuid(), {}, fail_parent_sync))
+              .durability_reason == DurabilityReason::DirectorySyncFailed);
+    REQUIRE(std::filesystem::is_directory(temp.state() / "spool"));
+
+    auto retry_source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto retry_error = require_error(create_spool_file(retry_source, temp.state().string(),
+                                                             std::string(kInvocation), ::getuid(),
+                                                             {}, fail_parent_sync));
+    CHECK(retry_error.durability_reason == DurabilityReason::DirectorySyncFailed);
+    CHECK_FALSE(std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation)));
+
+    auto final_source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    const auto created = require_created(create_spool_file(final_source, temp.state().string(),
+                                                           std::string(kInvocation), ::getuid()));
+    CHECK(std::filesystem::exists(created.local_path));
+}
+
+TEST_CASE("file spool defers root creation cancellation through parent durability",
+          "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    std::stop_source stop;
+    const FileSpoolControl control{std::nullopt, stop.get_token()};
+    std::size_t parent_syncs = 0;
+    auto hooks = std::make_shared<testing::FileSpoolHooks>();
+    hooks->at_stage = [&](FileSpoolStage stage) {
+        if (stage == FileSpoolStage::AfterRootCreate) {
+            stop.request_stop();
+        }
+    };
+    hooks->sync = [&](FileSpoolStage stage, int descriptor) {
+        if (stage == FileSpoolStage::BeforeAccountStateSync) {
+            ++parent_syncs;
+        }
+        return ::fsync(descriptor);
+    };
+    const auto error = require_error(create_spool_file(
+        source, temp.state().string(), std::string(kInvocation), ::getuid(), control, hooks));
+    CHECK(error.kind == FileSpoolErrorKind::Cancelled);
+    CHECK(parent_syncs == 1);
+    CHECK(std::filesystem::is_directory(temp.state() / "spool"));
+    CHECK_FALSE(std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation)));
+}
+
+TEST_CASE("file spool defers invocation cancellation through root durability", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+    std::stop_source stop;
+    const FileSpoolControl control{std::nullopt, stop.get_token()};
+    std::size_t root_syncs = 0;
+    auto hooks = std::make_shared<testing::FileSpoolHooks>();
+    hooks->at_stage = [&](FileSpoolStage stage) {
+        if (stage == FileSpoolStage::AfterInvocationCreate) {
+            stop.request_stop();
+        }
+    };
+    hooks->sync = [&](FileSpoolStage stage, int descriptor) {
+        if (stage == FileSpoolStage::BeforeRootSync) {
+            ++root_syncs;
+        }
+        return ::fsync(descriptor);
+    };
+    const auto error = require_error(create_spool_file(
+        source, temp.state().string(), std::string(kInvocation), ::getuid(), control, hooks));
+    CHECK(error.kind == FileSpoolErrorKind::Cancelled);
+    CHECK(root_syncs == 1);
+    REQUIRE(error.cleanup_reference);
+    CHECK(std::filesystem::is_directory(temp.state() / "spool" / std::string(kInvocation)));
+}
+
+TEST_CASE("file spool stage controls retain typed errors across operations", "[file-spool]") {
+    const TempTree temp;
+    temp.write(temp.source(), "payload");
+    std::filesystem::create_directory(temp.state() / "spool");
+    REQUIRE(::chmod((temp.state() / "spool").c_str(), 0700) == 0);
+
+    SECTION("create cancellation") {
+        std::stop_source stop;
+        const FileSpoolControl control{std::nullopt, stop.get_token()};
+        auto hooks =
+            mutation_hook(FileSpoolStage::BeforeAccountStateOpen, [&] { stop.request_stop(); });
+        auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
+        CHECK(require_error(create_spool_file(source, temp.state().string(),
+                                              std::string(kInvocation), ::getuid(), control, hooks))
+                  .kind == FileSpoolErrorKind::Cancelled);
+    }
+    SECTION("inspect timeout") {
+        FileSpoolControl control;
+        auto hooks = mutation_hook(FileSpoolStage::AfterAccountStateOpen, [&] {
+            control.deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+        });
+        CHECK(require_error(inspect_spool_root(temp.state().string(), ::getuid(), control, hooks))
+                  .kind == FileSpoolErrorKind::TimedOut);
+    }
+    SECTION("enumerate cancellation") {
+        std::stop_source stop;
+        const FileSpoolControl control{std::nullopt, stop.get_token()};
+        auto hooks =
+            mutation_hook(FileSpoolStage::BeforeRootEnumeration, [&] { stop.request_stop(); });
+        CHECK(require_error(enumerate_spool(temp.state().string(), ::getuid(), control, hooks))
+                  .kind == FileSpoolErrorKind::Cancelled);
+    }
+    SECTION("cleanup timeout") {
+        const SpoolRef reference{
+            "spool/00112233445566778899aabbccddeeff/source.bin",
+            FileSnapshot{"/source.bin", "source.bin", 1, "sha256:00", 1, 1, 1, 1}};
+        FileSpoolControl control;
+        auto hooks = mutation_hook(FileSpoolStage::BeforeCleanupOpen, [&] {
+            control.deadline = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+        });
+        CHECK(require_error(
+                  cleanup_spool_file(temp.state().string(), reference, ::getuid(), control, hooks))
+                  .kind == FileSpoolErrorKind::TimedOut);
+    }
+}
+
+TEST_CASE("file spool reconciliation reports first sorted child unequal expected", "[file-spool]") {
+    const TempTree temp;
+    const auto invocation = temp.state() / "spool" / std::string(kInvocation);
+    std::filesystem::create_directories(invocation);
+    REQUIRE(::chmod((temp.state() / "spool").c_str(), 0700) == 0);
+    REQUIRE(::chmod(invocation.c_str(), 0700) == 0);
+    temp.write(invocation / "a", "expected");
+    temp.write(invocation / "b", "extra-one");
+    temp.write(invocation / "z", "extra-two");
+
+    const auto inventory =
+        std::get<SpoolInventory>(enumerate_spool(temp.state().string(), ::getuid()));
+    const auto reconciled = reconcile_spool_inventory(inventory, {{std::string(kInvocation), "a"}});
+    REQUIRE(std::holds_alternative<SpoolReconciliation>(reconciled));
+    const auto& contradiction = std::get<SpoolReconciliation>(reconciled).contradiction;
+    REQUIRE(contradiction);
+    const auto expected = encode_filesystem_diagnostic_path((invocation / "b").string());
+    REQUIRE(expected);
+    CHECK(contradiction->bytes_hex == expected->bytes_hex);
+}
+
 TEST_CASE("file spool concurrent same invocation has one winner and no overwrite",
           "[file-spool][concurrency]") {
     const TempTree temp;

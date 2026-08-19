@@ -81,8 +81,19 @@ struct DirectoryEdge {
 struct RootHandle {
     Descriptor account_state;
     Descriptor root;
+    struct stat root_status {};
     std::string account_state_path;
     bool absent{false};
+};
+
+struct InvocationHandle {
+    Descriptor descriptor;
+    struct stat status {};
+};
+
+struct DestinationHandle {
+    Descriptor descriptor;
+    struct stat status {};
 };
 
 enum class SourcePass { First, Second };
@@ -134,6 +145,13 @@ void notify(const std::shared_ptr<const testing::FileSpoolHooks>& hooks, FileSpo
     if (hooks && hooks->at_stage) {
         hooks->at_stage(stage);
     }
+}
+
+std::optional<FileSpoolError>
+notify_controlled(const std::shared_ptr<const testing::FileSpoolHooks>& hooks, FileSpoolStage stage,
+                  const FileSpoolControl& control) {
+    notify(hooks, stage);
+    return control_error(control);
 }
 
 bool injected(const std::shared_ptr<const testing::FileSpoolHooks>& hooks, FileSpoolStage stage) {
@@ -640,6 +658,9 @@ write_all(int descriptor, const unsigned char* bytes, std::size_t size,
             return error;
         }
         notify(hooks, FileSpoolStage::DuringDestinationWrite);
+        if (const auto error = control_error(control)) {
+            return error;
+        }
         if (injected(hooks, FileSpoolStage::DuringDestinationWrite)) {
             return durability_error(DurabilityReason::WriteFailed);
         }
@@ -685,6 +706,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
             return *error;
         }
         notify(hooks, FileSpoolStage::BeforeSourceEntryStat);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
         if (injected(hooks, FileSpoolStage::BeforeSourceEntryStat)) {
             return durability_error(DurabilityReason::OpenFailed);
         }
@@ -694,6 +718,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
             return component_error(pass, errno, DurabilityReason::OpenFailed);
         }
         notify(hooks, FileSpoolStage::AfterSourceEntryStat);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
         if (S_ISLNK(entry.st_mode)) {
             return pass == SourcePass::First ? source_error(SourceFileReason::Symlink)
                                              : simple_error(FileSpoolErrorKind::InputChanged);
@@ -728,6 +755,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
     }
     const auto& target = locator.components.back();
     notify(hooks, FileSpoolStage::BeforeSourceEntryStat);
+    if (const auto error = control_error(control)) {
+        return *error;
+    }
     if (injected(hooks, FileSpoolStage::BeforeSourceEntryStat)) {
         return durability_error(DurabilityReason::OpenFailed);
     }
@@ -736,6 +766,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
         return component_error(pass, errno, DurabilityReason::OpenFailed);
     }
     notify(hooks, FileSpoolStage::AfterSourceEntryStat);
+    if (const auto error = control_error(control)) {
+        return *error;
+    }
     if (S_ISLNK(entry.st_mode)) {
         return pass == SourcePass::First ? source_error(SourceFileReason::Symlink)
                                          : simple_error(FileSpoolErrorKind::InputChanged);
@@ -769,6 +802,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
         return simple_error(FileSpoolErrorKind::InputChanged);
     }
     notify(hooks, FileSpoolStage::AfterSourceOpen);
+    if (const auto error = control_error(control)) {
+        return *error;
+    }
 
     Sha256 digest;
     std::array<unsigned char, kBufferSize> buffer{};
@@ -781,6 +817,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
             return *error;
         }
         notify(hooks, stage);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
         if (injected(hooks, stage)) {
             return durability_error(DurabilityReason::ReadFailed);
         }
@@ -815,6 +854,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
             return *error;
         }
         notify(hooks, stage);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
         unsigned char extra = 0;
         const auto count = read_bytes(io, source.get(), &extra, 1, hooks);
         if (count < 0 && errno == EINTR) {
@@ -830,6 +872,9 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
     }
 
     notify(hooks, FileSpoolStage::AfterSourceRead);
+    if (const auto error = control_error(control)) {
+        return *error;
+    }
     struct stat after {};
     if (::fstat(source.get(), &after) != 0) {
         return durability_error(DurabilityReason::ReadFailed);
@@ -890,18 +935,21 @@ DurabilityReason root_reason(const struct stat& status, uid_t expected_uid) {
 
 // Every account-state component is checked before advancing the retained descriptor.
 // NOLINTBEGIN(readability-function-cognitive-complexity)
-std::variant<Descriptor, DurabilityReason>
+std::variant<Descriptor, FileSpoolError>
 open_account_state(std::string_view account_state, uid_t expected_uid,
                    const FileSpoolControl& control,
                    const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
-    notify(hooks, FileSpoolStage::BeforeAccountStateOpen);
-    if (control_error(control) || injected(hooks, FileSpoolStage::BeforeAccountStateOpen) ||
+    if (const auto error =
+            notify_controlled(hooks, FileSpoolStage::BeforeAccountStateOpen, control)) {
+        return *error;
+    }
+    if (injected(hooks, FileSpoolStage::BeforeAccountStateOpen) ||
         !canonical_absolute_directory(account_state) || account_state == "/") {
-        return DurabilityReason::PathInvalid;
+        return durability_error(DurabilityReason::PathInvalid);
     }
     Descriptor current(::open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW));
     if (!current) {
-        return DurabilityReason::OpenFailed;
+        return durability_error(DurabilityReason::OpenFailed);
     }
     const auto components = split_components(account_state, true);
     for (std::size_t index = 0; index < components.size(); ++index) {
@@ -912,40 +960,43 @@ open_account_state(std::string_view account_state, uid_t expected_uid,
         struct stat entry {};
         if (::fstatat(current.get(), component.c_str(), &entry, AT_SYMLINK_NOFOLLOW) != 0) {
             return errno == ELOOP || errno == ENOENT || errno == ENOTDIR
-                       ? DurabilityReason::PathInvalid
-                       : DurabilityReason::OpenFailed;
+                       ? durability_error(DurabilityReason::PathInvalid)
+                       : durability_error(DurabilityReason::OpenFailed);
         }
         if (S_ISLNK(entry.st_mode)) {
-            return DurabilityReason::PathInvalid;
+            return durability_error(DurabilityReason::PathInvalid);
         }
         if (!S_ISDIR(entry.st_mode)) {
-            return DurabilityReason::WrongType;
+            return durability_error(DurabilityReason::WrongType);
         }
         Descriptor child(::openat(current.get(), component.c_str(),
                                   O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW));
         if (!child) {
             return errno == ELOOP || errno == ENOENT || errno == ENOTDIR
-                       ? DurabilityReason::PathInvalid
-                       : DurabilityReason::OpenFailed;
+                       ? durability_error(DurabilityReason::PathInvalid)
+                       : durability_error(DurabilityReason::OpenFailed);
         }
         struct stat opened {};
         if (::fstat(child.get(), &opened) != 0) {
-            return DurabilityReason::OpenFailed;
+            return durability_error(DurabilityReason::OpenFailed);
         }
         if (!same_directory(entry, opened)) {
-            return DurabilityReason::PathInvalid;
+            return durability_error(DurabilityReason::PathInvalid);
         }
         current = std::move(child);
         if (index + 1 == components.size()) {
             if (opened.st_uid != expected_uid) {
-                return DurabilityReason::WrongOwner;
+                return durability_error(DurabilityReason::WrongOwner);
             }
             if ((opened.st_mode & 07777) != 0700) {
-                return DurabilityReason::WrongMode;
+                return durability_error(DurabilityReason::WrongMode);
             }
         }
     }
-    notify(hooks, FileSpoolStage::AfterAccountStateOpen);
+    if (const auto error =
+            notify_controlled(hooks, FileSpoolStage::AfterAccountStateOpen, control)) {
+        return *error;
+    }
     return current;
 }
 // NOLINTEND(readability-function-cognitive-complexity)
@@ -960,8 +1011,8 @@ open_spool_root(std::string account_state, uid_t expected_uid, bool create,
         return *error;
     }
     auto account = open_account_state(account_state, expected_uid, control, hooks);
-    if (const auto* reason = std::get_if<DurabilityReason>(&account)) {
-        return durability_error(*reason);
+    if (const auto* error = std::get_if<FileSpoolError>(&account)) {
+        return *error;
     }
     RootHandle handle;
     handle.account_state = std::move(std::get<Descriptor>(account));
@@ -971,7 +1022,10 @@ open_spool_root(std::string account_state, uid_t expected_uid, bool create,
         if (const auto error = control_error(control)) {
             return *error;
         }
-        notify(hooks, FileSpoolStage::BeforeRootInspect);
+        if (const auto error =
+                notify_controlled(hooks, FileSpoolStage::BeforeRootInspect, control)) {
+            return *error;
+        }
         if (injected(hooks, FileSpoolStage::BeforeRootInspect)) {
             return durability_error(DurabilityReason::OpenFailed);
         }
@@ -985,8 +1039,8 @@ open_spool_root(std::string account_state, uid_t expected_uid, bool create,
                 handle.absent = true;
                 return handle;
             }
-            notify(hooks, FileSpoolStage::BeforeRootCreate);
-            if (const auto error = control_error(control)) {
+            if (const auto error =
+                    notify_controlled(hooks, FileSpoolStage::BeforeRootCreate, control)) {
                 return *error;
             }
             if (injected(hooks, FileSpoolStage::BeforeRootCreate)) {
@@ -1017,18 +1071,22 @@ open_spool_root(std::string account_state, uid_t expected_uid, bool create,
                 return durability_error(DurabilityReason::PathInvalid);
             }
             notify(hooks, FileSpoolStage::AfterRootCreate);
-            if (const auto error = control_error(control)) {
-                return *error;
-            }
             if (sync_descriptor(FileSpoolStage::BeforeAccountStateSync, handle.account_state.get(),
                                 hooks) != 0) {
                 return durability_error(DurabilityReason::DirectorySyncFailed);
             }
+            if (const auto error = control_error(control)) {
+                return *error;
+            }
             handle.root = std::move(created);
+            handle.root_status = created_status;
             return handle;
         }
         mutate_metadata(hooks, FileSpoolMetadata::RootEntry, entry);
-        notify(hooks, FileSpoolStage::AfterRootEntryStat);
+        if (const auto error =
+                notify_controlled(hooks, FileSpoolStage::AfterRootEntryStat, control)) {
+            return *error;
+        }
         if (S_ISLNK(entry.st_mode)) {
             return durability_error(DurabilityReason::PathInvalid);
         }
@@ -1047,14 +1105,26 @@ open_spool_root(std::string account_state, uid_t expected_uid, bool create,
             return durability_error(DurabilityReason::OpenFailed);
         }
         mutate_metadata(hooks, FileSpoolMetadata::RootDescriptor, opened_status);
-        notify(hooks, FileSpoolStage::AfterRootOpen);
+        if (const auto error = notify_controlled(hooks, FileSpoolStage::AfterRootOpen, control)) {
+            return *error;
+        }
         if (!same_directory(entry, opened_status)) {
             return durability_error(DurabilityReason::PathInvalid);
         }
         if (!valid_private_directory(opened_status, expected_uid)) {
             return durability_error(root_reason(opened_status, expected_uid));
         }
+        if (create && sync_descriptor(FileSpoolStage::BeforeAccountStateSync,
+                                      handle.account_state.get(), hooks) != 0) {
+            return durability_error(DurabilityReason::DirectorySyncFailed);
+        }
+        if (create) {
+            if (const auto error = control_error(control)) {
+                return *error;
+            }
+        }
         handle.root = std::move(opened);
+        handle.root_status = opened_status;
         return handle;
     }
 }
@@ -1088,12 +1158,12 @@ FileSpoolError with_cleanup(FileSpoolError error, const SpoolRef& reference) {
     return error;
 }
 
-std::variant<Descriptor, FileSpoolError>
+std::variant<InvocationHandle, FileSpoolError>
 create_invocation_directory(RootHandle& root, std::string_view invocation_id, uid_t expected_uid,
                             const FileSpoolControl& control,
                             const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
-    notify(hooks, FileSpoolStage::BeforeInvocationCreate);
-    if (const auto error = control_error(control)) {
+    if (const auto error =
+            notify_controlled(hooks, FileSpoolStage::BeforeInvocationCreate, control)) {
         return *error;
     }
     if (injected(hooks, FileSpoolStage::BeforeInvocationCreate)) {
@@ -1127,16 +1197,16 @@ create_invocation_directory(RootHandle& root, std::string_view invocation_id, ui
         return contradiction_error();
     }
     notify(hooks, FileSpoolStage::AfterInvocationCreate);
-    if (const auto error = control_error(control)) {
-        return *error;
-    }
     if (sync_descriptor(FileSpoolStage::BeforeRootSync, root.root.get(), hooks) != 0) {
         return durability_error(DurabilityReason::DirectorySyncFailed);
     }
-    return invocation;
+    if (const auto error = control_error(control)) {
+        return *error;
+    }
+    return InvocationHandle{.descriptor = std::move(invocation), .status = opened};
 }
 
-std::variant<Descriptor, FileSpoolError>
+std::variant<DestinationHandle, FileSpoolError>
 create_destination(int invocation, std::string_view name, uid_t expected_uid,
                    const FileSpoolControl& control,
                    const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
@@ -1148,7 +1218,10 @@ create_destination(int invocation, std::string_view name, uid_t expected_uid,
     if (name_max < 0 || static_cast<std::uint64_t>(name_max) < name.size()) {
         return durability_error(DurabilityReason::PathInvalid);
     }
-    notify(hooks, FileSpoolStage::BeforeDestinationCreate);
+    if (const auto error =
+            notify_controlled(hooks, FileSpoolStage::BeforeDestinationCreate, control)) {
+        return *error;
+    }
     if (injected(hooks, FileSpoolStage::BeforeDestinationCreate)) {
         return durability_error(DurabilityReason::WriteFailed);
     }
@@ -1169,24 +1242,137 @@ create_destination(int invocation, std::string_view name, uid_t expected_uid,
     if (::fstat(destination.get(), &opened) != 0 || !valid_private_file(opened, expected_uid)) {
         return durability_error(DurabilityReason::PathInvalid);
     }
-    notify(hooks, FileSpoolStage::AfterDestinationCreate);
-    return destination;
+    if (const auto error =
+            notify_controlled(hooks, FileSpoolStage::AfterDestinationCreate, control)) {
+        return *error;
+    }
+    return DestinationHandle{.descriptor = std::move(destination), .status = opened};
 }
 
-std::optional<FileSpoolError>
-revalidate_destination(int invocation, std::string_view name, int destination, uid_t expected_uid,
-                       const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+bool stable_file_identity(const struct stat& before, const struct stat& after) {
+    const auto before_times = file_times(before);
+    const auto after_times = file_times(after);
+    return before_times && after_times && same_inode(before, after) &&
+           same_file_type(before, after) && before.st_size == after.st_size &&
+           before.st_mode == after.st_mode && before.st_uid == after.st_uid &&
+           before.st_nlink == after.st_nlink && *before_times == *after_times;
+}
+
+std::optional<FileSpoolError> revalidate_publication(
+    RootHandle& root, std::string_view invocation_id, const InvocationHandle& invocation,
+    std::string_view name, const DestinationHandle& destination, const FileSnapshot& expected,
+    uid_t expected_uid, const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
     notify(hooks, FileSpoolStage::BeforeDestinationRevalidate);
-    struct stat entry {};
-    struct stat opened {};
-    if (::fstatat(invocation, std::string(name).c_str(), &entry, AT_SYMLINK_NOFOLLOW) != 0 ||
-        ::fstat(destination, &opened) != 0) {
+
+    struct stat root_entry {};
+    struct stat root_opened {};
+    struct stat invocation_entry {};
+    struct stat invocation_opened {};
+    struct stat destination_entry {};
+    struct stat destination_opened {};
+    if (::fstatat(root.account_state.get(), kSpoolName.data(), &root_entry, AT_SYMLINK_NOFOLLOW) !=
+            0 ||
+        ::fstat(root.root.get(), &root_opened) != 0 ||
+        ::fstatat(root.root.get(), std::string(invocation_id).c_str(), &invocation_entry,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(invocation.descriptor.get(), &invocation_opened) != 0 ||
+        ::fstatat(invocation.descriptor.get(), std::string(name).c_str(), &destination_entry,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(destination.descriptor.get(), &destination_opened) != 0) {
         return contradiction_error();
     }
-    mutate_metadata(hooks, FileSpoolMetadata::DestinationEntry, entry);
-    mutate_metadata(hooks, FileSpoolMetadata::DestinationDescriptor, opened);
-    if (!same_inode(entry, opened) || !valid_private_file(entry, expected_uid) ||
-        !valid_private_file(opened, expected_uid)) {
+    mutate_metadata(hooks, FileSpoolMetadata::RootEntry, root_entry);
+    mutate_metadata(hooks, FileSpoolMetadata::RootDescriptor, root_opened);
+    mutate_metadata(hooks, FileSpoolMetadata::InvocationEntry, invocation_entry);
+    mutate_metadata(hooks, FileSpoolMetadata::InvocationDescriptor, invocation_opened);
+    mutate_metadata(hooks, FileSpoolMetadata::DestinationEntry, destination_entry);
+    mutate_metadata(hooks, FileSpoolMetadata::DestinationDescriptor, destination_opened);
+    if (!same_directory(root.root_status, root_entry) ||
+        !same_directory(root.root_status, root_opened) ||
+        !valid_private_directory(root_entry, expected_uid) ||
+        !valid_private_directory(root_opened, expected_uid) ||
+        !same_directory(invocation.status, invocation_entry) ||
+        !same_directory(invocation.status, invocation_opened) ||
+        !valid_private_directory(invocation_entry, expected_uid) ||
+        !valid_private_directory(invocation_opened, expected_uid) ||
+        !same_inode(destination.status, destination_entry) ||
+        !same_inode(destination.status, destination_opened) ||
+        !valid_private_file(destination_entry, expected_uid) ||
+        !valid_private_file(destination_opened, expected_uid) || destination_opened.st_size < 0 ||
+        static_cast<std::uint64_t>(destination_opened.st_size) != expected.size) {
+        return contradiction_error();
+    }
+
+    const Descriptor reader(::openat(invocation.descriptor.get(), std::string(name).c_str(),
+                                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+    struct stat reader_before {};
+    if (!reader || ::fstat(reader.get(), &reader_before) != 0 ||
+        !same_inode(destination.status, reader_before) ||
+        !valid_private_file(reader_before, expected_uid) || reader_before.st_size < 0 ||
+        static_cast<std::uint64_t>(reader_before.st_size) != expected.size) {
+        return contradiction_error();
+    }
+
+    Sha256 digest;
+    std::array<unsigned char, kBufferSize> buffer{};
+    std::uint64_t total = 0;
+    while (total < expected.size) {
+        const auto requested = static_cast<std::size_t>(std::min<std::uint64_t>(
+            expected.size - total, static_cast<std::uint64_t>(buffer.size())));
+        const auto count = ::read(reader.get(), buffer.data(), requested);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0 || static_cast<std::size_t>(count) > requested) {
+            return contradiction_error();
+        }
+        digest.update(buffer.data(), static_cast<std::size_t>(count));
+        total += static_cast<std::uint64_t>(count);
+    }
+    unsigned char extra = 0;
+    ssize_t extra_count = -1;
+    for (;;) {
+        extra_count = ::read(reader.get(), &extra, 1);
+        if (extra_count >= 0 || errno != EINTR) {
+            break;
+        }
+    }
+    if (extra_count != 0 || "sha256:" + digest.finish() != expected.sha256) {
+        return contradiction_error();
+    }
+
+    struct stat final_root_entry {};
+    struct stat final_root_opened {};
+    struct stat final_invocation_entry {};
+    struct stat final_invocation_opened {};
+    struct stat final_destination_entry {};
+    struct stat final_destination_opened {};
+    struct stat reader_after {};
+    if (::fstatat(root.account_state.get(), kSpoolName.data(), &final_root_entry,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(root.root.get(), &final_root_opened) != 0 ||
+        ::fstatat(root.root.get(), std::string(invocation_id).c_str(), &final_invocation_entry,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(invocation.descriptor.get(), &final_invocation_opened) != 0 ||
+        ::fstatat(invocation.descriptor.get(), std::string(name).c_str(), &final_destination_entry,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        ::fstat(destination.descriptor.get(), &final_destination_opened) != 0 ||
+        ::fstat(reader.get(), &reader_after) != 0 ||
+        !same_directory(root_entry, final_root_entry) ||
+        !same_directory(root_opened, final_root_opened) ||
+        !valid_private_directory(final_root_entry, expected_uid) ||
+        !valid_private_directory(final_root_opened, expected_uid) ||
+        !same_directory(invocation_entry, final_invocation_entry) ||
+        !same_directory(invocation_opened, final_invocation_opened) ||
+        !valid_private_directory(final_invocation_entry, expected_uid) ||
+        !valid_private_directory(final_invocation_opened, expected_uid) ||
+        !stable_file_identity(destination_entry, final_destination_entry) ||
+        !stable_file_identity(destination_opened, final_destination_opened) ||
+        !stable_file_identity(reader_before, reader_after) ||
+        !same_inode(final_destination_entry, final_destination_opened) ||
+        !same_inode(final_destination_opened, reader_after) ||
+        !valid_private_file(final_destination_entry, expected_uid) ||
+        !valid_private_file(final_destination_opened, expected_uid)) {
         return contradiction_error();
     }
     return std::nullopt;
@@ -1215,6 +1401,10 @@ directory_names(int directory, const FileSpoolControl& control,
     errno = 0;
     while (const auto* entry = ::readdir(stream)) {
         notify(hooks, FileSpoolStage::DuringRootEnumeration);
+        if (const auto error = control_error(control)) {
+            ::closedir(stream);
+            return *error;
+        }
         if (injected(hooks, FileSpoolStage::DuringRootEnumeration)) {
             ::closedir(stream);
             return durability_error(DurabilityReason::ReadFailed);
@@ -1222,10 +1412,6 @@ directory_names(int directory, const FileSpoolControl& control,
         const std::string_view name(entry->d_name);
         if (name != "." && name != "..") {
             result.emplace_back(name);
-        }
-        if (const auto error = control_error(control)) {
-            ::closedir(stream);
-            return *error;
         }
     }
     const int read_error = errno;
@@ -1278,8 +1464,9 @@ enumerate_open_root(RootHandle& root, uid_t expected_uid, const FileSpoolControl
         if (!directory_diagnostic) {
             return durability_error(DurabilityReason::SchemaError);
         }
+        const auto& directory_path = *directory_diagnostic;
         if (!valid_invocation_id(invocation_name)) {
-            select_contradiction(inventory.contradiction, *directory_diagnostic);
+            select_contradiction(inventory.contradiction, directory_path);
             continue;
         }
         struct stat entry {};
@@ -1288,19 +1475,19 @@ enumerate_open_root(RootHandle& root, uid_t expected_uid, const FileSpoolControl
         }
         mutate_metadata(hooks, FileSpoolMetadata::InvocationEntry, entry);
         if (S_ISLNK(entry.st_mode) || !valid_private_directory(entry, expected_uid)) {
-            select_contradiction(inventory.contradiction, *directory_diagnostic);
+            select_contradiction(inventory.contradiction, directory_path);
             continue;
         }
         const Descriptor invocation(::openat(root.root.get(), invocation_name.c_str(),
                                              O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW));
         struct stat opened {};
         if (!invocation || ::fstat(invocation.get(), &opened) != 0) {
-            select_contradiction(inventory.contradiction, *directory_diagnostic);
+            select_contradiction(inventory.contradiction, directory_path);
             continue;
         }
         mutate_metadata(hooks, FileSpoolMetadata::InvocationDescriptor, opened);
         if (!same_directory(entry, opened) || !valid_private_directory(opened, expected_uid)) {
-            select_contradiction(inventory.contradiction, *directory_diagnostic);
+            select_contradiction(inventory.contradiction, directory_path);
             continue;
         }
         auto child_names = directory_names(invocation.get(), control, hooks);
@@ -1310,18 +1497,8 @@ enumerate_open_root(RootHandle& root, uid_t expected_uid, const FileSpoolControl
         auto& children = std::get<std::vector<std::string>>(child_names);
         SpoolInvocationObservation observation;
         observation.invocation_id = invocation_name;
-        observation.directory_path = *directory_diagnostic;
-        if (children.empty()) {
-            inventory.invocations.push_back(std::move(observation));
-        } else if (children.size() != 1) {
-            const auto child_diagnostic = diagnostic_for(
-                root.account_state_path, diagnostic_suffix(invocation_name, children.front()));
-            if (!child_diagnostic) {
-                return durability_error(DurabilityReason::SchemaError);
-            }
-            select_contradiction(inventory.contradiction, *child_diagnostic);
-        } else {
-            const auto& child_name = children.front();
+        observation.directory_path = directory_path;
+        for (const auto& child_name : children) {
             const auto child_diagnostic = diagnostic_for(
                 root.account_state_path, diagnostic_suffix(invocation_name, child_name));
             if (!child_diagnostic) {
@@ -1345,19 +1522,23 @@ enumerate_open_root(RootHandle& root, uid_t expected_uid, const FileSpoolControl
                     !valid_private_file(child_opened, expected_uid)) {
                     select_contradiction(inventory.contradiction, *child_diagnostic);
                 } else {
-                    observation.file_name = child_name;
-                    observation.file_path = *child_diagnostic;
-                    inventory.invocations.push_back(std::move(observation));
+                    observation.files.push_back(
+                        SpoolInvocationObservation::File{child_name, *child_diagnostic});
                 }
             }
         }
+        if (observation.files.size() == 1) {
+            observation.file_name = observation.files.front().name;
+            observation.file_path = observation.files.front().path;
+        }
+        inventory.invocations.push_back(std::move(observation));
         struct stat final_entry {};
         struct stat final_opened {};
         if (::fstatat(root.root.get(), invocation_name.c_str(), &final_entry,
                       AT_SYMLINK_NOFOLLOW) != 0 ||
             ::fstat(invocation.get(), &final_opened) != 0 || !same_directory(entry, final_entry) ||
             !same_directory(opened, final_opened)) {
-            select_contradiction(inventory.contradiction, *directory_diagnostic);
+            select_contradiction(inventory.contradiction, directory_path);
         }
     }
     struct stat root_entry {};
@@ -1444,34 +1625,30 @@ create_spool_file(PreparedSource& source, std::string account_state, std::string
     if (auto* error = std::get_if<FileSpoolError>(&invocation_result)) {
         return with_cleanup(*error, reference);
     }
-    auto invocation = std::move(std::get<Descriptor>(invocation_result));
-    auto destination_result =
-        create_destination(invocation.get(), source.snapshot().name, expected_uid, control, hooks);
+    auto invocation = std::move(std::get<InvocationHandle>(invocation_result));
+    auto destination_result = create_destination(
+        invocation.descriptor.get(), source.snapshot().name, expected_uid, control, hooks);
     if (auto* error = std::get_if<FileSpoolError>(&destination_result)) {
         return with_cleanup(*error, reference);
     }
-    auto destination = std::move(std::get<Descriptor>(destination_result));
-    auto pass =
-        run_source_pass(source.implementation_->locator, SourcePass::Second,
-                        &source.implementation_->snapshot, destination.get(), control, hooks);
+    auto destination = std::move(std::get<DestinationHandle>(destination_result));
+    auto pass = run_source_pass(source.implementation_->locator, SourcePass::Second,
+                                &source.implementation_->snapshot, destination.descriptor.get(),
+                                control, hooks);
     if (auto* error = std::get_if<FileSpoolError>(&pass)) {
         return with_cleanup(*error, reference);
     }
-    if (const auto error = revalidate_destination(invocation.get(), source.snapshot().name,
-                                                  destination.get(), expected_uid, hooks)) {
-        return with_cleanup(*error, reference);
-    }
-    if (const auto error = control_error(control)) {
-        return with_cleanup(*error, reference);
-    }
-    if (sync_descriptor(FileSpoolStage::BeforeFileSync, destination.get(), hooks) != 0) {
+    if (sync_descriptor(FileSpoolStage::BeforeFileSync, destination.descriptor.get(), hooks) != 0) {
         return with_cleanup(durability_error(DurabilityReason::SyncFailed), reference);
     }
-    if (const auto error = control_error(control)) {
-        return with_cleanup(*error, reference);
-    }
-    if (sync_descriptor(FileSpoolStage::BeforeInvocationSync, invocation.get(), hooks) != 0) {
+    if (sync_descriptor(FileSpoolStage::BeforeInvocationSync, invocation.descriptor.get(), hooks) !=
+        0) {
         return with_cleanup(durability_error(DurabilityReason::DirectorySyncFailed), reference);
+    }
+    if (const auto error =
+            revalidate_publication(root, invocation_id, invocation, source.snapshot().name,
+                                   destination, source.snapshot(), expected_uid, hooks)) {
+        return with_cleanup(*error, reference);
     }
     if (const auto error = control_error(control)) {
         return with_cleanup(*error, reference);
@@ -1546,14 +1723,16 @@ SpoolReconciliationResult reconcile_spool_inventory(const SpoolInventory& invent
             select_contradiction(result.contradiction, observation.directory_path);
             continue;
         }
-        if (!observation.file_name) {
+        if (observation.files.empty()) {
             result.incomplete_invocations.push_back(observation.invocation_id);
             expected_by_id.erase(match);
             continue;
         }
-        if (*observation.file_name != match->second.file_name) {
-            select_contradiction(result.contradiction,
-                                 observation.file_path.value_or(observation.directory_path));
+        const auto unequal = std::ranges::find_if(observation.files, [&](const auto& file) {
+            return file.name != match->second.file_name;
+        });
+        if (unequal != observation.files.end()) {
+            select_contradiction(result.contradiction, unequal->path);
             expected_by_id.erase(match);
             continue;
         }
@@ -1592,6 +1771,12 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
     if (!invocation_diagnostic || !file_diagnostic) {
         return durability_error(DurabilityReason::SchemaError);
     }
+    const auto sync_root = [&]() -> std::optional<FileSpoolError> {
+        if (sync_descriptor(FileSpoolStage::BeforeCleanupRootSync, root.root.get(), hooks) != 0) {
+            return durability_error(DurabilityReason::DirectorySyncFailed);
+        }
+        return control_error(control);
+    };
     notify(hooks, FileSpoolStage::BeforeCleanupOpen);
     if (const auto error = control_error(control)) {
         return *error;
@@ -1600,6 +1785,9 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
     if (::fstatat(root.root.get(), invocation_id.c_str(), &invocation_entry, AT_SYMLINK_NOFOLLOW) !=
         0) {
         if (errno == ENOENT) {
+            if (const auto error = sync_root()) {
+                return *error;
+            }
             return SpoolCleanupResult{.removed = false};
         }
         return durability_error(DurabilityReason::ReadFailed);
@@ -1645,6 +1833,9 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
             return contradiction_at(*file_diagnostic);
         }
         notify(hooks, FileSpoolStage::BeforeCleanupUnlink);
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
         struct stat final_entry {};
         if (::fstatat(invocation.get(), name.c_str(), &final_entry, AT_SYMLINK_NOFOLLOW) != 0 ||
             !same_inode(file_entry, final_entry) ||
@@ -1653,21 +1844,21 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
         }
     }
     notify(hooks, FileSpoolStage::BeforeCleanupInvocationRemove);
-    auto final_children = directory_names(invocation.get(), control, hooks);
-    if (auto* error = std::get_if<FileSpoolError>(&final_children)) {
-        return *error;
+    if (children.empty()) {
+        if (const auto error = control_error(control)) {
+            return *error;
+        }
     }
-    if (!std::get<std::vector<std::string>>(final_children).empty()) {
-        return contradiction_at(*invocation_diagnostic);
-    }
+    std::optional<FileSpoolError> removal_error;
     if (::unlinkat(root.root.get(), invocation_id.c_str(), AT_REMOVEDIR) != 0 && errno != ENOENT) {
-        return durability_error(DurabilityReason::WriteFailed);
+        removal_error = errno == ENOTEMPTY ? contradiction_at(*invocation_diagnostic)
+                                           : durability_error(DurabilityReason::WriteFailed);
     }
-    if (const auto error = control_error(control)) {
+    if (const auto error = sync_root()) {
         return *error;
     }
-    if (sync_descriptor(FileSpoolStage::BeforeCleanupRootSync, root.root.get(), hooks) != 0) {
-        return durability_error(DurabilityReason::DirectorySyncFailed);
+    if (removal_error) {
+        return *removal_error;
     }
     return SpoolCleanupResult{.removed = true};
 }

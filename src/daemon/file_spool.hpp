@@ -224,10 +224,18 @@ inspect_spool_root(std::string account_state, uid_t expected_uid,
                    const std::shared_ptr<const testing::FileSpoolHooks>& hooks = {});
 
 struct SpoolInvocationObservation {
+    struct File {
+        std::string name;
+        FilesystemDiagnosticPath path;
+
+        friend bool operator==(const File&, const File&) = default;
+    };
+
     std::string invocation_id;
     std::optional<std::string> file_name;
     FilesystemDiagnosticPath directory_path;
     std::optional<FilesystemDiagnosticPath> file_path;
+    std::vector<File> files;
 
     friend bool operator==(const SpoolInvocationObservation&,
                            const SpoolInvocationObservation&) = default;
