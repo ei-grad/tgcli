@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli session list result",
+  "$defs": {
+    "sessionId": {
+      "oneOf": [
+        { "const": "0" },
+        {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+        },
+        {
+          "type": "string",
+          "pattern": "^-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-8])$"
+        }
+      ]
+    },
+    "timestampOrNull": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "not": { "const": "1970-01-01T00:00:00Z" },
+          "oneOf": [
+            {
+              "pattern": "^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:0[0-7])))Z$"
+            }
+          ]
+        }
+      ]
+    },
+    "deviceType": {
+      "enum": [
+        "android",
+        "apple",
+        "brave",
+        "chrome",
+        "edge",
+        "firefox",
+        "ipad",
+        "iphone",
+        "linux",
+        "mac",
+        "opera",
+        "safari",
+        "ubuntu",
+        "unknown",
+        "vivaldi",
+        "windows",
+        "xbox"
+      ]
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "is_current",
+        "is_password_pending",
+        "is_unconfirmed",
+        "can_accept_secret_chats",
+        "can_accept_calls",
+        "device_type",
+        "api_id",
+        "application_name",
+        "application_version",
+        "is_official_application",
+        "device_model",
+        "platform",
+        "system_version",
+        "log_in_date",
+        "last_active_date",
+        "ip_address",
+        "location"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/sessionId" },
+        "is_current": { "type": "boolean" },
+        "is_password_pending": { "type": "boolean" },
+        "is_unconfirmed": { "type": "boolean" },
+        "can_accept_secret_chats": { "type": "boolean" },
+        "can_accept_calls": { "type": "boolean" },
+        "device_type": { "$ref": "#/$defs/deviceType" },
+        "api_id": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "application_name": { "type": "string" },
+        "application_version": { "type": "string" },
+        "is_official_application": { "type": "boolean" },
+        "device_model": { "type": "string" },
+        "platform": { "type": "string" },
+        "system_version": { "type": "string" },
+        "log_in_date": { "$ref": "#/$defs/timestampOrNull" },
+        "last_active_date": { "$ref": "#/$defs/timestampOrNull" },
+        "ip_address": { "type": "string" },
+        "location": { "type": "string" }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "inactive_session_ttl_days",
+    "next"
+  ],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/session" }
+    },
+    "inactive_session_ttl_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 366
+    },
+    "next": { "const": null }
+  }
+}

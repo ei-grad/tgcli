@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli session terminate result",
+  "$defs": {
+    "sessionId": {
+      "oneOf": [
+        { "const": "0" },
+        {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+        },
+        {
+          "type": "string",
+          "pattern": "^-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-8])$"
+        }
+      ]
+    },
+    "timestampOrNull": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "not": { "const": "1970-01-01T00:00:00Z" },
+          "oneOf": [
+            {
+              "pattern": "^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:0[0-7])))Z$"
+            }
+          ]
+        }
+      ]
+    },
+    "deviceType": {
+      "enum": [
+        "android",
+        "apple",
+        "brave",
+        "chrome",
+        "edge",
+        "firefox",
+        "ipad",
+        "iphone",
+        "linux",
+        "mac",
+        "opera",
+        "safari",
+        "ubuntu",
+        "unknown",
+        "vivaldi",
+        "windows",
+        "xbox"
+      ]
+    },
+    "sessionTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "is_current",
+        "is_password_pending",
+        "is_unconfirmed",
+        "device_type",
+        "application_name",
+        "application_version",
+        "device_model",
+        "platform",
+        "system_version",
+        "last_active_date"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/sessionId" },
+        "is_current": { "const": false },
+        "is_password_pending": { "type": "boolean" },
+        "is_unconfirmed": { "type": "boolean" },
+        "device_type": { "$ref": "#/$defs/deviceType" },
+        "application_name": { "type": "string" },
+        "application_version": { "type": "string" },
+        "device_model": { "type": "string" },
+        "platform": { "type": "string" },
+        "system_version": { "type": "string" },
+        "last_active_date": { "$ref": "#/$defs/timestampOrNull" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "tdlib_request",
+        "session"
+      ],
+      "properties": {
+        "operation": { "const": "session_terminate" },
+        "account": { "type": "string" },
+        "tdlib_request": { "const": "terminateSession" },
+        "session": { "$ref": "#/$defs/sessionTarget" }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "terminated"
+      ],
+      "properties": {
+        "session_id": { "$ref": "#/$defs/sessionId" },
+        "terminated": { "const": true }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run",
+        "plan"
+      ],
+      "properties": {
+        "dry_run": { "const": true },
+        "plan": { "$ref": "#/$defs/plan" }
+      }
+    }
+  ]
+}

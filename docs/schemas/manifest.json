@@ -43,6 +43,12 @@
     "saved tags": {
       "result": "saved-tags.result.schema.json"
     },
+    "session list": {
+      "result": "session-list.result.schema.json"
+    },
+    "session terminate": {
+      "result": "session-terminate.result.schema.json"
+    },
     "version": {
       "result": "version.result.schema.json"
     },

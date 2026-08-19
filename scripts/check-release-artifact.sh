@@ -834,7 +834,7 @@ import sys
 
 
 def fail(message: str) -> None:
-    raise SystemExit(f"stream schema package verification failed: {message}")
+    raise SystemExit(f"schema package verification failed: {message}")
 
 
 def require(condition: bool, message: str) -> None:
@@ -857,12 +857,18 @@ expected_catalog = {
         },
     },
 }
-expected_files = {
+expected_stream_files = {
     "listen.item.schema.json",
     "stream-manifest.json",
     "stream.error.schema.json",
     "wait-for.result.schema.json",
 }
+expected_session_files = {
+    "session-list.result.schema.json",
+    "session-terminate.result.schema.json",
+    "session.error.schema.json",
+}
+expected_files = expected_stream_files | expected_session_files
 
 try:
     package_root_mode = package_root.lstat().st_mode
@@ -918,7 +924,7 @@ require(
 )
 
 actual_entries = {entry.name for entry in package_directory.iterdir()}
-require(actual_entries == expected_files, "packaged stream schema file set differs")
+require(actual_entries == expected_files, "packaged schema file set differs")
 
 for filename in sorted(expected_files):
     packaged_file = packaged_component(f"docs/schemas/{filename}", "file")
@@ -953,10 +959,10 @@ for contracts in commands.values():
 require(catalog == expected_catalog, "stream manifest contract differs")
 referenced = set(referenced_files)
 require(
-    referenced == expected_files - {"stream-manifest.json"},
+    referenced == expected_stream_files - {"stream-manifest.json"},
     "stream manifest and packaged schemas are not bijective",
 )
-for filename in sorted(referenced):
+for filename in sorted(expected_files - {"stream-manifest.json"}):
     try:
         schema = json.loads((package_directory / filename).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:

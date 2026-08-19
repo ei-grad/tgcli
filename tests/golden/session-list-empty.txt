@@ -1,0 +1,3 @@
+id	current	password_pending	unconfirmed	device	api_id	application	application_version	official	device_model	platform	system_version	login	last_active	ip	location	accept_secret_chats	accept_calls
+inactive_session_ttl_days	1
+next	null

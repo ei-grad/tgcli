@@ -1,0 +1,5 @@
+id	current	password_pending	unconfirmed	device	api_id	application	application_version	official	device_model	platform	system_version	login	last_active	ip	location	accept_secret_chats	accept_calls
+0	true	false	true	"linux"	2040	"Desktop\tBeta"	"5.1\nnightly"	true	"ThinkPad \"P1\""	"Linux"	"6.10\\custom"	null	"2038-01-19T03:14:07Z"	"203.0.113.10\tvpn"	"Athens\nGreece"	true	false
+9007199254740992	false	true	false	"iphone"	-2147483648	"Telegram iOS"	"11.0"	true	"iPhone"	"iOS"	"18.0"	"1970-01-01T00:00:01Z"	null	"2001:db8::1"	""	false	true
+inactive_session_ttl_days	30
+next	null

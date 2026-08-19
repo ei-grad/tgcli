@@ -161,7 +161,10 @@ for schema_file in \
     listen.item.schema.json \
     stream-manifest.json \
     stream.error.schema.json \
-    wait-for.result.schema.json; do
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
     cp "$root/docs/schemas/$schema_file" "$schema_package/docs/schemas/$schema_file"
 done
 bash "$checker" verify-schema-package "$schema_package" "$root/docs/schemas"
@@ -171,7 +174,10 @@ mkdir -p "$missing_schema_package/docs/schemas"
 for schema_file in \
     listen.item.schema.json \
     stream-manifest.json \
-    stream.error.schema.json; do
+    stream.error.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
     cp "$root/docs/schemas/$schema_file" "$missing_schema_package/docs/schemas/$schema_file"
 done
 expect_failure_message missing-packaged-stream-schema 'file set differs' \
@@ -183,7 +189,10 @@ for schema_file in \
     listen.item.schema.json \
     stream-manifest.json \
     stream.error.schema.json \
-    wait-for.result.schema.json; do
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
     cp "$root/docs/schemas/$schema_file" "$tampered_schema_package/docs/schemas/$schema_file"
 done
 printf '\n' >> "$tampered_schema_package/docs/schemas/listen.item.schema.json"
@@ -195,7 +204,10 @@ mkdir -p "$symlink_schema_package/docs/schemas"
 for schema_file in \
     stream-manifest.json \
     stream.error.schema.json \
-    wait-for.result.schema.json; do
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
     cp "$root/docs/schemas/$schema_file" "$symlink_schema_package/docs/schemas/$schema_file"
 done
 ln -s "$root/docs/schemas/listen.item.schema.json" \
@@ -204,13 +216,68 @@ expect_failure_message symlink-packaged-stream-schema \
     'packaged docs/schemas/listen.item.schema.json cannot be a symlink' \
     bash "$checker" verify-schema-package "$symlink_schema_package" "$root/docs/schemas"
 
+missing_session_schema_package="$fixture_root/missing-session-schema-package"
+mkdir -p "$missing_session_schema_package/docs/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" \
+        "$missing_session_schema_package/docs/schemas/$schema_file"
+done
+expect_failure_message missing-packaged-session-schema 'file set differs' \
+    bash "$checker" verify-schema-package "$missing_session_schema_package" "$root/docs/schemas"
+
+tampered_session_schema_package="$fixture_root/tampered-session-schema-package"
+mkdir -p "$tampered_session_schema_package/docs/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
+    cp "$root/docs/schemas/$schema_file" \
+        "$tampered_session_schema_package/docs/schemas/$schema_file"
+done
+printf '\n' >> \
+    "$tampered_session_schema_package/docs/schemas/session-list.result.schema.json"
+expect_failure_message tampered-packaged-session-schema \
+    'session-list.result.schema.json differs' \
+    bash "$checker" verify-schema-package "$tampered_session_schema_package" "$root/docs/schemas"
+
+symlink_session_schema_package="$fixture_root/symlink-session-schema-package"
+mkdir -p "$symlink_session_schema_package/docs/schemas"
+for schema_file in \
+    listen.item.schema.json \
+    stream-manifest.json \
+    stream.error.schema.json \
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json; do
+    cp "$root/docs/schemas/$schema_file" \
+        "$symlink_session_schema_package/docs/schemas/$schema_file"
+done
+ln -s "$root/docs/schemas/session.error.schema.json" \
+    "$symlink_session_schema_package/docs/schemas/session.error.schema.json"
+expect_failure_message symlink-packaged-session-schema \
+    'packaged docs/schemas/session.error.schema.json cannot be a symlink' \
+    bash "$checker" verify-schema-package "$symlink_session_schema_package" "$root/docs/schemas"
+
 parent_symlink_target="$fixture_root/parent-symlink-target"
 mkdir -p "$parent_symlink_target/schemas"
 for schema_file in \
     listen.item.schema.json \
     stream-manifest.json \
     stream.error.schema.json \
-    wait-for.result.schema.json; do
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
     cp "$root/docs/schemas/$schema_file" "$parent_symlink_target/schemas/$schema_file"
 done
 parent_symlink_package="$fixture_root/parent-symlink-package"
@@ -225,7 +292,10 @@ for schema_file in \
     listen.item.schema.json \
     stream-manifest.json \
     stream.error.schema.json \
-    wait-for.result.schema.json; do
+    wait-for.result.schema.json \
+    session-list.result.schema.json \
+    session-terminate.result.schema.json \
+    session.error.schema.json; do
     cp "$root/docs/schemas/$schema_file" "$directory_symlink_target/$schema_file"
 done
 directory_symlink_package="$fixture_root/directory-symlink-package"
@@ -254,7 +324,10 @@ for unsafe_reference in '../listen.item.schema.json' '/listen.item.schema.json';
         listen.item.schema.json \
         stream-manifest.json \
         stream.error.schema.json \
-        wait-for.result.schema.json; do
+        wait-for.result.schema.json \
+        session-list.result.schema.json \
+        session-terminate.result.schema.json \
+        session.error.schema.json; do
         cp "$root/docs/schemas/$schema_file" "$unsafe_source/$schema_file"
         cp "$root/docs/schemas/$schema_file" "$unsafe_package/docs/schemas/$schema_file"
     done
@@ -1109,9 +1182,12 @@ for schema_file in (
     "docs/schemas/stream-manifest.json",
     "docs/schemas/stream.error.schema.json",
     "docs/schemas/wait-for.result.schema.json",
+    "docs/schemas/session-list.result.schema.json",
+    "docs/schemas/session-terminate.result.schema.json",
+    "docs/schemas/session.error.schema.json",
 ):
     if schema_file not in linux_package:
-        raise SystemExit(f"Linux package is missing stream schema {schema_file}")
+        raise SystemExit(f"Linux package is missing packaged schema {schema_file}")
 if "verify-schema-package" not in linux_package:
     raise SystemExit("Linux package does not verify its stream schema catalog")
 
@@ -1148,9 +1224,12 @@ for schema_file in (
     "docs/schemas/stream-manifest.json",
     "docs/schemas/stream.error.schema.json",
     "docs/schemas/wait-for.result.schema.json",
+    "docs/schemas/session-list.result.schema.json",
+    "docs/schemas/session-terminate.result.schema.json",
+    "docs/schemas/session.error.schema.json",
 ):
     if schema_file not in package_step:
-        raise SystemExit(f"universal package is missing stream schema {schema_file}")
+        raise SystemExit(f"universal package is missing packaged schema {schema_file}")
 if "verify-schema-package" not in package_step:
     raise SystemExit("universal package does not verify its stream schema catalog")
 package_verification = package_step.split(

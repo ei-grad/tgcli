@@ -240,26 +240,29 @@ json terminal_error(std::string code, json details) {
 
 TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]") {
     const auto manifest = tgcli::test::load_schema_document("manifest.json");
-    const json expected{{"schemaDialect", kDialect},
-                        {"commands",
-                         {{"account add", {{"result", "account-add.result.schema.json"}}},
-                          {"account list", {{"result", "account-list.result.schema.json"}}},
-                          {"account remove", {{"result", "account-remove.result.schema.json"}}},
-                          {"account show", {{"result", "account-show.result.schema.json"}}},
-                          {"account use", {{"result", "account-use.result.schema.json"}}},
-                          {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
-                          {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
-                          {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
-                          {"doctor", {{"result", "doctor.result.schema.json"}}},
-                          {"login", {{"result", "login.result.schema.json"}}},
-                          {"logout", {{"result", "logout.result.schema.json"}}},
-                          {"me", {{"result", "me.result.schema.json"}}},
-                          {"saved search", {{"result", "saved-search.result.schema.json"}}},
-                          {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
-                          {"version", {{"result", "version.result.schema.json"}}},
-                          {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
+    const json expected{
+        {"schemaDialect", kDialect},
+        {"commands",
+         {{"account add", {{"result", "account-add.result.schema.json"}}},
+          {"account list", {{"result", "account-list.result.schema.json"}}},
+          {"account remove", {{"result", "account-remove.result.schema.json"}}},
+          {"account show", {{"result", "account-show.result.schema.json"}}},
+          {"account use", {{"result", "account-use.result.schema.json"}}},
+          {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
+          {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
+          {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
+          {"doctor", {{"result", "doctor.result.schema.json"}}},
+          {"login", {{"result", "login.result.schema.json"}}},
+          {"logout", {{"result", "logout.result.schema.json"}}},
+          {"me", {{"result", "me.result.schema.json"}}},
+          {"saved search", {{"result", "saved-search.result.schema.json"}}},
+          {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
+          {"session list", {{"result", "session-list.result.schema.json"}}},
+          {"session terminate", {{"result", "session-terminate.result.schema.json"}}},
+          {"version", {{"result", "version.result.schema.json"}}},
+          {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 16);
+    CHECK(manifest["commands"].size() == 18);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -308,6 +311,8 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(daemon_error);
     const auto saved_error = tgcli::test::load_schema_document("saved.error.schema.json");
     check_schema_node(saved_error);
+    const auto session_error = tgcli::test::load_schema_document("session.error.schema.json");
+    check_schema_node(session_error);
     for (const auto* filename : {"logout.error.schema.json", "account-remove.error.schema.json",
                                  "audit-intent.schema.json", "audit-checkpoint.schema.json",
                                  "audit-outcome.schema.json", "removal-tombstone.schema.json"}) {

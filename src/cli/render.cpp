@@ -1,6 +1,7 @@
 #include "cli/render.hpp"
 
 #include <cstdint>
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -193,6 +194,85 @@ std::string render_saved_search(const nlohmann::json& data) {
     return out;
 }
 
+std::string_view true_false(bool value) {
+    return value ? "true" : "false";
+}
+
+void append_json_member(std::string& out, std::string_view name, const nlohmann::json& value) {
+    if (out.back() != '{') {
+        out += ',';
+    }
+    out += '"';
+    out += name;
+    out += "\":";
+    out += value.dump();
+}
+
+std::string render_session_target_json(const nlohmann::json& session) {
+    std::string out{"{"};
+    append_json_member(out, "id", session.at("id"));
+    append_json_member(out, "is_current", session.at("is_current"));
+    append_json_member(out, "is_password_pending", session.at("is_password_pending"));
+    append_json_member(out, "is_unconfirmed", session.at("is_unconfirmed"));
+    append_json_member(out, "device_type", session.at("device_type"));
+    append_json_member(out, "application_name", session.at("application_name"));
+    append_json_member(out, "application_version", session.at("application_version"));
+    append_json_member(out, "device_model", session.at("device_model"));
+    append_json_member(out, "platform", session.at("platform"));
+    append_json_member(out, "system_version", session.at("system_version"));
+    append_json_member(out, "last_active_date", session.at("last_active_date"));
+    out += '}';
+    return out;
+}
+
+std::string render_session_plan_json(const nlohmann::json& plan) {
+    std::string out{"{"};
+    append_json_member(out, "operation", plan.at("operation"));
+    append_json_member(out, "account", plan.at("account"));
+    append_json_member(out, "tdlib_request", plan.at("tdlib_request"));
+    if (out.back() != '{') {
+        out += ',';
+    }
+    out += "\"session\":";
+    out += render_session_target_json(plan.at("session"));
+    out += '}';
+    return out;
+}
+
+std::string render_session_list(const nlohmann::json& data) {
+    std::string out =
+        "id\tcurrent\tpassword_pending\tunconfirmed\tdevice\tapi_id\tapplication\t"
+        "application_version\tofficial\tdevice_model\tplatform\tsystem_version\tlogin\t"
+        "last_active\tip\tlocation\taccept_secret_chats\taccept_calls\n";
+    for (const auto& item : data.at("items")) {
+        out += fmt::format(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            item.at("id").get_ref<const std::string&>(),
+            true_false(item.at("is_current").get<bool>()),
+            true_false(item.at("is_password_pending").get<bool>()),
+            true_false(item.at("is_unconfirmed").get<bool>()), item.at("device_type").dump(),
+            item.at("api_id").get<std::int32_t>(), item.at("application_name").dump(),
+            item.at("application_version").dump(),
+            true_false(item.at("is_official_application").get<bool>()),
+            item.at("device_model").dump(), item.at("platform").dump(),
+            item.at("system_version").dump(), item.at("log_in_date").dump(),
+            item.at("last_active_date").dump(), item.at("ip_address").dump(),
+            item.at("location").dump(), true_false(item.at("can_accept_secret_chats").get<bool>()),
+            true_false(item.at("can_accept_calls").get<bool>()));
+    }
+    out += fmt::format("inactive_session_ttl_days\t{}\nnext\tnull\n",
+                       data.at("inactive_session_ttl_days").get<std::int32_t>());
+    return out;
+}
+
+std::string render_session_terminate(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", render_session_plan_json(data.at("plan")));
+    }
+    return fmt::format("session_id\t{}\nterminated\ttrue\n",
+                       data.at("session_id").get_ref<const std::string&>());
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -240,6 +320,12 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "saved search") {
         return render_saved_search(data);
+    }
+    if (command_key == "session list") {
+        return render_session_list(data);
+    }
+    if (command_key == "session terminate") {
+        return render_session_terminate(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"operation":"session_terminate","account":"main","tdlib_request":"terminateSession","session":{"id":"9007199254740992","is_current":false,"is_password_pending":true,"is_unconfirmed":false,"device_type":"iphone","application_name":"Telegram\tDesktop","application_version":"5.1\nnightly","device_model":"ThinkPad \"P1\"","platform":"Linux","system_version":"6.10\\custom","last_active_date":"2038-01-19T03:14:07Z"}}

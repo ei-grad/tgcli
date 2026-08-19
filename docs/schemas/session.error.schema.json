@@ -1,0 +1,694 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli session error",
+  "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "state": {
+      "enum": [
+        "unknown",
+        "wait_tdlib_parameters",
+        "wait_phone_number",
+        "wait_premium_purchase",
+        "wait_email_address",
+        "wait_email_code",
+        "wait_code",
+        "wait_other_device_confirmation",
+        "wait_registration",
+        "wait_password",
+        "ready",
+        "logging_out",
+        "closing",
+        "closed"
+      ]
+    },
+    "nullableState": {
+      "oneOf": [
+        { "$ref": "#/$defs/state" },
+        { "type": "null" }
+      ]
+    },
+    "sessionId": {
+      "oneOf": [
+        { "const": "0" },
+        {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+        },
+        {
+          "type": "string",
+          "pattern": "^-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[01][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-8])$"
+        }
+      ]
+    },
+    "timestampOrNull": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "not": { "const": "1970-01-01T00:00:00Z" },
+          "oneOf": [
+            {
+              "pattern": "^(?:19(?:7[0-9]|8[0-9]|9[0-9])|20(?:0[0-9]|1[0-9]|2[0-9]|3[0-7]))-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:19(?:7[26]|8[048]|9[26])|20(?:0[048]|1[26]|2[048]|3[26]))-02-29T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+            },
+            {
+              "pattern": "^(?:2038-01-(?:0[1-9]|1[0-8])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|2038-01-19T(?:0[0-2]:[0-5][0-9]:[0-5][0-9]|03:(?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:0[0-7])))Z$"
+            }
+          ]
+        }
+      ]
+    },
+    "deviceType": {
+      "enum": [
+        "android",
+        "apple",
+        "brave",
+        "chrome",
+        "edge",
+        "firefox",
+        "ipad",
+        "iphone",
+        "linux",
+        "mac",
+        "opera",
+        "safari",
+        "ubuntu",
+        "unknown",
+        "vivaldi",
+        "windows",
+        "xbox"
+      ]
+    },
+    "sessionTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "is_current",
+        "is_password_pending",
+        "is_unconfirmed",
+        "device_type",
+        "application_name",
+        "application_version",
+        "device_model",
+        "platform",
+        "system_version",
+        "last_active_date"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/sessionId" },
+        "is_current": { "const": false },
+        "is_password_pending": { "type": "boolean" },
+        "is_unconfirmed": { "type": "boolean" },
+        "device_type": { "$ref": "#/$defs/deviceType" },
+        "application_name": { "type": "string" },
+        "application_version": { "type": "string" },
+        "device_model": { "type": "string" },
+        "platform": { "type": "string" },
+        "system_version": { "type": "string" },
+        "last_active_date": { "$ref": "#/$defs/timestampOrNull" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "account",
+        "tdlib_request",
+        "session"
+      ],
+      "properties": {
+        "operation": { "const": "session_terminate" },
+        "account": { "type": "string" },
+        "tdlib_request": { "const": "terminateSession" },
+        "session": { "$ref": "#/$defs/sessionTarget" }
+      }
+    },
+    "usageError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "USAGE" },
+        "message": { "type": "string" },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 0
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["argument", "reason"],
+              "properties": {
+                "argument": { "type": ["string", "null"] },
+                "reason": {
+                  "enum": [
+                    "missing_argument",
+                    "invalid_argument",
+                    "mutually_exclusive",
+                    "unknown_command",
+                    "invalid_environment",
+                    "unsupported_mode"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "accountNotFoundError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "ACCOUNT_NOT_FOUND" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" }
+          }
+        }
+      }
+    },
+    "accountMismatchError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "ACCOUNT_MISMATCH" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested_account", "daemon_account"],
+          "properties": {
+            "requested_account": { "$ref": "#/$defs/account" },
+            "daemon_account": { "$ref": "#/$defs/account" }
+          }
+        }
+      }
+    },
+    "configInvalidError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "CONFIG_INVALID" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "reason"],
+          "properties": {
+            "path": { "type": "string" },
+            "reason": {
+              "enum": [
+                "path_invalid",
+                "wrong_owner",
+                "wrong_type",
+                "wrong_mode",
+                "wrong_link_count",
+                "too_large",
+                "parse_error",
+                "type_error",
+                "invalid_default",
+                "conflicting_credentials",
+                "io_error",
+                "sync_error"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "configConflictError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "CONFIG_CONFLICT" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "expected", "current"],
+          "properties": {
+            "path": { "type": "string" },
+            "expected": {
+              "type": "string",
+              "pattern": "^(?:missing|sha256:[0-9a-f]{64};dev:(?:0|[1-9][0-9]*);ino:(?:0|[1-9][0-9]*);size:(?:0|[1-9][0-9]*);ctime_ns:(?:0|[1-9][0-9]*))$"
+            },
+            "current": {
+              "type": "string",
+              "pattern": "^(?:missing|sha256:[0-9a-f]{64};dev:(?:0|[1-9][0-9]*);ino:(?:0|[1-9][0-9]*);size:(?:0|[1-9][0-9]*);ctime_ns:(?:0|[1-9][0-9]*))$"
+            }
+          }
+        }
+      }
+    },
+    "hookFailedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "HOOK_FAILED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hook", "reason", "status"],
+          "properties": {
+            "hook": {
+              "enum": ["api_id_cmd", "api_hash_cmd", "db_key_cmd", "password_cmd", "bot_token_cmd"]
+            },
+            "reason": {
+              "enum": [
+                "spawn",
+                "exit",
+                "signal",
+                "timeout",
+                "stdout_empty",
+                "stdout_invalid",
+                "stdout_too_large",
+                "stderr_too_large"
+              ]
+            },
+            "status": { "type": ["integer", "null"] }
+          }
+        }
+      }
+    },
+    "notAuthedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "NOT_AUTHED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "state", "reason"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "state": { "$ref": "#/$defs/state" },
+            "reason": { "enum": ["not_ready", "authorization_lost", "login_required"] }
+          }
+        }
+      }
+    },
+    "writeDeniedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "WRITE_DENIED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "reason"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "reason": { "enum": ["explicit_deny", "no_grant", "invalid_config_grant"] }
+          }
+        }
+      }
+    },
+    "confirmationRequiredError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "CONFIRMATION_REQUIRED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "action", "target"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "action": { "const": "session_terminate" },
+            "target": { "$ref": "#/$defs/plan" }
+          }
+        }
+      }
+    },
+    "auditUnavailableError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "AUDIT_UNAVAILABLE" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "path", "reason"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "path": { "type": "string" },
+            "reason": {
+              "enum": [
+                "path_invalid",
+                "open_failed",
+                "write_failed",
+                "sync_failed",
+                "rotate_failed",
+                "capacity_exhausted"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "auditIncompleteError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "AUDIT_INCOMPLETE" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "path", "mutation_state", "completed_stages"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "path": { "type": "string" },
+            "mutation_state": { "enum": ["none", "possible", "confirmed"] },
+            "completed_stages": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "intent_synced",
+                  "logout_send_started",
+                  "logout_closed_confirmed",
+                  "idempotency_pending",
+                  "spool_ready",
+                  "dispatch_started",
+                  "temporary_ids_observed",
+                  "forward_progress",
+                  "mutation_confirmed"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "protocolAnswerInvalidError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "PROTOCOL_ANSWER_INVALID" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["request_id", "reason"],
+          "properties": {
+            "request_id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "reason": {
+              "enum": [
+                "future_sequence",
+                "nonce_mismatch",
+                "generation_mismatch",
+                "malformed",
+                "unknown_request"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "daemonNotRunningError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "DAEMON_NOT_RUNNING" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "socket"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "socket": { "type": "string" }
+          }
+        }
+      }
+    },
+    "daemonControlFailedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "DAEMON_CONTROL_FAILED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "operation", "reason"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "operation": { "enum": ["status", "stop", "restart"] },
+            "reason": {
+              "enum": [
+                "surface_invalid",
+                "identity_changed",
+                "handshake_failed",
+                "shutdown_failed",
+                "replacement_failed"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "daemonShutdownError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "DAEMON_SHUTDOWN" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {
+            "reason": { "const": "daemon_shutdown" }
+          }
+        }
+      }
+    },
+    "botUnsupportedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "BOT_UNSUPPORTED" },
+        "message": { "const": "session commands require a user account" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation"],
+          "properties": {
+            "operation": { "enum": ["session_list", "session_terminate"] }
+          }
+        }
+      }
+    },
+    "notFoundError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "NOT_FOUND" },
+        "message": { "const": "session not found" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "session_id"],
+          "properties": {
+            "operation": { "const": "session_terminate" },
+            "session_id": { "$ref": "#/$defs/sessionId" }
+          }
+        }
+      }
+    },
+    "preconditionFailedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "PRECONDITION_FAILED" },
+        "message": { "const": "the current session cannot be terminated; use tgcli logout" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "session_id", "reason"],
+          "properties": {
+            "operation": { "const": "session_terminate" },
+            "session_id": { "$ref": "#/$defs/sessionId" },
+            "reason": { "const": "current_session" }
+          }
+        }
+      }
+    },
+    "tdlibError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "TDLIB_ERROR" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "tdlib_code"],
+          "properties": {
+            "operation": { "enum": ["session_list", "session_terminate"] },
+            "tdlib_code": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "rateLimitedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "RATE_LIMITED" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "tdlib_code", "retry_after"],
+          "properties": {
+            "operation": { "enum": ["session_list", "session_terminate"] },
+            "tdlib_code": { "const": 429 },
+            "retry_after": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "internalError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "INTERNAL" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "reason", "tdlib_type_id"],
+          "properties": {
+            "operation": { "enum": ["session_list", "session_terminate"] },
+            "reason": { "const": "malformed_tdlib_response" },
+            "tdlib_type_id": { "type": ["integer", "null"] }
+          }
+        }
+      }
+    },
+    "timeoutError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "TIMEOUT" },
+        "message": { "type": "string" },
+        "details": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "state"],
+              "properties": {
+                "operation": { "const": "session_list" },
+                "state": { "$ref": "#/$defs/nullableState" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "state", "outcome", "idempotency"],
+              "properties": {
+                "operation": { "const": "session_terminate" },
+                "phase": { "const": "preflight" },
+                "state": { "$ref": "#/$defs/nullableState" },
+                "outcome": { "const": "not_started" },
+                "idempotency": { "const": "not_requested" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "phase", "state", "outcome", "idempotency"],
+              "properties": {
+                "operation": { "const": "session_terminate" },
+                "phase": { "const": "dispatch" },
+                "state": { "$ref": "#/$defs/nullableState" },
+                "outcome": { "const": "unknown" },
+                "idempotency": { "const": "not_requested" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "oneOf": [
+        { "$ref": "#/$defs/usageError" },
+        { "$ref": "#/$defs/accountNotFoundError" },
+        { "$ref": "#/$defs/accountMismatchError" },
+        { "$ref": "#/$defs/configInvalidError" },
+        { "$ref": "#/$defs/configConflictError" },
+        { "$ref": "#/$defs/hookFailedError" },
+        { "$ref": "#/$defs/notAuthedError" },
+        { "$ref": "#/$defs/writeDeniedError" },
+        { "$ref": "#/$defs/confirmationRequiredError" },
+        { "$ref": "#/$defs/auditUnavailableError" },
+        { "$ref": "#/$defs/auditIncompleteError" },
+        { "$ref": "#/$defs/protocolAnswerInvalidError" },
+        { "$ref": "#/$defs/daemonNotRunningError" },
+        { "$ref": "#/$defs/daemonControlFailedError" },
+        { "$ref": "#/$defs/daemonShutdownError" },
+        { "$ref": "#/$defs/botUnsupportedError" },
+        { "$ref": "#/$defs/notFoundError" },
+        { "$ref": "#/$defs/preconditionFailedError" },
+        { "$ref": "#/$defs/tdlibError" },
+        { "$ref": "#/$defs/rateLimitedError" },
+        { "$ref": "#/$defs/internalError" },
+        { "$ref": "#/$defs/timeoutError" }
+      ]
+    }
+  }
+}

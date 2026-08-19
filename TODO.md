@@ -286,7 +286,7 @@ before the milestone is closed.
       `session_terminate`, direct dispatch/proof/recovery stages,
       `idempotency_key_hash:null` and prior-group inspection; expose no command
       and perform no real terminate dispatch yet
-- [ ] Add the one-of real/dry-run terminate result schema, list result schema,
+- [x] Add the one-of real/dry-run terminate result schema, list result schema,
       exact self-contained session error schema, manifest entries and
       deterministic human renderers; keep the public `schema` CLI deferred M7
 - [ ] Implement dormant complete list and terminate handlers with exact
