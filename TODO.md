@@ -313,7 +313,14 @@ before the milestone is closed.
 
 - [ ] `tgcli raw` passthrough (td_api_json), read-only allowlist, auth-type
       refusal + audit redaction
-- [ ] `tgcli schema <command> [--all]` — runtime dump of curated schemas
+- [ ] Implement local `tgcli schema <command-token>... [--all]`: exact
+      result/item fallback, fixed result/item/error aggregation, history alias,
+      embedded byte-authoritative catalogs, separate non-stream error manifest,
+      canonical-key/different-spelling collision gates with legal identical-key kind
+      coexistence, trusted-source lstat/containment checks, frozen help/option/lookup
+      precedence, uncataloged meta-command exception, deterministic errors/output,
+      and complete Linux/macOS package derivation plus packaged-binary byte smoke;
+      perform no config/socket/daemon/TDLib access
 - [ ] Shell completions (bash/zsh/fish), man pages
 - [ ] docs/schemas/ — freeze curated JSON schemas per command
 - [ ] Validate the complete M1–M6 test-DC E2E suite at the M7 gate, including

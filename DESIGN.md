@@ -213,7 +213,8 @@ tgcli saved attach <message-id> <PATH> [--caption TEXT]
 tgcli daemon status|stop|restart|run              lifecycle (§10); status/stop do not auto-spawn,
                                                   `run` stays in the foreground
 tgcli storage stats|optimize                      tdlib file-store usage / optimizeStorage cleanup
-tgcli schema <command> [--all]                    print the command's curated result schema
+tgcli schema <command-token>... [--all]           print the primary curated success schema;
+                                                   --all adds every cataloged payload kind (§4.8)
 tgcli completion <shell>
 tgcli version
 ```
@@ -3666,6 +3667,122 @@ fake/native-boundary tests. This still satisfies the canonical M6 requirement
 to add one supported long-tail TestDC flow without creating an unsafe live
 side effect.
 
+### 4.8 M7 schema discovery
+
+`tgcli schema <command-token>... [--all]` is an unconditional client-local
+introspection command. It runs after CLI parsing and the global insecure-secret
+precheck but before write-authority folding, account/config/removal routing,
+request-context construction, runtime/socket access, daemon handling or TDLib
+construction. `--no-daemon` is therefore an accepted byte-identical no-op. Invalid
+config and `TGCLI_ACCOUNT`, `TGCLI_ALLOW_WRITE` or `TGCLI_TEST_DC` values cannot affect
+it.
+
+The positional tokens are flattened by splitting only ASCII space, tab, LF, CR, FF
+and VT, discarding empty components and joining with one ASCII space. Matching is
+case-sensitive and performs no Unicode or punctuation normalization. The exact
+`history` key canonicalizes to `read`; there are no other aliases. Both `schema
+account list` and `schema "account list"` therefore select `account list`.
+
+Every catalog key is nonempty lowercase ASCII matching
+`^[a-z0-9][a-z0-9-]*( [a-z0-9][a-z0-9-]*)*$`, equals its own target normalization,
+and is unchanged by alias canonicalization. Catalog validation rejects whitespace
+artifacts, doubled/edge spaces, uppercase/non-ASCII keys, quoted-command artifacts,
+the alias key `history`, and collisions where different raw spellings across catalogs
+normalize or alias to one target. Identical canonical keys are legal across catalogs:
+the same `(command,kind,filename)` deduplicates, equal `(command,kind)` with different
+filenames fails, and different kinds coexist. The bytewise schema-target accessor
+contains only merged canonical keys plus a public alias whose destination is cataloged.
+It supports only completion after `schema`; later general shell completion requires a
+separate full command/alias registry, including uncataloged commands and aliases such
+as `schema`, `daemon run`, and `history`.
+
+Schema discovery consults three strict Draft 2020-12 catalogs:
+
+- the existing result-only `docs/schemas/manifest.json`;
+- the existing `docs/schemas/stream-manifest.json`;
+- `docs/schemas/error-manifest.json`, the sole non-stream command-to-error-schema
+  authority.
+
+The error catalog maps account add/list/show/use to `account.error.schema.json`,
+account remove to `account-remove.error.schema.json`, daemon restart/status/stop to
+`daemon.error.schema.json`, login/me to `auth.error.schema.json`, logout to
+`logout.error.schema.json`, resolve to `resolve.error.schema.json`, saved search/tags
+to `saved.error.schema.json`, and session list/terminate to
+`session.error.schema.json`. Stream errors remain solely in the stream catalog.
+Audit/checkpoint/tombstone schemas are not command payload schemas and are not in these
+catalogs.
+
+Catalog merge keys are `(canonical command, result|item|error)`. Identical canonical
+command keys may recur across catalogs and different kinds coexist. An identical
+`(command,kind,filename)`, currently the `wait-for` result, is deduplicated; equal
+`(command,kind)` with different filenames fails. Duplicate JSON keys, unsafe/non-leaf
+references, missing/symlinked files, a wrong dialect, invalid JSON, or a referenced
+file without exactly one final LF also fail catalog validation. The build generator
+and release verifier each receive an explicit intended source root and, before
+reading, lstat the nonsymlink directory chain `<root>/docs/schemas`, all three regular
+nonsymlink catalogs, and every regular nonsymlink referenced leaf; strict resolution
+of every checked component must remain inside the resolved intended source root.
+Commands enumerate bytewise; kinds always enumerate in `result`, `item`, `error`
+order.
+
+Without `--all`, `schema` prints the cataloged result, or the item when no result
+exists. Output is the embedded file byte-for-byte including its final LF. Thus
+`schema listen` prints `listen.item.schema.json`; `listen` gains no result schema or
+result-manifest entry. `schema wait-for` prints its one deduplicated result schema.
+
+With `--all`, stdout is one JSON object containing every present kind in fixed
+`result`, `item`, `error` order. Each value is the schema document itself. Construction
+copies each schema byte-for-byte except its final LF into the member value and adds
+exactly one final LF after the wrapper. There is no command/file metadata or success
+envelope. Human and `--json` bytes are identical.
+
+A missing or whitespace-only target is the existing exit-2
+`USAGE/missing_argument` object. An unknown or uncataloged normalized target is exit 2
+with exactly `{"error":{"code":"USAGE","message":"no curated schema is available
+for command","details":{"argument":<normalized-key>,"reason":"unknown_command"}}}`
+on stderr and no stdout.
+
+The total CLI precedence is: global legacy-secret rejection; structural option parsing
+and value validation; valid nested help; fixed unsupported-option precedence; target
+normalization and missing detection; aliasing and lookup; success-only verbose
+diagnostic; success output. A syntax/value failure is not hidden by a later help token,
+but structurally valid help wins over missing/unknown targets, semantic unsupported
+options and verbose. Unsupported options win over missing/unknown targets. Help is
+exit 0 with empty stderr, no diagnostic or local state access, and these exact bytes:
+
+    Print curated JSON schemas
+
+    Usage:
+      tgcli schema [OPTIONS] command...
+
+    Positionals:
+      command TEXT ... REQUIRED    command path (for example: account list)
+
+    Options:
+      -h,--help                    Print this help message and exit
+      --all                        include every cataloged result, item, and error schema
+
+`--json`, `--no-daemon`, `--no-color` and `--all` are accepted. `--no-color` is an
+explicit byte-preserving no-op on help, success and failures. Verbose emits the exact
+local-transport diagnostic only after a successful lookup, before schema output; help
+and every failure emit no diagnostic. `--account`, `--full`, `--allow-write`, `--yes`,
+`--dry-run`, `--timeout`, `--cursor` and `--idempotency-key` are
+`USAGE/unsupported_mode` for `schema`, in that precedence after parser errors.
+
+The build embeds the exact catalogs, every distinct referenced schema, and the merged
+lookup table. Embedded bytes are the sole runtime authority: the command performs no
+runtime filesystem lookup or schema-path override. Release packages still ship the
+three catalogs and the exact unique set of referenced schemas. Package verification
+derives that set from the catalogs, independently applies the same trusted-source-root
+lstat/type/containment checks, rejects source or package symlinks/escape/tampering, and
+proves a packaged binary's `schema version` and `schema listen` bytes equal the
+packaged files.
+
+`schema` is explicitly an introspection meta-command rather than a curated application
+result DTO. It has no result/error schema and no catalog entry; `schema schema` is
+therefore uncataloged. This sole exception avoids recursive arbitrary-schema
+self-description and does not weaken strict schemas for ordinary command DTOs.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result
@@ -3697,6 +3814,10 @@ Failures print a single error object to **stderr** and set the exit code:
   baseline is self-contained (no `$id`, external references, or `format`) and
   rejects undeclared properties at every object boundary. Commands without a
   result, such as `daemon run`, do not appear in the manifest.
+  The M7 `schema` introspection meta-command is the sole result-manifest exception: its
+  stdout is a selected schema asset or the fixed multi-kind object in §4.8, not a curated
+  application DTO, and it is intentionally not recursively cataloged. `listen` remains
+  absent because it produces items rather than a public result.
 - Human output renders the same data — no information exists in one mode that
   the other lacks.
 - Warnings go to stderr (prefixed `warning:` in human mode, NDJSON
@@ -5367,6 +5488,15 @@ What makes tgcli specifically LLM-agent-friendly:
 - **Libraries** (FetchContent, permissively licensed): CLI11 (nested
   subcommands), nlohmann/json, fmt, tomlplusplus, Catch2; tests additionally
   use jsoncons 1.7.0 at the pinned release commit for Draft 2020-12 validation.
+- **Schema assets**: M7 embeds the exact three command catalogs and every schema they
+  reference into the binary; no runtime install-path lookup exists. The generator and
+  release verifier independently lstat the explicit intended source root, `docs`,
+  `docs/schemas`, all three catalogs and every referenced leaf, require exact
+  nonsymlink directory/regular-file types, and prove strict resolved containment under
+  that root before reads. Linux and macOS archives also carry the three catalogs plus
+  their exact referenced-file union under `docs/schemas/`. The release verifier derives
+  this set from the catalogs, rejects unsafe/symlinked/escaping or byte-different source
+  and package components, and compares packaged-binary discovery output with the files.
 - **Testing** (policy detailed in CLAUDE.md; tests pin the external
   contract, never the implementation):
   - Contract tests as the default: a command driven through the real

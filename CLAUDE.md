@@ -19,13 +19,24 @@ authoritative implementation status and roadmap (work milestones top-down).
 ## Invariants
 
 - stdout carries data only; progress, warnings, and diagnostics go to stderr.
-- The exit-code table (DESIGN.md §5) and the curated JSON schemas under
-  docs/schemas/ are stable contracts; changing them is a design change
-  (pre-M7-freeze schema edits are additive-class spec deltas, post-freeze
-  contract-class — REVIEW.md §7). Result schemas use Draft 2020-12, reject
-  undeclared object properties, and have an exact command/file bijection in
-  the result-only `docs/schemas/manifest.json`; commands without results are
-  absent from that manifest.
+- The exit-code table (DESIGN.md §5) and curated JSON schemas under
+  `docs/schemas/` are stable contracts; changing them is a design change (pre-M7-freeze
+  schema edits are additive-class spec deltas, post-freeze contract-class — REVIEW.md
+  §7). Result schemas use Draft 2020-12, reject undeclared object properties, and have
+  an exact command/file bijection in the result-only `docs/schemas/manifest.json`;
+  commands without results are absent. `stream-manifest.json` separately owns the M5
+  item/result/error stream mappings, and `error-manifest.json` is the sole non-stream
+  command-to-error-schema authority. Catalog references are safe leaf filenames and
+  canonical command keys are unchanged by target normalization/aliasing; catalog
+  merging rejects collisions only between different raw spellings, deduplicates equal
+  `(command,kind,filename)`, rejects equal `(command,kind)` with different filenames,
+  and lets different kinds for an identical command coexist. The generator and release
+  verifier independently reject wrong-type, symlinked or
+  escaping source-root/catalog/schema components before reading them. M7 embeds exact
+  catalog/schema bytes as the runtime schema-discovery authority while release
+  packages ship and byte-verify the same referenced set. The `schema` introspection
+  meta-command is the sole explicit result-manifest exception and is not recursively
+  cataloged; it does not permit a free-form result schema for ordinary commands.
 - The write gate is fail-closed and evaluated daemon-side. Every
   Telegram-side mutation passes through the single safety chokepoint with a
   statically declared descriptor (Read/AuthBootstrap/Write/Destructive); no
