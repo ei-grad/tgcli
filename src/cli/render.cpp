@@ -10,8 +10,10 @@ namespace tgcli::cli {
 namespace {
 
 std::string render_version(const nlohmann::json& data) {
-    return fmt::format("tgcli {} (protocol {}, tdlib {})\n",
-                       data.value("version", std::string("?")), data.value("protocol", 0),
+    const auto commit = data.value("commit", std::string{});
+    return fmt::format("tgcli {} ({}protocol {}, tdlib {})\n",
+                       data.value("version", std::string("?")),
+                       commit.empty() ? std::string{} : commit + ", ", data.value("protocol", 0),
                        data.value("tdlib", std::string("?")));
 }
 

@@ -5429,6 +5429,18 @@ reachable `auth.state` value from `unknown` to the state names in §8 while
 retaining `unknown` before the first snapshot. `version` and the successful
 `daemon stop` object are otherwise unchanged.
 
+`version` contains exactly `version`, `protocol`, `tdlib` and an optional
+`commit`: the seven-hex-digit HEAD revision of the tree the binary was built
+from, suffixed `-dirty` when tracked files were modified at build time; untracked
+files alone do not make a build dirty. The key is absent — never null and
+never empty — for a build made from an exact tag or from a source tree that is
+not itself the root of a git work tree, so a tree unpacked inside an unrelated
+checkout reports no revision instead of that checkout's. `commit` is build provenance only: it is
+never part of the binary version compared during the version handshake and
+never appears in audit records, `doctor` or `daemon status`. Human output is
+`tgcli 0.1.0 (4d7ca6e, protocol 3, tdlib 1.8.65)`, collapsing to
+`tgcli 0.1.0 (protocol 3, tdlib 1.8.65)` when the key is absent.
+
 Every M1 failure uses the single envelope
 `{"error":{"code":<string>,"message":<string>,"details":<object>}}` on
 stderr. `message` is explanatory text; branching uses `code`, exit status and

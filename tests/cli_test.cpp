@@ -2832,6 +2832,13 @@ TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli]
     CHECK(data["tdlib"].is_string());
     CHECK_FALSE(data.contains("type"));
     CHECK_FALSE(data.contains("data"));
+    // Tagged and non-checkout builds report no revision at all; every other
+    // build reports exactly the revision compiled into the binary.
+    if (std::string_view{kBuildCommit}.empty()) {
+        CHECK_FALSE(data.contains("commit"));
+    } else {
+        CHECK(data["commit"] == kBuildCommit);
+    }
     CHECK_THAT(data, test::matches_json_schema("version.result.schema.json"));
 }
 

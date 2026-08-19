@@ -84,6 +84,17 @@ TEST_CASE("logout human renderers match reviewed goldens", "[logout][render][gol
           golden("logout-dry-run.txt"));
 }
 
+TEST_CASE("version human output shows the build revision only when present", "[version][render]") {
+    CHECK(tgcli::cli::render_human("version",
+                                   {{"version", "0.1.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}}) ==
+          "tgcli 0.1.0 (protocol 3, tdlib 1.8.65)\n");
+    CHECK(tgcli::cli::render_human("version", {{"version", "0.1.0"},
+                                               {"protocol", 3},
+                                               {"tdlib", "1.8.65"},
+                                               {"commit", "4d7ca6e-dirty"}}) ==
+          "tgcli 0.1.0 (4d7ca6e-dirty, protocol 3, tdlib 1.8.65)\n");
+}
+
 TEST_CASE("daemon control human renderers match reviewed goldens",
           "[daemon-control][render][golden]") {
     CHECK(tgcli::cli::render_human("daemon status", {{"account", "main"},

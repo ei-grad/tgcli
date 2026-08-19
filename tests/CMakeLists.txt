@@ -58,6 +58,7 @@ add_executable(tgcli_unit_tests
 target_link_libraries(tgcli_unit_tests
     PRIVATE tgcli_proto tgcli_util tgcli_daemon tgcli_cli tgcli_core tgcli_schema Td::TdStatic
         Catch2::Catch2WithMain jsoncons)
+add_dependencies(tgcli_unit_tests tgcli_version_header)
 target_include_directories(tgcli_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(tgcli_unit_tests tgcli)
 target_compile_definitions(tgcli_unit_tests
@@ -102,6 +103,12 @@ add_test(
         -DREPO_ROOT=${CMAKE_SOURCE_DIR}
         -DTEST_OUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/re2-cmake-scope
         -P "${CMAKE_CURRENT_SOURCE_DIR}/re2_cmake_scope_test.cmake")
+add_test(
+    NAME version-revision
+    COMMAND "${CMAKE_COMMAND}"
+        -DREPO_ROOT=${CMAKE_SOURCE_DIR}
+        -DTEST_OUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/version-revision
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/version_revision_test.cmake")
 add_test(
     NAME release-toolchain-helpers
     COMMAND "${Python3_EXECUTABLE}"

@@ -12,6 +12,7 @@
 #include "daemon/saved_commands.hpp"
 
 #include <cstdint>
+#include <tgcli/version.hpp>
 #include <unistd.h>
 
 namespace tgcli::daemon {
@@ -21,9 +22,13 @@ namespace {
 using nlohmann::json;
 
 json version_payload(const DaemonContext& context) {
-    return {{"version", context.binary_version},
-            {"protocol", context.protocol_version},
-            {"tdlib", context.tdlib_version}};
+    json payload{{"version", context.binary_version},
+                 {"protocol", context.protocol_version},
+                 {"tdlib", context.tdlib_version}};
+    if (kBuildCommit[0] != '\0') {
+        payload["commit"] = kBuildCommit;
+    }
+    return payload;
 }
 
 json doctor_payload(const DaemonContext& context) {

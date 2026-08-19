@@ -2,6 +2,11 @@
 
 namespace tgcli {
 
-inline constexpr const char* kVersion = "@PROJECT_VERSION@";
+inline constexpr const char* kVersion = "@TGCLI_VERSION@";
+
+// Short HEAD revision of the tree this binary was built from, with a
+// `-dirty` suffix for modified tracked files. Empty for a build made from an
+// exact tag or from a source tree that is not itself a git work-tree root.
+inline constexpr const char* kBuildCommit = "@TGCLI_BUILD_COMMIT@";
 
 } // namespace tgcli

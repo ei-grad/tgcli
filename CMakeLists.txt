@@ -127,7 +127,27 @@ else()
     endforeach()
 endif()
 
-configure_file(cmake/version.hpp.in include/tgcli/version.hpp @ONLY)
+set(tgcli_version_header ${CMAKE_CURRENT_BINARY_DIR}/include/tgcli/version.hpp)
+set(tgcli_version_command
+    ${CMAKE_COMMAND}
+    -DTGCLI_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+    -DTGCLI_TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in
+    -DTGCLI_OUTPUT=${tgcli_version_header}
+    -DTGCLI_VERSION=${PROJECT_VERSION}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/git_version.cmake)
+
+execute_process(COMMAND ${tgcli_version_command} RESULT_VARIABLE tgcli_version_status)
+if(NOT tgcli_version_status EQUAL 0)
+    message(FATAL_ERROR "failed to generate ${tgcli_version_header}")
+endif()
+
+# Always re-resolved at build time: the recorded revision must follow the
+# checkout, not the last configure. The script rewrites the header only on a
+# real change, so dependents rebuild only then.
+add_custom_target(tgcli_version_header ALL
+    COMMAND ${tgcli_version_command}
+    BYPRODUCTS ${tgcli_version_header}
+    COMMENT "Resolving tgcli build revision")
 
 add_library(tgcli_common INTERFACE)
 target_compile_features(tgcli_common INTERFACE cxx_std_20)
@@ -228,6 +248,7 @@ add_library(tgcli_daemon STATIC
 target_link_libraries(tgcli_daemon
     PUBLIC tgcli_proto tgcli_util
     PRIVATE tgcli_core re2::re2)
+add_dependencies(tgcli_daemon tgcli_version_header)
 
 add_library(tgcli_cli STATIC
     src/cli/client.cpp
@@ -239,6 +260,7 @@ add_library(tgcli_cli STATIC
 target_link_libraries(tgcli_cli
     PUBLIC tgcli_proto tgcli_util tgcli_daemon
     PRIVATE fmt::fmt)
+add_dependencies(tgcli_cli tgcli_version_header)
 
 add_executable(tgcli
     src/main.cpp)

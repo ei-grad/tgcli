@@ -134,6 +134,9 @@ std::vector<SchemaCase> schema_cases() {
         {"version.result.schema.json",
          {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}},
          "version"},
+        {"version.result.schema.json",
+         {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}, {"commit", "4d7ca6e"}},
+         "version"},
         {"daemon-stop.result.schema.json", {{"stopping", true}}, "stopping"},
         {"daemon-status.result.schema.json",
          {{"account", "main"}, {"running", false}, {"socket", "/tmp/tgcli.sock"}},
@@ -881,6 +884,31 @@ TEST_CASE("result schemas reject missing required and unknown properties", "[sch
     list_item_unknown["items"][0]["unexpected"] = true;
     CHECK_THAT(list_item_unknown,
                !tgcli::test::matches_json_schema("account-list.result.schema.json"));
+}
+
+TEST_CASE("version result schema bounds the optional build revision", "[schema][version]") {
+    const json base{{"version", "0.1.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}};
+    CHECK_THAT(base, tgcli::test::matches_json_schema("version.result.schema.json"));
+
+    for (const auto* accepted :
+         {"4d7ca6e", "4d7ca6e-dirty", "4d7ca6ed9b8a5c1f0e3d2c4b6a8f9e7d1c3b5a70"}) {
+        auto instance = base;
+        instance["commit"] = accepted;
+        INFO("commit: " << accepted);
+        CHECK_THAT(instance, tgcli::test::matches_json_schema("version.result.schema.json"));
+    }
+
+    for (const auto* rejected :
+         {"", "4d7ca6", "4D7CA6E", "4d7ca6e-DIRTY", "4d7ca6e-modified", "g4d7ca6e"}) {
+        auto instance = base;
+        instance["commit"] = rejected;
+        INFO("commit: " << rejected);
+        CHECK_THAT(instance, !tgcli::test::matches_json_schema("version.result.schema.json"));
+    }
+
+    auto null_commit = base;
+    null_commit["commit"] = nullptr;
+    CHECK_THAT(null_commit, !tgcli::test::matches_json_schema("version.result.schema.json"));
 }
 
 TEST_CASE("resolve result schema enforces kind-specific topic id bounds",
