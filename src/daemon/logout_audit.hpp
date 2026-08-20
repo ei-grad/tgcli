@@ -46,6 +46,9 @@ struct LogoutAuditInspection {
     LogoutAuditFailure failure;
 };
 
+using LogoutAuditDurableObserver = std::function<void()>;
+using LogoutAuditInspectionObserver = std::function<void(const LogoutAuditInspection&)>;
+
 class LogoutAuditRecordAdapter final {
   public:
     explicit LogoutAuditRecordAdapter(std::string account);
@@ -71,8 +74,11 @@ class LogoutAuditLog final {
                    std::shared_ptr<const testing::LogoutAuditHooks> hooks = {});
 
     [[nodiscard]] const std::string& path() const;
+    // The observer is the logical durability publication point and must not
+    // perform audit I/O; it runs after both fsyncs and before testing callbacks.
     [[nodiscard]] bool append(const nlohmann::json& record, LogoutAuditFailure& failure,
-                              bool begin_group = false) const;
+                              bool begin_group = false,
+                              const LogoutAuditDurableObserver& durable_observer = {}) const;
     [[nodiscard]] LogoutAuditInspection inspect() const;
 
   private:
@@ -93,6 +99,7 @@ struct LogoutAuditReconcileResult {
 
 LogoutAuditReconcileResult
 reconcile_definite_logout_audit(const LogoutAuditLog& audit,
-                                const std::function<std::string()>& timestamp);
+                                const std::function<std::string()>& timestamp,
+                                const LogoutAuditInspectionObserver& inspection_observer = {});
 
 } // namespace tgcli::daemon

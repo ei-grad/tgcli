@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace tgcli::daemon {
 
@@ -80,7 +81,12 @@ class LogoutCoordinator final {
     static bool request_active(RequestSession& session);
     std::optional<OperationPermit> acquire_operation(RequestSession& session);
     void release_operation();
-    void report_recovery_deadline(RequestSession& session);
+    void publish_audit_snapshot(const LogoutAuditInspection& snapshot);
+    void publish_audit_incomplete(std::string invocation_id, proto::LogoutPlan plan,
+                                  std::vector<AuditStage> completed_stages);
+    void publish_audit_clean();
+    void report_recovery_deadline(RequestSession& session,
+                                  const std::optional<LogoutAuditInspection>& snapshot);
     [[nodiscard]] ChallengeOutcome request_challenge(RequestSession& session,
                                                      ChallengeSpec spec) const;
     PreflightStep reconcile_preflight(RequestSession& session);
@@ -107,6 +113,7 @@ class LogoutCoordinator final {
     std::mutex operation_mutex_;
     std::condition_variable_any operation_condition_;
     bool operation_active_ = false;
+    std::optional<LogoutAuditInspection> durable_audit_snapshot_;
 };
 
 void register_logout_command(Dispatcher& dispatcher, LogoutCoordinator& coordinator);

@@ -312,8 +312,9 @@ LogoutCoordinator::acquire_operation(RequestSession& session) {
         return std::nullopt;
     }
     if (!acquired || (contended && deadline_expired(session.deadline()))) {
+        const auto snapshot = durable_audit_snapshot_;
         lock.unlock();
-        report_recovery_deadline(session);
+        report_recovery_deadline(session, snapshot);
         return std::nullopt;
     }
     operation_active_ = true;
@@ -328,17 +329,33 @@ void LogoutCoordinator::release_operation() {
     operation_condition_.notify_all();
 }
 
-void LogoutCoordinator::report_recovery_deadline(RequestSession& session) {
-    auto inspection = audit_.inspect();
-    if (inspection.incomplete) {
-        report_audit_incomplete(session, *inspection.incomplete,
+void LogoutCoordinator::publish_audit_snapshot(const LogoutAuditInspection& snapshot) {
+    const std::lock_guard lock(operation_mutex_);
+    durable_audit_snapshot_ = snapshot;
+}
+
+void LogoutCoordinator::publish_audit_incomplete(std::string invocation_id, proto::LogoutPlan plan,
+                                                 std::vector<AuditStage> completed_stages) {
+    publish_audit_snapshot({LogoutAuditInspectionStatus::Incomplete,
+                            IncompleteLogoutAudit{std::move(invocation_id), std::move(plan),
+                                                  std::move(completed_stages)},
+                            {}});
+}
+
+void LogoutCoordinator::publish_audit_clean() {
+    publish_audit_snapshot({});
+}
+
+void LogoutCoordinator::report_recovery_deadline(
+    RequestSession& session, const std::optional<LogoutAuditInspection>& snapshot) {
+    if (snapshot && snapshot->incomplete) {
+        report_audit_incomplete(session, *snapshot->incomplete,
                                 "logout audit reconciliation is incomplete");
         return;
     }
-    if (inspection.status == LogoutAuditInspectionStatus::Invalid) {
-        report_audit_unavailable(session, inspection.failure.reason.empty()
-                                              ? "path_invalid"
-                                              : inspection.failure.reason);
+    if (snapshot && snapshot->status == LogoutAuditInspectionStatus::Invalid) {
+        report_audit_unavailable(
+            session, snapshot->failure.reason.empty() ? "path_invalid" : snapshot->failure.reason);
         return;
     }
     session.error("AUDIT_INCOMPLETE", "logout audit reconciliation is incomplete",
@@ -402,7 +419,8 @@ bool LogoutCoordinator::append_unconfirmed_recovery(const IncompleteLogoutAudit&
                                               proto::DestructivePlan{incomplete.plan},
                                               incomplete.completed_stages, *error, error_text);
     LogoutAuditFailure failure;
-    return outcome && audit_.append(serialize(*outcome), failure);
+    return outcome &&
+           audit_.append(serialize(*outcome), failure, false, [this] { publish_audit_clean(); });
 }
 
 std::optional<AuthState> LogoutCoordinator::wait_for_bootstrap_observation(
@@ -473,7 +491,9 @@ LogoutCoordinator::PreflightStep LogoutCoordinator::reconcile_preflight(RequestS
     const auto audit_timestamp = [this] {
         return hooks_ && hooks_->timestamp ? hooks_->timestamp() : timestamp();
     };
-    auto reconciliation = reconcile_definite_logout_audit(audit_, audit_timestamp);
+    auto reconciliation = reconcile_definite_logout_audit(
+        audit_, audit_timestamp,
+        [this](const LogoutAuditInspection& snapshot) { publish_audit_snapshot(snapshot); });
     if (!request_active(session)) {
         return PreflightStep::Failed;
     }
@@ -763,7 +783,10 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
         return;
     }
     LogoutAuditFailure audit_failure;
-    if (!audit_.append(serialize(*intent), audit_failure, true)) {
+    if (!audit_.append(
+            serialize(*intent), audit_failure, true, [this, invocation, logout_plan = *plan] {
+                publish_audit_incomplete(invocation, logout_plan, {AuditStage::IntentSynced});
+            })) {
         session.error(
             "AUDIT_UNAVAILABLE", "cannot durably append logout intent",
             {{"account", account_}, {"path", audit_.path()}, {"reason", audit_failure.reason}},
@@ -787,7 +810,8 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
         std::string error_text;
         auto outcome = make_failure_audit_outcome(record_identity(), proto::DestructivePlan{*plan},
                                                   completed, *error, error_text);
-        if (!outcome || !audit_.append(serialize(*outcome), audit_failure)) {
+        if (!outcome || !audit_.append(serialize(*outcome), audit_failure, false,
+                                       [this] { publish_audit_clean(); })) {
             audit_fatal();
             return;
         }
@@ -808,7 +832,13 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
 
     auto send_checkpoint = make_logout_audit_checkpoint(
         record_identity(), *plan, AuditStage::LogoutSendStarted, factory_error);
-    if (!send_checkpoint || !audit_.append(serialize(*send_checkpoint), audit_failure)) {
+    auto send_completed = completed;
+    send_completed.push_back(AuditStage::LogoutSendStarted);
+    if (!send_checkpoint || !audit_.append(serialize(*send_checkpoint), audit_failure, false,
+                                           [this, invocation, logout_plan = *plan, send_completed] {
+                                               publish_audit_incomplete(invocation, logout_plan,
+                                                                        send_completed);
+                                           })) {
         session.settle_in_flight();
         audit_fatal();
         return;
@@ -992,14 +1022,21 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
     session.settle_in_flight();
     auto closed_checkpoint = make_logout_audit_checkpoint(
         record_identity(), *plan, AuditStage::LogoutClosedConfirmed, factory_error);
-    if (!closed_checkpoint || !audit_.append(serialize(*closed_checkpoint), audit_failure)) {
+    auto closed_completed = completed;
+    closed_completed.push_back(AuditStage::LogoutClosedConfirmed);
+    if (!closed_checkpoint ||
+        !audit_.append(serialize(*closed_checkpoint), audit_failure, false,
+                       [this, invocation, logout_plan = *plan, closed_completed] {
+                           publish_audit_incomplete(invocation, logout_plan, closed_completed);
+                       })) {
         audit_fatal();
         return;
     }
     completed.push_back(AuditStage::LogoutClosedConfirmed);
     auto outcome =
         make_logout_success_audit_outcome(record_identity(), *plan, completed, factory_error);
-    if (!outcome || !audit_.append(serialize(*outcome), audit_failure)) {
+    if (!outcome || !audit_.append(serialize(*outcome), audit_failure, false,
+                                   [this] { publish_audit_clean(); })) {
         audit_fatal();
         return;
     }

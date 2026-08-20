@@ -432,7 +432,8 @@ const std::string& LogoutAuditLog::path() const {
 }
 
 bool LogoutAuditLog::append(const nlohmann::json& record, LogoutAuditFailure& failure,
-                            bool begin_group) const {
+                            bool begin_group,
+                            const LogoutAuditDurableObserver& durable_observer) const {
     const auto slash = path().rfind('/');
     if (slash == std::string::npos || path().substr(0, slash) != state_directory_) {
         failure.reason = "path_invalid";
@@ -476,6 +477,9 @@ bool LogoutAuditLog::append(const nlohmann::json& record, LogoutAuditFailure& fa
         ::fsync(directory.get()) != 0) {
         failure.reason = "sync_failed";
         return false;
+    }
+    if (durable_observer) {
+        durable_observer();
     }
     if (hooks_ && hooks_->after_sync) {
         hooks_->after_sync(record.value("phase", std::string{}));
@@ -552,9 +556,13 @@ LogoutAuditInspection LogoutAuditLog::inspect() const {
 
 LogoutAuditReconcileResult
 reconcile_definite_logout_audit(const LogoutAuditLog& audit,
-                                const std::function<std::string()>& timestamp) {
+                                const std::function<std::string()>& timestamp,
+                                const LogoutAuditInspectionObserver& inspection_observer) {
     for (;;) {
         auto inspection = audit.inspect();
+        if (inspection_observer) {
+            inspection_observer(inspection);
+        }
         if (inspection.status == LogoutAuditInspectionStatus::Clean) {
             return {};
         }
@@ -588,7 +596,11 @@ reconcile_definite_logout_audit(const LogoutAuditLog& audit,
         }
 
         LogoutAuditFailure failure;
-        if (!outcome || !audit.append(serialize(*outcome), failure)) {
+        if (!outcome || !audit.append(serialize(*outcome), failure, false, [inspection_observer] {
+                if (inspection_observer) {
+                    inspection_observer(LogoutAuditInspection{});
+                }
+            })) {
             return {LogoutAuditReconcileStatus::AppendFailed, std::move(incomplete),
                     std::move(failure)};
         }

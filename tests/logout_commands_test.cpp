@@ -350,6 +350,53 @@ class FakeLogout final {
     daemon::Dispatcher dispatcher_;
 };
 
+class AuditBoundaryGate {
+  public:
+    explicit AuditBoundaryGate(daemon::LogoutAuditFault boundary) : boundary_(boundary) {}
+
+    ~AuditBoundaryGate() {
+        release();
+    }
+
+    AuditBoundaryGate(const AuditBoundaryGate&) = delete;
+    AuditBoundaryGate& operator=(const AuditBoundaryGate&) = delete;
+    AuditBoundaryGate(AuditBoundaryGate&&) = delete;
+    AuditBoundaryGate& operator=(AuditBoundaryGate&&) = delete;
+
+    bool intercept(daemon::LogoutAuditFault fault) {
+        std::unique_lock lock(mutex_);
+        if (fault != boundary_ || consumed_) {
+            return false;
+        }
+        consumed_ = true;
+        entered_ = true;
+        condition_.notify_all();
+        condition_.wait(lock, [this] { return released_; });
+        return false;
+    }
+
+    bool wait_until_entered() {
+        std::unique_lock lock(mutex_);
+        return condition_.wait_for(lock, 2s, [this] { return entered_; });
+    }
+
+    void release() {
+        {
+            const std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        condition_.notify_all();
+    }
+
+  private:
+    daemon::LogoutAuditFault boundary_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool consumed_ = false;
+    bool entered_ = false;
+    bool released_ = false;
+};
+
 std::vector<json> jsonl_records(const std::string& filename) {
     std::ifstream input(filename);
     std::vector<json> result;
@@ -940,31 +987,17 @@ TEST_CASE("finite fetch recovery terminates at deadline while logout admission i
           "[logout][audit][reconciliation][deadline][fetch][concurrency]") {
     const LogoutTree tree;
     append_prior_logout(tree, {daemon::AuditStage::LogoutSendStarted});
-    std::mutex mutex;
-    std::condition_variable condition;
-    std::size_t admissions = 0;
-    bool first_entered = false;
-    bool release_first = false;
-    auto hooks = fixed_hooks();
-    hooks->after_operation_admission = [&] {
-        std::unique_lock lock(mutex);
-        ++admissions;
-        if (admissions != 1) {
-            return;
-        }
-        first_entered = true;
-        condition.notify_all();
-        condition.wait(lock, [&] { return release_first; });
+    AuditBoundaryGate gate(daemon::LogoutAuditFault::Write);
+    auto audit_hooks = std::make_shared<daemon::testing::LogoutAuditHooks>();
+    audit_hooks->should_fail = [&gate](daemon::LogoutAuditFault fault) {
+        return gate.intercept(fault);
     };
-    FakeLogout logout(tree, hooks);
+    FakeLogout logout(tree, fixed_hooks(audit_hooks));
     logout.register_fetch_for_test();
 
     auto occupying = logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 2.0,
                                                 false, std::nullopt, {"doctor"});
-    {
-        std::unique_lock lock(mutex);
-        REQUIRE(condition.wait_for(lock, 2s, [&] { return first_entered; }));
-    }
+    REQUIRE(gate.wait_until_entered());
 
     const auto expiry = daemon::RequestSession::Clock::now() + 50ms;
     auto fetch = logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 0.05, false,
@@ -975,11 +1008,7 @@ TEST_CASE("finite fetch recovery terminates at deadline while logout admission i
         fetch.session->disconnect();
     }
 
-    {
-        const std::lock_guard lock(mutex);
-        release_first = true;
-    }
-    condition.notify_all();
+    gate.release();
     static_cast<void>(occupying.outcome.get());
 
     const auto outcome = fetch.outcome.get();
@@ -991,6 +1020,60 @@ TEST_CASE("finite fetch recovery terminates at deadline while logout admission i
                    {"path", tree.audit_path()},
                    {"mutation_state", "possible"},
                    {"completed_stages", json::array({"intent_synced", "logout_send_started"})}});
+    }
+}
+
+TEST_CASE("finite fetch deadline uses the synchronized durable logout prefix",
+          "[logout][audit][rotation][deadline][fetch][concurrency]") {
+    for (const auto& [name, boundary] : {std::pair{"rotation", daemon::LogoutAuditFault::Rotate},
+                                         std::pair{"write", daemon::LogoutAuditFault::Write},
+                                         std::pair{"sync", daemon::LogoutAuditFault::Sync}}) {
+        DYNAMIC_SECTION(name) {
+            const LogoutTree tree;
+            const config::Store store(tree.config_path());
+            const auto loaded = store.load();
+            REQUIRE(loaded.snapshot);
+            daemon::LogoutAuditLog audit(tree.account_state(), "main", tree.environment().uid);
+            append_complete_logout(audit, loaded.snapshot->identity,
+                                   "33333333333333333333333333333333");
+
+            AuditBoundaryGate gate(boundary);
+            auto audit_hooks = std::make_shared<daemon::testing::LogoutAuditHooks>();
+            audit_hooks->rotation_bytes = 1;
+            audit_hooks->should_fail = [&gate](daemon::LogoutAuditFault fault) {
+                return gate.intercept(fault);
+            };
+            FakeLogout logout(tree, fixed_hooks(audit_hooks));
+            logout.register_fetch_for_test();
+
+            auto occupying = logout.dispatch_controlled();
+            REQUIRE(gate.wait_until_entered());
+
+            const auto expiry = daemon::RequestSession::Clock::now() + 50ms;
+            auto fetch = logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 0.05,
+                                                    false, std::nullopt, {"fetch"}, {}, {}, expiry);
+            const bool finished = fetch.outcome.wait_for(500ms) == std::future_status::ready;
+            CHECK(finished);
+            if (!finished) {
+                fetch.session->disconnect();
+            }
+            const auto outcome = fetch.outcome.get();
+            if (finished) {
+                REQUIRE(outcome.error);
+                CHECK((*outcome.error)["error"]["code"] == "AUDIT_INCOMPLETE");
+                CHECK((*outcome.error)["error"]["details"] ==
+                      json{{"account", "main"},
+                           {"path", tree.audit_path()},
+                           {"mutation_state", "none"},
+                           {"completed_stages", json::array()}});
+            }
+
+            gate.release();
+            REQUIRE(logout.runtime().wait_for_sent(2));
+            logout.runtime().push_update(logout.first(), {},
+                                         core::AuthStateData{core::AuthState::Closed});
+            REQUIRE(occupying.outcome.get().result);
+        }
     }
 }
 
