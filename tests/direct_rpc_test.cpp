@@ -3,6 +3,7 @@
 #include "daemon/request_session.hpp"
 #include "support/scripted_td_runtime.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <future>
@@ -224,6 +225,13 @@ const tgcli::daemon::DirectSuccess& require_success(tgcli::daemon::DirectOutcome
     const auto* success = std::get_if<tgcli::daemon::DirectSuccess>(&outcome);
     REQUIRE(success != nullptr);
     return *success;
+}
+
+std::size_t sent_count(const tgcli::test::ScriptedTdRuntime& runtime,
+                       tgcli::core::TdFunctionKind function) {
+    const auto sent = runtime.sent_functions();
+    return static_cast<std::size_t>(std::ranges::count_if(
+        sent, [&](const auto& item) { return item.function.kind() == function; }));
 }
 
 } // namespace
@@ -476,6 +484,59 @@ TEST_CASE("direct RPC never retries a pre-boundary authorization rejection",
     CHECK(rejected->authorization_failure ==
           tgcli::core::TdAuthorizationFailure::AuthSequenceMismatch);
     CHECK(harness.runtime().sent_functions().size() == 1);
+}
+
+TEST_CASE("direct RPC keeps pre-boundary authorization loss mutation-free",
+          "[daemon][direct][authorization][fake-boundary]") {
+    SECTION("non-Ready before send") {
+        DirectHarness harness;
+        PollBarrier barrier;
+        harness.runtime().set_before_make([&](tgcli::core::TdFunctionKind function) {
+            if (function == tgcli::core::TdFunctionKind::EditMessageText) {
+                barrier.wait();
+            }
+        });
+        auto pending = harness.execute(edit_request());
+        REQUIRE(barrier.await_entry());
+        harness.runtime().push_update(harness.first(), {},
+                                      tgcli::core::AuthStateData{tgcli::core::AuthState::WaitCode});
+        REQUIRE(eventually([&] {
+            return harness.client().auth_state()->data.state == tgcli::core::AuthState::WaitCode;
+        }));
+        barrier.release();
+        auto outcome = pending.get();
+        const auto* lost = std::get_if<tgcli::daemon::DirectAuthorizationLost>(&outcome);
+        REQUIRE(lost != nullptr);
+        CHECK(lost->mutation_state == tgcli::daemon::DirectMutationState::None);
+        CHECK(sent_count(harness.runtime(), tgcli::core::TdFunctionKind::EditMessageText) == 0);
+    }
+
+    SECTION("replacement bootstrap snapshot is not a malformed receive event") {
+        DirectHarness harness;
+        PollBarrier barrier;
+        harness.runtime().set_before_make([&](tgcli::core::TdFunctionKind function) {
+            if (function == tgcli::core::TdFunctionKind::EditMessageText) {
+                barrier.wait();
+            }
+        });
+        auto pending = harness.execute(edit_request());
+        REQUIRE(barrier.await_entry());
+        harness.runtime().push_update(harness.first(), {},
+                                      tgcli::core::AuthStateData{tgcli::core::AuthState::Closed});
+        REQUIRE(harness.runtime().wait_for_clients(2));
+        REQUIRE(eventually([&] {
+            return harness.client().auth_state()->client_generation >
+                   harness.first().client_generation;
+        }));
+        barrier.release();
+        auto outcome = pending.get();
+        const auto* lost = std::get_if<tgcli::daemon::DirectAuthorizationLost>(&outcome);
+        REQUIRE(lost != nullptr);
+        REQUIRE(lost->snapshot != nullptr);
+        CHECK(lost->snapshot->data.state == tgcli::core::AuthState::Closed);
+        CHECK(lost->mutation_state == tgcli::daemon::DirectMutationState::None);
+        CHECK(sent_count(harness.runtime(), tgcli::core::TdFunctionKind::EditMessageText) == 0);
+    }
 }
 
 TEST_CASE("direct join guard and decline are explicit mutation-none outcomes",

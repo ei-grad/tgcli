@@ -3,7 +3,6 @@
 #include "common/utf8.hpp"
 #include "daemon/request_session.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <future>
@@ -17,58 +16,6 @@ namespace tgcli::daemon {
 namespace {
 
 using namespace std::chrono_literals;
-
-bool valid_message_ids(const std::vector<std::int64_t>& values, std::size_t maximum,
-                       bool strictly_increasing) {
-    if (values.empty() || values.size() > maximum ||
-        !std::ranges::all_of(values, core::valid_td_message_id)) {
-        return false;
-    }
-    return !strictly_increasing ||
-           std::adjacent_find(values.begin(), values.end(), std::greater_equal<>{}) == values.end();
-}
-
-bool valid_request(const core::TdDirectRequest& request) {
-    return std::visit(
-        [](const auto& value) {
-            using Request = std::decay_t<decltype(value)>;
-            if constexpr (std::is_same_v<Request, core::TdEditMessageTextRequest>) {
-                return core::valid_td_chat_id(value.chat_id) &&
-                       core::valid_td_message_id(value.message_id) &&
-                       common::valid_utf8(value.text);
-            } else if constexpr (std::is_same_v<Request, core::TdDeleteMessagesRequest>) {
-                return core::valid_td_chat_id(value.chat_id) &&
-                       valid_message_ids(value.message_ids, 100, true);
-            } else if constexpr (std::is_same_v<Request, core::TdMessageReactionRequest>) {
-                return core::valid_td_chat_id(value.chat_id) &&
-                       core::valid_td_message_id(value.message_id) && !value.reaction.empty() &&
-                       value.reaction.size() <= 64 && common::valid_utf8(value.reaction) &&
-                       !(value.remove && value.big);
-            } else if constexpr (std::is_same_v<Request, core::TdPinMessageRequest>) {
-                return core::valid_td_chat_id(value.chat_id) &&
-                       core::valid_td_message_id(value.message_id);
-            } else if constexpr (std::is_same_v<Request, core::TdViewMessagesRequest>) {
-                return core::valid_td_chat_id(value.chat_id) &&
-                       valid_message_ids(value.message_ids, 1, false);
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdSetChatNotificationSettingsRequest>) {
-                return core::valid_td_chat_id(value.chat_id) && value.settings.mute_for >= 0;
-            } else if constexpr (std::is_same_v<Request, core::TdToggleChatIsPinnedRequest> ||
-                                 std::is_same_v<Request, core::TdAddChatToListRequest>) {
-                return core::valid_td_chat_id(value.chat_id);
-            } else if constexpr (std::is_same_v<Request, core::TdJoinChatRequest>) {
-                const bool by_id = value.chat_id.has_value();
-                const bool by_invite = value.invite_link.has_value();
-                return by_id != by_invite && (!by_id || core::valid_td_chat_id(*value.chat_id)) &&
-                       (!by_invite ||
-                        (!value.invite_link->empty() && common::valid_utf8(*value.invite_link)));
-            } else {
-                static_assert(std::is_same_v<Request, core::TdLeaveChatRequest>);
-                return core::valid_td_chat_id(value.chat_id);
-            }
-        },
-        request);
-}
 
 bool valid_sender(const core::TdMessageSender& sender) {
     switch (sender.kind) {
@@ -319,7 +266,7 @@ class DirectRpcCoordinator::Impl {
     DirectOutcome execute(const core::TdDirectRequest& request,
                           const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
         if (executed_ || !authorization || authorization->data.state != core::AuthState::Ready ||
-            !valid_request(request)) {
+            !core::valid_td_direct_request(request)) {
             return DirectRejected{};
         }
         executed_ = true;
@@ -342,7 +289,7 @@ class DirectRpcCoordinator::Impl {
     }
 
   private:
-    enum class AuthCompetitionKind { None, Lost, Invalid };
+    enum class AuthCompetitionKind { None, Lost };
 
     struct AuthCompetition {
         AuthCompetitionKind kind = AuthCompetitionKind::None;
@@ -358,7 +305,7 @@ class DirectRpcCoordinator::Impl {
                 continue;
             }
             if (candidate->receive_event_sequence == 0 || !candidate->receive_observed_at) {
-                return {AuthCompetitionKind::Invalid, candidate};
+                continue;
             }
             if (!event_precedes_deadline(candidate->receive_observed_at, session_.deadline())) {
                 continue;
@@ -376,9 +323,6 @@ class DirectRpcCoordinator::Impl {
         try {
             auto value = response.get();
             const auto auth = first_auth_competitor(sent);
-            if (auth.kind == AuthCompetitionKind::Invalid) {
-                return DirectMalformed{};
-            }
             const auto response_sequence = value.receive_event_sequence();
             const auto observed_at = value.receive_observed_at();
             if (response_sequence == 0 || !observed_at) {
@@ -397,19 +341,14 @@ class DirectRpcCoordinator::Impl {
         } catch (const core::TdAuthorizationError& error) {
             const auto auth = first_auth_competitor(sent);
             if (auth.kind == AuthCompetitionKind::Lost) {
-                return DirectAuthorizationLost{.snapshot = auth.snapshot};
-            }
-            if (auth.kind == AuthCompetitionKind::Invalid) {
-                return DirectMalformed{};
+                return DirectAuthorizationLost{.snapshot = auth.snapshot,
+                                               .mutation_state = DirectMutationState::None};
             }
             return DirectRejected{.authorization_failure = error.failure()};
         } catch (const std::exception&) {
             const auto auth = first_auth_competitor(sent);
             if (auth.kind == AuthCompetitionKind::Lost) {
                 return DirectAuthorizationLost{.snapshot = auth.snapshot};
-            }
-            if (auth.kind == AuthCompetitionKind::Invalid) {
-                return DirectMalformed{};
             }
             return DirectRejected{};
         }
@@ -435,9 +374,6 @@ class DirectRpcCoordinator::Impl {
                 const auto auth = first_auth_competitor(sent);
                 if (auth.kind == AuthCompetitionKind::Lost) {
                     return DirectAuthorizationLost{.snapshot = auth.snapshot};
-                }
-                if (auth.kind == AuthCompetitionKind::Invalid) {
-                    return DirectMalformed{};
                 }
                 if (deadline_expired(session_.deadline(), now_())) {
                     return DirectTimedOut{};

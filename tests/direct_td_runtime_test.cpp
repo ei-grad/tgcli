@@ -34,6 +34,34 @@ class UnsupportedTextEntityType final : public td_api::TextEntityType {
     }
 };
 
+class UnsupportedDateTimeFormattingType final : public td_api::DateTimeFormattingType {
+  public:
+    static constexpr std::int32_t ID = 700'000'018;
+
+    [[nodiscard]] std::int32_t get_id() const final {
+        return ID;
+    }
+
+    void store(td::TlStorerToString& storer, const char* field_name) const final {
+        static_cast<void>(storer);
+        static_cast<void>(field_name);
+    }
+};
+
+class UnsupportedDateTimePartPrecision final : public td_api::DateTimePartPrecision {
+  public:
+    static constexpr std::int32_t ID = 700'000'019;
+
+    [[nodiscard]] std::int32_t get_id() const final {
+        return ID;
+    }
+
+    void store(td::TlStorerToString& storer, const char* field_name) const final {
+        static_cast<void>(storer);
+        static_cast<void>(field_name);
+    }
+};
+
 TdValue convert(TdFunctionKind function, NativeObjectPtr object) {
     return detail::convert_production_direct_response_for_test(function,
                                                                TdValue::from(std::move(object)));
@@ -377,8 +405,8 @@ TEST_CASE("formatted text conversion covers every pinned entity type",
     types.emplace_back(td_api::make_object<td_api::textEntityTypeMentionName>(42));
     types.emplace_back(td_api::make_object<td_api::textEntityTypeCustomEmoji>(73));
     types.emplace_back(td_api::make_object<td_api::textEntityTypeMediaTimestamp>(91));
-    types.emplace_back(td_api::make_object<td_api::textEntityTypeDateTime>(123, nullptr));
-    types.emplace_back(td_api::make_object<UnsupportedTextEntityType>());
+    types.emplace_back(td_api::make_object<td_api::textEntityTypeDateTime>(
+        123, td_api::make_object<td_api::dateTimeFormattingTypeRelative>()));
     constexpr std::array expected{
         TdTextEntityKind::Mention,     TdTextEntityKind::Hashtag,
         TdTextEntityKind::Cashtag,     TdTextEntityKind::BotCommand,
@@ -391,7 +419,7 @@ TEST_CASE("formatted text conversion covers every pinned entity type",
         TdTextEntityKind::BlockQuote,  TdTextEntityKind::ExpandableBlockQuote,
         TdTextEntityKind::TextUrl,     TdTextEntityKind::MentionName,
         TdTextEntityKind::CustomEmoji, TdTextEntityKind::MediaTimestamp,
-        TdTextEntityKind::DateTime,    TdTextEntityKind::Unknown,
+        TdTextEntityKind::DateTime,
     };
     std::vector<td_api::object_ptr<td_api::textEntity>> entities;
     for (std::size_t index = 0; index < types.size(); ++index) {
@@ -416,7 +444,162 @@ TEST_CASE("formatted text conversion covers every pinned entity type",
     CHECK(text->entities[20].numeric_value == 73);
     CHECK(text->entities[21].numeric_value == 91);
     CHECK(text->entities[22].numeric_value == 123);
-    CHECK(text->entities[23].tdlib_type_id == UnsupportedTextEntityType::ID);
+    REQUIRE(text->entities[22].date_time_formatting.has_value());
+    CHECK(std::holds_alternative<TdDateTimeFormattingRelative>(
+        *text->entities[22].date_time_formatting));
+}
+
+TEST_CASE("formatted DateTime conversion preserves every absolute formatting field",
+          "[core][tdlib][direct][conversion]") {
+    std::vector<td_api::object_ptr<td_api::textEntity>> entities;
+    entities.emplace_back(td_api::make_object<td_api::textEntity>(
+        0, 1,
+        td_api::make_object<td_api::textEntityTypeDateTime>(
+            123, td_api::make_object<td_api::dateTimeFormattingTypeAbsolute>(
+                     td_api::make_object<td_api::dateTimePartPrecisionNone>(),
+                     td_api::make_object<td_api::dateTimePartPrecisionShort>(), true))));
+    entities.emplace_back(td_api::make_object<td_api::textEntity>(
+        1, 1,
+        td_api::make_object<td_api::textEntityTypeDateTime>(
+            456, td_api::make_object<td_api::dateTimeFormattingTypeAbsolute>(
+                     td_api::make_object<td_api::dateTimePartPrecisionLong>(),
+                     td_api::make_object<td_api::dateTimePartPrecisionNone>(), false))));
+    auto converted = convert(TdFunctionKind::ParseTextEntities,
+                             td_api::make_object<td_api::formattedText>("xy", std::move(entities)));
+    const auto* text = converted.get_if<TdFormattedText>();
+    REQUIRE(text != nullptr);
+    REQUIRE(text->entities.size() == 2);
+    REQUIRE(text->entities[0].date_time_formatting.has_value());
+    REQUIRE(text->entities[1].date_time_formatting.has_value());
+    const auto* first =
+        std::get_if<TdDateTimeFormattingAbsolute>(&*text->entities[0].date_time_formatting);
+    const auto* second =
+        std::get_if<TdDateTimeFormattingAbsolute>(&*text->entities[1].date_time_formatting);
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    CHECK(first->time_precision == TdDateTimePartPrecision::None);
+    CHECK(first->date_precision == TdDateTimePartPrecision::Short);
+    CHECK(first->show_day_of_week);
+    CHECK(second->time_precision == TdDateTimePartPrecision::Long);
+    CHECK(second->date_precision == TdDateTimePartPrecision::None);
+    CHECK_FALSE(second->show_day_of_week);
+}
+
+TEST_CASE("formatted text conversion rejects unknown and malformed nested entity types",
+          "[core][tdlib][direct][conversion]") {
+    SECTION("unknown entity") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> entities;
+        entities.emplace_back(td_api::make_object<td_api::textEntity>(
+            0, 1, td_api::make_object<UnsupportedTextEntityType>()));
+        auto converted =
+            convert(TdFunctionKind::ParseTextEntities,
+                    td_api::make_object<td_api::formattedText>("x", std::move(entities)));
+        CHECK(converted.get_if<TdDirectConversionError>() != nullptr);
+    }
+
+    SECTION("DateTime without formatting") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> entities;
+        entities.emplace_back(td_api::make_object<td_api::textEntity>(
+            0, 1, td_api::make_object<td_api::textEntityTypeDateTime>(123, nullptr)));
+        auto converted =
+            convert(TdFunctionKind::ParseTextEntities,
+                    td_api::make_object<td_api::formattedText>("x", std::move(entities)));
+        CHECK(converted.get_if<TdDirectConversionError>() != nullptr);
+    }
+
+    SECTION("DateTime with unknown formatting") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> entities;
+        entities.emplace_back(td_api::make_object<td_api::textEntity>(
+            0, 1,
+            td_api::make_object<td_api::textEntityTypeDateTime>(
+                123, td_api::make_object<UnsupportedDateTimeFormattingType>())));
+        auto converted =
+            convert(TdFunctionKind::ParseTextEntities,
+                    td_api::make_object<td_api::formattedText>("x", std::move(entities)));
+        CHECK(converted.get_if<TdDirectConversionError>() != nullptr);
+    }
+
+    SECTION("absolute DateTime with malformed precision") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> entities;
+        entities.emplace_back(td_api::make_object<td_api::textEntity>(
+            0, 1,
+            td_api::make_object<td_api::textEntityTypeDateTime>(
+                123, td_api::make_object<td_api::dateTimeFormattingTypeAbsolute>(
+                         td_api::make_object<UnsupportedDateTimePartPrecision>(),
+                         td_api::make_object<td_api::dateTimePartPrecisionLong>(), false))));
+        auto converted =
+            convert(TdFunctionKind::ParseTextEntities,
+                    td_api::make_object<td_api::formattedText>("x", std::move(entities)));
+        CHECK(converted.get_if<TdDirectConversionError>() != nullptr);
+    }
+
+    SECTION("absolute DateTime with missing precision") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> entities;
+        entities.emplace_back(td_api::make_object<td_api::textEntity>(
+            0, 1,
+            td_api::make_object<td_api::textEntityTypeDateTime>(
+                123,
+                td_api::make_object<td_api::dateTimeFormattingTypeAbsolute>(
+                    nullptr, td_api::make_object<td_api::dateTimePartPrecisionLong>(), false))));
+        auto converted =
+            convert(TdFunctionKind::ParseTextEntities,
+                    td_api::make_object<td_api::formattedText>("x", std::move(entities)));
+        CHECK(converted.get_if<TdDirectConversionError>() != nullptr);
+    }
+}
+
+TEST_CASE("production and scripted direct factories reject the same invalid requests",
+          "[core][tdlib][direct][fake-boundary]") {
+    const std::vector<TdDirectRequest> invalid{
+        TdEditMessageTextRequest{.chat_id = 0, .message_id = 10, .text = "edit"},
+        TdEditMessageTextRequest{.chat_id = kTdInt53Max + 1, .message_id = 10, .text = "edit"},
+        TdEditMessageTextRequest{.chat_id = -1001, .message_id = kTdInt53Max + 1, .text = "edit"},
+        TdDeleteMessagesRequest{.chat_id = -1001, .message_ids = {}, .revoke = false},
+        TdDeleteMessagesRequest{.chat_id = -1001, .message_ids = {2, 1}, .revoke = false},
+        TdDeleteMessagesRequest{
+            .chat_id = -1001, .message_ids = std::vector<std::int64_t>(101, 1), .revoke = false},
+        TdMessageReactionRequest{
+            .chat_id = -1001, .message_id = 10, .reaction = {}, .remove = false, .big = false},
+        TdMessageReactionRequest{.chat_id = -1001,
+                                 .message_id = 10,
+                                 .reaction = std::string(65, 'x'),
+                                 .remove = false,
+                                 .big = false},
+        TdMessageReactionRequest{.chat_id = -1001,
+                                 .message_id = 10,
+                                 .reaction = std::string("\xC3", 1),
+                                 .remove = false,
+                                 .big = false},
+        TdMessageReactionRequest{
+            .chat_id = -1001, .message_id = 10, .reaction = "x", .remove = true, .big = true},
+        TdViewMessagesRequest{.chat_id = -1001, .message_ids = {}},
+        TdViewMessagesRequest{.chat_id = -1001, .message_ids = {10, 11}},
+        TdSetChatNotificationSettingsRequest{
+            .chat_id = -1001, .settings = {.use_default_mute_for = false, .mute_for = -1}},
+        TdJoinChatRequest{.chat_id = -1001, .invite_link = "https://t.me/+token"},
+        TdJoinChatRequest{.chat_id = std::nullopt, .invite_link = std::nullopt},
+        TdJoinChatRequest{.chat_id = std::nullopt, .invite_link = std::string{}},
+        TdLeaveChatRequest{.chat_id = 0},
+    };
+    tgcli::test::ScriptedTdRuntime runtime;
+    for (const auto& request : invalid) {
+        INFO(request.index());
+        CHECK_THROWS_AS(detail::make_production_direct_request_for_test(request),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(make_scripted(runtime, request), std::invalid_argument);
+    }
+    CHECK(runtime.sent_functions().empty());
+
+    CHECK_THROWS_AS(detail::make_production_get_message_for_test(0, 10), std::invalid_argument);
+    CHECK_THROWS_AS(runtime.make_get_message(0, 10), std::invalid_argument);
+    CHECK_THROWS_AS(detail::make_production_get_message_properties_for_test(-1001, 0),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(runtime.make_get_message_properties(-1001, 0), std::invalid_argument);
+    CHECK_THROWS_AS(
+        detail::make_production_get_message_available_reactions_for_test(kTdInt53Max + 1, 10),
+        std::invalid_argument);
+    CHECK_THROWS_AS(runtime.make_get_message_available_reactions(kTdInt53Max + 1, 10),
+                    std::invalid_argument);
 }
 
 TEST_CASE("available reactions option formatted text and join variants convert neutrally",

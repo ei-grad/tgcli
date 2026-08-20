@@ -742,15 +742,59 @@ TdValue convert_message_available_reactions(const td_api::availableReactions& va
     return TdValue::from(std::move(converted));
 }
 
-TdTextEntity convert_text_entity(const td_api::textEntity& entity) {
+std::optional<TdDateTimePartPrecision>
+convert_date_time_precision(const td_api::DateTimePartPrecision* precision) {
+    if (precision == nullptr) {
+        return std::nullopt;
+    }
+    switch (precision->get_id()) {
+    case td_api::dateTimePartPrecisionNone::ID:
+        return TdDateTimePartPrecision::None;
+    case td_api::dateTimePartPrecisionShort::ID:
+        return TdDateTimePartPrecision::Short;
+    case td_api::dateTimePartPrecisionLong::ID:
+        return TdDateTimePartPrecision::Long;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<TdDateTimeFormatting>
+convert_date_time_formatting(const td_api::DateTimeFormattingType* formatting) {
+    if (formatting == nullptr) {
+        return std::nullopt;
+    }
+    switch (formatting->get_id()) {
+    case td_api::dateTimeFormattingTypeRelative::ID:
+        return TdDateTimeFormattingRelative{};
+    case td_api::dateTimeFormattingTypeAbsolute::ID: {
+        const auto& absolute =
+            static_cast<const td_api::dateTimeFormattingTypeAbsolute&>(*formatting);
+        const auto time_precision = convert_date_time_precision(absolute.time_precision_.get());
+        const auto date_precision = convert_date_time_precision(absolute.date_precision_.get());
+        if (!time_precision || !date_precision) {
+            return std::nullopt;
+        }
+        return TdDateTimeFormattingAbsolute{
+            .time_precision = time_precision.value_or(TdDateTimePartPrecision::None),
+            .date_precision = date_precision.value_or(TdDateTimePartPrecision::None),
+            .show_day_of_week = absolute.show_day_of_week_};
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<TdTextEntity> convert_text_entity(const td_api::textEntity& entity) {
     TdTextEntity result{.offset = entity.offset_,
                         .length = entity.length_,
                         .kind = TdTextEntityKind::Unknown,
                         .value = {},
                         .numeric_value = 0,
-                        .tdlib_type_id = entity.type_ == nullptr ? 0 : entity.type_->get_id()};
+                        .tdlib_type_id = entity.type_ == nullptr ? 0 : entity.type_->get_id(),
+                        .date_time_formatting = std::nullopt};
     if (entity.type_ == nullptr) {
-        return result;
+        return std::nullopt;
     }
     switch (entity.type_->get_id()) {
     case td_api::textEntityTypeMention::ID:
@@ -828,13 +872,19 @@ TdTextEntity convert_text_entity(const td_api::textEntity& entity) {
             static_cast<const td_api::textEntityTypeMediaTimestamp&>(*entity.type_)
                 .media_timestamp_;
         break;
-    case td_api::textEntityTypeDateTime::ID:
+    case td_api::textEntityTypeDateTime::ID: {
+        const auto& date_time = static_cast<const td_api::textEntityTypeDateTime&>(*entity.type_);
+        auto formatting = convert_date_time_formatting(date_time.formatting_type_.get());
+        if (!formatting) {
+            return std::nullopt;
+        }
         result.kind = TdTextEntityKind::DateTime;
-        result.numeric_value =
-            static_cast<const td_api::textEntityTypeDateTime&>(*entity.type_).unix_time_;
+        result.numeric_value = date_time.unix_time_;
+        result.date_time_formatting = formatting;
         break;
+    }
     default:
-        break;
+        return std::nullopt;
     }
     return result;
 }
@@ -846,7 +896,11 @@ TdValue convert_formatted_text(const td_api::formattedText& value) {
         if (entity == nullptr || entity->type_ == nullptr) {
             return TdValue::from(TdDirectConversionError{});
         }
-        converted.entities.push_back(convert_text_entity(*entity));
+        auto converted_entity = convert_text_entity(*entity);
+        if (!converted_entity) {
+            return TdValue::from(TdDirectConversionError{.tdlib_type_id = entity->type_->get_id()});
+        }
+        converted.entities.push_back(std::move(*converted_entity));
     }
     return TdValue::from(std::move(converted));
 }
@@ -1474,16 +1528,15 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
     return false;
 }
 
-void require_direct_ids(std::int64_t chat_id, std::optional<std::int64_t> message_id = {}) {
-    if (!valid_td_chat_id(chat_id) || (message_id && !valid_td_message_id(*message_id))) {
-        throw std::invalid_argument("direct TD request contains an invalid int53 identifier");
+void require_message_locator(std::int64_t chat_id, std::int64_t message_id) {
+    if (!valid_td_message_locator(chat_id, message_id)) {
+        throw std::invalid_argument("direct TD request contains an invalid message locator");
     }
 }
 
-void require_message_ids(std::int64_t chat_id, const std::vector<std::int64_t>& message_ids) {
-    if (!valid_td_chat_id(chat_id) || message_ids.empty() ||
-        !std::ranges::all_of(message_ids, valid_td_message_id)) {
-        throw std::invalid_argument("direct TD request contains invalid message identifiers");
+template <typename Request> void require_direct_request(const Request& request) {
+    if (!valid_td_direct_request(request)) {
+        throw std::invalid_argument("direct TD request is invalid");
     }
 }
 
@@ -1502,7 +1555,7 @@ std::string direct_chat_list_name(TdDirectChatList list) {
 }
 
 TdValue make_native_get_message(std::int64_t chat_id, std::int64_t message_id) {
-    require_direct_ids(chat_id, message_id);
+    require_message_locator(chat_id, message_id);
     NativeFunctionPtr native = td_api::make_object<td_api::getMessage>(chat_id, message_id);
     return TdValue::function(std::move(native),
                              TdFunctionData{TdFunctionKind::GetMessage,
@@ -1510,7 +1563,7 @@ TdValue make_native_get_message(std::int64_t chat_id, std::int64_t message_id) {
 }
 
 TdValue make_native_get_message_properties(std::int64_t chat_id, std::int64_t message_id) {
-    require_direct_ids(chat_id, message_id);
+    require_message_locator(chat_id, message_id);
     NativeFunctionPtr native =
         td_api::make_object<td_api::getMessageProperties>(chat_id, message_id);
     return TdValue::function(std::move(native),
@@ -1519,7 +1572,7 @@ TdValue make_native_get_message_properties(std::int64_t chat_id, std::int64_t me
 }
 
 TdValue make_native_get_message_available_reactions(std::int64_t chat_id, std::int64_t message_id) {
-    require_direct_ids(chat_id, message_id);
+    require_message_locator(chat_id, message_id);
     NativeFunctionPtr native =
         td_api::make_object<td_api::getMessageAvailableReactions>(chat_id, message_id, 25);
     return TdValue::function(
@@ -1558,7 +1611,7 @@ TdValue make_native_parse_text_entities(std::string text, TdTextParseMode mode) 
 }
 
 TdValue make_native_edit_message_text(TdEditMessageTextRequest request) {
-    require_direct_ids(request.chat_id, request.message_id);
+    require_direct_request(request);
     auto text = td_api::make_object<td_api::formattedText>(
         request.text, std::vector<td_api::object_ptr<td_api::textEntity>>{});
     auto content = td_api::make_object<td_api::inputMessageText>(std::move(text), nullptr, false);
@@ -1576,7 +1629,7 @@ TdValue make_native_edit_message_text(TdEditMessageTextRequest request) {
 }
 
 TdValue make_native_delete_messages(TdDeleteMessagesRequest request) {
-    require_message_ids(request.chat_id, request.message_ids);
+    require_direct_request(request);
     auto descriptor_ids = request.message_ids;
     NativeFunctionPtr native = td_api::make_object<td_api::deleteMessages>(
         request.chat_id, std::move(request.message_ids), request.revoke);
@@ -1588,10 +1641,7 @@ TdValue make_native_delete_messages(TdDeleteMessagesRequest request) {
 }
 
 TdValue make_native_message_reaction(TdMessageReactionRequest request) {
-    require_direct_ids(request.chat_id, request.message_id);
-    if (request.reaction.empty() || (request.remove && request.big)) {
-        throw std::invalid_argument("direct reaction request is invalid");
-    }
+    require_direct_request(request);
     auto reaction = td_api::make_object<td_api::reactionTypeEmoji>(request.reaction);
     const auto function =
         request.remove ? TdFunctionKind::RemoveMessageReaction : TdFunctionKind::AddMessageReaction;
@@ -1612,7 +1662,7 @@ TdValue make_native_message_reaction(TdMessageReactionRequest request) {
 }
 
 TdValue make_native_pin_message(TdPinMessageRequest request) {
-    require_direct_ids(request.chat_id, request.message_id);
+    require_direct_request(request);
     const auto function =
         request.pinned ? TdFunctionKind::PinChatMessage : TdFunctionKind::UnpinChatMessage;
     NativeFunctionPtr native;
@@ -1630,7 +1680,7 @@ TdValue make_native_pin_message(TdPinMessageRequest request) {
 }
 
 TdValue make_native_view_messages(TdViewMessagesRequest request) {
-    require_message_ids(request.chat_id, request.message_ids);
+    require_direct_request(request);
     auto descriptor_ids = request.message_ids;
     NativeFunctionPtr native = td_api::make_object<td_api::viewMessages>(
         request.chat_id, std::move(request.message_ids), nullptr, true);
@@ -1667,7 +1717,7 @@ describe_notification_settings(const TdSetChatNotificationSettingsRequest& reque
 }
 
 TdValue make_native_set_chat_notification_settings(TdSetChatNotificationSettingsRequest request) {
-    require_direct_ids(request.chat_id);
+    require_direct_request(request);
     const auto& value = request.settings;
     auto settings = td_api::make_object<td_api::chatNotificationSettings>(
         value.use_default_mute_for, value.mute_for, value.use_default_sound, value.sound_id,
@@ -1685,7 +1735,7 @@ TdValue make_native_set_chat_notification_settings(TdSetChatNotificationSettings
 }
 
 TdValue make_native_toggle_chat_is_pinned(TdToggleChatIsPinnedRequest request) {
-    require_direct_ids(request.chat_id);
+    require_direct_request(request);
     auto list = make_direct_chat_list(request.list);
     NativeFunctionPtr native = td_api::make_object<td_api::toggleChatIsPinned>(
         std::move(list), request.chat_id, request.pinned);
@@ -1697,7 +1747,7 @@ TdValue make_native_toggle_chat_is_pinned(TdToggleChatIsPinnedRequest request) {
 }
 
 TdValue make_native_add_chat_to_list(TdAddChatToListRequest request) {
-    require_direct_ids(request.chat_id);
+    require_direct_request(request);
     auto list = make_direct_chat_list(request.list);
     NativeFunctionPtr native =
         td_api::make_object<td_api::addChatToList>(request.chat_id, std::move(list));
@@ -1708,27 +1758,22 @@ TdValue make_native_add_chat_to_list(TdAddChatToListRequest request) {
 }
 
 TdValue make_native_join_chat(TdJoinChatRequest request) {
-    const bool by_id = request.chat_id.has_value();
-    const bool by_invite = request.invite_link.has_value();
-    if (by_id == by_invite || (by_id && !valid_td_chat_id(*request.chat_id)) ||
-        (by_invite && request.invite_link->empty())) {
-        throw std::invalid_argument("join request must contain exactly one valid source");
-    }
-    if (by_id) {
+    require_direct_request(request);
+    if (request.chat_id.has_value()) {
         NativeFunctionPtr native = td_api::make_object<td_api::joinChat>(*request.chat_id);
         return TdValue::function(
             std::move(native),
             TdFunctionData{TdFunctionKind::JoinChat, {{"chat_id", *request.chat_id}}});
     }
-    NativeFunctionPtr native =
-        td_api::make_object<td_api::joinChatByInviteLink>(*request.invite_link);
+    auto invite_link = std::move(request.invite_link).value_or(std::string{});
+    NativeFunctionPtr native = td_api::make_object<td_api::joinChatByInviteLink>(invite_link);
     return TdValue::function(std::move(native),
                              TdFunctionData{TdFunctionKind::JoinChatByInviteLink,
-                                            {{"invite_link", std::move(*request.invite_link)}}});
+                                            {{"invite_link", std::move(invite_link)}}});
 }
 
 TdValue make_native_leave_chat(TdLeaveChatRequest request) {
-    require_direct_ids(request.chat_id);
+    require_direct_request(request);
     NativeFunctionPtr native = td_api::make_object<td_api::leaveChat>(request.chat_id);
     return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::LeaveChat,
                                                                {{"chat_id", request.chat_id}}});

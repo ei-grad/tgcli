@@ -956,6 +956,23 @@ enum class TdTextEntityKind {
     Unknown,
 };
 
+enum class TdDateTimePartPrecision { None, Short, Long };
+
+struct TdDateTimeFormattingRelative {
+    bool operator==(const TdDateTimeFormattingRelative&) const = default;
+};
+
+struct TdDateTimeFormattingAbsolute {
+    TdDateTimePartPrecision time_precision = TdDateTimePartPrecision::None;
+    TdDateTimePartPrecision date_precision = TdDateTimePartPrecision::None;
+    bool show_day_of_week = false;
+
+    bool operator==(const TdDateTimeFormattingAbsolute&) const = default;
+};
+
+using TdDateTimeFormatting =
+    std::variant<TdDateTimeFormattingRelative, TdDateTimeFormattingAbsolute>;
+
 struct TdTextEntity {
     std::int32_t offset = 0;
     std::int32_t length = 0;
@@ -963,6 +980,7 @@ struct TdTextEntity {
     std::string value;
     std::int64_t numeric_value = 0;
     std::int32_t tdlib_type_id = 0;
+    std::optional<TdDateTimeFormatting> date_time_formatting;
 
     bool operator==(const TdTextEntity&) const = default;
 };
@@ -1084,6 +1102,20 @@ using TdDirectRequest =
                  TdPinMessageRequest, TdViewMessagesRequest, TdSetChatNotificationSettingsRequest,
                  TdToggleChatIsPinnedRequest, TdAddChatToListRequest, TdJoinChatRequest,
                  TdLeaveChatRequest>;
+
+[[nodiscard]] bool valid_td_message_locator(std::int64_t chat_id, std::int64_t message_id) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdEditMessageTextRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdDeleteMessagesRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdMessageReactionRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdPinMessageRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdViewMessagesRequest& request) noexcept;
+[[nodiscard]] bool
+valid_td_direct_request(const TdSetChatNotificationSettingsRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdToggleChatIsPinnedRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdAddChatToListRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdJoinChatRequest& request);
+[[nodiscard]] bool valid_td_direct_request(const TdLeaveChatRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdDirectRequest& request);
 
 enum class TdChatJoinResultKind {
     Success,

@@ -5,6 +5,22 @@
 
 namespace tgcli::test {
 
+namespace {
+
+void require_message_locator(std::int64_t chat_id, std::int64_t message_id) {
+    if (!core::valid_td_message_locator(chat_id, message_id)) {
+        throw std::invalid_argument("scripted direct TD request contains an invalid locator");
+    }
+}
+
+template <typename Request> void require_direct_request(const Request& request) {
+    if (!core::valid_td_direct_request(request)) {
+        throw std::invalid_argument("scripted direct TD request is invalid");
+    }
+}
+
+} // namespace
+
 ScriptedTdRuntime::ScriptedTdRuntime(bool close_automatically)
     : close_automatically_(close_automatically) {}
 
@@ -320,6 +336,7 @@ core::TdValue ScriptedTdRuntime::make_create_private_chat(std::int64_t user_id, 
 }
 
 core::TdValue ScriptedTdRuntime::make_get_message(std::int64_t chat_id, std::int64_t message_id) {
+    require_message_locator(chat_id, message_id);
     before_make(core::TdFunctionKind::GetMessage);
     return core::TdValue::scripted_function(core::TdFunctionData{
         core::TdFunctionKind::GetMessage, {{"chat_id", chat_id}, {"message_id", message_id}}});
@@ -327,6 +344,7 @@ core::TdValue ScriptedTdRuntime::make_get_message(std::int64_t chat_id, std::int
 
 core::TdValue ScriptedTdRuntime::make_get_message_properties(std::int64_t chat_id,
                                                              std::int64_t message_id) {
+    require_message_locator(chat_id, message_id);
     before_make(core::TdFunctionKind::GetMessageProperties);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::GetMessageProperties,
@@ -335,6 +353,7 @@ core::TdValue ScriptedTdRuntime::make_get_message_properties(std::int64_t chat_i
 
 core::TdValue ScriptedTdRuntime::make_get_message_available_reactions(std::int64_t chat_id,
                                                                       std::int64_t message_id) {
+    require_message_locator(chat_id, message_id);
     before_make(core::TdFunctionKind::GetMessageAvailableReactions);
     return core::TdValue::scripted_function(core::TdFunctionData{
         core::TdFunctionKind::GetMessageAvailableReactions,
@@ -350,13 +369,15 @@ core::TdValue ScriptedTdRuntime::make_get_unix_time() {
 core::TdValue ScriptedTdRuntime::make_parse_text_entities(std::string text,
                                                           core::TdTextParseMode mode) {
     before_make(core::TdFunctionKind::ParseTextEntities);
-    const auto mode_name = mode == core::TdTextParseMode::MarkdownV2 ? "markdown_v2" : "html";
+    const auto* const mode_name =
+        mode == core::TdTextParseMode::MarkdownV2 ? "markdown_v2" : "html";
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::ParseTextEntities,
                              {{"text", std::move(text)}, {"parse_mode", std::string{mode_name}}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_edit_message_text(core::TdEditMessageTextRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::EditMessageText);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::EditMessageText,
@@ -370,6 +391,7 @@ core::TdValue ScriptedTdRuntime::make_edit_message_text(core::TdEditMessageTextR
 }
 
 core::TdValue ScriptedTdRuntime::make_delete_messages(core::TdDeleteMessagesRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::DeleteMessages);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::DeleteMessages,
@@ -379,6 +401,7 @@ core::TdValue ScriptedTdRuntime::make_delete_messages(core::TdDeleteMessagesRequ
 }
 
 core::TdValue ScriptedTdRuntime::make_message_reaction(core::TdMessageReactionRequest request) {
+    require_direct_request(request);
     const auto function = request.remove ? core::TdFunctionKind::RemoveMessageReaction
                                          : core::TdFunctionKind::AddMessageReaction;
     before_make(function);
@@ -393,6 +416,7 @@ core::TdValue ScriptedTdRuntime::make_message_reaction(core::TdMessageReactionRe
 }
 
 core::TdValue ScriptedTdRuntime::make_pin_message(core::TdPinMessageRequest request) {
+    require_direct_request(request);
     const auto function = request.pinned ? core::TdFunctionKind::PinChatMessage
                                          : core::TdFunctionKind::UnpinChatMessage;
     before_make(function);
@@ -406,6 +430,7 @@ core::TdValue ScriptedTdRuntime::make_pin_message(core::TdPinMessageRequest requ
 }
 
 core::TdValue ScriptedTdRuntime::make_view_messages(core::TdViewMessagesRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::ViewMessages);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::ViewMessages,
@@ -417,6 +442,7 @@ core::TdValue ScriptedTdRuntime::make_view_messages(core::TdViewMessagesRequest 
 
 core::TdValue ScriptedTdRuntime::make_set_chat_notification_settings(
     core::TdSetChatNotificationSettingsRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::SetChatNotificationSettings);
     const auto& settings = request.settings;
     return core::TdValue::scripted_function(core::TdFunctionData{
@@ -444,8 +470,9 @@ core::TdValue ScriptedTdRuntime::make_set_chat_notification_settings(
 
 core::TdValue
 ScriptedTdRuntime::make_toggle_chat_is_pinned(core::TdToggleChatIsPinnedRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::ToggleChatIsPinned);
-    const auto list = request.list == core::TdDirectChatList::Main ? "main" : "archive";
+    const auto* const list = request.list == core::TdDirectChatList::Main ? "main" : "archive";
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::ToggleChatIsPinned,
                              {{"chat_list", std::string{list}},
@@ -454,26 +481,29 @@ ScriptedTdRuntime::make_toggle_chat_is_pinned(core::TdToggleChatIsPinnedRequest 
 }
 
 core::TdValue ScriptedTdRuntime::make_add_chat_to_list(core::TdAddChatToListRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::AddChatToList);
-    const auto list = request.list == core::TdDirectChatList::Main ? "main" : "archive";
+    const auto* const list = request.list == core::TdDirectChatList::Main ? "main" : "archive";
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::AddChatToList,
                              {{"chat_id", request.chat_id}, {"chat_list", std::string{list}}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_join_chat(core::TdJoinChatRequest request) {
+    require_direct_request(request);
     if (request.chat_id.has_value()) {
         before_make(core::TdFunctionKind::JoinChat);
-        return core::TdValue::scripted_function(
-            core::TdFunctionData{core::TdFunctionKind::JoinChat, {{"chat_id", *request.chat_id}}});
+        return core::TdValue::scripted_function(core::TdFunctionData{
+            core::TdFunctionKind::JoinChat, {{"chat_id", request.chat_id.value_or(0)}}});
     }
+    auto invite_link = std::move(request.invite_link).value_or(std::string{});
     before_make(core::TdFunctionKind::JoinChatByInviteLink);
-    return core::TdValue::scripted_function(
-        core::TdFunctionData{core::TdFunctionKind::JoinChatByInviteLink,
-                             {{"invite_link", std::move(*request.invite_link)}}});
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::JoinChatByInviteLink, {{"invite_link", std::move(invite_link)}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_leave_chat(core::TdLeaveChatRequest request) {
+    require_direct_request(request);
     before_make(core::TdFunctionKind::LeaveChat);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::LeaveChat, {{"chat_id", request.chat_id}}});
