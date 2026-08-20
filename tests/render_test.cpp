@@ -325,3 +325,16 @@ TEST_CASE("read human renderer matches its reviewed exact TSV golden", "[read][r
     CHECK_THAT(result, tgcli::test::matches_json_schema("read.result.schema.json"));
     CHECK(tgcli::cli::render_human("read", result) == golden("read.txt"));
 }
+
+TEST_CASE("fetch human renderer preserves the strict result in its reviewed golden",
+          "[fetch][render][golden]") {
+    const json result{{"chat_id", -1001},
+                      {"cached_count", 250},
+                      {"oldest_message_id", 123},
+                      {"target", {{"limit", 1000}, {"all", false}, {"since", nullptr}}},
+                      {"target_reached", false},
+                      {"stop_reason", "tdlib_idle"},
+                      {"resume_from_message_id", 123}};
+    CHECK_THAT(result, tgcli::test::matches_json_schema("fetch.result.schema.json"));
+    CHECK(tgcli::cli::render_human("fetch", result) == golden("fetch.txt"));
+}

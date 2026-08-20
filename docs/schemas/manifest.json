@@ -31,6 +31,9 @@
     "doctor": {
       "result": "doctor.result.schema.json"
     },
+    "fetch": {
+      "result": "fetch.result.schema.json"
+    },
     "login": {
       "result": "login.result.schema.json"
     },

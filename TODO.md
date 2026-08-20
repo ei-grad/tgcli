@@ -190,9 +190,10 @@ before the milestone is closed.
       matches, and reaction tags vs emoji text
 - [x] `tgcli unread`: fully load and deduplicate Main then Archive, apply the
       shared unread predicate, skip secret chats, and return `next:null`
-- [ ] `tgcli fetch <chat>`: default/finite/since/all targets, continuous local
-      prefix plus live fill, resumable progress/timeout details, and the public-
-      TDLib `tdlib_idle` limitation without false EOF/completeness claims
+- [x] `tgcli fetch <chat>`: default/finite/since/all targets, continuous local
+      prefix plus one live-fill transition, exact progress and phase-aware timeout
+      details, strict result schema/runtime invariants, recovery ordering, and the
+      public-TDLib `tdlib_idle` limitation without false EOF/completeness claims
 - [ ] `tgcli chat info`, `tgcli chat members`: type-specific info sources,
       user/chat senders, exact filters, and empty-probe pagination independent
       of approximate member totals

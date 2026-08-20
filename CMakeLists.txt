@@ -225,6 +225,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/config_runtime.cpp
     src/daemon/destructive_contract.cpp
     src/daemon/file_spool.cpp
+    src/daemon/fetch_domain.cpp
+    src/daemon/fetch_commands.cpp
     src/daemon/logout_audit.cpp
     src/daemon/logout_commands.cpp
     src/daemon/removal_filesystem.cpp

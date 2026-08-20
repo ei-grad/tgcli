@@ -448,6 +448,16 @@ std::string render_read(const nlohmann::json& data) {
     return out;
 }
 
+std::string render_fetch(const nlohmann::json& data) {
+    return fmt::format(
+        "chat_id\t{}\ncached_count\t{}\noldest_message_id\t{}\ntarget\t{}\n"
+        "target_reached\t{}\nstop_reason\t{}\nresume_from_message_id\t{}\n",
+        data.at("chat_id").get<std::int64_t>(), data.at("cached_count").get<std::uint64_t>(),
+        data.at("oldest_message_id").dump(), data.at("target").dump(),
+        data.at("target_reached").dump(), data.at("stop_reason").get_ref<const std::string&>(),
+        data.at("resume_from_message_id").dump());
+}
+
 } // namespace
 
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
@@ -510,6 +520,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "read") {
         return render_read(data);
+    }
+    if (command_key == "fetch") {
+        return render_fetch(data);
     }
     if (command_key == "resolve") {
         return render_resolve(data);

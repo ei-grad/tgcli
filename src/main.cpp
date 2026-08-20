@@ -4,6 +4,7 @@
 #include "common/paths.hpp"
 #include "daemon/chats_commands.hpp"
 #include "daemon/daemon_run.hpp"
+#include "daemon/fetch_domain.hpp"
 #include "daemon/local_selector.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/resolver.hpp"
@@ -385,6 +386,16 @@ struct ReadCliArguments {
     CLI::Option* local_option = nullptr;
 };
 
+struct FetchCliArguments {
+    std::string chat;
+    std::string since;
+    int limit = tgcli::daemon::kDefaultFetchLimit;
+    bool all = false;
+    CLI::Option* limit_option = nullptr;
+    CLI::Option* since_option = nullptr;
+    CLI::Option* all_option = nullptr;
+};
+
 bool is_saved_tags(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "tags"};
 }
@@ -441,7 +452,8 @@ std::optional<int> validate_chats_arguments(const std::vector<std::string>& comm
 std::optional<int>
 validate_command_arguments(const std::vector<std::string>& command, const SavedCliArguments& saved,
                            const ChatsCliArguments& chats, const MessageCliArguments& messages,
-                           const ReadCliArguments& read, std::string_view resolve_selector) {
+                           const ReadCliArguments& read, const FetchCliArguments& fetch,
+                           std::string_view resolve_selector) {
     if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
         return saved_exit;
     }
@@ -514,6 +526,25 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
     if (command == std::vector<std::string>{"resolve"} &&
         !tgcli::daemon::valid_resolve_selector(resolve_selector)) {
         return report_usage("resolve selector is invalid", "selector");
+    }
+    if (command == std::vector<std::string>{"fetch"}) {
+        if (!tgcli::daemon::valid_resolve_selector(fetch.chat)) {
+            return report_usage("fetch selector is invalid", "selector");
+        }
+        if (fetch.limit_option->count() != 0 &&
+            (fetch.limit < 1 || fetch.limit > tgcli::daemon::kMaximumFetchLimit)) {
+            return report_usage("fetch limit must be between 1 and 1000000", "--limit");
+        }
+        if (fetch.limit_option->count() != 0 && fetch.all_option->count() != 0) {
+            return report_usage("--limit and --all are mutually exclusive", "--limit/--all",
+                                "mutually_exclusive");
+        }
+        if (fetch.since_option->count() != 0 &&
+            !tgcli::daemon::parse_read_timestamp(fetch.since,
+                                                 tgcli::daemon::ReadTimestampBound::Since,
+                                                 std::chrono::system_clock::now())) {
+            return report_usage("invalid --since timestamp", "--since");
+        }
     }
     constexpr std::int64_t maximum_int53 = 9007199254740991LL;
     const auto valid_message_id = [](std::int64_t id) {
@@ -632,7 +663,7 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                                     bool login_bot, std::string_view resolve_selector,
                                     const ChatsCliArguments& chats, const SavedCliArguments& saved,
                                     const MessageCliArguments& messages,
-                                    const ReadCliArguments& read) {
+                                    const ReadCliArguments& read, const FetchCliArguments& fetch) {
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -644,6 +675,14 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     if (command == std::vector<std::string>{"read"}) {
         return read_request_args(read, saved);
+    }
+    if (command == std::vector<std::string>{"fetch"}) {
+        return {{"chat", fetch.chat},
+                {"limit", fetch.limit_option->count() != 0 ? nlohmann::json(fetch.limit)
+                                                           : nlohmann::json(nullptr)},
+                {"all", fetch.all},
+                {"since", fetch.since_option->count() != 0 ? nlohmann::json(fetch.since)
+                                                           : nlohmann::json(nullptr)}};
     }
     if (is_saved_search(command)) {
         return saved_search_request_args(saved);
@@ -684,6 +723,7 @@ int run(int argc, char** argv) {
     MessageCliArguments messages;
     ReadCliArguments read;
     ReadCliArguments history;
+    FetchCliArguments fetch;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -748,6 +788,13 @@ int run(int argc, char** argv) {
     CLI::App* history_cmd = app.add_subcommand("history", "alias for read");
     add_read_options(*history_cmd, history);
     app.add_subcommand("unread", "list chats with unread activity");
+    CLI::App* fetch_cmd = app.add_subcommand("fetch", "warm local history for one chat");
+    fetch_cmd->add_option("chat", fetch.chat, "chat selector")->required();
+    fetch.limit_option =
+        fetch_cmd->add_option("--limit", fetch.limit, "target history depth (1-1000000)");
+    fetch.all_option = fetch_cmd->add_flag("--all", fetch.all, "fetch without a numeric limit");
+    fetch.since_option =
+        fetch_cmd->add_option("--since", fetch.since, "inclusive timestamp lower bound");
     CLI::App* msg_cmd = app.add_subcommand("msg", "message reads and mutations");
     msg_cmd->require_subcommand(1);
     CLI::App* msg_get_cmd = msg_cmd->add_subcommand("get", "get messages by id");
@@ -827,8 +874,8 @@ int run(int argc, char** argv) {
     if (command.empty()) {
         return report_missing_command();
     }
-    if (const auto argument_exit = validate_command_arguments(command, saved, chats, messages,
-                                                              *selected_read, resolve_selector);
+    if (const auto argument_exit = validate_command_arguments(
+            command, saved, chats, messages, *selected_read, fetch, resolve_selector);
         argument_exit) {
         return *argument_exit;
     }
@@ -873,8 +920,9 @@ int run(int argc, char** argv) {
         return tgcli::kUsage;
     }
 
-    nlohmann::json request_args = command_request_args(
-        command, login_qr, login_bot, resolve_selector, chats, saved, messages, *selected_read);
+    nlohmann::json request_args =
+        command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
+                             *selected_read, fetch);
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);

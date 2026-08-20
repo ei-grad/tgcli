@@ -1,0 +1,7 @@
+chat_id	-1001
+cached_count	250
+oldest_message_id	123
+target	{"all":false,"limit":1000,"since":null}
+target_reached	false
+stop_reason	tdlib_idle
+resume_from_message_id	123

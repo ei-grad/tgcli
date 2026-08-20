@@ -5,6 +5,7 @@
 #include "daemon/commands.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
+#include "daemon/fetch_commands.hpp"
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/message_commands.hpp"
@@ -182,11 +183,13 @@ class RecoveryFixture {
         messages_ =
             std::make_unique<tgcli::daemon::MessageCoordinator>(*client_, std::string("main"));
         read_ = std::make_unique<tgcli::daemon::ReadCoordinator>(*client_, std::string("main"));
+        fetch_ = std::make_unique<tgcli::daemon::FetchCoordinator>(*client_, std::string("main"));
         context_.account = "main";
         context_.account_removal = removal_.get();
         context_.logout = logout_.get();
         context_.messages = messages_.get();
         context_.read = read_.get();
+        context_.fetch = fetch_.get();
         tgcli::daemon::register_commands(dispatcher_, context_);
     }
 
@@ -257,6 +260,9 @@ class RecoveryFixture {
                 request.args = {{"chat", "-1001"},  {"before", nullptr}, {"since", nullptr},
                                 {"until", nullptr}, {"topic", nullptr},  {"local", false},
                                 {"limit", 20},      {"cursor", nullptr}};
+            } else if (command == std::vector<std::string>{"fetch"}) {
+                request.args = {
+                    {"chat", "-1001"}, {"limit", 1}, {"all", false}, {"since", nullptr}};
             } else {
                 request.args = {{"chat", "-1001"}, {"message_id", 123}};
             }
@@ -327,6 +333,7 @@ class RecoveryFixture {
     std::unique_ptr<tgcli::daemon::LogoutCoordinator> logout_;
     std::unique_ptr<tgcli::daemon::MessageCoordinator> messages_;
     std::unique_ptr<tgcli::daemon::ReadCoordinator> read_;
+    std::unique_ptr<tgcli::daemon::FetchCoordinator> fetch_;
     tgcli::daemon::DaemonContext context_;
     tgcli::daemon::Dispatcher dispatcher_;
     std::size_t sent_count_ = 1;
@@ -472,4 +479,61 @@ TEST_CASE("read remains outside both recovery preflight lists",
     CHECK(trace[0] == "getMe");
     CHECK(trace[1] == "getChat");
     CHECK(trace[2] == "getChatHistory");
+}
+
+TEST_CASE("fetch real dispatch stops recovery failures before every TD read",
+          "[fetch][recovery][dispatch][fake-boundary]") {
+    SECTION("removal precedes logout") {
+        RecoveryFixture fixture;
+        fixture.add_incomplete_removal();
+        const auto outcome = fixture.dispatch({"fetch"}).get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "REMOVAL_INCOMPLETE");
+        CHECK(fixture.trace() == std::vector<std::string>{"removal"});
+        CHECK(fixture.sent_count() == 1);
+        CHECK_FALSE(outcome.result);
+    }
+    SECTION("logout follows clean removal") {
+        RecoveryFixture fixture;
+        fixture.add_incomplete_logout();
+        const auto outcome = fixture.dispatch({"fetch"}).get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "AUDIT_INCOMPLETE");
+        const auto trace = fixture.trace();
+        CHECK(first_index(trace, "removal") < first_index(trace, "logout"));
+        CHECK(fixture.sent_count() == 1);
+        CHECK_FALSE(outcome.result);
+    }
+}
+
+TEST_CASE("fetch real dispatch orders both recoveries before Ready resolver and local history",
+          "[fetch][recovery][dispatch][fake-boundary][ordering]") {
+    RecoveryFixture fixture;
+    auto pending = fixture.dispatch({"fetch"});
+    fixture.respond(tgcli::core::TdFunctionKind::GetMe, user());
+    fixture.respond(tgcli::core::TdFunctionKind::GetChat, chat());
+    fixture.respond(
+        tgcli::core::TdFunctionKind::GetChatHistory,
+        tgcli::core::TdMessages{.total_count = 1,
+                                .messages = {tgcli::core::TdMessageSummary{
+                                    .id = 123,
+                                    .chat_id = -1001,
+                                    .date = 20,
+                                    .sender = {.kind = tgcli::core::TdMessageSenderKind::User,
+                                               .id = 42,
+                                               .tdlib_type_id = 1},
+                                    .is_outgoing = false,
+                                    .topic = std::nullopt,
+                                    .content_kind = tgcli::core::TdMessageContentKind::Text,
+                                    .text = "message"}}});
+    fixture.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                    tgcli::core::TdMessages{.total_count = 0, .messages = {}});
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["stop_reason"] == "target_reached");
+    const auto trace = fixture.trace();
+    CHECK(first_index(trace, "removal") < first_index(trace, "logout"));
+    CHECK(first_index(trace, "logout") < first_index(trace, "getMe"));
+    CHECK(first_index(trace, "getMe") < first_index(trace, "getChat"));
+    CHECK(first_index(trace, "getChat") < first_index(trace, "getChatHistory"));
 }

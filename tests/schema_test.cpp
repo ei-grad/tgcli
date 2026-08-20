@@ -220,6 +220,16 @@ std::vector<SchemaCase> schema_cases() {
           {"boundary", "page"}},
          "items",
          true},
+        {"fetch.result.schema.json",
+         {{"chat_id", -1001},
+          {"cached_count", 250},
+          {"oldest_message_id", 123},
+          {"target", {{"limit", 1000}, {"all", false}, {"since", nullptr}}},
+          {"target_reached", false},
+          {"stop_reason", "tdlib_idle"},
+          {"resume_from_message_id", 123}},
+         "chat_id",
+         true},
         {"doctor.result.schema.json",
          {{"account", "main"},
           {"daemon",
@@ -340,6 +350,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
           {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
           {"doctor", {{"result", "doctor.result.schema.json"}}},
+          {"fetch", {{"result", "fetch.result.schema.json"}}},
           {"login", {{"result", "login.result.schema.json"}}},
           {"logout", {{"result", "logout.result.schema.json"}}},
           {"me", {{"result", "me.result.schema.json"}}},
@@ -355,7 +366,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 24);
+    CHECK(manifest["commands"].size() == 25);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

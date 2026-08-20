@@ -2633,6 +2633,134 @@ TEST_CASE("read no-daemon fake boundary preserves canonical JSON discipline",
     CHECK_THAT(result, test::matches_json_schema("read.result.schema.json"));
 }
 
+TEST_CASE("fetch parser exposes only the closed target grammar and validates locally",
+          "[cli][fetch][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "fetch-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("fetch") != std::string::npos);
+
+    const auto help = run_binary_captured({"fetch", "--help"}, env, "fetch-help");
+    REQUIRE(help.exit_code == kOk);
+    CHECK((help.out + help.err).find("warm local history") != std::string::npos);
+
+    const std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
+        {"fetch-missing-chat", {"fetch"}},
+        {"fetch-zero-limit", {"fetch", "-1001", "--limit", "0"}},
+        {"fetch-large-limit", {"fetch", "-1001", "--limit", "1000001"}},
+        {"fetch-exclusive", {"fetch", "-1001", "--limit", "1", "--all"}},
+        {"fetch-bad-since", {"fetch", "-1001", "--since", "1970-01-01 00:00:00Z"}},
+        {"fetch-short-limit", {"fetch", "-1001", "-n", "1"}},
+        {"fetch-cursor", {"--cursor", "opaque", "fetch", "-1001"}},
+    };
+    for (const auto& [stem, arguments] : invalid) {
+        const auto outcome = run_binary_captured(arguments, env, stem);
+        INFO(stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the strict result",
+          "[cli][fetch][fake-boundary][schema][progress]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"fetch"};
+    request.args = {{"chat", "-1001"}, {"limit", 1}, {"all", false}, {"since", nullptr}};
+    request.context.json = true;
+    request.context.cwd = "/";
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+
+    const auto respond = [&](std::size_t count, core::TdFunctionKind kind, core::TdValue value) {
+        REQUIRE(scripted->wait_for_sent(count));
+        const auto sent = scripted->sent_functions();
+        REQUIRE(sent.size() == count);
+        REQUIRE(sent.back().function.kind() == kind);
+        scripted->push_response(td_client, sent.back().query_id, std::move(value));
+    };
+    respond(2, core::TdFunctionKind::GetMe,
+            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                    .first_name = "Ada",
+                                                    .last_name = "",
+                                                    .usernames = {"ada"},
+                                                    .phone_number = "12025550123",
+                                                    .is_bot = false,
+                                                    .is_premium = false}));
+    respond(3, core::TdFunctionKind::GetChat,
+            core::TdValue::from(core::TdChat{.id = -1001,
+                                             .title = "Project",
+                                             .kind = core::TdChatKind::BasicGroup,
+                                             .related_id = 0,
+                                             .tdlib_type_id = 1,
+                                             .positions = {},
+                                             .chat_lists = {},
+                                             .is_marked_unread = false,
+                                             .unread_count = 0,
+                                             .unread_mention_count = 0,
+                                             .unread_reaction_count = 0,
+                                             .unread_poll_vote_count = 0,
+                                             .last_message = std::nullopt}));
+    respond(
+        4, core::TdFunctionKind::GetChatHistory,
+        core::TdValue::from(core::TdMessages{
+            .total_count = 2,
+            .messages = {core::TdMessageSummary{.id = 100,
+                                                .chat_id = -1001,
+                                                .date = 20,
+                                                .sender = {.kind = core::TdMessageSenderKind::User,
+                                                           .id = 42,
+                                                           .tdlib_type_id = 1},
+                                                .is_outgoing = false,
+                                                .topic = std::nullopt,
+                                                .content_kind = core::TdMessageContentKind::Text,
+                                                .text = "first"},
+                         core::TdMessageSummary{.id = 99,
+                                                .chat_id = -1001,
+                                                .date = 19,
+                                                .sender = {.kind = core::TdMessageSenderKind::User,
+                                                           .id = 42,
+                                                           .tdlib_type_id = 1},
+                                                .is_outgoing = false,
+                                                .topic = std::nullopt,
+                                                .content_kind = core::TdMessageContentKind::Text,
+                                                .text = "second"}}}));
+    respond(5, core::TdFunctionKind::GetChatHistory,
+            core::TdValue::from(core::TdMessages{.total_count = 0, .messages = {}}));
+
+    const auto outcome = pending.get();
+    CHECK(outcome.exit_code == kOk);
+    const auto result = json::parse(outcome.out);
+    CHECK_THAT(result, test::matches_json_schema("fetch.result.schema.json"));
+    CHECK(result["cached_count"] == 2);
+    CHECK(result["stop_reason"] == "target_reached");
+    CHECK(outcome.out.find("progress") == std::string::npos);
+    CHECK(outcome.err == "{\"progress\":{\"cached\":2,\"chat_id\":-1001,\"oldest_message_id\":99,"
+                         "\"operation\":\"fetch\",\"target\":1}}\n");
+}
+
 TEST_CASE("msg get and link no-daemon fake boundary preserve strict JSON discipline",
           "[cli][msg][fake-boundary][schema]") {
     const IsolatedEnv env;

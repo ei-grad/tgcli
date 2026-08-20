@@ -3,6 +3,7 @@
 #include "common/exit_codes.hpp"
 #include "daemon/account_removal.hpp"
 #include "daemon/chats_commands.hpp"
+#include "daemon/fetch_commands.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
 #include "daemon/message_commands.hpp"
@@ -124,6 +125,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.read != nullptr) {
         register_read_command(dispatcher, *context.read);
+    }
+    if (context.fetch != nullptr) {
+        register_fetch_command(dispatcher, *context.fetch);
     }
     if (context.resolver != nullptr) {
         register_resolve_command(dispatcher, *context.resolver);

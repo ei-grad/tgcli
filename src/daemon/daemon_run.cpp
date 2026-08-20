@@ -11,6 +11,7 @@
 #include "daemon/commands.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
+#include "daemon/fetch_commands.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
@@ -255,6 +256,7 @@ int run_daemon(const std::string& account) {
     ChatsCoordinator chats(td, account);
     MessageCoordinator messages(td, account);
     ReadCoordinator read(td, account);
+    FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
 
     DaemonContext context;
@@ -270,6 +272,7 @@ int run_daemon(const std::string& account) {
     context.chats = &chats;
     context.messages = &messages;
     context.read = &read;
+    context.fetch = &fetch;
     context.resolver = &resolver;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
@@ -403,6 +406,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     ChatsCoordinator chats(td, account);
     MessageCoordinator messages(td, account);
     ReadCoordinator read(td, account);
+    FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
     DaemonContext context;
     context.account = account;
@@ -417,6 +421,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.chats = &chats;
     context.messages = &messages;
     context.read = &read;
+    context.fetch = &fetch;
     context.resolver = &resolver;
     context.auth_state = [&td] {
         const auto state = td.auth_state();

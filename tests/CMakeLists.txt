@@ -21,6 +21,8 @@ add_executable(tgcli_unit_tests
     destructive_contract_test.cpp
     destructive_plan_test.cpp
     file_spool_test.cpp
+    fetch_domain_test.cpp
+    fetch_commands_test.cpp
     removal_filesystem_test.cpp
     removal_journal_test.cpp
     removal_planner_test.cpp
