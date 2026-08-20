@@ -346,6 +346,7 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetMessageProperties:
     case TdFunctionKind::GetMessageAvailableReactions:
     case TdFunctionKind::ParseTextEntities:
+    case TdFunctionKind::SendMessage:
     case TdFunctionKind::EditMessageText:
     case TdFunctionKind::DeleteMessages:
     case TdFunctionKind::AddMessageReaction:

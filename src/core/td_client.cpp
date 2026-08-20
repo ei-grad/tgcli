@@ -59,6 +59,7 @@ TdClosedDecisionStatus terminal_decision(TdLifecycleClaimStatus claim) {
 
 std::optional<DescriptorKind> direct_mutation_tier(TdFunctionKind function) {
     switch (function) {
+    case TdFunctionKind::SendMessage:
     case TdFunctionKind::EditMessageText:
     case TdFunctionKind::AddMessageReaction:
     case TdFunctionKind::RemoveMessageReaction:
@@ -405,6 +406,57 @@ class TdClient::Impl {
                         std::string text, TdTextParseMode mode) {
         return send_read(authorization, TdFunctionKind::ParseTextEntities,
                          runtime_->make_parse_text_entities(std::move(text), mode));
+    }
+
+    std::future<TdValue> send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                      TdSendMessageRequest request) {
+        if (!authorization) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        if (!valid_td_send_message_request(request)) {
+            return failed_future("sendMessage request is invalid");
+        }
+        auto owner = issue_owner(TdOwnerKind::Request);
+        if (!owner) {
+            return failed_future(TdAuthorizationFailure::GenerationClosed);
+        }
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard<std::mutex> lock(state_mutex_);
+            generation = current_;
+        }
+        if (!generation) {
+            return failed_future(TdAuthorizationFailure::GenerationClosed);
+        }
+        const TdSendDescriptor descriptor{.function = TdFunctionKind::SendMessage,
+                                          .tier = DescriptorKind::Write,
+                                          .owner = owner.owner(),
+                                          .client_generation = authorization->client_generation,
+                                          .auth_sequence = authorization->auth_sequence,
+                                          .auth_state = authorization->data.state};
+        return generation->lifecycle.send(
+            [this, generation, descriptor, request = std::move(request)]() mutable {
+                const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+                if (!generation->initial_state_installed) {
+                    return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+                }
+                if (const auto failure = authorization_failure_locked(
+                        generation, descriptor, TdFunctionData{TdFunctionKind::SendMessage})) {
+                    return failed_future(*failure);
+                }
+                if (request.content.parsed &&
+                    !request.content.formatted_text.capability.valid_for(generation->number)) {
+                    return failed_future("parsed formattedText capability expired");
+                }
+                try {
+                    return submit_admitted_locked(
+                               generation, descriptor,
+                               runtime_->make_send_message(std::move(request), generation->number))
+                        .future;
+                } catch (const std::exception& error) {
+                    return failed_future(error.what());
+                }
+            });
     }
 
     std::future<TdValue>
@@ -758,6 +810,14 @@ class TdClient::Impl {
         updates_.unsubscribe(id);
     }
 
+    std::uint64_t subscribe_send_updates(UpdateHandler handler) {
+        return send_updates_.subscribe(std::move(handler));
+    }
+
+    void unsubscribe_send_updates(std::uint64_t id) {
+        send_updates_.unsubscribe(id);
+    }
+
     std::uint64_t subscribe_response_completions(ResponseCompletionHandler handler) {
         return response_completions_.subscribe(std::move(handler));
     }
@@ -1102,8 +1162,10 @@ class TdClient::Impl {
 
     // Auth publication lock order is auth_commit -> outbound -> gate. Response
     // promises are detached from the query registry before any of those locks.
-    // Clock/test callbacks, lifecycle coordination, TD sends, and subscriber
-    // callbacks stay outside the gate.
+    // Clock/test callbacks, lifecycle coordination, TD sends, and generic
+    // subscriber callbacks stay outside the gate. Dedicated send-update
+    // subscribers run inside it and may only queue the stamped update, which
+    // makes deadline arbitration atomic with their visibility.
     TdEventClock::time_point observe_event() {
         const auto observed_at = event_now_();
         if (after_event_observed_) {
@@ -1227,6 +1289,10 @@ class TdClient::Impl {
             if (!generation->initial_state_installed) {
                 generation->pending_updates.push_back(std::move(event.object));
                 pending = true;
+            } else if (event.object.get_if<TdUpdateMessageSendSucceeded>() != nullptr ||
+                       event.object.get_if<TdUpdateMessageSendFailed>() != nullptr ||
+                       event.object.get_if<TdUpdateDeleteMessages>() != nullptr) {
+                send_updates_.publish(event.object);
             }
         }
         if (!pending) {
@@ -1343,6 +1409,7 @@ class TdClient::Impl {
     std::uint64_t shutdown_generation_ = 0;
     std::atomic<std::shared_ptr<const AuthStateSnapshot>> auth_state_;
     UpdateBus<TdValue> updates_;
+    UpdateBus<TdValue> send_updates_;
     UpdateBus<std::uint64_t> response_completions_;
     UpdateBus<std::shared_ptr<const AuthStateSnapshot>> auth_states_;
     std::atomic<bool> stop_{false};
@@ -1707,6 +1774,12 @@ TdClient::parse_text_entities(const std::shared_ptr<const AuthStateSnapshot>& au
 }
 
 std::future<TdValue>
+TdClient::send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       TdSendMessageRequest request) {
+    return impl_->send_message(authorization, std::move(request));
+}
+
+std::future<TdValue>
 TdClient::edit_message_text(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                             TdEditMessageTextRequest request) {
     return impl_->edit_message_text(authorization, std::move(request));
@@ -1806,6 +1879,14 @@ std::uint64_t TdClient::subscribe_updates(UpdateHandler handler) {
 
 void TdClient::unsubscribe_updates(std::uint64_t id) {
     impl_->unsubscribe_updates(id);
+}
+
+std::uint64_t TdClient::subscribe_send_updates(UpdateHandler handler) {
+    return impl_->subscribe_send_updates(std::move(handler));
+}
+
+void TdClient::unsubscribe_send_updates(std::uint64_t id) {
+    impl_->unsubscribe_send_updates(id);
 }
 
 std::uint64_t TdClient::subscribe_response_completions(ResponseCompletionHandler handler) {

@@ -376,6 +376,24 @@ core::TdValue ScriptedTdRuntime::make_parse_text_entities(std::string text,
                              {{"text", std::move(text)}, {"parse_mode", std::string{mode_name}}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_send_message(core::TdSendMessageRequest request,
+                                                   std::uint64_t client_generation) {
+    if (!core::valid_td_send_message_request(request) || client_generation == 0) {
+        throw std::invalid_argument("scripted sendMessage request is invalid");
+    }
+    auto description = core::describe_td_send_message_request(request);
+    if (request.content.parsed) {
+        const auto capability =
+            request.content.formatted_text.capability
+                .consume<core::TdScriptedFormattedTextCapability>(client_generation);
+        if (!capability) {
+            throw std::invalid_argument("scripted formattedText capability is unavailable");
+        }
+    }
+    before_make(core::TdFunctionKind::SendMessage);
+    return core::TdValue::scripted_function(std::move(description));
+}
+
 core::TdValue ScriptedTdRuntime::make_edit_message_text(core::TdEditMessageTextRequest request) {
     require_direct_request(request);
     before_make(core::TdFunctionKind::EditMessageText);
@@ -569,6 +587,45 @@ void ScriptedTdRuntime::push_update(ScriptedClient client, core::TdValue object,
                 .query_id = 0,
                 .object = std::move(object),
                 .authorization_state = std::move(authorization_state)});
+}
+
+void ScriptedTdRuntime::push_message_send_succeeded(ScriptedClient client,
+                                                    std::int64_t old_message_id,
+                                                    std::optional<core::TdWriteMessage> message) {
+    push_update(client, core::TdValue::from(core::TdUpdateMessageSendSucceeded{
+                            .client_generation = client.client_generation,
+                            .old_message_id = old_message_id,
+                            .message = std::move(message)}));
+}
+
+void ScriptedTdRuntime::push_message_send_failed(ScriptedClient client, std::int64_t old_message_id,
+                                                 std::optional<core::TdWriteMessage> message,
+                                                 std::optional<core::TdError> error) {
+    push_update(client, core::TdValue::from(core::TdUpdateMessageSendFailed{
+                            .client_generation = client.client_generation,
+                            .old_message_id = old_message_id,
+                            .message = std::move(message),
+                            .error = std::move(error)}));
+}
+
+void ScriptedTdRuntime::push_delete_messages(ScriptedClient client, std::int64_t chat_id,
+                                             std::vector<std::int64_t> message_ids,
+                                             bool is_permanent, bool from_cache) {
+    push_update(client, core::TdValue::from(core::TdUpdateDeleteMessages{
+                            .client_generation = client.client_generation,
+                            .chat_id = chat_id,
+                            .message_ids = std::move(message_ids),
+                            .is_permanent = is_permanent,
+                            .from_cache = from_cache}));
+}
+
+core::TdFormattedText
+ScriptedTdRuntime::parsed_formatted_text(ScriptedClient client, std::string text,
+                                         std::vector<core::TdTextEntity> entities) {
+    return {.text = std::move(text),
+            .entities = std::move(entities),
+            .capability = core::TdFormattedTextCapability::from(
+                core::TdScriptedFormattedTextCapability{}, client.client_generation)};
 }
 
 bool ScriptedTdRuntime::wait_for_sent(std::size_t count, std::chrono::milliseconds timeout) const {

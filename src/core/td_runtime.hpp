@@ -59,6 +59,7 @@ enum class TdFunctionKind {
     GetMessageProperties,
     GetMessageAvailableReactions,
     ParseTextEntities,
+    SendMessage,
     EditMessageText,
     DeleteMessages,
     AddMessageReaction,
@@ -158,6 +159,8 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getMessageAvailableReactions";
     case TdFunctionKind::ParseTextEntities:
         return "parseTextEntities";
+    case TdFunctionKind::SendMessage:
+        return "sendMessage";
     case TdFunctionKind::EditMessageText:
         return "editMessageText";
     case TdFunctionKind::DeleteMessages:
@@ -612,6 +615,8 @@ struct TdOk {};
 struct TdError {
     std::int32_t code = 0;
     std::string message;
+
+    bool operator==(const TdError&) const = default;
 };
 
 struct TdUserSummary {
@@ -817,6 +822,49 @@ struct TdMessageSummary {
     bool operator==(const TdMessageSummary&) const = default;
 };
 
+enum class TdMessageSendingStateKind { Stable, Pending, Failed, Unknown };
+
+struct TdMessageSendingState {
+    TdMessageSendingStateKind kind = TdMessageSendingStateKind::Stable;
+    std::int32_t sending_id = 0;
+    std::optional<TdError> error;
+    bool can_retry = false;
+    bool need_another_sender = false;
+    bool need_another_reply_quote = false;
+    bool need_drop_reply = false;
+    std::int64_t required_paid_message_star_count = 0;
+    double retry_after = 0;
+    std::optional<std::int32_t> unsupported_tdlib_type_id;
+
+    bool operator==(const TdMessageSendingState&) const = default;
+};
+
+enum class TdMessageSchedulingStateKind {
+    None,
+    SendAtDate,
+    SendWhenOnline,
+    SendWhenVideoProcessed,
+    Unknown
+};
+
+struct TdMessageSchedulingState {
+    TdMessageSchedulingStateKind kind = TdMessageSchedulingStateKind::None;
+    std::int32_t send_date = 0;
+    std::int32_t repeat_period = 0;
+    std::optional<std::int32_t> unsupported_tdlib_type_id;
+
+    bool operator==(const TdMessageSchedulingState&) const = default;
+};
+
+struct TdWriteMessage {
+    TdMessageSummary message;
+    TdMessageSendingState sending_state;
+    TdMessageSchedulingState scheduling_state;
+    bool has_reply_markup = false;
+
+    bool operator==(const TdWriteMessage&) const = default;
+};
+
 inline constexpr std::int64_t kTdInt53Max = 9'007'199'254'740'991LL;
 
 constexpr bool valid_td_chat_id(std::int64_t value) noexcept {
@@ -985,11 +1033,141 @@ struct TdTextEntity {
     bool operator==(const TdTextEntity&) const = default;
 };
 
+class TdFormattedTextCapability {
+  public:
+    TdFormattedTextCapability() = default;
+    TdFormattedTextCapability(const TdFormattedTextCapability&) = delete;
+    TdFormattedTextCapability& operator=(const TdFormattedTextCapability&) = delete;
+    TdFormattedTextCapability(TdFormattedTextCapability&&) noexcept = default;
+    TdFormattedTextCapability& operator=(TdFormattedTextCapability&&) noexcept = default;
+    ~TdFormattedTextCapability() = default;
+
+    template <typename T>
+    static TdFormattedTextCapability from(T value, std::uint64_t client_generation) {
+        TdFormattedTextCapability result;
+        result.value_ = std::make_unique<Holder<T>>(std::move(value));
+        result.client_generation_ = client_generation;
+        return result;
+    }
+
+    template <typename T> std::optional<T> consume(std::uint64_t client_generation) {
+        if (client_generation == 0 || client_generation != client_generation_) {
+            return std::nullopt;
+        }
+        auto* holder = dynamic_cast<Holder<T>*>(value_.get());
+        if (holder == nullptr) {
+            return std::nullopt;
+        }
+        std::optional<T> result{std::move(holder->value)};
+        value_.reset();
+        client_generation_ = 0;
+        return result;
+    }
+
+    [[nodiscard]] bool valid_for(std::uint64_t client_generation) const noexcept {
+        return value_ != nullptr && client_generation != 0 &&
+               client_generation == client_generation_;
+    }
+
+    [[nodiscard]] bool has_value() const noexcept {
+        return value_ != nullptr;
+    }
+
+    [[nodiscard]] std::uint64_t client_generation() const noexcept {
+        return client_generation_;
+    }
+
+  private:
+    struct ValueBase {
+        ValueBase() = default;
+        ValueBase(const ValueBase&) = delete;
+        ValueBase& operator=(const ValueBase&) = delete;
+        ValueBase(ValueBase&&) = delete;
+        ValueBase& operator=(ValueBase&&) = delete;
+        virtual ~ValueBase() = default;
+    };
+
+    template <typename T> struct Holder final : ValueBase {
+        explicit Holder(T stored) : value(std::move(stored)) {}
+        T value;
+    };
+
+    std::unique_ptr<ValueBase> value_;
+    std::uint64_t client_generation_ = 0;
+};
+
+struct TdScriptedFormattedTextCapability {};
+
 struct TdFormattedText {
     std::string text;
     std::vector<TdTextEntity> entities;
+    TdFormattedTextCapability capability;
 
-    bool operator==(const TdFormattedText&) const = default;
+    bool operator==(const TdFormattedText& other) const {
+        return text == other.text && entities == other.entities;
+    }
+};
+
+enum class TdSendScheduleKind { Immediate, AtDate, WhenOnline };
+
+struct TdSendSchedule {
+    TdSendScheduleKind kind = TdSendScheduleKind::Immediate;
+    std::int32_t send_date = 0;
+
+    bool operator==(const TdSendSchedule&) const = default;
+};
+
+struct TdMessageSendOptions {
+    bool disable_notification = false;
+    bool protect_content = false;
+    bool update_order_of_installed_sticker_sets = false;
+    TdSendSchedule schedule;
+    std::int32_t sending_id = 0;
+
+    bool operator==(const TdMessageSendOptions&) const = default;
+};
+
+struct TdSendTextContent {
+    TdFormattedText formatted_text;
+    bool parsed = false;
+};
+
+struct TdSendMessageRequest {
+    std::int64_t chat_id = 0;
+    std::optional<TdTopic> topic;
+    std::optional<std::int64_t> reply_to_message_id;
+    TdMessageSendOptions options;
+    TdSendTextContent content;
+};
+
+[[nodiscard]] bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept;
+TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& request);
+
+struct TdUpdateMessageSendSucceeded {
+    std::uint64_t client_generation = 0;
+    std::int64_t old_message_id = 0;
+    std::optional<TdWriteMessage> message;
+
+    bool operator==(const TdUpdateMessageSendSucceeded&) const = default;
+};
+
+struct TdUpdateMessageSendFailed {
+    std::uint64_t client_generation = 0;
+    std::int64_t old_message_id = 0;
+    std::optional<TdWriteMessage> message;
+    std::optional<TdError> error;
+
+    bool operator==(const TdUpdateMessageSendFailed&) const = default;
+};
+
+struct TdUpdateDeleteMessages {
+    std::uint64_t client_generation = 0;
+    std::int64_t chat_id = 0;
+    std::vector<std::int64_t> message_ids;
+    bool is_permanent = false;
+    bool from_cache = false;
+
+    bool operator==(const TdUpdateDeleteMessages&) const = default;
 };
 
 struct TdOptionInteger {
@@ -1321,6 +1499,8 @@ class TdRuntime {
                                                          std::int64_t message_id) = 0;
     virtual TdValue make_get_unix_time() = 0;
     virtual TdValue make_parse_text_entities(std::string text, TdTextParseMode mode) = 0;
+    virtual TdValue make_send_message(TdSendMessageRequest request,
+                                      std::uint64_t client_generation) = 0;
     virtual TdValue make_edit_message_text(TdEditMessageTextRequest request) = 0;
     virtual TdValue make_delete_messages(TdDeleteMessagesRequest request) = 0;
     virtual TdValue make_message_reaction(TdMessageReactionRequest request) = 0;

@@ -242,6 +242,9 @@ class TdClient {
     parse_text_entities(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                         std::string text, TdTextParseMode mode);
 
+    std::future<TdValue> send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                      TdSendMessageRequest request);
+
     std::future<TdValue>
     edit_message_text(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                       TdEditMessageTextRequest request);
@@ -277,6 +280,10 @@ class TdClient {
     // calls, no (un)subscribe from within a handler (see UpdateBus).
     std::uint64_t subscribe_updates(UpdateHandler handler);
     void unsubscribe_updates(std::uint64_t id);
+    // Send-update handlers additionally run under the event-publication gate;
+    // they must only queue the update and return.
+    std::uint64_t subscribe_send_updates(UpdateHandler handler);
+    void unsubscribe_send_updates(std::uint64_t id);
     std::uint64_t subscribe_response_completions(ResponseCompletionHandler handler);
     void unsubscribe_response_completions(std::uint64_t id);
 

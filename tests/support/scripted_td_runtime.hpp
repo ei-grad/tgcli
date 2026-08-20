@@ -87,6 +87,8 @@ class ScriptedTdRuntime final : public core::TdRuntime {
                                                        std::int64_t message_id) override;
     core::TdValue make_get_unix_time() override;
     core::TdValue make_parse_text_entities(std::string text, core::TdTextParseMode mode) override;
+    core::TdValue make_send_message(core::TdSendMessageRequest request,
+                                    std::uint64_t client_generation) override;
     core::TdValue make_edit_message_text(core::TdEditMessageTextRequest request) override;
     core::TdValue make_delete_messages(core::TdDeleteMessagesRequest request) override;
     core::TdValue make_message_reaction(core::TdMessageReactionRequest request) override;
@@ -106,6 +108,17 @@ class ScriptedTdRuntime final : public core::TdRuntime {
                        std::optional<core::AuthStateData> authorization_state = std::nullopt);
     void push_update(ScriptedClient client, core::TdValue object = {},
                      std::optional<core::AuthStateData> authorization_state = std::nullopt);
+    void push_message_send_succeeded(ScriptedClient client, std::int64_t old_message_id,
+                                     std::optional<core::TdWriteMessage> message);
+    void push_message_send_failed(ScriptedClient client, std::int64_t old_message_id,
+                                  std::optional<core::TdWriteMessage> message,
+                                  std::optional<core::TdError> error);
+    void push_delete_messages(ScriptedClient client, std::int64_t chat_id,
+                              std::vector<std::int64_t> message_ids, bool is_permanent,
+                              bool from_cache);
+    static core::TdFormattedText
+    parsed_formatted_text(ScriptedClient client, std::string text,
+                          std::vector<core::TdTextEntity> entities = {});
 
     bool wait_for_sent(std::size_t count,
                        std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <type_traits>
 
 namespace tgcli::core {
@@ -17,6 +18,48 @@ bool valid_message_ids(const std::vector<std::int64_t>& values, std::size_t maxi
     }
     return !strictly_increasing ||
            std::adjacent_find(values.begin(), values.end(), std::greater_equal<>{}) == values.end();
+}
+
+bool valid_send_text(std::string_view text) {
+    if (text.empty() || text.find('\0') != std::string_view::npos || !common::valid_utf8(text)) {
+        return false;
+    }
+    std::size_t scalar_count = 0;
+    for (const auto byte : text) {
+        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalar_count > 4'096) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_send_topic(const std::optional<TdTopic>& topic) {
+    if (!topic) {
+        return true;
+    }
+    if (topic->kind == TdTopicKind::Forum) {
+        return topic->id > 0 && topic->id <= std::numeric_limits<std::int32_t>::max();
+    }
+    return topic->kind == TdTopicKind::Saved && valid_td_message_id(topic->id);
+}
+
+std::string send_topic_name(const std::optional<TdTopic>& topic) {
+    if (!topic) {
+        return "none";
+    }
+    return topic->kind == TdTopicKind::Forum ? "forum" : "saved";
+}
+
+std::string send_schedule_name(TdSendScheduleKind schedule) {
+    switch (schedule) {
+    case TdSendScheduleKind::Immediate:
+        return "immediate";
+    case TdSendScheduleKind::AtDate:
+        return "at_date";
+    case TdSendScheduleKind::WhenOnline:
+        return "when_online";
+    }
+    return "unknown";
 }
 
 } // namespace
@@ -80,6 +123,70 @@ bool valid_td_direct_request(const TdDirectRequest& request) {
         return false;
     }
     return std::visit([](const auto& value) { return valid_td_direct_request(value); }, request);
+}
+
+bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept {
+    const auto& formatted = request.content.formatted_text;
+    if (!valid_td_chat_id(request.chat_id) || !valid_send_topic(request.topic) ||
+        (request.reply_to_message_id &&
+         !valid_td_message_id(request.reply_to_message_id.value_or(0))) ||
+        request.options.sending_id == 0 || !valid_send_text(formatted.text)) {
+        return false;
+    }
+    switch (request.options.schedule.kind) {
+    case TdSendScheduleKind::Immediate:
+    case TdSendScheduleKind::WhenOnline:
+        if (request.options.schedule.send_date != 0) {
+            return false;
+        }
+        break;
+    case TdSendScheduleKind::AtDate:
+        if (request.options.schedule.send_date <= 0) {
+            return false;
+        }
+        break;
+    }
+    if (request.content.parsed) {
+        return formatted.capability.has_value() &&
+               std::ranges::none_of(formatted.entities, [](const auto& entity) {
+                   return entity.kind == TdTextEntityKind::Unknown || entity.offset < 0 ||
+                          entity.length <= 0;
+               });
+    }
+    return formatted.entities.empty() && !formatted.capability.has_value();
+}
+
+TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& request) {
+    return TdFunctionData{
+        TdFunctionKind::SendMessage,
+        {{"chat_id", request.chat_id},
+         {"topic_kind", send_topic_name(request.topic)},
+         {"topic_id", request.topic ? request.topic->id : std::int64_t{0}},
+         {"reply_to_message_id", request.reply_to_message_id.value_or(0)},
+         {"reply_quote_is_null", true},
+         {"reply_checklist_task_id", std::int64_t{0}},
+         {"reply_poll_option_id", std::string{}},
+         {"suggested_post_info_is_null", true},
+         {"disable_notification", request.options.disable_notification},
+         {"from_background", false},
+         {"protect_content", request.options.protect_content},
+         {"allow_paid_broadcast", false},
+         {"paid_message_star_count", std::int64_t{0}},
+         {"update_order_of_installed_sticker_sets",
+          request.options.update_order_of_installed_sticker_sets},
+         {"schedule_kind", send_schedule_name(request.options.schedule.kind)},
+         {"schedule_send_date", static_cast<std::int64_t>(request.options.schedule.send_date)},
+         {"schedule_repeat_period", std::int64_t{0}},
+         {"effect_id", std::int64_t{0}},
+         {"sending_id", static_cast<std::int64_t>(request.options.sending_id)},
+         {"only_preview", false},
+         {"reply_markup_is_null", true},
+         {"text", request.content.formatted_text.text},
+         {"entities_count",
+          static_cast<std::int64_t>(request.content.formatted_text.entities.size())},
+         {"parsed", request.content.parsed},
+         {"link_preview_options_is_null", true},
+         {"clear_draft", false}}};
 }
 
 } // namespace tgcli::core

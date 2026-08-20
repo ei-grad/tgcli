@@ -415,6 +415,7 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetMessageProperties:
     case core::TdFunctionKind::GetMessageAvailableReactions:
     case core::TdFunctionKind::ParseTextEntities:
+    case core::TdFunctionKind::SendMessage:
     case core::TdFunctionKind::EditMessageText:
     case core::TdFunctionKind::DeleteMessages:
     case core::TdFunctionKind::AddMessageReaction:
