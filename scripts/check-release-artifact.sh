@@ -1097,13 +1097,19 @@ verify_version_revision() {
     workspace="$(mktemp -d)"
     mkdir -p \
         "$workspace/home" \
-        "$workspace/config" \
+        "$workspace/config/tgcli" \
         "$workspace/data" \
         "$workspace/state" \
         "$workspace/runtime"
-    chmod 0700 "$workspace/runtime"
+    chmod 0700 "$workspace/config/tgcli" "$workspace/runtime"
+    printf '%s\n' \
+        'default_account = "main"' \
+        '[accounts.main]' \
+        'allow_write = false' > "$workspace/config/tgcli/config.toml"
+    chmod 0600 "$workspace/config/tgcli/config.toml"
 
     if ! version_json="$(
+        unset TGCLI_ACCOUNT TGCLI_ALLOW_WRITE TGCLI_TEST_DC
         HOME="$workspace/home" \
         XDG_CONFIG_HOME="$workspace/config" \
         XDG_DATA_HOME="$workspace/data" \

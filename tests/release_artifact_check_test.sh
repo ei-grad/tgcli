@@ -158,6 +158,9 @@ toolchain_image="docker.io/example/toolchain@sha256:$(printf 'c%.0s' {1..64})"
 version_artifact="$fixture_root/version-artifact"
 printf '%s\n' \
     '#!/usr/bin/env bash' \
+    'if [[ "$*" != "--no-daemon --json version" ]]; then exit 31; fi' \
+    'if [[ ! -f "$XDG_CONFIG_HOME/tgcli/config.toml" ]]; then exit 32; fi' \
+    'if [[ -n "${TGCLI_ACCOUNT:-}${TGCLI_ALLOW_WRITE:-}${TGCLI_TEST_DC:-}" ]]; then exit 33; fi' \
     'if [[ -n "${TGCLI_FAKE_VERSION_STDERR:-}" ]]; then' \
     '    printf "%s\n" "$TGCLI_FAKE_VERSION_STDERR" >&2' \
     'fi' \
@@ -171,7 +174,8 @@ chmod 0755 "$version_artifact"
 
 for reported_revision in aaaaaaa aaaaaaaaaaaa; do
     classification="$(
-        TGCLI_FAKE_VERSION_JSON="{\"version\":\"1.2.3\",\"protocol\":3,\"tdlib\":\"1.8.65\",\"commit\":\"$reported_revision\"}" \
+        TGCLI_ACCOUNT=ambient TGCLI_ALLOW_WRITE=1 TGCLI_TEST_DC=1 \
+            TGCLI_FAKE_VERSION_JSON="{\"version\":\"1.2.3\",\"protocol\":3,\"tdlib\":\"1.8.65\",\"commit\":\"$reported_revision\"}" \
             bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
     )"
     if [[ "$classification" != release-version-revision-matches-full-provenance ]]; then
