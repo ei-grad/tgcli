@@ -2484,16 +2484,21 @@ make_completed_view(const AccountAuditOpenGroup& group, const json& outcome, std
     }
     view.completed_stages = group.completed_stages;
     view.outcome = outcome;
-    if (!group.keyed) {
-        view.store_disposition = AccountAuditStoreDisposition::NoStore;
-    } else if (outcome["mutation_state"] == "none") {
-        view.store_disposition = AccountAuditStoreDisposition::Remove;
-    } else if (outcome["mutation_state"] == "possible") {
-        view.store_disposition = AccountAuditStoreDisposition::RetainPending;
-    } else {
-        view.store_disposition = AccountAuditStoreDisposition::Complete;
-    }
     return view;
+}
+
+std::optional<AccountAuditHoldSeed> make_spool_hold_seed(const AccountAuditOpenGroup& group) {
+    const auto found = std::ranges::find_if(group.checkpoints, [](const json& checkpoint) {
+        return checkpoint["stage"] == "spool_ready";
+    });
+    if (found == group.checkpoints.end()) {
+        return std::nullopt;
+    }
+    const auto& data = (*found)["data"];
+    return AccountAuditHoldSeed{group.audit_generation,
+                                group.intent["invocation_id"].get<std::string>(),
+                                SpoolRef{.relative_path = data["relative_path"].get<std::string>(),
+                                         .file = file_snapshot_from_audit(data["file"])}};
 }
 
 constexpr std::array<const char*, 5> kSegmentNames{"audit.log.4", "audit.log.3", "audit.log.2",
@@ -2940,7 +2945,7 @@ AccountAuditInspection contradiction(const ScanState& state, std::string_view ac
 
 } // namespace
 
-struct AccountAuditAppendPermit::Impl {
+struct AccountAuditHoldPermitState {
     struct HoldRecord {
         std::uint64_t hold_id = 0;
         AccountAuditHoldSeed seed;
@@ -2951,23 +2956,49 @@ struct AccountAuditAppendPermit::Impl {
     std::string state_directory;
     std::string account;
     uid_t expected_uid = 0;
-    bool absent_by_policy = false;
+    std::shared_ptr<const AccountAuditCoordinator> coordinator;
     bool holds_issued = false;
+    std::vector<HoldRecord> holds;
+};
+
+struct AccountAuditAppendPermit::Impl : AccountAuditHoldPermitState {
+    bool absent_by_policy = false;
     bool consumed = false;
     std::string intent_line;
     std::vector<SegmentIdentity> segments;
     std::vector<AccountAuditPin> pins;
-    std::vector<HoldRecord> holds;
 };
 
-AccountAuditSpoolHold::AccountAuditSpoolHold(std::uint64_t permit_id, std::uint64_t hold_id,
-                                             std::uint64_t audit_generation,
-                                             std::string invocation_id, SpoolRef spool)
-    : permit_id_(permit_id), hold_id_(hold_id), audit_generation_(audit_generation),
+struct AccountAuditRecoveryPermit::Impl : AccountAuditHoldPermitState {};
+
+namespace {
+
+std::uint64_t next_spool_permit_id() {
+    static std::atomic<std::uint64_t> next{1};
+    auto result = next.fetch_add(1, std::memory_order_relaxed);
+    if (result == 0) {
+        result = next.fetch_add(1, std::memory_order_relaxed);
+    }
+    return result;
+}
+
+} // namespace
+
+AccountAuditSpoolHold::AccountAuditSpoolHold(
+    std::uint64_t permit_id, std::uint64_t hold_id, std::string state_directory,
+    std::string account, uid_t expected_uid,
+    std::shared_ptr<const AccountAuditCoordinator> coordinator, std::uint64_t audit_generation,
+    std::string invocation_id, SpoolRef spool)
+    : permit_id_(permit_id), hold_id_(hold_id), state_directory_(std::move(state_directory)),
+      account_(std::move(account)), expected_uid_(expected_uid),
+      coordinator_(std::move(coordinator)), audit_generation_(audit_generation),
       invocation_id_(std::move(invocation_id)), spool_(std::move(spool)) {}
 
 AccountAuditSpoolHold::AccountAuditSpoolHold(AccountAuditSpoolHold&& other) noexcept
     : permit_id_(std::exchange(other.permit_id_, 0)), hold_id_(std::exchange(other.hold_id_, 0)),
+      state_directory_(std::move(other.state_directory_)), account_(std::move(other.account_)),
+      expected_uid_(std::exchange(other.expected_uid_, 0)),
+      coordinator_(std::move(other.coordinator_)),
       audit_generation_(std::exchange(other.audit_generation_, 0)),
       invocation_id_(std::move(other.invocation_id_)), spool_(std::move(other.spool_)) {}
 
@@ -2975,6 +3006,10 @@ AccountAuditSpoolHold& AccountAuditSpoolHold::operator=(AccountAuditSpoolHold&& 
     if (this != &other) {
         permit_id_ = std::exchange(other.permit_id_, 0);
         hold_id_ = std::exchange(other.hold_id_, 0);
+        state_directory_ = std::move(other.state_directory_);
+        account_ = std::move(other.account_);
+        expected_uid_ = std::exchange(other.expected_uid_, 0);
+        coordinator_ = std::move(other.coordinator_);
         audit_generation_ = std::exchange(other.audit_generation_, 0);
         invocation_id_ = std::move(other.invocation_id_);
         spool_ = std::move(other.spool_);
@@ -2983,7 +3018,8 @@ AccountAuditSpoolHold& AccountAuditSpoolHold::operator=(AccountAuditSpoolHold&& 
 }
 
 bool AccountAuditSpoolHold::valid() const {
-    return permit_id_ != 0 && hold_id_ != 0 && audit_generation_ != 0 && !invocation_id_.empty() &&
+    return permit_id_ != 0 && hold_id_ != 0 && !state_directory_.empty() && !account_.empty() &&
+           coordinator_ && audit_generation_ != 0 && !invocation_id_.empty() &&
            !spool_.relative_path.empty();
 }
 
@@ -3002,6 +3038,10 @@ const SpoolRef& AccountAuditSpoolHold::spool() const {
 void AccountAuditSpoolHold::invalidate() {
     permit_id_ = 0;
     hold_id_ = 0;
+    state_directory_.clear();
+    account_.clear();
+    expected_uid_ = 0;
+    coordinator_.reset();
     audit_generation_ = 0;
     invocation_id_.clear();
     spool_ = {};
@@ -3009,12 +3049,18 @@ void AccountAuditSpoolHold::invalidate() {
 
 AccountAuditSpoolReleaseReceipt::AccountAuditSpoolReleaseReceipt(AccountAuditSpoolHold hold)
     : permit_id_(std::exchange(hold.permit_id_, 0)), hold_id_(std::exchange(hold.hold_id_, 0)),
+      state_directory_(std::move(hold.state_directory_)), account_(std::move(hold.account_)),
+      expected_uid_(std::exchange(hold.expected_uid_, 0)),
+      coordinator_(std::move(hold.coordinator_)),
       audit_generation_(std::exchange(hold.audit_generation_, 0)),
       invocation_id_(std::move(hold.invocation_id_)), spool_(std::move(hold.spool_)) {}
 
 AccountAuditSpoolReleaseReceipt::AccountAuditSpoolReleaseReceipt(
     AccountAuditSpoolReleaseReceipt&& other) noexcept
     : permit_id_(std::exchange(other.permit_id_, 0)), hold_id_(std::exchange(other.hold_id_, 0)),
+      state_directory_(std::move(other.state_directory_)), account_(std::move(other.account_)),
+      expected_uid_(std::exchange(other.expected_uid_, 0)),
+      coordinator_(std::move(other.coordinator_)),
       audit_generation_(std::exchange(other.audit_generation_, 0)),
       invocation_id_(std::move(other.invocation_id_)), spool_(std::move(other.spool_)) {}
 
@@ -3023,6 +3069,10 @@ AccountAuditSpoolReleaseReceipt::operator=(AccountAuditSpoolReleaseReceipt&& oth
     if (this != &other) {
         permit_id_ = std::exchange(other.permit_id_, 0);
         hold_id_ = std::exchange(other.hold_id_, 0);
+        state_directory_ = std::move(other.state_directory_);
+        account_ = std::move(other.account_);
+        expected_uid_ = std::exchange(other.expected_uid_, 0);
+        coordinator_ = std::move(other.coordinator_);
         audit_generation_ = std::exchange(other.audit_generation_, 0);
         invocation_id_ = std::move(other.invocation_id_);
         spool_ = std::move(other.spool_);
@@ -3031,39 +3081,61 @@ AccountAuditSpoolReleaseReceipt::operator=(AccountAuditSpoolReleaseReceipt&& oth
 }
 
 bool AccountAuditSpoolReleaseReceipt::valid() const {
-    return permit_id_ != 0 && hold_id_ != 0 && audit_generation_ != 0 && !invocation_id_.empty() &&
+    return permit_id_ != 0 && hold_id_ != 0 && !state_directory_.empty() && !account_.empty() &&
+           coordinator_ && audit_generation_ != 0 && !invocation_id_.empty() &&
            !spool_.relative_path.empty();
 }
 
 void AccountAuditSpoolReleaseReceipt::invalidate() {
     permit_id_ = 0;
     hold_id_ = 0;
+    state_directory_.clear();
+    account_.clear();
+    expected_uid_ = 0;
+    coordinator_.reset();
     audit_generation_ = 0;
     invocation_id_.clear();
     spool_ = {};
 }
 
-AccountAuditSpoolCleanupCallResult
-cleanup_spool_file_with_hold(std::string_view account_state, AccountAuditSpoolHold&& hold,
-                             uid_t expected_uid, const FileSpoolControl& control,
-                             const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
-    const auto contradiction = [] {
-        FileSpoolError error;
-        error.kind = FileSpoolErrorKind::Contradiction;
-        error.durability_reason = DurabilityReason::Contradiction;
-        return error;
-    };
-    if (!hold.valid()) {
-        return contradiction();
+struct AccountAuditSpoolHoldAccess {
+    static AccountAuditSpoolCleanupCallResult
+    cleanup(AccountAuditSpoolHold hold, const AccountAuditCoordinator::Guard& guard,
+            const FileSpoolControl& control,
+            const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+        const auto contradiction = [] {
+            FileSpoolError error;
+            error.kind = FileSpoolErrorKind::Contradiction;
+            error.durability_reason = DurabilityReason::Contradiction;
+            return error;
+        };
+        if (!hold.valid() || guard.owner_ != hold.coordinator_) {
+            return contradiction();
+        }
+        std::string lease_error;
+        if (!guard.validate_lease(hold.state_directory_, hold.account_, hold.expected_uid_,
+                                  lease_error)) {
+            FileSpoolError error;
+            error.kind = FileSpoolErrorKind::DurabilityFailure;
+            error.durability_reason = DurabilityReason::LockFailed;
+            return error;
+        }
+        auto cleanup = cleanup_spool_file(hold.state_directory_, hold.spool_, hold.expected_uid_,
+                                          control, hooks);
+        if (auto* error = std::get_if<FileSpoolError>(&cleanup)) {
+            return *error;
+        }
+        if (!std::get<SpoolCleanupResult>(cleanup).root_synced) {
+            return contradiction();
+        }
+        return AccountAuditSpoolReleaseReceipt(std::move(hold));
     }
-    auto cleanup = cleanup_spool_file(account_state, hold.spool_, expected_uid, control, hooks);
-    if (auto* error = std::get_if<FileSpoolError>(&cleanup)) {
-        return *error;
-    }
-    if (!std::get<SpoolCleanupResult>(cleanup).root_synced) {
-        return contradiction();
-    }
-    return AccountAuditSpoolReleaseReceipt(std::move(hold));
+};
+
+AccountAuditSpoolCleanupCallResult cleanup_spool_file_with_hold(
+    AccountAuditSpoolHold hold, const AccountAuditCoordinator::Guard& guard,
+    const FileSpoolControl& control, const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+    return AccountAuditSpoolHoldAccess::cleanup(std::move(hold), guard, control, hooks);
 }
 
 AccountAuditAppendPermit::AccountAuditAppendPermit() = default;
@@ -3075,7 +3147,8 @@ AccountAuditAppendPermit::operator=(AccountAuditAppendPermit&&) noexcept = defau
 AccountAuditAppendPermit::~AccountAuditAppendPermit() = default;
 
 bool AccountAuditAppendPermit::valid() const {
-    return implementation_ && !implementation_->consumed && implementation_->permit_id != 0;
+    return implementation_ && !implementation_->consumed && implementation_->permit_id != 0 &&
+           implementation_->coordinator;
 }
 
 std::vector<AccountAuditSpoolHold> AccountAuditAppendPermit::issue_spool_holds() {
@@ -3086,18 +3159,31 @@ std::vector<AccountAuditSpoolHold> AccountAuditAppendPermit::issue_spool_holds()
     implementation_->holds_issued = true;
     result.reserve(implementation_->holds.size());
     for (const auto& hold : implementation_->holds) {
-        result.push_back(AccountAuditSpoolHold(implementation_->permit_id, hold.hold_id,
-                                               hold.seed.audit_generation, hold.seed.invocation_id,
-                                               hold.seed.spool));
+        result.push_back(AccountAuditSpoolHold(
+            implementation_->permit_id, hold.hold_id, implementation_->state_directory,
+            implementation_->account, implementation_->expected_uid, implementation_->coordinator,
+            hold.seed.audit_generation, hold.seed.invocation_id, hold.seed.spool));
     }
     return result;
 }
 
 bool AccountAuditAppendPermit::release_spool_hold(AccountAuditSpoolReleaseReceipt receipt,
+                                                  const AccountAuditCoordinator::Guard& guard,
                                                   AccountAuditFailure& failure) {
     if (!valid() || !receipt.valid()) {
         failure = {AccountAuditDurabilityReason::Contradiction,
                    "spool release receipt is invalid or stale"};
+        return false;
+    }
+    if (guard.owner_ != implementation_->coordinator) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "spool permit is bound to another account epoch"};
+        return false;
+    }
+    std::string lease_error;
+    if (!guard.validate_lease(implementation_->state_directory, implementation_->account,
+                              implementation_->expected_uid, lease_error)) {
+        failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
         return false;
     }
     const auto found = std::ranges::find_if(implementation_->holds, [&](const auto& hold) {
@@ -3106,8 +3192,83 @@ bool AccountAuditAppendPermit::release_spool_hold(AccountAuditSpoolReleaseReceip
                hold.seed.invocation_id == receipt.invocation_id_ &&
                hold.seed.spool == receipt.spool_;
     });
-    if (receipt.permit_id_ != implementation_->permit_id || found == implementation_->holds.end() ||
-        found->released) {
+    if (receipt.permit_id_ != implementation_->permit_id ||
+        receipt.state_directory_ != implementation_->state_directory ||
+        receipt.account_ != implementation_->account ||
+        receipt.expected_uid_ != implementation_->expected_uid ||
+        receipt.coordinator_ != implementation_->coordinator ||
+        found == implementation_->holds.end() || found->released) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "spool release receipt does not match an unreleased hold"};
+        receipt.invalidate();
+        return false;
+    }
+    found->released = true;
+    receipt.invalidate();
+    failure.detail.clear();
+    return true;
+}
+
+AccountAuditRecoveryPermit::AccountAuditRecoveryPermit() = default;
+AccountAuditRecoveryPermit::AccountAuditRecoveryPermit(std::unique_ptr<Impl> implementation)
+    : implementation_(std::move(implementation)) {}
+AccountAuditRecoveryPermit::AccountAuditRecoveryPermit(AccountAuditRecoveryPermit&&) noexcept =
+    default;
+AccountAuditRecoveryPermit&
+AccountAuditRecoveryPermit::operator=(AccountAuditRecoveryPermit&&) noexcept = default;
+AccountAuditRecoveryPermit::~AccountAuditRecoveryPermit() = default;
+
+bool AccountAuditRecoveryPermit::valid() const {
+    return implementation_ && implementation_->permit_id != 0 && implementation_->coordinator;
+}
+
+std::vector<AccountAuditSpoolHold> AccountAuditRecoveryPermit::issue_spool_holds() {
+    std::vector<AccountAuditSpoolHold> result;
+    if (!valid() || implementation_->holds_issued) {
+        return result;
+    }
+    implementation_->holds_issued = true;
+    result.reserve(implementation_->holds.size());
+    for (const auto& hold : implementation_->holds) {
+        result.push_back(AccountAuditSpoolHold(
+            implementation_->permit_id, hold.hold_id, implementation_->state_directory,
+            implementation_->account, implementation_->expected_uid, implementation_->coordinator,
+            hold.seed.audit_generation, hold.seed.invocation_id, hold.seed.spool));
+    }
+    return result;
+}
+
+bool AccountAuditRecoveryPermit::release_spool_hold(AccountAuditSpoolReleaseReceipt receipt,
+                                                    const AccountAuditCoordinator::Guard& guard,
+                                                    AccountAuditFailure& failure) {
+    if (!valid() || !receipt.valid()) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "spool release receipt is invalid or stale"};
+        return false;
+    }
+    if (guard.owner_ != implementation_->coordinator) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "spool permit is bound to another account epoch"};
+        return false;
+    }
+    std::string lease_error;
+    if (!guard.validate_lease(implementation_->state_directory, implementation_->account,
+                              implementation_->expected_uid, lease_error)) {
+        failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
+        return false;
+    }
+    const auto found = std::ranges::find_if(implementation_->holds, [&](const auto& hold) {
+        return hold.hold_id == receipt.hold_id_ &&
+               hold.seed.audit_generation == receipt.audit_generation_ &&
+               hold.seed.invocation_id == receipt.invocation_id_ &&
+               hold.seed.spool == receipt.spool_;
+    });
+    if (receipt.permit_id_ != implementation_->permit_id ||
+        receipt.state_directory_ != implementation_->state_directory ||
+        receipt.account_ != implementation_->account ||
+        receipt.expected_uid_ != implementation_->expected_uid ||
+        receipt.coordinator_ != implementation_->coordinator ||
+        found == implementation_->holds.end() || found->released) {
         failure = {AccountAuditDurabilityReason::Contradiction,
                    "spool release receipt does not match an unreleased hold"};
         receipt.invalidate();
@@ -3488,7 +3649,7 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
                                       // mixed-version scanner.
     const AccountAuditCoordinator::Guard& guard, const AccountAuditPinSource* pins,
     const AccountAuditCompletedGroupVisitor* completed_visitor, AccountAuditAppendPermit* permit,
-    const AccountAuditIntent* next_intent) const {
+    const AccountAuditIntent* next_intent, AccountAuditRecoveryPermit* recovery_permit) const {
     AccountAuditInspection result;
     if (const auto* unavailable =
             pins == nullptr ? nullptr : std::get_if<UnavailableAccountAuditPins>(pins)) {
@@ -3706,7 +3867,7 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
                     std::string record_error;
                     if (!consume_v2(document, state, record_error,
                                     static_cast<std::uint64_t>(descriptor_metadata.st_ino),
-                                    completed_visitor, &hold_seeds)) {
+                                    completed_visitor, permit != nullptr ? &hold_seeds : nullptr)) {
                         return contradiction(state, account_, audit_path_, std::move(record_error));
                     }
                 } else if (state.positive_v2) {
@@ -3794,6 +3955,21 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
     }
     if (state.open) {
         result.status = AccountAuditInspectionStatus::Open;
+        if (recovery_permit != nullptr && state.open->has_spool) {
+            const auto seed = make_spool_hold_seed(*state.open);
+            if (!seed) {
+                return contradiction(state, account_, audit_path_,
+                                     "spool-ready group lost its recovery reference");
+            }
+            auto implementation = std::make_unique<AccountAuditRecoveryPermit::Impl>();
+            implementation->permit_id = next_spool_permit_id();
+            implementation->state_directory = state_directory_;
+            implementation->account = account_;
+            implementation->expected_uid = expected_uid_;
+            implementation->coordinator = guard.owner_;
+            implementation->holds.push_back({1, *seed, false});
+            *recovery_permit = AccountAuditRecoveryPermit(std::move(implementation));
+        }
         result.oldest_open = std::move(state.open);
         return result;
     }
@@ -3804,15 +3980,12 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
     }
     if (result.status == AccountAuditInspectionStatus::Clean && permit != nullptr &&
         next_intent != nullptr && pins != nullptr) {
-        static std::atomic<std::uint64_t> next_permit_id{1};
         auto implementation = std::make_unique<AccountAuditAppendPermit::Impl>();
-        implementation->permit_id = next_permit_id.fetch_add(1, std::memory_order_relaxed);
-        if (implementation->permit_id == 0) {
-            implementation->permit_id = next_permit_id.fetch_add(1, std::memory_order_relaxed);
-        }
+        implementation->permit_id = next_spool_permit_id();
         implementation->state_directory = state_directory_;
         implementation->account = account_;
         implementation->expected_uid = expected_uid_;
+        implementation->coordinator = guard.owner_;
         implementation->absent_by_policy =
             std::holds_alternative<AbsentAccountAuditPinsByPolicy>(*pins);
         implementation->intent_line =
@@ -3889,6 +4062,33 @@ AccountAuditLog::prepare_append(const AccountAuditIntent& intent, const AccountA
     }
     if (result.status != AccountAuditInspectionStatus::Clean) {
         permit = AccountAuditAppendPermit{};
+    }
+    return result;
+}
+
+AccountAuditInspection AccountAuditLog::prepare_recovery(
+    const AccountAuditPinSource& pins, const AccountAuditCoordinator::Guard& guard,
+    AccountAuditRecoveryPermit& permit,
+    const AccountAuditCompletedGroupVisitor& completed_visitor) const {
+    permit = AccountAuditRecoveryPermit{};
+    auto result = inspect_unfinalized(guard, &pins, &completed_visitor, nullptr, nullptr, &permit);
+    if (result.status == AccountAuditInspectionStatus::Open && result.oldest_open &&
+        std::holds_alternative<AbsentAccountAuditPinsByPolicy>(pins) &&
+        (result.oldest_open->keyed || result.oldest_open->has_spool)) {
+        result.status = AccountAuditInspectionStatus::Contradiction;
+        result.failure = {AccountAuditDurabilityReason::Contradiction,
+                          "store-dependent audit group contradicts absent store policy"};
+    }
+    if (hooks_ && hooks_->before_final_classification) {
+        hooks_->before_final_classification();
+    }
+    AccountAuditFailure interruption;
+    if (scan_interrupted(guard.scan_control_, interruption)) {
+        result.status = AccountAuditInspectionStatus::Interrupted;
+        result.failure = std::move(interruption);
+    }
+    if (result.status != AccountAuditInspectionStatus::Open) {
+        permit = AccountAuditRecoveryPermit{};
     }
     return result;
 }
