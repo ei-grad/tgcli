@@ -227,9 +227,9 @@ before the milestone is closed.
       its 64 MiB behavior; freeze AUDIT_INCOMPLETE recovery terminals,
       sent-forward confirmed recovery, cleanup/outcome/store ordering,
       inode-backed audit generations, hole-first rotation, bounded global
-      invocation rescans, the continuous daemon.lock-backed outer mutex,
-      external data ceilings, exact v2 record/group/segment limits,
-      oversize precedence, contradiction handling and crash points; publish the
+      invocation rescans, external data ceilings, exact v2 record/group/segment
+      limits, oversize precedence, contradiction handling and crash points;
+      publish the
       reviewed standard-schema/runtime boundary, retain all expressible
       calendar/stage/terminal/basename/path assertions, remove field-level
       pseudo-assertions, emit the exact schema-version-2 marker and
@@ -238,10 +238,24 @@ before the milestone is closed.
 - [ ] Align session/M3 AUDIT_UNAVAILABLE schemas with the complete accepted
       durability_reason enum; reject rotate_failed in v2 while retaining the
       separate v1 audit_reason, and generator-check every runtime audit record.
-- [ ] Add canonical JSON and complete per-operation fingerprints plus the
-      idempotency store: quota/reservations, locked insert-if-absent, exact
-      pending/completed/conflict/replay states, crash-cutpoint repair, and
-      raw-key/invite sentinel gates
+- [ ] Add canonical JSON, domain-separated hashes and complete per-operation
+      fingerprints with exact canonical byte/golden vectors and raw-key/invite
+      sentinel gates.
+- [ ] Extend the accepted audit API with open-group generation, the exact
+      immutable streamed completed-group view, one-pass tuple pin validation,
+      move-only append permits and receipt-bound audit spool holds/releases;
+      retain M6 `AbsentByPolicy` as zero store/temp I/O and hole-only rotation.
+- [ ] Add the strict canonical-byte idempotency store and reconciliation:
+      fixed stale-temp recovery, file-fsync→rename→directory-fsync replacement,
+      exhaustive public reason/precedence and canonical absolute path, exact
+      count/byte/mutable-headroom quota, keyed/unkeyed equality expiry with
+      conservative clock rollback, completed clearing/pending retention,
+      nine-step core gate without capacity, pre-intent append permit,
+      authoritative incumbent return before a current group, miss-only
+      confirmation/config-CAS/intent, post-generation prospective-winner quota,
+      unexpected-insert-loss INTERNAL/AUDIT_INCOMPLETE fatal closure,
+      checkpoint→store repair, exact M4 pass-1/pass-2 epoch placement, no inner
+      store lock, crash recovery and safe spool/capacity release.
 - [ ] Add shared direct and single-message coordinators with immutable plans,
       schedule ceiling/boundary rechecks, strict timeout oneOf, exact terminal
       ordering, and no post-dispatch cancellation claim
@@ -261,8 +275,26 @@ before the milestone is closed.
       with exact direct-call state machines, invite secrecy and
       notification-setting plans
 - [ ] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel
-      acceptance matrix and the no-skip Saved text-send TestDC flow with
-      immediately registered confirmed cleanup
+      acceptance matrix: same-key dual misses; expiry equality/rollback/order;
+      canonical/noncanonical final bytes; fixed-temp and rename/directory-fsync
+      crash images; mutable progress quota and completion clearing;
+      audit-ahead/store-lag repair for temp ids and every forward vector;
+      exact completed views/one-pass pins/receipt-bound holds across rotation;
+      unkeyed timestamp expiry and store-removal-before-cleanup crashes;
+      exhaustive idempotency reason/precedence and absolute final paths;
+      same-fingerprint username retarget/completed-incumbent adoption and fresh
+      confirmation, direct pending/conflict return with no prompt/group, exact
+      miss-only pre-CAS/pre-intent proposed-plan confirmation, and zero
+      unconfirmed artifacts;
+      wait deadline/cancel before acquired spool/root precedence; initial core
+      gate with zero capacity/permit, authoritative commit lookup before any
+      current group, commit permit before miss-only intent, winner quota after
+      generation, unexpected-loss fatal closure; M4 pass 1 after prior
+      reconciliation and before lookup, repeated core gate/lookup before
+      CAS/permit/intent, pass 2 and dispatch inside commit epoch with no inner
+      store lock; and proof M6 `AbsentByPolicy` opens neither
+      canonical nor temp store. Retain the no-skip Saved text-send TestDC flow
+      with immediately registered confirmed cleanup.
 - [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
 
 ## M4 — Files & media

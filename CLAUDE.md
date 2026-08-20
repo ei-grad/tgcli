@@ -73,6 +73,37 @@ authoritative implementation status and roadmap (work milestones top-down).
   spool from DESIGN.md §4.5.12, config.toml (which `login` updates with app
   credentials), and rotated logs. The spool is temporary send staging and
   never becomes a second Telegram message cache.
+- Real M3/M4 operations use two deadline-aware outer account-mutex epochs: an
+  initial reconciliation/lookup epoch and a revalidated commit epoch. A lookup
+  miss releases the first epoch for resolver/property planning. Prior
+  reconciliation, M4 pass 1 SHA/fingerprint and lookup occur in the initial
+  epoch. Repeated core gate/lookup is authoritative before any current intent.
+  Incumbent replay/pending/conflict creates no current group. Only a repeated
+  miss proceeds through proposed-plan confirmation, config CAS, exact append
+  permit, intent, returned generation, insertion quota and insert-if-absent.
+  M4 pass 2 and mutating TD dispatch occur inside the commit epoch, which stays
+  held through checkpoints, store transitions, outcome and cleanup. Audit
+  groups never interleave.
+- A completed same-fingerprint incumbent's stored plan replaces a newly
+  resolved plan for replay. Destructive replay freshly confirms that plan while
+  held; decline/no-TTY/cancel/deadline creates no intent. Pending/conflict never
+  prompts. An unexpected post-intent insert loss closes mutation-none with
+  exact INTERNAL then is durability-fatal; crash recovery uses
+  AUDIT_INCOMPLETE and never removes the incumbent. No separate inner store
+  lock exists.
+- `idempotency.db` contains exact canonical JSON bytes and is replaced only
+  through the fixed non-authoritative `.idempotency.db.tmp`, file fsync, rename
+  and directory fsync protocol. Its public failure reason/precedence table and
+  canonical absolute final path are exhaustive. Audit is recovery authority;
+  completed clears temporary/progress, pending unknown retains them, and keyed
+  plus unkeyed expiry are equality-exact and conservative under clock rollback.
+- Session paths pass `AbsentByPolicy`; this is mechanically distinct from
+  known-empty pins and performs zero idempotency-store or temp-file I/O. Audit
+  rotation protects surviving pins and receipt-bound audit spool holds; only
+  cleanup plus spool-root fsync mints the matching release.
+- Raw idempotency keys are accepted only at the protocol boundary and are
+  converted to the domain-separated hash before any persistence helper,
+  filename, error or diagnostic. Store/audit APIs never accept the raw key.
 - Real secrets (2FA password, DB encryption key, bot token) are never accepted
   via argv or environment and never written to disk by the tool. Bot login is
   `login --bot` and obtains its token only from `bot_token_cmd` or a no-echo

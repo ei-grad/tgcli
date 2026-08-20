@@ -1440,33 +1440,55 @@ Real new invocation order:
 3. correlated `getMe`, principal binding, bot classification;
 4. bot preflight;
 5. write authority;
-6. audit/store reconciliation and capacity-readable preflight;
-7. parse/hash caller-controlled inputs and compute request fingerprint;
-8. locked idempotency lookup;
-9. completed replay/pending/conflict handling; destructive completed replay
-   confirms stored plan here;
-10. exact-only M2 target resolution and read-only property validation;
-11. immutable strict plan;
-12. destructive confirmation for a new mutation;
-13. fresh config-grant CAS recheck when authority source was config;
-14. durable audit intent;
-15. keyed invocation performs locked idempotency insert-if-absent with quota
-    reservation; unkeyed invocation skips this step;
-16. keyed loser closes its audit group as mutation `none`; keyed winner or
-    unkeyed invocation continues;
-17. file second-pass spool and durable `spool_ready`, only for that keyed
-    winner or unkeyed post-intent invocation;
+6. acquire the initial outer-account-mutex epoch; perform the complete
+   account-global spool gate, known-pin audit/store reconciliation and expiry;
+7. while that epoch remains held, parse/hash caller-controlled inputs, compute
+   the request fingerprint and perform the locked lookup; `saved_attach` also
+   completes pass 1 and its source SHA-256 before this lookup;
+8. completed replay/pending/conflict handling occurs under that epoch;
+   destructive completed replay freshly confirms its exact stored plan;
+9. on a miss release the initial epoch, then perform exact-only M2 target
+   resolution, read-only property validation and immutable proposed-plan
+   planning-result construction, including whether the proposed plan would
+   require confirmation, but do not prompt;
+10. acquire the commit epoch, repeat only the nine-step core gate/expiry, and
+    perform a fresh protected lookup;
+11. treat that repeated lookup as authoritative before any current intent:
+    completed same-fingerprint adopts the exact incumbent plan, freshly
+    confirms it if destructive and replays; pending same-fingerprint returns
+    `IDEMPOTENCY_PENDING`; different fingerprint returns
+    `IDEMPOTENCY_CONFLICT`; each incumbent branch creates no current group, and
+    pending/conflict never prompts even without a TTY or `--yes`;
+12. only on a repeated miss, select the proposed plan and confirm it now while
+    the epoch remains held when the new mutation is destructive; any
+    decline/no-TTY/cancel/deadline exits with no intent;
+13. perform fresh config-grant CAS after confirmation when authority source was
+    config; request authority skips it;
+14. compute audit append/rotation permit from exact now-known intent inputs;
+15. append/fsync intent and obtain `audit_generation`;
+16. run insert-if-absent: first revalidate the protected miss; an unexpected
+    incumbent takes only the invariant-fatal mutation-none INTERNAL path below
+    without insertion capacity, otherwise compute exact entry-count/byte/
+    headroom quota using that generation, insert and fsync the winner, then
+    append/fsync `idempotency_pending`; unkeyed continues without this step;
+17. `saved_attach` winner/unkeyed pass 2, SHA-256, spool publication and
+    `spool_ready` occur while the commit epoch remains held;
 18. schedule boundary recheck, if applicable;
 19. durable `dispatch_started`;
-20. mutating TDLib call;
-21. durable progress/mutation checkpoints;
+20. mutating TDLib call and complete wait/arbitration while the commit epoch is
+    held;
+21. durable progress/mutation checkpoints and matching store updates;
 22. durable audit outcome;
 23. durable store complete/remove/retain transition;
-24. eligible spool cleanup;
-25. exactly one terminal frame.
+24. eligible spool cleanup and receipt-bound audit-hold release;
+25. release the commit epoch immediately before exactly one terminal frame.
 
 A deadline or failure before step 19 is `not_started`. Никакой step не
 re-resolve-ит immutable plan.
+Prior reconciliation precedes M4 pass 1 and may durably repair only prior
+groups before a pass-1 error; a clean preflight plus pass-1 error has absolute
+zero persistence. Dry-run performs no reconciliation. Pass-2 hashing and every
+mutating TD dispatch are required inside the continuous commit epoch.
 
 Write selectors — exact id, `@username` или supported t.me link. Title
 substring никогда не становится target; resolver может вернуть только
@@ -2117,10 +2139,28 @@ post-intent no-terminal audit-fatal path. Dispatch-ambiguous recovery retains
 store and spool.
 
 Per-account audit mutation occurs only while the existing verified
-`<account-state>/daemon.lock` lifetime lease is held. Exactly one outer
-per-account operation mutex spans pin snapshot, audit inspection/recovery,
-rotation, intent/checkpoints/outcome, required store transition, and spool
-cleanup; helpers take no inner audit mutex. There is no second audit lock file.
+`<account-state>/daemon.lock` lifetime lease is held. Exactly one deadline-aware
+outer per-account operation mutex is shared by audit, idempotency and spool
+coordination; helpers take no inner audit or store mutex and there is no second
+audit/store lock file. A real M3/M4 request uses §4.5.2's exact two epochs. The
+initial epoch performs the complete gate, then caller hashing and lookup; M4
+pass 1 is after prior reconciliation but before lookup in this epoch. A hit
+remains held through selection and any destructive stored-plan confirmation. A
+miss releases the epoch for resolver/property planning. The commit epoch
+repeats only the core gate and authoritative lookup. Completed replay adopts
+and, when destructive, freshly confirms the exact stored plan; pending and
+conflict return directly. Every incumbent branch creates no current group.
+Only a repeated miss confirms the proposed plan when required, then performs
+config CAS, append-permit calculation, intent, generation-bound quota and
+insert-if-absent. An unexpected insert loss is invariant-fatal, not an
+incumbent terminal branch. No unconfirmed intent is durable. A winner holds the
+epoch through pass 2,
+checkpoints/store transitions, mutating TDLib dispatch/wait, outcome and spool
+cleanup, and releases before terminal. Thus two callers may observe an initial
+miss while audit groups remain contiguous. This
+contract requires M4 pass-2 hashing and mutating TD dispatch inside the commit
+epoch and makes no blanket assertion that network/file hashing is outside the
+mutex.
 A group is contiguous and never spans segments. A nonempty active file rotates
 exactly once before intent only when
 `active_size + intent_line_size > 33,554,432`; equality does not rotate, and a
@@ -2287,10 +2327,81 @@ can report `contradiction` without an audit-group history.
 {"schema_version":1,"entries":[]}
 ```
 
-Current uid, regular non-symlink, `0600`, link count 1, ≤16 MiB и ≤10,000
-entries. Rewrite: same-dir `O_EXCL` temp, file fsync, rename, directory fsync.
-Entries sorted by `key_hash`. Cross-process verified lock + per-account mutex;
-network/file hashing не выполняются под lock.
+The exact `IDEMPOTENCY_UNAVAILABLE.details.path` is the frozen absolute,
+lexically canonical per-account state directory plus `/idempotency.db`. It is
+never a relative token, temp name, raw environment spelling or resolved symlink
+target. The authoritative file is current-uid, regular non-symlink, exact
+`0600`, link count 1, at most 16 MiB and at most 10,000 entries. It contains
+exactly one canonical JSON serialization with no BOM, leading/trailing
+whitespace or trailing LF. Duplicate-safe parsing, the strict schema and
+relations, and byte-identical canonical reserialization are all necessary.
+Missing is the empty snapshot; an empty or noncanonical present file is an
+error. Entries are sorted by `key_hash`.
+
+The only rewrite temp basename is `.idempotency.db.tmp`. The verified lifetime
+lease and outer mutex make a PID/random suffix unnecessary. A present temp is
+never parsed, replayed, promoted or merged. After the spool/audit/store
+contradiction gate, a current-uid regular non-symlink exact-`0600`, link-count-1
+temp is unlinked and the account-state directory fsynced; unsafe metadata fails
+closed and is retained. Rewrite uses same-directory `O_CREAT|O_EXCL|O_NOFOLLOW`
+mode `0600`, exact canonical bytes, temp-file fsync, descriptor/name identity
+revalidation, atomic rename over the already-validated canonical entry,
+final-name/descriptor revalidation and directory fsync. The old canonical name
+is never separately unlinked. Unlink/rename failure is `rename_failed`, file
+fsync failure is `sync_failed`, and directory fsync failure is
+`directory_sync_failed`.
+
+If rename succeeds but directory fsync fails, tgcli does not guess which
+snapshot is crash-durable. The current operation follows its existing
+pre-intent or post-intent failure rule. At restart the canonical final name is
+the sole store authority, any temp is discarded, and audit reconciliation
+repairs whichever complete canonical snapshot survived. A temp alone never
+proves a transition.
+
+Every store failure uses exit 6, stable message
+`idempotency store is unavailable`, exact routed account, and the same canonical
+absolute final store path even when the temp failed. Exact reason mapping:
+
+| Failure | `durability_reason` |
+|---|---|
+| invalid/nonabsolute/noncanonical frozen path, symlink, named-entry/descriptor or inode mismatch/replacement | `path_invalid` |
+| non-directory account state or non-regular final/temp | `wrong_type` |
+| wrong uid | `wrong_owner` |
+| account-state not exact `0700` or final/temp not exact `0600` | `wrong_mode` |
+| final/temp link count not one | `wrong_link_count` |
+| final exceeds 16 MiB | `too_large` |
+| invalid/missing/replaced lease or lock | `lock_failed` |
+| lstat/fstatat/open/initial-fstat failure before a stable descriptor | `open_failed` |
+| read failure, premature EOF, or descriptor size/identity change during read | `read_failed` |
+| invalid JSON/UTF-8, duplicate key, empty present file, trailing junk | `parse_error` |
+| noncanonical bytes; standalone schema/version/field/type/range/order/uniqueness/state/expiry/quota/plan/terminal invariant; unrepresentable clock/factory | `schema_error` |
+| otherwise-valid store disagrees with audit/spool, pin, progress, terminal, permit or release receipt | `contradiction` |
+| post-expiry entry-count/byte/headroom admission failure | `capacity_exhausted` |
+| short/failed write | `write_failed` |
+| temp file fsync | `sync_failed` |
+| stale-temp unlink or final rename | `rename_failed` |
+| directory fsync after unlink/rename | `directory_sync_failed` |
+
+Precedence is exact: deadline/cancellation while waiting to acquire the outer
+epoch first, through its own terminal and with no gate observation; only after
+acquisition, account-global spool failure/contradiction; then lease/frozen path/account-state;
+authoritative final metadata/open/read/size then parse/duplicates then schema/
+canonical validation; temp metadata; one-pass audit relation contradiction;
+safe-temp unlink/fsync; prior recovery; expiry cleanup. Initial lookup performs
+no append-permit or store-capacity decision. Commit repeats authoritative
+lookup; an incumbent terminal returns before capacity and creates no group.
+Only a miss confirms the proposed plan when required, performs config CAS and
+computes exact append/rotation permit before intent. After intent/generation,
+the insert primitive revalidates absence: unexpected incumbent takes its fatal
+path without capacity, otherwise exact prospective-winner capacity precedes
+insertion. Current rewrite failures retain their actual boundary. Final failure
+wins over simultaneous temp failure. Parse
+failure/duplicate keys win before schema/canonical comparison. Standalone
+invalidity is `schema_error`; disagreement between otherwise valid durable
+components is `contradiction`. Within metadata, symlink/name mismatch is
+`path_invalid`, then wrong type, owner, mode, link count and size; a syscall
+preventing classification uses `open_failed`/`read_failed`. No later failure
+replaces an earlier selected one and no internal/temp/raw-key detail is public.
 
 Entry exact:
 
@@ -2305,18 +2416,22 @@ spool:SpoolRef|null, terminal:StoredTerminal|null
 
 `SpoolRef` имеет ровно
 `{"relative_path":string,"file":FileSnapshot}`. Pending terminal null;
-completed terminal
-`StoredTerminal`. Completed has `reserved_terminal_bytes=0`.
+completed terminal `StoredTerminal`. A transition to completed atomically sets
+`reserved_terminal_bytes=0`, clears `temporary_message_ids` and
+`forward_progress` to empty arrays, and retains `spool` unchanged until cleanup.
+A pending/unknown entry retains its exact observed temporary ids and latest full
+forward vector. Mutation-none removes the entry.
 `created_at/expires_at` are integer Unix seconds 0…253402300799;
 `expires_at=created_at+604800` exactly. `audit_generation` pins a real segment.
 No transport request id/raw key/raw invite.
 
 `Entry.spool` changes from null only after matching durable audit
 `spool_ready`; it is durable before `dispatch_started`. The update obeys the
-existing 16 MiB actual-snapshot and pending-reservation inequalities. No file
-bytes or separate spool quota are reserved. A completed entry retains the
-non-null reference through filesystem cleanup and changes it to null only
-after cleanup plus spool-root fsync.
+exact 16 MiB actual-snapshot and remaining-headroom inequalities below. No file
+bytes or separate spool quota are reserved. Spool growth is outside the mutable
+payload reservation and must preserve the global inequality before dispatch. A
+completed entry retains the non-null reference through filesystem cleanup and
+changes it to null only after cleanup plus spool-root fsync.
 
 Before pending insert quota reserves maximum terminal bytes:
 
@@ -2326,34 +2441,103 @@ send, msg_edit, saved_attach: 65,536
 all other operations: 32,768
 ```
 
-Admission требует simultaneously entry count <10,000, actual serialized
-snapshot ≤16 MiB. Under the insertion lock tgcli canonically serializes the
-whole prospective pending entry, including plan/progress/spool nulls and JSON
-array delimiter growth. Let `candidate_increment_bytes` be the exact increase
-from inserting that entry into the current canonical snapshot. Admission
-requires both:
+The reservation is one reusable mutable-payload budget. For an entry `E`, let
+`mutable(E)` be the exact canonical-byte growth of
+`{"temporary_message_ids":E.temporary_message_ids,
+"forward_progress":E.forward_progress,"terminal":E.terminal}` relative to the
+same object with `[],[],null`. Pending entries require
+`0 <= mutable(E) <= E.reserved_terminal_bytes`; define
+`remaining(E)=E.reserved_terminal_bytes-mutable(E)`. Every snapshot and
+prospective rewrite requires:
 
 ```text
-actual_bytes + candidate_increment_bytes <= 16 MiB
-actual_bytes + candidate_increment_bytes
-  + sum(existing pending terminal-growth reservations)
-  + new terminal-growth reservation <= 16 MiB
+canonical_snapshot_bytes
+  + sum(remaining(E) for every pending E) <= 16 MiB
 ```
 
-Thus the reservation is additional future terminal growth, not a substitute
-for the entire serialized pending entry.
+Insertion also requires fewer than 10,000 existing entries and includes the
+exact prospective entry, array delimiters and comma growth. At insertion the
+new mutable charge is zero and its whole reservation contributes to remaining
+headroom. Temporary-id and latest-forward-vector rewrites consume that
+headroom; completion clears both arrays and consumes the same budget with the
+terminal. Every legal post-dispatch update therefore preserves the inequality
+and cannot discover an unreserved quota shortage. `forward_progress` stores
+only the latest full vector, never checkpoint history. The existing
+terminal/vector byte ceilings are measured by these canonical growth
+expressions, including member/delimiter bytes.
+
 Strict curated terminal больше reservation — `schema_error`, durability-fatal;
 dispatch до такой невозможности не допускается.
+
+The durable order is exact:
+
+- initial winner: store insert and directory fsync, then
+  `idempotency_pending` checkpoint and audit fsync;
+- `spool_ready`, `temporary_ids_observed`, and every `forward_progress`:
+  checkpoint and audit fsync, then matching pending-entry rewrite and directory
+  fsync before any later TD event/checkpoint/outcome;
+- terminal proof when required, then audit outcome and fsync, then the exact
+  completed/remove/retain store rewrite and directory fsync, then terminal.
+
+Initial insertion is the sole store-before-checkpoint exception. A matching own
+pending entry without `idempotency_pending` is its legal crash window and is
+closed none then removed. Another invocation under the key after this intent is
+an unexpected incumbent: intent-without-dispatch recovery closes the crashed
+group none with exact `AUDIT_INCOMPLETE`, never removes that incumbent, and
+validates the incumbent's own audit relation independently. A pending
+checkpoint without its matching store entry is contradiction. After a durable
+temporary/progress checkpoint, store lag may be repaired only forward from the
+audit prefix; store-ahead or conflicting values are contradiction. A post-
+dispatch required store-update failure is no-terminal durability-fatal.
 
 Lookup и later insertion оба под lock. Miss не является reservation. После
 durable intent `insert-if-absent`:
 
-- отсутствует → caller atomically becomes winner;
-- существует → caller не dispatch-ит; его уже durable intent закрывается
-  durable outcome `mutation_state:none`;
-- после loser outcome same completed fingerprint replays, same pending returns
-  `IDEMPOTENCY_PENDING`, different fingerprint conflicts;
-- inability to close loser outcome means no terminal and audit-fatal.
+- the protected repeated miss is revalidated inside the insert primitive;
+- if still absent, exact generation-bound quota is evaluated and the caller
+  atomically becomes winner;
+- an unexpected incumbent is an invariant failure, not replay, pending or
+  conflict, and takes only the exact fatal closure below;
+- inability to close that outcome means no terminal and audit-fatal.
+
+At the repeated commit gate, the lookup is authoritative before any current
+intent. Completed same-fingerprint adopts the exact incumbent stored immutable
+plan, including after a username/link retarget, and replays it. Pending same-
+fingerprint returns `IDEMPOTENCY_PENDING`; different fingerprint returns
+`IDEMPOTENCY_CONFLICT`. Every incumbent branch returns without config CAS,
+append permit, insertion capacity, current intent/outcome or current group.
+Pending/conflict never prompts: no-TTY without `--yes` still returns the lookup
+terminal because no destructive action or replay plan is admitted.
+
+A destructive confirmation of the proposed plan does not authorize replay of a
+different incumbent plan. Before CAS/intent, completed incumbent replay freshly
+confirms its exact stored plan while the epoch protects it: `--yes` confirms it;
+TTY renders/challenges it; decline/EOF/explicit cancel/non-TTY without `--yes`
+returns canonical `CONFIRMATION_REQUIRED`; deadline equality returns exact
+`replay_confirmation` TIMEOUT with `completed_unchanged`. No proposed-plan
+prompt occurs on that branch. An absent destructive winner confirms the
+proposed effective plan at the same pre-CAS position using ordinary new-mutation
+branches. Every failed confirmation creates no intent. A confirmed completed
+incumbent replays directly and creates no current group; only a confirmed miss
+proceeds to config CAS, permit and intent. Thus every destructive current intent
+has its ordinary exact `yes` or TTY `confirmation_source`; incumbent returns
+have no current confirmation source.
+
+The repeated lookup, insert and rewrite are continuously protected by the same
+outer epoch and verified lease, so post-intent insert loss is impossible in
+normal execution. If a fault injection or invariant violation nevertheless
+returns an incumbent, never replace or remove it and do not classify the result
+as replay/pending/conflict. Before dispatch, append/fsync mutation-none outcome
+with `success:false`, empty `completed_stages`, and exact terminal
+`{"kind":"error","code":"INTERNAL","message":"internal error","details":{"operation":"<operation>","reason":"internal_error"},"exit_code":1}`.
+After that outcome is durable, emit it once and enter durability-fatal shutdown.
+Outcome append/fsync failure emits no terminal, closes the connection and is
+audit-fatal. Crash after intent but before outcome gives the crashed connection
+no terminal; next inspection applies intent-without-dispatch recovery with exact
+mutation-none `AUDIT_INCOMPLETE`, never mutates the incumbent, then uses the
+existing continue rule. Crash after INTERNAL outcome but before its frame gives
+that connection no terminal; retry uses ordinary authoritative lookup. There is
+no confirmation after intent.
 
 Completed replay проходит Ready/getMe/bot/authority. `msg_delete`/`chat_leave`
 дополнительно требуют fresh confirmation над exact stored `plan`; cancel/no-TTY
@@ -2367,7 +2551,8 @@ Per-cutpoint transitions:
 | Cutpoint/outcome | audit | keyed store | terminal |
 |---|---|---|---|
 | before intent | none | none | ordinary error |
-| intent, insert failed | none outcome required | none | idempotency error only after outcome |
+| intent, expected-winner quota/write failed | none outcome required | none | exact idempotency error only after outcome |
+| intent, unexpected incumbent | none INTERNAL outcome required | incumbent unchanged | exact INTERNAL after outcome, then durability-fatal |
 | pending, before dispatch (including changed file/schedule recheck) | none outcome | remove pending | exact error |
 | dispatch, no proof; timeout/auth/generation/shutdown/top-level uncertain TD error | possible outcome | keep pending | exact error if durability succeeds |
 | explicit single send failed state/update | none outcome | remove pending | TDLIB/RATE error |
@@ -2389,9 +2574,94 @@ replacement error; connection closes, daemon enters durability-fatal, startup
 repair completes store from audit. Segment остаётся pinned. Аналогично failure
 store transition обязан стать durable до error frame.
 
-Pending expiry никогда не auto-resend-ит. Reconciliation сначала закрывает
-audit ambiguity; затем entry удаляется и segment/spool может быть released.
-После expiry exactly-once не заявляется.
+Every outer epoch samples wall-clock Unix seconds once after acquiring the
+mutex. An entry is expired iff `sampled_now >= expires_at`; equality is
+expired. A new winner takes one fresh integer wall sample immediately before
+constructing its entry and computes `expires_at` by checked addition of exactly
+604800. Wall clock and the monotonic request deadline are independent.
+
+Clock rollback is conservative: it delays expiry, is not a contradiction, and
+does not use a persisted or process-local high-water mark. `created_at` need not
+be monotonic between entries. An unrepresentable sample or expiry addition
+fails before insertion as `IDEMPOTENCY_UNAVAILABLE/schema_error`. Entries are
+never expired early or automatically resent.
+
+Reconciliation always precedes expiry, and even already-expired entries remain
+pins until their audit/store/spool relation is proven. Sweep visits canonical
+key-hash order and removes all expired pending/completed entries in one rewrite
+when possible. Terminal/completed cleanup is retried before sweep. An expired
+pending unknown entry is store-removed and fsynced before its newly eligible
+spool is deleted and the spool root fsynced, all before rotation/current intent.
+Cleanup failure stops the request and retains an audit-derived generation hold.
+After equality expiry lookup sees absence and a later same-key mutation may
+dispatch; exactly-once is no longer claimed.
+
+The reusable known-pin core gate is exactly steps 1–9:
+
+1. classify and enumerate the spool root without mutation;
+2. read the canonical store and inspect, but do not promote, the fixed temp;
+3. derive pins from every entry, including expired entries;
+4. scan all audit segments once for group facts and pin validation;
+5. select spool contradictions before any recovery/temp-cleanup write;
+6. remove and directory-fsync a safe stale temp;
+7. reconcile the open group and every store-pinned completed group;
+8. retry eligible terminal/completed spool cleanup;
+9. sample/sweep expiry and clean newly eligible spools;
+
+Initial epoch stops here, then hashes/looks up: no permit, rotation-capacity or
+store insertion-capacity calculation. Commit repeats core gate and authoritative
+lookup; an incumbent terminal returns before confirmation/CAS/permit/capacity
+and creates no group. Only a miss confirms the proposed plan if required,
+performs config CAS, then computes append permit from exact intent bytes. After
+durable intent returns generation, insert-if-absent revalidates absence: an
+unexpected incumbent takes the invariant-fatal path without capacity;
+otherwise exact prospective-winner quota precedes insertion.
+
+The scanner assigns the intent segment inode to every open group as
+`audit_generation` and streams each fully validated completed v2 group in audit
+chronological order to a non-mutating consumer. The immutable typed view has
+exactly: generation; invocation/account/operation/fingerprint; nullable key
+hash; immutable plan; exact intent timestamp and validated Unix seconds;
+nullable exact `idempotency_pending` payload; nullable exact `SpoolRef`;
+durable temporary ids or `[]`; latest durable forward vector or `[]`; nullable
+mutation proof; exact completed stages; and nullable exact outcome including
+success/mutation/terminal. No process-memory or later store value is folded in.
+It is streamed rather than accumulated across five maximum-sized segments.
+
+For `KnownPins`, the audit layer builds one bounded tuple index and validates
+all `(audit_generation,invocation_id,request_fingerprint,operation)` relations
+while each segment is already streamed. Unmatched, duplicate, dangling or
+mismatched pins are contradiction. Pin count never creates a per-pin segment
+rescan; the separately required invocation-id rescans remain unchanged. A
+successful scan yields a move-only append/rotation permit containing validated
+segment identities and pin relations. Each uncleaned spool mints a move-only
+hold bound to exact `(generation,invocation_id,SpoolRef,permit)`. Cleanup accepts
+that hold and only missing-is-success deletion plus root fsync returns a typed
+move-only release receipt. Rotation drops a hold only by consuming its exact
+receipt; strings/booleans/wrong or duplicate receipts cannot release it. After
+expiry the caller may narrow store pins only to a validated subset. Rotation
+metadata-revalidates the permit, protects that subset plus every unreleased
+hold, and does not rescan pins.
+
+`AbsentByPolicy` is distinct from known-empty pins. It performs no canonical or
+temp idempotency-store open, cleanup, quota, expiry or mutation. It may
+reconcile only the already accepted audit-only groups; an incomplete keyed
+group still stops with `AUDIT_INCOMPLETE`. Its rotation permit may consume a
+missing numbered hole but never delete an occupied numbered slot. Completed
+keyed groups do not by themselves block M6. Session paths retain their existing
+account-global spool gate.
+
+Unkeyed dispatch-unknown spool expiry is checked addition
+`intent_unix_seconds+604800`; the one gate wall sample makes it eligible at
+`now >= expiry`. Equality is eligible and rollback delays cleanup without
+contradiction/high-water mark. Known-terminal unkeyed is immediately eligible.
+
+For expired keyed pending, store removal+directory fsync occur before cleanup,
+but the typed hold remains. Crash after store removal reconstructs it from the
+completed view and spool inventory. Crash after deletion/root-fsync but before
+receipt consumption repeats missing-is-success cleanup/root-fsync and remints
+the receipt. Only receipt consumption makes the generation capacity-evictable;
+cleanup failure stops before rotation/current intent.
 
 #### 4.5.8 Canonical JSON, hashes, fingerprints и secrecy
 
@@ -2695,10 +2965,13 @@ persisted path is exactly `spool/<invocation_id>/<FileSnapshot.name>`.
 
 After file and invocation-directory sync, tgcli appends and fsyncs
 `spool_ready`. A keyed winner then durably changes its exact pending entry
-from `spool:null` to the matching `SpoolRef` under the store lock. Only that
+from `spool:null` to the matching `SpoolRef` under the shared outer account
+epoch. There is no separate inner store mutex or lock file. Only that
 store update, or `spool_ready` itself for unkeyed execution, admits
 `dispatch_started`. The store never references a spool without durable
-`spool_ready`; file hashing/copy never holds the store lock.
+`spool_ready`. Pass 1 hashes in the initial outer epoch; pass 2 hashes/copies in
+the commit outer epoch; audit-first checkpoint then store rewrite remain ordered
+inside that epoch.
 Only the spool
 path enters TDLib. Recovery/cleanup:
 
@@ -2756,20 +3029,31 @@ account-global `SPOOL_UNAVAILABLE`; contradiction is the object-path
 
 `saved_attach` exact order:
 
-1. Ready → `getMe` → user-only preflight.
-2. Parse message id/path/caption; perform pass 1.
-3. Fingerprint only caller facts:
+1. Ready → `getMe` → user-only preflight → write authority.
+2. Acquire the initial epoch and perform complete prior spool/audit/store
+   reconciliation and expiry before source parsing/hash.
+3. Still under that epoch, parse message id/path/caption, perform pass 1, then
+   fingerprint only caller facts:
    `message_id,topic="inherit_saved",name,size,sha256,caption`.
-4. Keyed lookup may replay/conflict/pending here. Completed replay therefore
+4. Perform keyed lookup in that epoch. Completed replay therefore
    does not require Saved materialization or the original message to exist.
 5. Only unkeyed/new-miss execution materializes self chat, gets
    original/properties, validates reply, accepts derived saved/null topic and
-   builds immutable plan.
-6. Durable intent; keyed insert winner or unkeyed continuation.
-7. Pass 2, `spool_ready`, dispatch and common single-message coordinator.
+   builds the proposed planning result without prompting.
+6. Acquire commit epoch; repeat core gate/expiry and authoritative lookup.
+   Incumbent completed replay/pending/conflict returns with no current group;
+   completed destructive replay confirms the exact incumbent plan. Only a miss
+   performs config CAS and computes append permit before intent.
+7. Durable intent returns generation; keyed insert revalidates absence, then
+   checks exact prospective-winner quota and must win; an unexpected incumbent
+   takes the invariant-fatal INTERNAL path without capacity. Unkeyed continues.
+8. Only winner/unkeyed runs pass 2, `spool_ready`, dispatch and coordinator,
+   all while commit epoch remains held.
 
 Derived self chat id, original properties and effective saved/null topic are
 plan/audit facts, never fingerprint inputs. The original is not changed.
+Prior reconciliation may write before pass-1 failure, but no current artifact
+may. Clean preflight failure and every dry-run retain absolute zero persistence.
 
 #### 4.5.13 Acceptance and TestDC
 
@@ -2794,16 +3078,41 @@ Required fake-boundary/contract gates:
   `config`; hash/stat replacement at every config snapshot capture/recheck
   rejects the complete canonical identity;
 - schedule rounding/int32 and every boundary/race in §4.5.5;
-- locked same-key miss race proving one dispatch and loser durable none outcome;
+- barriers force two initial same-key misses: the first commit lookup misses,
+  creates the sole current group, wins and dispatches; the second commit lookup
+  observes pending/completed and returns with no confirmation, current group,
+  capacity check or dispatch; assert exactly one current group;
+  same fingerprint with username/link retarget adopts incumbent only for
+  completed replay, freshly confirms exact incumbent across yes/TTY/decline/
+  EOF/cancel/no-TTY/deadline, never dispatches new target, and creates no
+  current group; pending/conflict returns without prompting even for a
+  destructive proposed plan and no-TTY/no-yes;
 - quota tests include the exact prospective pending-entry insertion bytes plus
   terminal growth and reject before dispatch;
+  initial lookup invokes no capacity/permit, commit append permit precedes
+  intent, repeated incumbent returns before capacity, and expected-winner quota
+  follows generation; fault-injected unexpected insert loss skips capacity,
+  never touches the incumbent, durably closes exact mutation-none INTERNAL,
+  emits once then is durability-fatal; outcome failure emits nothing; crash
+  before outcome recovers exact AUDIT_INCOMPLETE;
+- every exact `IDEMPOTENCY_UNAVAILABLE` reason and precedence pair, canonical
+  absolute final path, stable message/details and no temp/internal/raw detail;
+  mutex-wait deadline/cancel wins before spool/root, which wins only after lock;
 - every audit/store/spool fsync cutpoint, including success→outcome→store
   failure with no terminal and startup repair;
-- mixed v1/v2 audit, every stage/data branch, contradictions, pinned rotation;
+- mixed v1/v2 audit, every exact completed-view field, one-pass pins, typed
+  hold/release misuse, store-removal/cleanup crashes, unkeyed timestamp expiry,
+  contradictions and pinned rotation/capacity release;
 - exact canonical bytes/golden hash vectors and raw sentinel scans;
 - destructive completed replay prompts stored plan and never dispatches;
   confirmation deadline yields `completed_unchanged` with byte-identical
   store/audit;
+- `saved_attach` proves prior reconciliation before pass 1, pass-1 SHA and
+  fingerprint before lookup, repeated core gate/authoritative lookup returns an
+  incumbent without a current group or, only on miss, proceeds CAS/permit before
+  intent; pass-2 hash/spool/dispatch remains under the commit epoch; dirty
+  pass-1 failure permits only prior recovery writes, clean failure/dry-run
+  absolute zero;
 - all direct response/auth/deadline permutations;
 - all single-send response/update/delete/generation permutations;
 - every forward vector/429/deletion/timeout aggregation;
@@ -6202,13 +6511,27 @@ compatibility surface described in §10. They are account-scoped even though
 they are not part of the main JSONL protocol.
 
 `daemon.lock` is also the cross-process lifetime lease for the per-account
-audit and idempotency state. Those components share exactly one outer account
-operation mutex inside the lease owner and hold it continuously across every
-durability boundary of an admitted real invocation. The typed lease
-revalidates the held descriptor's device/inode, uid, regular type, 0600 mode,
-link count 1, and open lifetime. No `.audit.lock` or other audit lock path is
-created. Audit inspection/rotation/appends fail `lock_failed` when invoked
-without a valid lease, except pure parsing tests over supplied bytes.
+audit and idempotency state. Those components share exactly one deadline-aware
+outer account operation mutex inside the lease owner. A real M3/M4 request uses
+the exact operation-specific initial and commit epochs in §§4.5.2, 4.5.7 and
+4.5.12. M4 prior reconciliation, pass 1 and lookup are in the initial epoch. A
+miss creates the only planning gap. Commit repeats the core gate/lookup, then
+returns incumbent replay/pending/conflict before a current intent; only a miss
+performs proposed-plan confirmation, config CAS, append permit, intent,
+generation-bound quota and insert. An unexpected insert loss is invariant-
+fatal, not an ordinary race. M4 pass 2 and every mutating TD dispatch/wait are
+inside the continuous commit epoch through cleanup. Two callers may observe an
+initial miss, but the second commit lookup observes the first caller's state and
+creates no group. No audit groups interleave, and there is no inner store mutex.
+The contract makes no blanket claim that network/file hashing is outside the
+mutex. The typed lease revalidates its descriptor identity and
+metadata. Waiting for the epoch shares the absolute monotonic deadline;
+deadline/cancel wins before any acquired spool/root/store/audit observation.
+Once acquired, scanning and pre-intent work use the same deadline and a begun
+durability operation completes required fsync before deadline handling resumes.
+No `.audit.lock`, store-lock path or other audit lock path is created. Audit
+inspection/rotation/appends fail `lock_failed` without a valid lease, except
+pure parsing tests over supplied bytes.
 
 The hidden removal gate uses the same verified `0600` regular-file and
 dual-lock mechanics as `daemon.lock`, but is not a control endpoint. A daemon
