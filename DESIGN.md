@@ -5426,20 +5426,39 @@ exactly `account`, the existing `daemon` object, `tdlib:{"version":...}`, and
 `auth:{"state":...}`; local fallback contains exactly `account`, the existing
 absent-daemon object and `config:{"path":...,"exists":...}`. M1 widens the
 reachable `auth.state` value from `unknown` to the state names in §8 while
-retaining `unknown` before the first snapshot. `version` and the successful
-`daemon stop` object are otherwise unchanged.
+retaining `unknown` before the first snapshot. The successful `daemon stop`
+object is otherwise unchanged.
 
-`version` contains exactly `version`, `protocol`, `tdlib` and an optional
-`commit`: the seven-hex-digit HEAD revision of the tree the binary was built
-from, suffixed `-dirty` when tracked files were modified at build time; untracked
-files alone do not make a build dirty. The key is absent — never null and
-never empty — for a build made from an exact tag or from a source tree that is
-not itself the root of a git work tree, so a tree unpacked inside an unrelated
-checkout reports no revision instead of that checkout's. `commit` is build provenance only: it is
-never part of the binary version compared during the version handshake and
-never appears in audit records, `doctor` or `daemon status`. Human output is
-`tgcli 0.1.0 (4d7ca6e, protocol 3, tdlib 1.8.65)`, collapsing to
-`tgcli 0.1.0 (protocol 3, tdlib 1.8.65)` when the key is absent.
+The `version` success data contains exactly the required `version`, `protocol`
+and `tdlib` fields plus an optional `commit` string. When present, `commit` is
+the abbreviated lowercase hexadecimal object name returned for `HEAD`, with a
+minimum length of seven hexadecimal digits and a literal `-dirty` suffix iff
+tracked index or work-tree state differs from `HEAD`. Untracked files alone do
+not add the suffix. The key is absent, never null or empty, when a trustworthy
+identity cannot be established.
+
+A build has a trustworthy identity only when Git is available, the canonical
+top-level work-tree path is the canonical CMake source path, `HEAD` resolves to
+a commit with a valid abbreviation of at least seven lowercase hexadecimal
+digits, and tracked status inspection succeeds. Failure of any check, including
+status inspection, omits `commit`; a status failure is never interpreted as a
+clean tree. This root equality excludes a source tree nested inside an unrelated
+checkout. Exact tags do not suppress the revision: clean and dirty tagged
+checkouts report the same abbreviated `HEAD` forms as untagged checkouts. A
+detached shallow checkout with no tag refs is also reportable because neither
+history nor tag discovery is required.
+
+This field is diagnostic build identity, not release authority. Release
+verification requires a present, clean abbreviation that is a prefix of its
+independently established full source commit, while the full commit/tree
+identity in release provenance remains authoritative. `commit` is not folded
+into `version`, the binary version handshake, a protocol-envelope field or an
+audit field, and it does not appear in `doctor`, `daemon status` or
+`daemon restart` results.
+Human output is exactly
+`tgcli 0.1.0 (4d7ca6e, protocol 3, tdlib 1.8.65)` when present and
+`tgcli 0.1.0 (protocol 3, tdlib 1.8.65)` when absent; a dirty value is rendered
+unchanged, for example `4d7ca6e-dirty`.
 
 Every M1 failure uses the single envelope
 `{"error":{"code":<string>,"message":<string>,"details":<object>}}` on

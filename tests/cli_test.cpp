@@ -2832,8 +2832,8 @@ TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli]
     CHECK(data["tdlib"].is_string());
     CHECK_FALSE(data.contains("type"));
     CHECK_FALSE(data.contains("data"));
-    // Tagged and non-checkout builds report no revision at all; every other
-    // build reports exactly the revision compiled into the binary.
+    // Builds without trustworthy Git identity omit the diagnostic; every
+    // trustworthy checkout reports exactly the compiled revision.
     if (std::string_view{kBuildCommit}.empty()) {
         CHECK_FALSE(data.contains("commit"));
     } else {
@@ -2880,6 +2880,7 @@ TEST_CASE("no-daemon doctor result matches the in-process schema variant", "[cli
     CHECK(result.err.empty());
     const auto data = json::parse(result.out);
     CHECK_THAT(data, test::matches_json_schema("doctor.result.schema.json"));
+    CHECK_FALSE(data.contains("commit"));
 }
 
 TEST_CASE("no-daemon unknown command: USAGE error on stderr, exit 2", "[cli][tdlib]") {
@@ -3041,6 +3042,7 @@ TEST_CASE("absent daemon status and stop are read-only and never spawn",
     CHECK(status.err.empty());
     const auto status_data = json::parse(status.out);
     CHECK(status_data["running"] == false);
+    CHECK_FALSE(status_data.contains("commit"));
     CHECK_THAT(status_data, test::matches_json_schema("daemon-status.result.schema.json"));
     CHECK_FALSE(std::filesystem::exists(runtime_dir));
     CHECK_FALSE(std::filesystem::exists(state_dir));
@@ -3156,6 +3158,7 @@ TEST_CASE("daemon status reports verified v1 and v2 owner facts without replacem
             CHECK(data["pid"] == old_daemon.pid());
             CHECK(data["version"] == "old-test-binary");
             CHECK(data["protocol"] == old_protocol);
+            CHECK_FALSE(data.contains("commit"));
             CHECK_THAT(data, test::matches_json_schema("daemon-status.result.schema.json"));
             CHECK(old_daemon.running());
         }

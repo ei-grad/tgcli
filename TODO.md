@@ -405,6 +405,13 @@ before the milestone is closed.
       deterministic errors/output, and complete Linux/macOS package derivation
       plus packaged-binary byte smoke; perform no config/socket/daemon/TDLib
       access
+- [x] Add diagnostic `tgcli version` build revision reporting for every
+      trustworthy checkout, including tags, linked worktrees, canonical
+      symlink-spelled source roots, and shallow tagless release checkouts;
+      reject unrelated parent-checkout leakage; tracked-tree dirtiness,
+      fail-closed identity/status handling, no-op header regeneration,
+      dependent rebuilds, schema and reviewed absent/clean/dirty human
+      goldens, and release-provenance consistency tests
 - [ ] Shell completions (bash/zsh/fish), man pages
 - [ ] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
       schemas out of command catalogs unless a later reviewed mapping explicitly

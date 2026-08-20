@@ -332,6 +332,9 @@ jobs:
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
             "$TOOLCHAIN_IMAGE"
+          bash scripts/check-release-artifact.sh verify-version-revision \
+            build/release-static/tgcli \
+            "$SOURCE_SHA"
 
       - name: Package the Linux artifact
         env:
@@ -822,6 +825,9 @@ jobs:
             "$SOURCE_SHA" \
             "$SOURCE_TREE" \
             "$DEPENDENCY_LOCK"
+          bash scripts/check-release-artifact.sh verify-version-revision \
+            build/release/tgcli \
+            "$SOURCE_SHA"
 
       - name: Stage the architecture slice
         env:
@@ -1144,6 +1150,9 @@ jobs:
             "package/$package/SBOM-arm64.json" \
             "package/$package/PROVENANCE-x86_64.json" \
             "package/$package/SBOM-x86_64.json"
+          bash scripts/check-release-artifact.sh verify-version-revision \
+            "package/$package/tgcli" \
+            "$SOURCE_SHA"
           find "package/$package" -exec gtouch -d "@$SOURCE_EPOCH" {} +
           gtar \
             --sort=name \

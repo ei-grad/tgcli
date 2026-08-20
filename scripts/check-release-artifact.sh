@@ -1077,6 +1077,86 @@ PY
     verify_release_bundle "$version" "$unsigned_directory"
 }
 
+verify_version_revision() {
+    local binary="$1"
+    local source_sha="$2"
+    local workspace
+    local version_json=""
+    local failure=""
+    local validation_error=""
+
+    [[ -f "$binary" && -x "$binary" && ! -L "$binary" ]] || {
+        fail "release version artifact is not an executable regular file"
+        return
+    }
+    [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+        fail "release version source SHA is not canonical"
+        return
+    }
+
+    workspace="$(mktemp -d)"
+    mkdir -p \
+        "$workspace/home" \
+        "$workspace/config" \
+        "$workspace/data" \
+        "$workspace/state" \
+        "$workspace/runtime"
+    chmod 0700 "$workspace/runtime"
+
+    if ! version_json="$(
+        HOME="$workspace/home" \
+        XDG_CONFIG_HOME="$workspace/config" \
+        XDG_DATA_HOME="$workspace/data" \
+        XDG_STATE_HOME="$workspace/state" \
+        XDG_RUNTIME_DIR="$workspace/runtime" \
+        "$binary" --no-daemon --json version 2>"$workspace/stderr"
+    )"; then
+        failure="release binary version command failed"
+    elif [[ -s "$workspace/stderr" ]]; then
+        failure="release binary version command wrote to stderr"
+    elif ! validation_error="$(python3 - "$version_json" "$source_sha" 2>&1 <<'PY'
+import json
+import re
+import sys
+
+try:
+    result = json.loads(sys.argv[1])
+except json.JSONDecodeError as error:
+    raise SystemExit(f"release version output is not one JSON value: {error}") from error
+
+if not isinstance(result, dict) or set(result) != {"commit", "protocol", "tdlib", "version"}:
+    raise SystemExit("release version result has unexpected keys")
+if not isinstance(result["version"], str) or not isinstance(result["tdlib"], str):
+    raise SystemExit("release version result has invalid string fields")
+if (
+    isinstance(result["protocol"], bool)
+    or not isinstance(result["protocol"], int)
+    or result["protocol"] < 1
+):
+    raise SystemExit("release version result has an invalid protocol")
+
+revision = result["commit"]
+if not isinstance(revision, str):
+    raise SystemExit("release version result has no string commit")
+if revision.endswith("-dirty"):
+    raise SystemExit("release build revision is dirty")
+if re.fullmatch(r"[0-9a-f]{7,}", revision) is None:
+    raise SystemExit("release build revision is invalid")
+if not sys.argv[2].startswith(revision):
+    raise SystemExit("release build revision differs from full provenance")
+PY
+    )"; then
+        failure="$validation_error"
+    fi
+
+    rm -rf -- "$workspace"
+    if [[ -n "$failure" ]]; then
+        fail "$failure"
+        return
+    fi
+    printf '%s\n' 'release-version-revision-matches-full-provenance'
+}
+
 usage() {
     printf 'usage: %s inspect-linux|inspect-macos|inspect-macos-universal <artifact>\n' "$0" >&2
     printf '       %s verify-linux-build <artifact> <provenance> <sbom> <source-sha> <source-tree> <image> [repo-root]\n' "$0" >&2
@@ -1085,6 +1165,7 @@ usage() {
     printf '       %s classify-release-state <version> <directory> <tag> <source-sha> <release-json>\n' "$0" >&2
     printf '       %s verify-remote-tag <source-sha> <owner/repository> <tag>\n' "$0" >&2
     printf '       %s verify-schema-package <package-root> <source-schema-directory>\n' "$0" >&2
+    printf '       %s verify-version-revision <artifact> <source-sha>\n' "$0" >&2
     printf '       %s staged-archive-name <component-id> <source-url>\n' "$0" >&2
     printf '       %s classify-linux|classify-macos\n' "$0" >&2
     return 2
@@ -1130,6 +1211,10 @@ case "${1:-}" in
     verify-schema-package)
         [[ "$#" -eq 3 ]] || usage
         verify_schema_package "$2" "$3"
+        ;;
+    verify-version-revision)
+        [[ "$#" -eq 3 ]] || usage
+        verify_version_revision "$2" "$3"
         ;;
     staged-archive-name)
         [[ "$#" -eq 3 ]] || usage

@@ -155,6 +155,69 @@ source_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_tree=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 toolchain_image="docker.io/example/toolchain@sha256:$(printf 'c%.0s' {1..64})"
 
+version_artifact="$fixture_root/version-artifact"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [[ -n "${TGCLI_FAKE_VERSION_STDERR:-}" ]]; then' \
+    '    printf "%s\n" "$TGCLI_FAKE_VERSION_STDERR" >&2' \
+    'fi' \
+    'if [[ -n "${TGCLI_FAKE_VERSION_JSON:-}" ]]; then' \
+    '    printf "%s\n" "$TGCLI_FAKE_VERSION_JSON"' \
+    'else' \
+    '    printf "%s\n" "{}"' \
+    'fi' \
+    'exit "${TGCLI_FAKE_VERSION_EXIT:-0}"' > "$version_artifact"
+chmod 0755 "$version_artifact"
+
+for reported_revision in aaaaaaa aaaaaaaaaaaa; do
+    classification="$(
+        TGCLI_FAKE_VERSION_JSON="{\"version\":\"1.2.3\",\"protocol\":3,\"tdlib\":\"1.8.65\",\"commit\":\"$reported_revision\"}" \
+            bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+    )"
+    if [[ "$classification" != release-version-revision-matches-full-provenance ]]; then
+        printf 'release version revision classification changed unexpectedly\n' >&2
+        exit 1
+    fi
+done
+
+expect_failure_message missing-release-revision 'unexpected keys' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65"}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message dirty-release-revision 'revision is dirty' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"aaaaaaa-dirty"}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message short-release-revision 'revision is invalid' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"aaaaaa"}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message uppercase-release-revision 'revision is invalid' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"AAAAAAA"}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message mismatched-release-revision 'differs from full provenance' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"bbbbbbb"}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message extra-release-version-key 'unexpected keys' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"aaaaaaa","extra":true}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message invalid-release-version-protocol 'invalid protocol' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":0,"tdlib":"1.8.65","commit":"aaaaaaa"}' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message malformed-release-version 'not one JSON value' \
+    env TGCLI_FAKE_VERSION_JSON='not-json' \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message failed-release-version-command 'version command failed' \
+    env \
+        TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"aaaaaaa"}' \
+        TGCLI_FAKE_VERSION_EXIT=7 \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message contaminated-release-version-stderr 'wrote to stderr' \
+    env \
+        TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"aaaaaaa"}' \
+        TGCLI_FAKE_VERSION_STDERR=unexpected \
+    bash "$checker" verify-version-revision "$version_artifact" "$source_sha"
+expect_failure_message invalid-release-source-sha 'source SHA is not canonical' \
+    env TGCLI_FAKE_VERSION_JSON='{"version":"1.2.3","protocol":3,"tdlib":"1.8.65","commit":"aaaaaaa"}' \
+    bash "$checker" verify-version-revision "$version_artifact" aaaaaaa
+
 schema_package="$fixture_root/schema-package"
 mkdir -p "$schema_package/docs/schemas"
 for schema_file in \
@@ -1143,6 +1206,7 @@ required = [
     "no-shared",
     "-DOPENSSL_USE_STATIC_LIBS=TRUE",
     "verify-macos-build",
+    "verify-version-revision",
     "verify-schema-package",
     "verify_re2_build.py",
     "write-sbom",
@@ -1167,6 +1231,8 @@ if workflow.index('bash "$BUILD_RECIPE" fetch') > workflow.index("docker run"):
     raise SystemExit("Linux dependency prefetch must precede the offline container")
 if workflow.count("contents: write") != 1 or workflow.count("id-token: write") != 1:
     raise SystemExit("release privileges must be scoped to separate single jobs")
+if workflow.count("verify-version-revision") != 3:
+    raise SystemExit("every native and universal release binary needs one revision check")
 if "--env HOME=" in workflow or "--env TMPDIR=" in workflow:
     raise SystemExit("the workflow must not override recipe-owned HOME or TMPDIR")
 metadata = workflow.split("\n  metadata:\n", 1)[1].split("\n  linux-musl:\n", 1)[0]
@@ -1176,6 +1242,8 @@ if metadata.index("Validate the tag source and version") > metadata.index(
     raise SystemExit("tag source identity must be validated before repository code runs")
 
 linux = workflow.split("\n  linux-musl:\n", 1)[1].split("\n  macos-arch:\n", 1)[0]
+if linux.index("verify-linux-build") > linux.index("verify-version-revision"):
+    raise SystemExit("Linux full provenance must precede the diagnostic revision check")
 linux_package = linux.split("      - name: Package the Linux artifact\n", 1)[1]
 for schema_file in (
     "docs/schemas/listen.item.schema.json",
@@ -1202,12 +1270,16 @@ if macos.index("ctest --test-dir") > macos.index(
     "Reverify source identity after the macOS build"
 ):
     raise SystemExit("macOS source identity must be rechecked after tests")
+if macos.index("verify-macos-build") > macos.index("verify-version-revision"):
+    raise SystemExit("macOS full provenance must precede the diagnostic revision check")
 
 universal = workflow.split("\n  macos-universal:\n", 1)[1].split(
     "\n  sign:\n", 1
 )[0]
 if "install -D" in universal:
     raise SystemExit("macOS universal packaging cannot use GNU-only install -D")
+if universal.rindex("verify-macos-build") > universal.rindex("verify-version-revision"):
+    raise SystemExit("universal full provenance must precede the diagnostic revision check")
 for evidence in (
     "arm64_binary_sha256",
     "arm64_provenance_sha256",

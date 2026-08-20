@@ -890,16 +890,23 @@ TEST_CASE("version result schema bounds the optional build revision", "[schema][
     const json base{{"version", "0.1.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}};
     CHECK_THAT(base, tgcli::test::matches_json_schema("version.result.schema.json"));
 
-    for (const auto* accepted :
-         {"4d7ca6e", "4d7ca6e-dirty", "4d7ca6ed9b8a5c1f0e3d2c4b6a8f9e7d1c3b5a70"}) {
+    const std::vector<std::string> accepted{
+        "4d7ca6e",
+        "4d7ca6e-dirty",
+        "4d7ca6ed9b8a",
+        "4d7ca6ed9b8a5c1f0e3d2c4b6a8f9e7d1c3b5a70",
+        std::string(64, 'a'),
+        std::string(64, 'a') + "-dirty",
+    };
+    for (const auto& value : accepted) {
         auto instance = base;
-        instance["commit"] = accepted;
-        INFO("commit: " << accepted);
+        instance["commit"] = value;
+        INFO("commit: " << value);
         CHECK_THAT(instance, tgcli::test::matches_json_schema("version.result.schema.json"));
     }
 
-    for (const auto* rejected :
-         {"", "4d7ca6", "4D7CA6E", "4d7ca6e-DIRTY", "4d7ca6e-modified", "g4d7ca6e"}) {
+    for (const auto* rejected : {"", "4d7ca6", "4D7CA6E", "4d7ca6e-DIRTY", "4d7ca6e-modified",
+                                 "g4d7ca6e", "-dirty", " 4d7ca6e", "4d7ca6e ", "4d7ca6e\n"}) {
         auto instance = base;
         instance["commit"] = rejected;
         INFO("commit: " << rejected);
@@ -909,6 +916,13 @@ TEST_CASE("version result schema bounds the optional build revision", "[schema][
     auto null_commit = base;
     null_commit["commit"] = nullptr;
     CHECK_THAT(null_commit, !tgcli::test::matches_json_schema("version.result.schema.json"));
+
+    for (const auto& wrong_type :
+         std::vector<json>{json(7), json(true), json::array(), json::object()}) {
+        auto instance = base;
+        instance["commit"] = wrong_type;
+        CHECK_THAT(instance, !tgcli::test::matches_json_schema("version.result.schema.json"));
+    }
 }
 
 TEST_CASE("resolve result schema enforces kind-specific topic id bounds",

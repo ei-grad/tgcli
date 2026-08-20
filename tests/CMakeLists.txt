@@ -108,6 +108,7 @@ add_test(
     COMMAND "${CMAKE_COMMAND}"
         -DREPO_ROOT=${CMAKE_SOURCE_DIR}
         -DTEST_OUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/version-revision
+        "-DTEST_GENERATOR=${CMAKE_GENERATOR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/version_revision_test.cmake")
 add_test(
     NAME release-toolchain-helpers
