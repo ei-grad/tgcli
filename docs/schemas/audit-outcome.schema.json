@@ -1381,6 +1381,18 @@
       "minimum": -9007199254740991,
       "maximum": 9007199254740991
     },
+    "messageId": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/int53"
+        },
+        {
+          "not": {
+            "const": 0
+          }
+        }
+      ]
+    },
     "chatId": {
       "allOf": [
         {
@@ -1745,7 +1757,7 @@
       ],
       "properties": {
         "id": {
-          "$ref": "#/$defs/positiveInt53"
+          "$ref": "#/$defs/messageId"
         },
         "chat_id": {
           "$ref": "#/$defs/chatId"
@@ -1981,7 +1993,7 @@
       ],
       "properties": {
         "source_id": {
-          "$ref": "#/$defs/positiveInt53"
+          "$ref": "#/$defs/messageId"
         },
         "status": {
           "const": "sent"
@@ -2005,7 +2017,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -2033,7 +2045,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -2061,7 +2073,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -2098,7 +2110,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -2138,13 +2150,13 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "pending"
             },
             "temporary_message_id": {
-              "$ref": "#/$defs/int53"
+              "$ref": "#/$defs/messageId"
             }
           }
         },
@@ -3735,7 +3747,7 @@
                         "temporary_message_id": {
                           "oneOf": [
                             {
-                              "$ref": "#/$defs/int53"
+                              "$ref": "#/$defs/messageId"
                             },
                             {
                               "type": "null"
@@ -4011,7 +4023,7 @@
                       "$ref": "#/$defs/chatId"
                     },
                     "temporary_message_id": {
-                      "$ref": "#/$defs/int53"
+                      "$ref": "#/$defs/messageId"
                     },
                     "reason": {
                       "const": "deleted_before_confirmation"
@@ -4071,7 +4083,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -4457,7 +4469,7 @@
                         "temporary_message_id": {
                           "oneOf": [
                             {
-                              "$ref": "#/$defs/int53"
+                              "$ref": "#/$defs/messageId"
                             },
                             {
                               "type": "null"
@@ -4733,7 +4745,7 @@
                       "$ref": "#/$defs/chatId"
                     },
                     "temporary_message_id": {
-                      "$ref": "#/$defs/int53"
+                      "$ref": "#/$defs/messageId"
                     },
                     "reason": {
                       "const": "deleted_before_confirmation"
@@ -4793,7 +4805,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -5183,7 +5195,7 @@
                         "temporary_message_id": {
                           "oneOf": [
                             {
-                              "$ref": "#/$defs/int53"
+                              "$ref": "#/$defs/messageId"
                             },
                             {
                               "type": "null"
@@ -5459,7 +5471,7 @@
                       "$ref": "#/$defs/chatId"
                     },
                     "temporary_message_id": {
-                      "$ref": "#/$defs/int53"
+                      "$ref": "#/$defs/messageId"
                     },
                     "reason": {
                       "const": "deleted_before_confirmation"
@@ -5519,7 +5531,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -6198,7 +6210,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -6807,7 +6819,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -7418,7 +7430,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -7526,7 +7538,7 @@
                   "maxItems": 100,
                   "uniqueItems": true,
                   "items": {
-                    "$ref": "#/$defs/positiveInt53"
+                    "$ref": "#/$defs/messageId"
                   }
                 },
                 "for_all": {
@@ -8150,7 +8162,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -8786,7 +8798,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -9424,7 +9436,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -10304,7 +10316,7 @@
                         ],
                         "properties": {
                           "source_id": {
-                            "$ref": "#/$defs/positiveInt53"
+                            "$ref": "#/$defs/messageId"
                           },
                           "status": {
                             "const": "failed"
@@ -10504,7 +10516,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -11267,7 +11279,7 @@
                         ],
                         "properties": {
                           "source_id": {
-                            "$ref": "#/$defs/positiveInt53"
+                            "$ref": "#/$defs/messageId"
                           },
                           "status": {
                             "const": "failed"
@@ -11467,7 +11479,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -12258,7 +12270,7 @@
                         ],
                         "properties": {
                           "source_id": {
-                            "$ref": "#/$defs/positiveInt53"
+                            "$ref": "#/$defs/messageId"
                           },
                           "status": {
                             "const": "failed"
@@ -12458,7 +12470,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -12561,7 +12573,7 @@
                   "$ref": "#/$defs/chatId"
                 },
                 "message_id": {
-                  "$ref": "#/$defs/positiveInt53"
+                  "$ref": "#/$defs/messageId"
                 },
                 "reaction": {
                   "type": "string",
@@ -13162,7 +13174,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -13769,7 +13781,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -14378,7 +14390,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -14478,7 +14490,7 @@
                   "$ref": "#/$defs/chatId"
                 },
                 "message_id": {
-                  "$ref": "#/$defs/positiveInt53"
+                  "$ref": "#/$defs/messageId"
                 },
                 "pinned": {
                   "const": true
@@ -15070,7 +15082,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -15677,7 +15689,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -16286,7 +16298,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -16386,7 +16398,7 @@
                   "$ref": "#/$defs/chatId"
                 },
                 "message_id": {
-                  "$ref": "#/$defs/positiveInt53"
+                  "$ref": "#/$defs/messageId"
                 },
                 "pinned": {
                   "const": false
@@ -18095,7 +18107,7 @@
                 "last_read_message_id": {
                   "oneOf": [
                     {
-                      "$ref": "#/$defs/positiveInt53"
+                      "$ref": "#/$defs/messageId"
                     },
                     {
                       "type": "null"
@@ -19810,9 +19822,16 @@
                   "const": true
                 },
                 "duration_seconds": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 31622400
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 31622400
+                    },
+                    {
+                      "const": 2147483647
+                    }
+                  ]
                 }
               }
             }
@@ -20401,7 +20420,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -21008,7 +21027,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -21617,7 +21636,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -24019,7 +24038,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -24626,7 +24645,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -25235,7 +25254,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -25930,7 +25949,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -26537,7 +26556,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -27146,7 +27165,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -33256,7 +33275,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -33891,7 +33910,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -34528,7 +34547,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -35021,7 +35040,7 @@
                         "temporary_message_id": {
                           "oneOf": [
                             {
-                              "$ref": "#/$defs/int53"
+                              "$ref": "#/$defs/messageId"
                             },
                             {
                               "type": "null"
@@ -35297,7 +35316,7 @@
                       "$ref": "#/$defs/chatId"
                     },
                     "temporary_message_id": {
-                      "$ref": "#/$defs/int53"
+                      "$ref": "#/$defs/messageId"
                     },
                     "reason": {
                       "const": "deleted_before_confirmation"
@@ -35403,7 +35422,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -35820,7 +35839,7 @@
                         "temporary_message_id": {
                           "oneOf": [
                             {
-                              "$ref": "#/$defs/int53"
+                              "$ref": "#/$defs/messageId"
                             },
                             {
                               "type": "null"
@@ -36096,7 +36115,7 @@
                       "$ref": "#/$defs/chatId"
                     },
                     "temporary_message_id": {
-                      "$ref": "#/$defs/int53"
+                      "$ref": "#/$defs/messageId"
                     },
                     "reason": {
                       "const": "deleted_before_confirmation"
@@ -36202,7 +36221,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"
@@ -36623,7 +36642,7 @@
                         "temporary_message_id": {
                           "oneOf": [
                             {
-                              "$ref": "#/$defs/int53"
+                              "$ref": "#/$defs/messageId"
                             },
                             {
                               "type": "null"
@@ -36899,7 +36918,7 @@
                       "$ref": "#/$defs/chatId"
                     },
                     "temporary_message_id": {
-                      "$ref": "#/$defs/int53"
+                      "$ref": "#/$defs/messageId"
                     },
                     "reason": {
                       "const": "deleted_before_confirmation"
@@ -37005,7 +37024,7 @@
                     "message_id": {
                       "oneOf": [
                         {
-                          "$ref": "#/$defs/positiveInt53"
+                          "$ref": "#/$defs/messageId"
                         },
                         {
                           "type": "null"

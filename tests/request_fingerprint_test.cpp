@@ -262,6 +262,53 @@ TEST_CASE("selector canonicalization is syntactic and byte-preserving", "[finger
           "sha256:dbcdb8fd83e13683aa84e6b093a4956e548ff23f914830e9bb20d0f0ba5a609d");
 }
 
+TEST_CASE("fingerprints defer globally admissible links and hash only exact invites",
+          "[fingerprint][selector][secrets]") {
+    struct LinkVector {
+        std::string_view selector;
+        std::string_view fingerprint;
+    };
+    constexpr std::array normal_links{
+        LinkVector{"t.me/project",
+                   "sha256:cc3077f522088d58973eca292523b472de60ff1641aa635b098186b5f792d9ae"},
+        LinkVector{"t.me/project?start=A_B",
+                   "sha256:e27a0264d01838cfa8adf9d7f1b3bb4696ff2f5a7f3de1c26def850b08003f66"},
+        LinkVector{"t.me/project/123/456",
+                   "sha256:8d65575f80be6593f254e096f24016fdc0d44e64529ce3a646a23b63ca255704"},
+        LinkVector{"https://t.me/project?boost=abc&ref=1",
+                   "sha256:742ef089a0bb4abb6c58a7ad052bd3bbf8d2b3b55da67bfaf1dbe4736a0bfcb0"},
+        LinkVector{"t.me/project/+not_invite",
+                   "sha256:7c4d48588d3a3c9453a63fb12218143fdd0cbf151a3654c71a7bcc3e41835cd3"},
+        LinkVector{"t.me/joinchat/token/extra",
+                   "sha256:3e1efdbb405d40bbe6b074cb99acc6fa02c1a696b1e5f06e3336c37254b965e8"},
+    };
+    for (const auto& [selector, expected_fingerprint] : normal_links) {
+        INFO(selector);
+        CHECK(daemon::valid_resolve_selector(selector));
+        CHECK(daemon::canonical_write_selector(selector) == std::optional<std::string>{selector});
+        auto send = send_payload();
+        send.chat_selector = selector;
+        CHECK(fingerprint(daemon::FingerprintPayload{send}) == expected_fingerprint);
+    }
+
+    constexpr std::array invite_links{
+        std::pair{"t.me/+RawInviteSentinel_77",
+                  "sha256:f97332b4a7a62eead038cabeff64d166a1ae12a6bd63f9ee5ce999cf36dbafd4"},
+        std::pair{"https://t.me/joinchat/JoinChatSentinel_88",
+                  "sha256:6bf05b2c238857f90a2de722ea4ef399a8fb06b8471b47d61da7522fea1ea723"},
+    };
+    for (const auto& [selector, expected_hash] : invite_links) {
+        INFO(selector);
+        CHECK(daemon::valid_resolve_selector(selector));
+        CHECK(daemon::canonical_write_selector(selector) ==
+              std::optional<std::string>{expected_hash});
+    }
+
+    CHECK_FALSE(daemon::canonical_write_selector("HTTPS://t.me/project"));
+    CHECK_FALSE(daemon::canonical_write_selector("http://t.me/project"));
+    CHECK_FALSE(daemon::canonical_write_selector(std::string("t.me/\xc3\x28", 7)));
+}
+
 TEST_CASE("fingerprints preserve array order and Unicode scalar bytes", "[fingerprint]") {
     using namespace daemon;
     const FingerprintPayload ordered{MsgForwardFingerprintPayload{"@a", "@b", {1, 2}, false}};
@@ -306,6 +353,7 @@ TEST_CASE("invalid fingerprint facts fail without returning caller bytes", "[fin
          std::vector<std::tuple<std::string, ResolverPrincipal, FingerprintPayload>>{
              {"bad account", kPrincipal, valid},
              {"main", {.id = 0, .is_bot = false}, valid},
+             {"main", {.id = -1, .is_bot = false}, valid},
              {"main", kPrincipal, FingerprintPayload{MsgEditFingerprintPayload{"title", 1, "x"}}},
              {"main", kPrincipal,
               FingerprintPayload{MsgDeleteFingerprintPayload{"@a", {2, 1}, false}}},
@@ -350,9 +398,18 @@ TEST_CASE("fingerprint validation pins caller-input boundaries", "[fingerprint]"
     send = send_payload();
     send.reply_to = 9'007'199'254'740'991LL;
     CHECK(accepted(FingerprintPayload{send}));
+    send.reply_to = -9'007'199'254'740'991LL;
+    CHECK(accepted(FingerprintPayload{send}));
+    send.reply_to = 0;
+    CHECK_FALSE(accepted(FingerprintPayload{send}));
+    send.reply_to = -9'007'199'254'740'992LL;
+    CHECK_FALSE(accepted(FingerprintPayload{send}));
+    send.reply_to = std::nullopt;
     send.requested_topic =
         TopicRef{.kind = TopicKind::Forum, .id = std::numeric_limits<std::int32_t>::max()};
     CHECK(accepted(FingerprintPayload{send}));
+    send.requested_topic = TopicRef{.kind = TopicKind::Forum, .id = -1};
+    CHECK_FALSE(accepted(FingerprintPayload{send}));
     send.requested_topic =
         TopicRef{.kind = TopicKind::Forum,
                  .id = static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()) + 1};
@@ -389,4 +446,59 @@ TEST_CASE("fingerprint validation pins caller-input boundaries", "[fingerprint]"
           std::optional<std::string>{"9007199254740991"});
     CHECK_FALSE(daemon::canonical_write_selector("+9007199254740992"));
     CHECK_FALSE(daemon::canonical_write_selector(std::string("@a\0b", 4)));
+}
+
+TEST_CASE("all fingerprint message ids are signed nonzero int53", "[fingerprint][message-id]") {
+    using namespace daemon;
+    constexpr std::int64_t minimum = -9'007'199'254'740'991LL;
+    constexpr std::int64_t maximum = 9'007'199'254'740'991LL;
+    const auto accepted = [](const FingerprintPayload& payload) {
+        return std::holds_alternative<std::string>(
+            request_fingerprint("main", kPrincipal, payload));
+    };
+
+    CHECK(accepted(FingerprintPayload{MsgEditFingerprintPayload{"@a", minimum, "x"}}));
+    CHECK(accepted(
+        FingerprintPayload{MsgDeleteFingerprintPayload{"@a", {minimum, -1, maximum}, false}}));
+    CHECK(accepted(FingerprintPayload{
+        MsgForwardFingerprintPayload{"@a", "@b", {minimum, -1, maximum}, false}}));
+    CHECK(accepted(FingerprintPayload{MsgReactFingerprintPayload{"@a", -1, "x", false, false}}));
+    CHECK(accepted(FingerprintPayload{MsgPinFingerprintPayload{"@a", -1}}));
+    CHECK(accepted(FingerprintPayload{MsgUnpinFingerprintPayload{"@a", -1}}));
+    CHECK(accepted(FingerprintPayload{
+        SavedAttachFingerprintPayload{minimum, "name", 1, std::string(kFileHash), ""}}));
+
+    CHECK_FALSE(accepted(FingerprintPayload{MsgEditFingerprintPayload{"@a", 0, "x"}}));
+    CHECK_FALSE(accepted(
+        FingerprintPayload{MsgDeleteFingerprintPayload{"@a", {minimum, 0, maximum}, false}}));
+    CHECK_FALSE(
+        accepted(FingerprintPayload{MsgDeleteFingerprintPayload{"@a", {minimum, -1, -1}, false}}));
+    CHECK_FALSE(accepted(
+        FingerprintPayload{MsgForwardFingerprintPayload{"@a", "@b", {-1, minimum}, false}}));
+    CHECK_FALSE(
+        accepted(FingerprintPayload{MsgReactFingerprintPayload{"@a", 0, "x", false, false}}));
+    CHECK_FALSE(accepted(FingerprintPayload{MsgPinFingerprintPayload{"@a", 0}}));
+    CHECK_FALSE(accepted(FingerprintPayload{MsgUnpinFingerprintPayload{"@a", 0}}));
+    CHECK_FALSE(accepted(FingerprintPayload{
+        SavedAttachFingerprintPayload{0, "name", 1, std::string(kFileHash), ""}}));
+}
+
+TEST_CASE("chat mute fingerprints admit only explicit durations or the default sentinel",
+          "[fingerprint][mute]") {
+    using namespace daemon;
+    const auto accepted = [](std::int32_t duration) {
+        return std::holds_alternative<std::string>(request_fingerprint(
+            "main", kPrincipal,
+            FingerprintPayload{ChatMuteFingerprintPayload{"@alice", duration}}));
+    };
+
+    CHECK(accepted(1));
+    CHECK(accepted(31'622'400));
+    CHECK(accepted(std::numeric_limits<std::int32_t>::max()));
+    CHECK(fingerprint(FingerprintPayload{
+              ChatMuteFingerprintPayload{"@alice", std::numeric_limits<std::int32_t>::max()}}) ==
+          "sha256:a0fe93dcf9b27be0a85ddc174db571dc0dabaed078de51f8bd8d6643789b82ed");
+    CHECK_FALSE(accepted(0));
+    CHECK_FALSE(accepted(31'622'401));
+    CHECK_FALSE(accepted(std::numeric_limits<std::int32_t>::max() - 1));
 }

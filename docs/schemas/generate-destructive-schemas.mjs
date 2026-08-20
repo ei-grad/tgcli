@@ -317,6 +317,7 @@ const v2Definitions = () => ({
     minimum: -9007199254740991,
     maximum: 9007199254740991,
   },
+  messageId: { allOf: [reference('int53'), { not: { const: 0 } }] },
   chatId: { allOf: [reference('int53'), { not: { const: 0 } }] },
   positiveInt53: { type: 'integer', minimum: 1, maximum: 9007199254740991 },
   int32: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
@@ -382,7 +383,7 @@ const v2Definitions = () => ({
   messageWriteResult: object(
     ['id', 'chat_id', 'date', 'sender', 'is_outgoing', 'topic', 'type', 'text', 'scheduled'],
     {
-      id: reference('positiveInt53'),
+      id: reference('messageId'),
       chat_id: reference('chatId'),
       date: nullable(reference('v2Timestamp')),
       sender: reference('messageSender'),
@@ -468,7 +469,7 @@ const v2Definitions = () => ({
     },
   ),
   forwardSentItem: object(['source_id', 'status', 'message'], {
-    source_id: reference('positiveInt53'),
+    source_id: reference('messageId'),
     status: { const: 'sent' },
     message: reference('messageWriteResult'),
   }),
@@ -476,21 +477,21 @@ const v2Definitions = () => ({
     oneOf: [
       ...['upstream_null', 'deleted_before_confirmation'].map((failureReason) =>
         object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
-          source_id: reference('positiveInt53'),
+          source_id: reference('messageId'),
           status: { const: 'failed' },
           failure_reason: { const: failureReason },
           tdlib_code: { type: 'null' },
           retry_after: { type: 'null' },
         })),
       object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
-        source_id: reference('positiveInt53'),
+        source_id: reference('messageId'),
         status: { const: 'failed' },
         failure_reason: { const: 'tdlib_error' },
         tdlib_code: { allOf: [reference('int32'), { not: { const: 429 } }] },
         retry_after: { type: 'null' },
       }),
       object(['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'], {
-        source_id: reference('positiveInt53'),
+        source_id: reference('messageId'),
         status: { const: 'failed' },
         failure_reason: { const: 'tdlib_error' },
         tdlib_code: { const: 429 },
@@ -504,9 +505,9 @@ const v2Definitions = () => ({
   forwardItem: {
     oneOf: [
       object(['source_id', 'status', 'temporary_message_id'], {
-        source_id: reference('positiveInt53'),
+        source_id: reference('messageId'),
         status: { const: 'pending' },
-        temporary_message_id: reference('int53'),
+        temporary_message_id: reference('messageId'),
       }),
       reference('forwardSentItem'),
       reference('forwardFailedItem'),
@@ -515,19 +516,18 @@ const v2Definitions = () => ({
 });
 const auditDefinitions = () => ({ ...definitions(), ...v2Definitions() });
 
-const int53Array = (minimum = 1) => ({
+const messageIdArray = (minimum = 1) => ({
   type: 'array',
   minItems: minimum,
   maxItems: 100,
   uniqueItems: true,
-  items: reference('int53'),
+  items: reference('messageId'),
 });
-const positiveInt53Array = () => ({
-  type: 'array',
-  minItems: 1,
-  maxItems: 100,
-  uniqueItems: true,
-  items: reference('positiveInt53'),
+const muteDuration = () => ({
+  oneOf: [
+    { type: 'integer', minimum: 1, maximum: 31622400 },
+    { const: 2147483647 },
+  ],
 });
 const v2Arguments = (operation) => {
   const string = nonemptyNoNulString({ maxScalars: 16842751, maxBytes: 16842751 });
@@ -536,31 +536,31 @@ const v2Arguments = (operation) => {
       chat: string,
       text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
       parse_mode: { enum: ['plain', 'markdown_v2', 'html'] },
-      reply_to: nullable(reference('positiveInt53')),
+      reply_to: nullable(reference('messageId')),
       topic: nullable(reference('forumTopic')),
       silent: { type: 'boolean' },
       schedule: nullable(reference('schedule')),
     }),
     msg_edit: object(['chat', 'message_id', 'text'], {
       chat: string,
-      message_id: reference('positiveInt53'),
+      message_id: reference('messageId'),
       text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
     }),
     msg_delete: object(['chat', 'message_ids', 'for_all'], {
       chat: string,
-      message_ids: positiveInt53Array(),
+      message_ids: messageIdArray(),
       for_all: { type: 'boolean' },
     }),
     msg_forward: object(['from', 'to', 'message_ids', 'drop_author'], {
       from: string,
       to: string,
-      message_ids: positiveInt53Array(),
+      message_ids: messageIdArray(),
       drop_author: { type: 'boolean' },
     }),
     msg_react: constrained(
       object(['chat', 'message_id', 'reaction', 'remove', 'big'], {
         chat: string,
-        message_id: reference('positiveInt53'),
+        message_id: reference('messageId'),
         reaction: nonemptyNoNulString({ maxScalars: 64, maxBytes: 64 }),
         remove: { type: 'boolean' },
         big: { type: 'boolean' },
@@ -574,11 +574,11 @@ const v2Arguments = (operation) => {
         }),
       ],
     ),
-    msg_pin: object(['chat', 'message_id'], { chat: string, message_id: reference('positiveInt53') }),
-    msg_unpin: object(['chat', 'message_id'], { chat: string, message_id: reference('positiveInt53') }),
+    msg_pin: object(['chat', 'message_id'], { chat: string, message_id: reference('messageId') }),
+    msg_unpin: object(['chat', 'message_id'], { chat: string, message_id: reference('messageId') }),
     chat_mark_read: object(['chat'], { chat: string }),
     chat_mute: object(['chat', 'duration_seconds'], {
-      chat: string, duration_seconds: { type: 'integer', minimum: 1, maximum: 31622400 },
+      chat: string, duration_seconds: muteDuration(),
     }),
     chat_unmute: object(['chat', 'duration_seconds'], {
       chat: string, duration_seconds: { const: 0 },
@@ -601,7 +601,7 @@ const v2Arguments = (operation) => {
     },
     chat_leave: object(['chat'], { chat: string }),
     saved_attach: object(['message_id', 'path', 'caption'], {
-      message_id: reference('positiveInt53'),
+      message_id: reference('messageId'),
       path: auditArgumentPath(),
       caption: noNulString({ maxScalars: 1024, maxBytes: 4096 }),
     }),
@@ -631,7 +631,7 @@ const v2Plan = (operation) => {
         tdlib_request: { const: 'sendMessage' }, chat,
         text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
         parse_mode: { enum: ['plain', 'markdown_v2', 'html'] },
-        reply_to: nullable(reference('positiveInt53')),
+        reply_to: nullable(reference('messageId')),
         requested_topic: nullable(reference('forumTopic')),
         effective_topic: nullable(reference('forumTopic')),
         silent: { type: 'boolean' }, schedule: nullable(reference('schedule')),
@@ -666,21 +666,21 @@ const v2Plan = (operation) => {
     ),
     msg_edit: plan(['chat', 'message_id', 'text'], {
       tdlib_request: { const: 'editMessageText' }, chat,
-      message_id: reference('positiveInt53'),
+      message_id: reference('messageId'),
       text: nonemptyNoNulString({ maxScalars: 4096, maxBytes: 16384 }),
     }),
     msg_delete: plan(['chat', 'message_ids', 'requested_for_all', 'effective_for_all'], {
-      tdlib_request: { const: 'deleteMessages' }, chat, message_ids: positiveInt53Array(),
+      tdlib_request: { const: 'deleteMessages' }, chat, message_ids: messageIdArray(),
       requested_for_all: { type: 'boolean' }, effective_for_all: { type: 'boolean' },
     }),
     msg_forward: plan(['from', 'to', 'message_ids', 'drop_author'], {
       tdlib_request: { const: 'forwardMessages' }, from: chat, to: chat,
-      message_ids: positiveInt53Array(), drop_author: { type: 'boolean' },
+      message_ids: messageIdArray(), drop_author: { type: 'boolean' },
     }),
     msg_react: constrained(
       plan(['chat', 'message_id', 'reaction', 'remove', 'big'], {
         tdlib_request: { enum: ['addMessageReaction', 'removeMessageReaction'] }, chat,
-        message_id: reference('positiveInt53'),
+        message_id: reference('messageId'),
         reaction: nonemptyNoNulString({ maxScalars: 64, maxBytes: 64 }),
         remove: { type: 'boolean' }, big: { type: 'boolean' },
       }),
@@ -696,16 +696,16 @@ const v2Plan = (operation) => {
     ),
     msg_pin: plan(['chat', 'message_id', 'pinned'], {
       tdlib_request: { const: 'pinChatMessage' }, chat,
-      message_id: reference('positiveInt53'), pinned: { const: true },
+      message_id: reference('messageId'), pinned: { const: true },
     }),
     msg_unpin: plan(['chat', 'message_id', 'pinned'], {
       tdlib_request: { const: 'unpinChatMessage' }, chat,
-      message_id: reference('positiveInt53'), pinned: { const: false },
+      message_id: reference('messageId'), pinned: { const: false },
     }),
     chat_mark_read: constrained(
       plan(['chat', 'last_message_id'], {
         tdlib_request: { oneOf: [{ const: 'viewMessages' }, { type: 'null' }] }, chat,
-        last_message_id: nullable(reference('positiveInt53')),
+        last_message_id: nullable(reference('messageId')),
       }),
       [
         planRelation(['chat', 'last_message_id'], {
@@ -713,13 +713,13 @@ const v2Plan = (operation) => {
         }),
         planRelation(['chat', 'last_message_id'], {
             tdlib_request: { const: 'viewMessages' },
-            last_message_id: reference('positiveInt53'),
+            last_message_id: reference('messageId'),
           }),
       ],
     ),
     chat_mute: plan(['chat', 'muted', 'duration_seconds'], {
       tdlib_request: { const: 'setChatNotificationSettings' }, chat,
-      muted: { const: true }, duration_seconds: { type: 'integer', minimum: 1, maximum: 31622400 },
+      muted: { const: true }, duration_seconds: muteDuration(),
     }),
     chat_unmute: plan(['chat', 'muted', 'duration_seconds'], {
       tdlib_request: { const: 'setChatNotificationSettings' }, chat,
@@ -764,7 +764,7 @@ const v2Plan = (operation) => {
     }),
     saved_attach: plan(['chat', 'message_id', 'effective_topic', 'caption', 'file'], {
       tdlib_request: { const: 'sendMessage' }, chat,
-      message_id: reference('positiveInt53'), effective_topic: nullable(reference('savedTopic')),
+      message_id: reference('messageId'), effective_topic: nullable(reference('savedTopic')),
       caption: noNulString({ maxScalars: 1024, maxBytes: 4096 }),
       file: reference('fileSnapshot'),
     }),
@@ -782,7 +782,7 @@ const v2ResultData = (operation) => {
     saved_attach: reference('messageWriteResult'),
     msg_delete: object(['chat_id', 'message_ids', 'for_all', 'deleted'], {
       chat_id: reference('chatId'),
-      message_ids: positiveInt53Array(),
+      message_ids: messageIdArray(),
       for_all: { type: 'boolean' },
       deleted: { const: true },
     }),
@@ -795,25 +795,25 @@ const v2ResultData = (operation) => {
       },
     }),
     msg_react: object(['chat_id', 'message_id', 'reaction', 'removed', 'big'], {
-      chat_id: reference('chatId'), message_id: reference('positiveInt53'),
+      chat_id: reference('chatId'), message_id: reference('messageId'),
       reaction: nonemptyNoNulString({ maxScalars: 64, maxBytes: 64 }),
       removed: { type: 'boolean' }, big: { type: 'boolean' },
     }),
     msg_pin: object(['chat_id', 'message_id', 'pinned'], {
-      chat_id: reference('chatId'), message_id: reference('positiveInt53'),
+      chat_id: reference('chatId'), message_id: reference('messageId'),
       pinned: { const: true },
     }),
     msg_unpin: object(['chat_id', 'message_id', 'pinned'], {
-      chat_id: reference('chatId'), message_id: reference('positiveInt53'),
+      chat_id: reference('chatId'), message_id: reference('messageId'),
       pinned: { const: false },
     }),
     chat_mark_read: object(['chat_id', 'last_read_message_id', 'marked_read'], {
-      chat_id: reference('chatId'), last_read_message_id: nullable(reference('positiveInt53')),
+      chat_id: reference('chatId'), last_read_message_id: nullable(reference('messageId')),
       marked_read: { const: true },
     }),
     chat_mute: object(['chat_id', 'muted', 'duration_seconds'], {
       chat_id: reference('chatId'), muted: { const: true },
-      duration_seconds: { type: 'integer', minimum: 1, maximum: 31622400 },
+      duration_seconds: muteDuration(),
     }),
     chat_unmute: object(['chat_id', 'muted', 'duration_seconds'], {
       chat_id: reference('chatId'), muted: { const: false }, duration_seconds: { const: 0 },
@@ -928,7 +928,7 @@ const storedTimeoutDetails = (operation) => {
       operation, ['phase', 'state', 'outcome', 'idempotency', 'temporary_message_id'], {
         phase: { const: 'confirmation' }, state: reference('nullableState'),
         outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
-        temporary_message_id: nullable(reference('int53')),
+        temporary_message_id: nullable(reference('messageId')),
       },
     ));
   }
@@ -1010,7 +1010,7 @@ const v2StoredErrorBranches = (operation) => {
     const failed429 = object(
       ['source_id', 'status', 'failure_reason', 'tdlib_code', 'retry_after'],
       {
-        source_id: reference('positiveInt53'), status: { const: 'failed' },
+        source_id: reference('messageId'), status: { const: 'failed' },
         failure_reason: { const: 'tdlib_error' }, tdlib_code: { const: 429 },
         retry_after: reference('positiveInt32'),
       },
@@ -1054,7 +1054,7 @@ const v2StoredErrorBranches = (operation) => {
   if (['send', 'saved_attach'].includes(operation)) {
     branches.push(storedError('SEND_FAILED', operationDetails(
       operation, ['chat_id', 'temporary_message_id', 'reason'], {
-        chat_id: reference('chatId'), temporary_message_id: reference('int53'),
+        chat_id: reference('chatId'), temporary_message_id: reference('messageId'),
         reason: { const: 'deleted_before_confirmation' },
       },
     ), 1));
@@ -1088,7 +1088,7 @@ const v2StoredErrorBranches = (operation) => {
   if (preconditionReasons[operation]) {
     branches.push(storedError('PRECONDITION_FAILED', operationDetails(
       operation, ['chat_id', 'message_id', 'reason'], {
-        chat_id: nullable(reference('chatId')), message_id: nullable(reference('positiveInt53')),
+        chat_id: nullable(reference('chatId')), message_id: nullable(reference('messageId')),
         reason: { enum: preconditionReasons[operation] },
       },
     ), 1));
@@ -1685,7 +1685,7 @@ for (const operation of v2Operations) {
       v2CheckpointBranch(
         operation,
         'temporary_ids_observed',
-        object(['temporary_message_ids'], { temporary_message_ids: int53Array() }),
+        object(['temporary_message_ids'], { temporary_message_ids: messageIdArray() }),
       ),
     );
   }

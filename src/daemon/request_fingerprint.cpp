@@ -4,10 +4,10 @@
 #include "common/paths.hpp"
 #include "common/sha256.hpp"
 #include "common/utf8.hpp"
-#include "daemon/local_selector.hpp"
 #include "daemon/resolver.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <limits>
 #include <optional>
 #include <ranges>
@@ -28,6 +28,10 @@ constexpr std::size_t kMaximumCaptionBytes = 4'096;
 
 bool valid_positive_int53(std::int64_t value) {
     return value > 0 && value <= kMaximumInt53;
+}
+
+bool valid_message_id(std::int64_t value) {
+    return value != 0 && value >= -kMaximumInt53 && value <= kMaximumInt53;
 }
 
 bool valid_text(std::string_view value, std::size_t maximum_scalars, bool allow_empty,
@@ -55,14 +59,68 @@ bool valid_message_ids(const std::vector<std::int64_t>& values) {
     if (values.empty() || values.size() > 100) {
         return false;
     }
-    std::int64_t previous = 0;
+    std::optional<std::int64_t> previous;
     return std::ranges::all_of(values, [&previous](std::int64_t value) {
-        if (!valid_positive_int53(value) || value <= previous) {
+        if (!valid_message_id(value) || (previous && value <= *previous)) {
             return false;
         }
         previous = value;
         return true;
     });
+}
+
+bool decimal_syntax(std::string_view value) {
+    if (value.empty()) {
+        return false;
+    }
+    std::size_t offset = 0;
+    if (value.front() == '-' || value.front() == '+') {
+        offset = 1;
+    }
+    return offset < value.size() && std::ranges::all_of(value.substr(offset), [](char character) {
+               return character >= '0' && character <= '9';
+           });
+}
+
+std::optional<std::int64_t> decimal_selector(std::string_view value) {
+    if (value.starts_with('+')) {
+        value.remove_prefix(1);
+    }
+    std::int64_t parsed = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (error != std::errc{} || end != value.data() + value.size() || !valid_message_id(parsed)) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+bool invite_token(std::string_view value) {
+    return !value.empty() && std::ranges::all_of(value, [](char character) {
+        return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') ||
+               (character >= '0' && character <= '9') || character == '_' || character == '-';
+    });
+}
+
+std::optional<std::string_view> global_link_remainder(std::string_view selector) {
+    for (const auto prefix : {std::string_view{"https://t.me/"}, std::string_view{"t.me/"}}) {
+        if (selector.starts_with(prefix)) {
+            return selector.substr(prefix.size());
+        }
+    }
+    return std::nullopt;
+}
+
+bool exact_invite_link(std::string_view remainder) {
+    if (remainder.starts_with('+')) {
+        return invite_token(remainder.substr(1));
+    }
+    constexpr std::string_view joinchat = "joinchat/";
+    return remainder.starts_with(joinchat) && invite_token(remainder.substr(joinchat.size()));
+}
+
+bool valid_mute_duration(std::int32_t duration) {
+    return (duration >= 1 && duration <= 31'622'400) ||
+           duration == std::numeric_limits<std::int32_t>::max();
 }
 
 bool valid_basename(std::string_view value) {
@@ -134,7 +192,7 @@ std::optional<json> make_payload(const SendFingerprintPayload& value) {
     const auto schedule = schedule_json(value.schedule);
     if (!selector || !mode || !topic || !schedule ||
         !valid_text(value.text, kMaximumMessageScalars, false) ||
-        (value.reply_to && !valid_positive_int53(*value.reply_to))) {
+        (value.reply_to && !valid_message_id(*value.reply_to))) {
         return std::nullopt;
     }
     return json{{"chat_selector", *selector},
@@ -148,7 +206,7 @@ std::optional<json> make_payload(const SendFingerprintPayload& value) {
 
 std::optional<json> make_payload(const MsgEditFingerprintPayload& value) {
     const auto selector = selector_json(value.chat_selector);
-    if (!selector || !valid_positive_int53(value.message_id) ||
+    if (!selector || !valid_message_id(value.message_id) ||
         !valid_text(value.text, kMaximumMessageScalars, false)) {
         return std::nullopt;
     }
@@ -180,7 +238,7 @@ std::optional<json> make_payload(const MsgForwardFingerprintPayload& value) {
 
 std::optional<json> make_payload(const MsgReactFingerprintPayload& value) {
     const auto selector = selector_json(value.chat_selector);
-    if (!selector || !valid_positive_int53(value.message_id) ||
+    if (!selector || !valid_message_id(value.message_id) ||
         !valid_text(value.reaction, 64, false, 64)) {
         return std::nullopt;
     }
@@ -193,7 +251,7 @@ std::optional<json> make_payload(const MsgReactFingerprintPayload& value) {
 
 template <typename T> std::optional<json> message_target_payload(const T& value) {
     const auto selector = selector_json(value.chat_selector);
-    if (!selector || !valid_positive_int53(value.message_id)) {
+    if (!selector || !valid_message_id(value.message_id)) {
         return std::nullopt;
     }
     return json{{"chat_selector", *selector}, {"message_id", value.message_id}};
@@ -221,7 +279,7 @@ std::optional<json> make_payload(const ChatMarkReadFingerprintPayload& value) {
 
 std::optional<json> make_payload(const ChatMuteFingerprintPayload& value) {
     const auto selector = selector_json(value.chat_selector);
-    if (!selector || value.duration_seconds < 1 || value.duration_seconds > 31'622'400) {
+    if (!selector || !valid_mute_duration(value.duration_seconds)) {
         return std::nullopt;
     }
     return json{{"chat_selector", *selector}, {"duration_seconds", value.duration_seconds}};
@@ -253,9 +311,9 @@ std::optional<json> make_payload(const ChatUnarchiveFingerprintPayload& value) {
 
 std::optional<json> make_payload(const ChatJoinFingerprintPayload& value) {
     if (const auto* username = std::get_if<ChatJoinUsernameFingerprint>(&value.target)) {
-        const auto classified = classify_local_selector(username->username);
-        if (!classified || classified->kind != LocalSelectorKind::Username ||
-            username->username.find('\0') != std::string::npos) {
+        const auto canonical = canonical_write_selector(username->username);
+        if (!canonical || !username->username.starts_with('@') ||
+            *canonical != username->username) {
             return std::nullopt;
         }
         return json{{"source", "username"}, {"username", username->username}};
@@ -272,7 +330,7 @@ std::optional<json> make_payload(const ChatLeaveFingerprintPayload& value) {
 }
 
 std::optional<json> make_payload(const SavedAttachFingerprintPayload& value) {
-    if (!valid_positive_int53(value.message_id) || !valid_basename(value.name) ||
+    if (!valid_message_id(value.message_id) || !valid_basename(value.name) ||
         !valid_hash(value.sha256) ||
         !valid_text(value.caption, kMaximumCaptionScalars, true, kMaximumCaptionBytes)) {
         return std::nullopt;
@@ -375,28 +433,22 @@ proto::M3Operation fingerprint_operation(const FingerprintPayload& payload) {
 }
 
 std::optional<std::string> canonical_write_selector(std::string_view selector) {
-    if (selector.find('\0') != std::string_view::npos) {
+    if (selector.empty() || selector.find('\0') != std::string_view::npos ||
+        !common::valid_utf8(selector)) {
         return std::nullopt;
     }
-    const auto classified = classify_local_selector(selector);
-    if (!classified) {
-        return std::nullopt;
+    if (decimal_syntax(selector)) {
+        const auto parsed = decimal_selector(selector);
+        return parsed ? std::optional<std::string>{std::to_string(*parsed)} : std::nullopt;
     }
-    switch (classified->kind) {
-    case LocalSelectorKind::Numeric:
-        return std::to_string(classified->chat_id);
-    case LocalSelectorKind::Username:
-    case LocalSelectorKind::PublicChatLink:
-    case LocalSelectorKind::BotStartLink:
-    case LocalSelectorKind::MessageLink:
-    case LocalSelectorKind::DirectMessagesChatLink:
+    if (selector.starts_with('@')) {
+        return selector.size() > 1 ? std::optional<std::string>{selector} : std::nullopt;
+    }
+    if (const auto remainder = global_link_remainder(selector)) {
+        if (exact_invite_link(*remainder)) {
+            return invite_link_hash(selector);
+        }
         return std::string(selector);
-    case LocalSelectorKind::ChatInviteLink:
-        return invite_link_hash(selector);
-    case LocalSelectorKind::InvalidLink:
-    case LocalSelectorKind::UnsupportedLink:
-    case LocalSelectorKind::Title:
-        return std::nullopt;
     }
     return std::nullopt;
 }

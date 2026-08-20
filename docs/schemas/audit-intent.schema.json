@@ -304,6 +304,18 @@
       "minimum": -9007199254740991,
       "maximum": 9007199254740991
     },
+    "messageId": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/int53"
+        },
+        {
+          "not": {
+            "const": 0
+          }
+        }
+      ]
+    },
     "chatId": {
       "allOf": [
         {
@@ -668,7 +680,7 @@
       ],
       "properties": {
         "id": {
-          "$ref": "#/$defs/positiveInt53"
+          "$ref": "#/$defs/messageId"
         },
         "chat_id": {
           "$ref": "#/$defs/chatId"
@@ -904,7 +916,7 @@
       ],
       "properties": {
         "source_id": {
-          "$ref": "#/$defs/positiveInt53"
+          "$ref": "#/$defs/messageId"
         },
         "status": {
           "const": "sent"
@@ -928,7 +940,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -956,7 +968,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -984,7 +996,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -1021,7 +1033,7 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "failed"
@@ -1061,13 +1073,13 @@
           ],
           "properties": {
             "source_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "status": {
               "const": "pending"
             },
             "temporary_message_id": {
-              "$ref": "#/$defs/int53"
+              "$ref": "#/$defs/messageId"
             }
           }
         },
@@ -1370,7 +1382,7 @@
             "reply_to": {
               "oneOf": [
                 {
-                  "$ref": "#/$defs/positiveInt53"
+                  "$ref": "#/$defs/messageId"
                 },
                 {
                   "type": "null"
@@ -1450,7 +1462,7 @@
                 "reply_to": {
                   "oneOf": [
                     {
-                      "$ref": "#/$defs/positiveInt53"
+                      "$ref": "#/$defs/messageId"
                     },
                     {
                       "type": "null"
@@ -1718,7 +1730,7 @@
               "pattern": "^[^\\u0000]+$"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "text": {
               "type": "string",
@@ -1753,7 +1765,7 @@
               "$ref": "#/$defs/chatIdentity"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "text": {
               "type": "string",
@@ -1848,7 +1860,7 @@
               "maxItems": 100,
               "uniqueItems": true,
               "items": {
-                "$ref": "#/$defs/positiveInt53"
+                "$ref": "#/$defs/messageId"
               }
             },
             "for_all": {
@@ -1887,7 +1899,7 @@
               "maxItems": 100,
               "uniqueItems": true,
               "items": {
-                "$ref": "#/$defs/positiveInt53"
+                "$ref": "#/$defs/messageId"
               }
             },
             "requested_for_all": {
@@ -1993,7 +2005,7 @@
               "maxItems": 100,
               "uniqueItems": true,
               "items": {
-                "$ref": "#/$defs/positiveInt53"
+                "$ref": "#/$defs/messageId"
               }
             },
             "drop_author": {
@@ -2035,7 +2047,7 @@
               "maxItems": 100,
               "uniqueItems": true,
               "items": {
-                "$ref": "#/$defs/positiveInt53"
+                "$ref": "#/$defs/messageId"
               }
             },
             "drop_author": {
@@ -2127,7 +2139,7 @@
                   "pattern": "^[^\\u0000]+$"
                 },
                 "message_id": {
-                  "$ref": "#/$defs/positiveInt53"
+                  "$ref": "#/$defs/messageId"
                 },
                 "reaction": {
                   "type": "string",
@@ -2223,7 +2235,7 @@
                   "$ref": "#/$defs/chatIdentity"
                 },
                 "message_id": {
-                  "$ref": "#/$defs/positiveInt53"
+                  "$ref": "#/$defs/messageId"
                 },
                 "reaction": {
                   "type": "string",
@@ -2382,7 +2394,7 @@
               "pattern": "^[^\\u0000]+$"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             }
           }
         },
@@ -2411,7 +2423,7 @@
               "$ref": "#/$defs/chatIdentity"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "pinned": {
               "const": true
@@ -2497,7 +2509,7 @@
               "pattern": "^[^\\u0000]+$"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             }
           }
         },
@@ -2526,7 +2538,7 @@
               "$ref": "#/$defs/chatIdentity"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "pinned": {
               "const": false
@@ -2647,7 +2659,7 @@
                 "last_message_id": {
                   "oneOf": [
                     {
-                      "$ref": "#/$defs/positiveInt53"
+                      "$ref": "#/$defs/messageId"
                     },
                     {
                       "type": "null"
@@ -2698,7 +2710,7 @@
                     },
                     "chat": true,
                     "last_message_id": {
-                      "$ref": "#/$defs/positiveInt53"
+                      "$ref": "#/$defs/messageId"
                     }
                   }
                 }
@@ -2785,9 +2797,16 @@
               "pattern": "^[^\\u0000]+$"
             },
             "duration_seconds": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 31622400
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 31622400
+                },
+                {
+                  "const": 2147483647
+                }
+              ]
             }
           }
         },
@@ -2819,9 +2838,16 @@
               "const": true
             },
             "duration_seconds": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 31622400
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 31622400
+                },
+                {
+                  "const": 2147483647
+                }
+              ]
             }
           }
         },
@@ -3816,7 +3842,7 @@
           ],
           "properties": {
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "path": {
               "type": "string",
@@ -3858,7 +3884,7 @@
               "$ref": "#/$defs/chatIdentity"
             },
             "message_id": {
-              "$ref": "#/$defs/positiveInt53"
+              "$ref": "#/$defs/messageId"
             },
             "effective_topic": {
               "oneOf": [

@@ -460,34 +460,45 @@ bool valid_int53(const json& value, bool positive = false) {
     return number && *number >= (positive ? 1 : -maximum) && *number <= maximum;
 }
 
-bool valid_int53_array(const json& value, std::size_t minimum = 1, std::size_t maximum = 100) {
+bool valid_message_id(const json& value) {
+    const auto number = json_int64(value);
+    return number && *number != 0 && valid_int53(value);
+}
+
+bool valid_message_id_array(const json& value, std::size_t minimum = 1, std::size_t maximum = 100) {
     if (!value.is_array() || value.size() < minimum || value.size() > maximum) {
         return false;
     }
     std::set<std::int64_t> unique;
     for (const auto& item : value) {
         const auto number = json_int64(item);
-        if (!number || !valid_int53(item) || !unique.emplace(*number).second) {
+        if (!number || !valid_message_id(item) || !unique.emplace(*number).second) {
             return false;
         }
     }
     return true;
 }
 
-bool valid_positive_int53_array(const json& value, std::size_t minimum = 1,
-                                std::size_t maximum = 100) {
+bool valid_strict_message_id_array(const json& value, std::size_t minimum = 1,
+                                   std::size_t maximum = 100) {
     if (!value.is_array() || value.size() < minimum || value.size() > maximum) {
         return false;
     }
-    std::int64_t previous = 0;
+    std::optional<std::int64_t> previous;
     for (const auto& item : value) {
         const auto number = json_int64(item);
-        if (!number || !valid_int53(item, true) || *number <= previous) {
+        if (!number || !valid_message_id(item) || (previous && *number <= *previous)) {
             return false;
         }
-        previous = *number;
+        previous = number;
     }
     return true;
+}
+
+bool valid_mute_duration(const json& value) {
+    const auto duration = json_int64(value);
+    return duration && ((*duration >= 1 && *duration <= 31'622'400) ||
+                        *duration == std::numeric_limits<std::int32_t>::max());
 }
 
 bool valid_session_id(const json& value) {
@@ -593,31 +604,31 @@ bool valid_arguments(AccountAuditOperation operation, const json& value) {
                valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false) &&
                (value["parse_mode"] == "plain" || value["parse_mode"] == "markdown_v2" ||
                 value["parse_mode"] == "html") &&
-               (value["reply_to"].is_null() || valid_int53(value["reply_to"], true)) &&
+               (value["reply_to"].is_null() || valid_message_id(value["reply_to"])) &&
                valid_topic(value["topic"], "forum", true) && value["silent"].is_boolean() &&
                valid_schedule(value["schedule"]);
     case AccountAuditOperation::MsgEdit:
         return exact_fields(value, {"chat", "message_id", "text"}) &&
-               valid_selector_string(value["chat"]) && valid_int53(value["message_id"], true) &&
+               valid_selector_string(value["chat"]) && valid_message_id(value["message_id"]) &&
                valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false);
     case AccountAuditOperation::MsgDelete:
         return exact_fields(value, {"chat", "message_ids", "for_all"}) &&
                valid_selector_string(value["chat"]) &&
-               valid_positive_int53_array(value["message_ids"]) && value["for_all"].is_boolean();
+               valid_strict_message_id_array(value["message_ids"]) && value["for_all"].is_boolean();
     case AccountAuditOperation::MsgForward:
         return exact_fields(value, {"from", "to", "message_ids", "drop_author"}) &&
                valid_selector_string(value["from"]) && valid_selector_string(value["to"]) &&
-               valid_positive_int53_array(value["message_ids"]) &&
+               valid_strict_message_id_array(value["message_ids"]) &&
                value["drop_author"].is_boolean();
     case AccountAuditOperation::MsgReact:
         return exact_fields(value, {"chat", "message_id", "reaction", "remove", "big"}) &&
-               valid_selector_string(value["chat"]) && valid_int53(value["message_id"], true) &&
+               valid_selector_string(value["chat"]) && valid_message_id(value["message_id"]) &&
                valid_utf8_text(value["reaction"], 64, 64, false) && value["remove"].is_boolean() &&
                value["big"].is_boolean() && !(value["remove"] == true && value["big"] == true);
     case AccountAuditOperation::MsgPin:
     case AccountAuditOperation::MsgUnpin:
         return exact_fields(value, {"chat", "message_id"}) &&
-               valid_selector_string(value["chat"]) && valid_int53(value["message_id"], true);
+               valid_selector_string(value["chat"]) && valid_message_id(value["message_id"]);
     case AccountAuditOperation::ChatMarkRead:
     case AccountAuditOperation::ChatPin:
     case AccountAuditOperation::ChatUnpin:
@@ -630,9 +641,7 @@ bool valid_arguments(AccountAuditOperation operation, const json& value) {
         return exact_fields(value, {"chat", "duration_seconds"}) &&
                valid_selector_string(value["chat"]) &&
                (operation == AccountAuditOperation::ChatMute
-                    ? (json_int64(value["duration_seconds"]).value_or(0) >= 1 &&
-                       json_int64(value["duration_seconds"])
-                               .value_or(std::numeric_limits<std::int64_t>::max()) <= 31'622'400)
+                    ? valid_mute_duration(value["duration_seconds"])
                     : json_int64(value["duration_seconds"]) == std::optional<std::int64_t>{0});
     case AccountAuditOperation::ChatJoin:
         if (exact_fields(value, {"source", "username"})) {
@@ -642,7 +651,7 @@ bool valid_arguments(AccountAuditOperation operation, const json& value) {
                value["source"] == "invite_link" && valid_hash(value["invite_link_sha256"]);
     case AccountAuditOperation::SavedAttach:
         return exact_fields(value, {"message_id", "path", "caption"}) &&
-               valid_int53(value["message_id"], true) && valid_argument_path(value["path"]) &&
+               valid_message_id(value["message_id"]) && valid_argument_path(value["path"]) &&
                valid_utf8_text(value["caption"], 4'096, 1'024, true);
     case AccountAuditOperation::SessionTerminate:
         return exact_fields(value, {"session_id"}) && valid_session_id(value["session_id"]);
@@ -742,7 +751,7 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
                valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false) &&
                (value["parse_mode"] == "plain" || value["parse_mode"] == "markdown_v2" ||
                 value["parse_mode"] == "html") &&
-               (value["reply_to"].is_null() || valid_int53(value["reply_to"], true)) &&
+               (value["reply_to"].is_null() || valid_message_id(value["reply_to"])) &&
                valid_topic(value["requested_topic"], "forum", true) &&
                valid_topic(value["effective_topic"], "forum", true) &&
                value["silent"].is_boolean() &&
@@ -750,12 +759,12 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
     case AccountAuditOperation::MsgEdit:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "text"}) &&
-               chat("chat") && valid_int53(value["message_id"], true) &&
+               chat("chat") && valid_message_id(value["message_id"]) &&
                valid_utf8_text(value["text"], kMessageTextBytes, kMessageTextScalars, false);
     case AccountAuditOperation::MsgDelete:
         if (!exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_ids",
                                   "requested_for_all", "effective_for_all"}) ||
-            !chat("chat") || !valid_positive_int53_array(value["message_ids"]) ||
+            !chat("chat") || !valid_strict_message_id_array(value["message_ids"]) ||
             !value["requested_for_all"].is_boolean() || !value["effective_for_all"].is_boolean()) {
             return false;
         }
@@ -765,12 +774,12 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
     case AccountAuditOperation::MsgForward:
         return exact_fields(value, {"operation", "account", "tdlib_request", "from", "to",
                                     "message_ids", "drop_author"}) &&
-               chat("from") && chat("to") && valid_positive_int53_array(value["message_ids"]) &&
+               chat("from") && chat("to") && valid_strict_message_id_array(value["message_ids"]) &&
                value["drop_author"].is_boolean();
     case AccountAuditOperation::MsgReact:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "reaction", "remove", "big"}) &&
-               chat("chat") && valid_int53(value["message_id"], true) &&
+               chat("chat") && valid_message_id(value["message_id"]) &&
                valid_utf8_text(value["reaction"], 64, 64, false) && value["remove"].is_boolean() &&
                value["big"].is_boolean() && !(value["remove"] == true && value["big"] == true) &&
                value["tdlib_request"] ==
@@ -779,14 +788,13 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
     case AccountAuditOperation::MsgUnpin:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "pinned"}) &&
-               chat("chat") && valid_int53(value["message_id"], true) &&
+               chat("chat") && valid_message_id(value["message_id"]) &&
                value["pinned"].is_boolean();
     case AccountAuditOperation::ChatMarkRead:
         return exact_fields(value,
                             {"operation", "account", "tdlib_request", "chat", "last_message_id"}) &&
                chat("chat") &&
-               (value["last_message_id"].is_null() ||
-                valid_int53(value["last_message_id"], true)) &&
+               (value["last_message_id"].is_null() || valid_message_id(value["last_message_id"])) &&
                (value["last_message_id"].is_null() ? value["tdlib_request"].is_null()
                                                    : value["tdlib_request"] == "viewMessages");
     case AccountAuditOperation::ChatMute:
@@ -796,9 +804,7 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
                chat("chat") && value["muted"].is_boolean() &&
                value["muted"] == (operation == AccountAuditOperation::ChatMute) &&
                (operation == AccountAuditOperation::ChatMute
-                    ? (json_int64(value["duration_seconds"]).value_or(0) >= 1 &&
-                       json_int64(value["duration_seconds"])
-                               .value_or(std::numeric_limits<std::int64_t>::max()) <= 31'622'400)
+                    ? valid_mute_duration(value["duration_seconds"])
                     : json_int64(value["duration_seconds"]) == std::optional<std::int64_t>{0});
     case AccountAuditOperation::ChatPin:
     case AccountAuditOperation::ChatUnpin:
@@ -829,7 +835,7 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
     case AccountAuditOperation::SavedAttach:
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_id",
                                     "effective_topic", "caption", "file"}) &&
-               chat("chat") && valid_int53(value["message_id"], true) &&
+               chat("chat") && valid_message_id(value["message_id"]) &&
                valid_topic(value["effective_topic"], "saved", false) &&
                valid_utf8_text(value["caption"], 4'096, 1'024, true) &&
                valid_file_snapshot(value["file"]);
@@ -912,10 +918,10 @@ bool valid_message_topic(const json& value) {
 bool valid_message_write_result(const json& value) {
     if (!exact_fields(value, {"id", "chat_id", "date", "sender", "is_outgoing", "topic", "type",
                               "text", "scheduled"}) ||
-        !valid_int53(value["id"], true) || !valid_int53(value["chat_id"]) ||
-        value["chat_id"] == 0 || !value["is_outgoing"].is_boolean() ||
-        !valid_message_topic(value["topic"]) || !value["type"].is_string() ||
-        !valid_string(value["text"], kMessageTextBytes) || !value["scheduled"].is_boolean()) {
+        !valid_message_id(value["id"]) || !valid_int53(value["chat_id"]) || value["chat_id"] == 0 ||
+        !value["is_outgoing"].is_boolean() || !valid_message_topic(value["topic"]) ||
+        !value["type"].is_string() || !valid_string(value["text"], kMessageTextBytes) ||
+        !value["scheduled"].is_boolean()) {
         return false;
     }
     const auto& type = value["type"].get_ref<const std::string&>();
@@ -954,8 +960,8 @@ bool valid_result_data( // NOLINT(readability-function-cognitive-complexity)
     case AccountAuditOperation::MsgDelete:
         return exact_fields(value, {"chat_id", "message_ids", "for_all", "deleted"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
-               valid_positive_int53_array(value["message_ids"]) && value["for_all"].is_boolean() &&
-               value["deleted"] == true;
+               valid_strict_message_id_array(value["message_ids"]) &&
+               value["for_all"].is_boolean() && value["deleted"] == true;
     case AccountAuditOperation::MsgForward:
         if (!exact_fields(value, {"from_chat_id", "to_chat_id", "items"}) ||
             !valid_int53(value["from_chat_id"]) || value["from_chat_id"] == 0 ||
@@ -965,36 +971,36 @@ bool valid_result_data( // NOLINT(readability-function-cognitive-complexity)
             return false;
         }
         {
-            std::int64_t previous = 0;
+            std::optional<std::int64_t> previous;
             for (const auto& item : value["items"]) {
                 if (!valid_forward_item(item) || item["status"] != "sent") {
                     return false;
                 }
                 const auto source = json_int64(item["source_id"]);
-                if (!source || *source <= previous) {
+                if (!source || (previous && *source <= *previous)) {
                     return false;
                 }
-                previous = *source;
+                previous = source;
             }
         }
         return true;
     case AccountAuditOperation::MsgReact:
         return exact_fields(value, {"chat_id", "message_id", "reaction", "removed", "big"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
-               valid_int53(value["message_id"], true) &&
+               valid_message_id(value["message_id"]) &&
                valid_utf8_text(value["reaction"], 64, 64, false) && value["removed"].is_boolean() &&
                value["big"].is_boolean();
     case AccountAuditOperation::MsgPin:
     case AccountAuditOperation::MsgUnpin:
         return exact_fields(value, {"chat_id", "message_id", "pinned"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
-               valid_int53(value["message_id"], true) && value["pinned"].is_boolean() &&
+               valid_message_id(value["message_id"]) && value["pinned"].is_boolean() &&
                value["pinned"] == (operation == AccountAuditOperation::MsgPin);
     case AccountAuditOperation::ChatMarkRead:
         return exact_fields(value, {"chat_id", "last_read_message_id", "marked_read"}) &&
                valid_int53(value["chat_id"]) && value["chat_id"] != 0 &&
                (value["last_read_message_id"].is_null() ||
-                valid_int53(value["last_read_message_id"], true)) &&
+                valid_message_id(value["last_read_message_id"])) &&
                value["marked_read"] == true;
     case AccountAuditOperation::ChatMute:
     case AccountAuditOperation::ChatUnmute:
@@ -1003,9 +1009,7 @@ bool valid_result_data( // NOLINT(readability-function-cognitive-complexity)
                value["muted"].is_boolean() &&
                value["muted"] == (operation == AccountAuditOperation::ChatMute) &&
                (operation == AccountAuditOperation::ChatMute
-                    ? (json_int64(value["duration_seconds"]).value_or(0) >= 1 &&
-                       json_int64(value["duration_seconds"])
-                               .value_or(std::numeric_limits<std::int64_t>::max()) <= 31'622'400)
+                    ? valid_mute_duration(value["duration_seconds"])
                     : json_int64(value["duration_seconds"]) == std::optional<std::int64_t>{0});
     case AccountAuditOperation::ChatPin:
     case AccountAuditOperation::ChatUnpin:
@@ -1104,17 +1108,18 @@ bool valid_forward_items(const json& items, bool allow_empty, bool require_termi
     if (!items.is_array() || (!allow_empty && items.empty()) || items.size() > kForwardItemCount) {
         return false;
     }
-    std::int64_t previous = 0;
+    std::optional<std::int64_t> previous;
     std::set<std::int64_t> temporary_ids;
     for (const auto& item : items) {
         if (!valid_forward_item(item)) {
             return false;
         }
         const auto source = json_int64(item["source_id"]);
-        if (!source || *source <= previous || (require_terminal && item["status"] == "pending")) {
+        if (!source || (previous && *source <= *previous) ||
+            (require_terminal && item["status"] == "pending")) {
             return false;
         }
-        previous = *source;
+        previous = source;
         if (item["status"] == "pending") {
             const auto temporary = json_int64(item["temporary_message_id"]);
             if (!temporary || !temporary_ids.emplace(*temporary).second) {
@@ -1259,7 +1264,7 @@ bool valid_timeout_details(AccountAuditOperation operation, const json& details)
            exact_fields(details, {"operation", "phase", "state", "outcome", "idempotency",
                                   "temporary_message_id"}) &&
            (details["temporary_message_id"].is_null() ||
-            valid_int53(details["temporary_message_id"]));
+            valid_message_id(details["temporary_message_id"]));
 }
 
 bool valid_forward_error_details(std::string_view code, const json& details) {
@@ -1394,7 +1399,7 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
                 operation == AccountAuditOperation::SavedAttach) &&
                exact_fields(details, {"operation", "chat_id", "temporary_message_id", "reason"}) &&
                valid_operation_field(operation, details) && valid_int53(details["chat_id"]) &&
-               details["chat_id"] != 0 && valid_int53(details["temporary_message_id"]) &&
+               details["chat_id"] != 0 && valid_message_id(details["temporary_message_id"]) &&
                details["reason"] == "deleted_before_confirmation";
     }
     if (code == "FORWARD_FAILED" || code == "FORWARD_PARTIAL") {
@@ -1450,7 +1455,7 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
             !valid_operation_field(operation, details) ||
             !(details["chat_id"].is_null() ||
               (valid_int53(details["chat_id"]) && details["chat_id"] != 0)) ||
-            !(details["message_id"].is_null() || valid_int53(details["message_id"], true)) ||
+            !(details["message_id"].is_null() || valid_message_id(details["message_id"])) ||
             !details["reason"].is_string()) {
             return false;
         }
@@ -1537,13 +1542,13 @@ std::uint64_t terminal_byte_ceiling(AccountAuditOperation operation) {
 
 bool valid_forward_item(const json& value) {
     if (!value.is_object() || !value.contains("source_id") ||
-        !valid_int53(value["source_id"], true) || !value.contains("status") ||
+        !valid_message_id(value["source_id"]) || !value.contains("status") ||
         !value["status"].is_string()) {
         return false;
     }
     if (value["status"] == "pending") {
         return exact_fields(value, {"source_id", "status", "temporary_message_id"}) &&
-               valid_int53(value["temporary_message_id"]);
+               valid_message_id(value["temporary_message_id"]);
     }
     if (value["status"] == "sent") {
         return exact_fields(value, {"source_id", "status", "message"}) &&
@@ -1604,7 +1609,7 @@ bool valid_checkpoint_data(AccountAuditOperation operation, AccountAuditStage st
                 operation == AccountAuditOperation::SavedAttach ||
                 operation == AccountAuditOperation::MsgForward) &&
                exact_fields(value, {"temporary_message_ids"}) &&
-               valid_int53_array(value["temporary_message_ids"]);
+               valid_message_id_array(value["temporary_message_ids"]);
     case AccountAuditStage::ForwardProgress:
         return operation == AccountAuditOperation::MsgForward && exact_fields(value, {"items"}) &&
                valid_forward_items(value["items"], false, false);

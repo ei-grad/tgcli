@@ -1393,6 +1393,196 @@ TEST_CASE("account audit enforces operation persistence constraints",
     CHECK_FALSE(daemon::validate_account_audit_checkpoint(forward, error));
 }
 
+TEST_CASE("account audit v2 accepts signed message ids and the mute default sentinel",
+          "[account-audit][contract][schema][message-id][mute]") {
+    using O = daemon::AccountAuditOperation;
+    using S = daemon::AccountAuditStage;
+    constexpr std::int64_t minimum = -9'007'199'254'740'991LL;
+    constexpr std::int64_t maximum = 9'007'199'254'740'991LL;
+
+    const auto accepts_intent = [](O operation, json args, json immutable_plan) {
+        std::string error;
+        auto value = daemon::make_account_audit_intent(
+            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:00Z"},
+             "main",
+             operation,
+             std::move(args),
+             std::move(immutable_plan),
+             std::string(kFingerprint),
+             std::string(kSnapshot),
+             "request",
+             destructive(operation) ? std::optional<std::string>{"yes"} : std::nullopt,
+             std::nullopt,
+             100},
+            error);
+        REQUIRE(value);
+        CHECK(
+            tgcli::test::matches_json_schema("audit-intent.schema.json").match(value->document()));
+    };
+
+    auto args = arguments(O::Send);
+    auto immutable_plan = plan(O::Send);
+    args["reply_to"] = minimum;
+    immutable_plan["reply_to"] = minimum;
+    accepts_intent(O::Send, args, immutable_plan);
+
+    for (const auto operation : {O::MsgEdit, O::MsgReact, O::MsgPin, O::MsgUnpin, O::SavedAttach}) {
+        args = arguments(operation);
+        immutable_plan = plan(operation);
+        args["message_id"] = minimum;
+        immutable_plan["message_id"] = minimum;
+        accepts_intent(operation, args, immutable_plan);
+    }
+
+    for (const auto operation : {O::MsgDelete, O::MsgForward}) {
+        args = arguments(operation);
+        immutable_plan = plan(operation);
+        args["message_ids"] = json::array({minimum, -1, maximum});
+        immutable_plan["message_ids"] = args["message_ids"];
+        accepts_intent(operation, args, immutable_plan);
+    }
+
+    args = arguments(O::ChatMarkRead);
+    immutable_plan = plan(O::ChatMarkRead);
+    immutable_plan["last_message_id"] = minimum;
+    accepts_intent(O::ChatMarkRead, args, immutable_plan);
+
+    args = arguments(O::ChatMute);
+    immutable_plan = plan(O::ChatMute);
+    args["duration_seconds"] = std::numeric_limits<std::int32_t>::max();
+    immutable_plan["duration_seconds"] = std::numeric_limits<std::int32_t>::max();
+    accepts_intent(O::ChatMute, args, immutable_plan);
+
+    const auto rejects_intent_document = [](const json& document) {
+        std::string error;
+        CHECK_FALSE(daemon::validate_account_audit_intent(document, error));
+        CHECK_FALSE(tgcli::test::matches_json_schema("audit-intent.schema.json").match(document));
+    };
+    auto document = make_intent(O::Send).document();
+    document["arguments"]["reply_to"] = 0;
+    document["plan"]["reply_to"] = 0;
+    rejects_intent_document(document);
+    document = make_intent(O::MsgEdit).document();
+    document["arguments"]["message_id"] = 0;
+    document["plan"]["message_id"] = 0;
+    rejects_intent_document(document);
+    document = make_intent(O::MsgDelete).document();
+    document["arguments"]["message_ids"] = json::array({minimum, 0, maximum});
+    document["plan"]["message_ids"] = document["arguments"]["message_ids"];
+    rejects_intent_document(document);
+    document = make_intent(O::SavedAttach).document();
+    document["arguments"]["message_id"] = 0;
+    document["plan"]["message_id"] = 0;
+    rejects_intent_document(document);
+    for (const auto invalid_duration : {31'622'401, std::numeric_limits<std::int32_t>::max() - 1}) {
+        document = make_intent(O::ChatMute).document();
+        document["arguments"]["duration_seconds"] = invalid_duration;
+        document["plan"]["duration_seconds"] = invalid_duration;
+        rejects_intent_document(document);
+    }
+    document = make_intent(O::Send).document();
+    document["arguments"]["topic"] = {{"kind", "forum"}, {"id", -1}};
+    document["plan"]["requested_topic"] = document["arguments"]["topic"];
+    document["plan"]["effective_topic"] = document["arguments"]["topic"];
+    rejects_intent_document(document);
+
+    const auto accepts_proof = [](O operation, json data) {
+        std::string error;
+        auto value = daemon::make_account_audit_checkpoint(
+            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:01Z"},
+             "main",
+             operation,
+             1,
+             S::MutationConfirmed,
+             {{"terminal", {{"kind", "result"}, {"data", std::move(data)}}}}},
+            error);
+        REQUIRE(value);
+        CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json")
+                  .match(value->document()));
+    };
+
+    accepts_proof(O::Send, message_write(minimum));
+    auto data = result_data(O::MsgDelete);
+    data["message_ids"] = json::array({minimum, -1, maximum});
+    accepts_proof(O::MsgDelete, data);
+    data = result_data(O::MsgForward);
+    data["items"] = json::array(
+        {json{{"source_id", minimum}, {"status", "sent"}, {"message", message_write(-2)}},
+         json{{"source_id", -1}, {"status", "sent"}, {"message", message_write(-1)}}});
+    accepts_proof(O::MsgForward, data);
+    for (const auto operation : {O::MsgReact, O::MsgPin, O::MsgUnpin}) {
+        data = result_data(operation);
+        data["message_id"] = minimum;
+        accepts_proof(operation, data);
+    }
+    data = result_data(O::ChatMarkRead);
+    data["last_read_message_id"] = minimum;
+    accepts_proof(O::ChatMarkRead, data);
+    data = result_data(O::ChatMute);
+    data["duration_seconds"] = std::numeric_limits<std::int32_t>::max();
+    accepts_proof(O::ChatMute, data);
+
+    std::string error;
+    auto progress = daemon::make_account_audit_checkpoint(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:01Z"},
+         "main",
+         O::MsgForward,
+         1,
+         S::ForwardProgress,
+         {{"items",
+           json::array({json{
+               {"source_id", minimum}, {"status", "pending"}, {"temporary_message_id", -1}}})}}},
+        error);
+    REQUIRE(progress);
+    CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json")
+              .match(progress->document()));
+
+    const auto rejects_checkpoint_document = [](const json& value) {
+        std::string validation_error;
+        CHECK_FALSE(daemon::validate_account_audit_checkpoint(value, validation_error));
+        CHECK_FALSE(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(value));
+    };
+    document =
+        checkpoint(O::Send, S::MutationConfirmed, 1, {{"terminal", result_terminal(O::Send)}})
+            .document();
+    document["data"]["terminal"]["data"]["id"] = 0;
+    rejects_checkpoint_document(document);
+    document =
+        checkpoint(O::Send, S::MutationConfirmed, 1, {{"terminal", result_terminal(O::Send)}})
+            .document();
+    document["data"]["terminal"]["data"]["sender"]["id"] = -1;
+    rejects_checkpoint_document(document);
+    document = checkpoint(O::Send, S::TemporaryIdsObserved, 1,
+                          {{"temporary_message_ids", json::array({-1})}})
+                   .document();
+    document["data"]["temporary_message_ids"] = json::array({0});
+    rejects_checkpoint_document(document);
+    document = progress->document();
+    document["data"]["items"][0]["source_id"] = 0;
+    rejects_checkpoint_document(document);
+
+    const json precondition_terminal{{"kind", "error"},
+                                     {"code", "PRECONDITION_FAILED"},
+                                     {"message", "operation precondition failed"},
+                                     {"details",
+                                      {{"operation", "msg_edit"},
+                                       {"chat_id", -1001},
+                                       {"message_id", minimum},
+                                       {"reason", "not_editable"}}},
+                                     {"exit_code", 1}};
+    auto outcome = daemon::make_account_audit_outcome(
+        {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+         "main",
+         O::MsgEdit,
+         false,
+         daemon::AccountAuditMutationState::None,
+         {},
+         precondition_terminal},
+        error);
+    REQUIRE(outcome);
+    CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json").match(outcome->document()));
+}
+
 TEST_CASE("account audit correlates forward temporary progress and proof vectors",
           "[account-audit][forward][regression]") {
     std::string error;
