@@ -253,6 +253,26 @@ LogoutCoordinator::LogoutCoordinator(core::TdClient& client, ConfigRuntime& conf
       audit_(paths::account_state_dir(account_, environment_), account_, environment_.uid,
              hooks_ ? hooks_->audit : nullptr) {}
 
+LogoutCoordinator::OperationPermit::~OperationPermit() {
+    if (owner_ != nullptr) {
+        owner_->release_operation();
+    }
+}
+
+LogoutCoordinator::OperationPermit::OperationPermit(OperationPermit&& other) noexcept
+    : owner_(std::exchange(other.owner_, nullptr)) {}
+
+LogoutCoordinator::OperationPermit&
+LogoutCoordinator::OperationPermit::operator=(OperationPermit&& other) noexcept {
+    if (this != &other) {
+        if (owner_ != nullptr) {
+            owner_->release_operation();
+        }
+        owner_ = std::exchange(other.owner_, nullptr);
+    }
+    return *this;
+}
+
 bool LogoutCoordinator::request_active(RequestSession& session) {
     if (session.shutdown_requested()) {
         session.error("DAEMON_SHUTDOWN", "daemon is shutting down", {{"reason", "daemon_shutdown"}},
@@ -271,25 +291,62 @@ bool LogoutCoordinator::request_active(RequestSession& session) {
     return true;
 }
 
-bool LogoutCoordinator::acquire_operation_lock(RequestSession& session,
-                                               std::unique_lock<std::mutex>& operation_lock) {
-    for (;;) {
-        if (!request_active(session)) {
-            return false;
-        }
-        if (operation_lock.try_lock()) {
-            return request_active(session);
-        }
-        const auto now = std::chrono::steady_clock::now();
-        auto retry_at = now + std::chrono::milliseconds(2);
-        const auto expires_at = session.deadline().expires_at;
-        if (expires_at) {
-            retry_at = std::min(expires_at.value(), retry_at);
-        }
-        if (retry_at > now) {
-            std::this_thread::sleep_until(retry_at);
+std::optional<LogoutCoordinator::OperationPermit>
+LogoutCoordinator::acquire_operation(RequestSession& session) {
+    if (!request_active(session)) {
+        return std::nullopt;
+    }
+    std::unique_lock lock(operation_mutex_);
+    const bool contended = operation_active_;
+    const auto available = [this] { return !operation_active_; };
+    bool acquired = true;
+    if (contended) {
+        if (const auto expires_at = session.deadline().expires_at) {
+            acquired = operation_condition_.wait_until(lock, session.cancellation_token(),
+                                                       *expires_at, available);
+        } else {
+            acquired = operation_condition_.wait(lock, session.cancellation_token(), available);
         }
     }
+    if (!request_active(session)) {
+        return std::nullopt;
+    }
+    if (!acquired || (contended && deadline_expired(session.deadline()))) {
+        lock.unlock();
+        report_recovery_deadline(session);
+        return std::nullopt;
+    }
+    operation_active_ = true;
+    return OperationPermit(*this);
+}
+
+void LogoutCoordinator::release_operation() {
+    {
+        const std::lock_guard lock(operation_mutex_);
+        operation_active_ = false;
+    }
+    operation_condition_.notify_all();
+}
+
+void LogoutCoordinator::report_recovery_deadline(RequestSession& session) {
+    auto inspection = audit_.inspect();
+    if (inspection.incomplete) {
+        report_audit_incomplete(session, *inspection.incomplete,
+                                "logout audit reconciliation is incomplete");
+        return;
+    }
+    if (inspection.status == LogoutAuditInspectionStatus::Invalid) {
+        report_audit_unavailable(session, inspection.failure.reason.empty()
+                                              ? "path_invalid"
+                                              : inspection.failure.reason);
+        return;
+    }
+    session.error("AUDIT_INCOMPLETE", "logout audit reconciliation is incomplete",
+                  {{"account", account_},
+                   {"path", audit_.path()},
+                   {"mutation_state", "none"},
+                   {"completed_stages", nlohmann::json::array()}},
+                  kGeneric);
 }
 
 ChallengeOutcome LogoutCoordinator::request_challenge(RequestSession& session,
@@ -452,9 +509,12 @@ LogoutCoordinator::PreflightStep LogoutCoordinator::reconcile_preflight(RequestS
 }
 
 bool LogoutCoordinator::preflight(RequestSession& session) {
-    std::unique_lock<std::mutex> operation_lock(operation_mutex_, std::defer_lock);
-    if (!acquire_operation_lock(session, operation_lock)) {
+    auto operation = acquire_operation(session);
+    if (!operation) {
         return false;
+    }
+    if (hooks_ && hooks_->after_operation_admission) {
+        hooks_->after_operation_admission();
     }
     for (;;) {
         const auto step = reconcile_preflight(session);
@@ -471,9 +531,12 @@ bool LogoutCoordinator::preflight(RequestSession& session) {
 // invocations from creating competing lifecycle waiters for one TDLib generation.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void LogoutCoordinator::logout(const proto::Request& request, RequestSession& session) {
-    std::unique_lock<std::mutex> operation_lock(operation_mutex_, std::defer_lock);
-    if (!acquire_operation_lock(session, operation_lock)) {
+    auto operation = acquire_operation(session);
+    if (!operation) {
         return;
+    }
+    if (hooks_ && hooks_->after_operation_admission) {
+        hooks_->after_operation_admission();
     }
     if (!request.args.empty()) {
         session.error("USAGE", "logout takes no command arguments",

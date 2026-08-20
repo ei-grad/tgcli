@@ -384,6 +384,8 @@ TEST_CASE("dispatcher activates unlimited defaults only for registered eligible 
     proto::Request unregistered("testacct");
     unregistered.command = {"listen"};
     CHECK(dispatcher.deadline_default(unregistered) == DeadlineDefault::Default60);
+    CHECK_THROWS_AS(dispatcher.register_command("fetch", {daemon::Tier::Read, report_deadline}),
+                    std::invalid_argument);
     CHECK_THROWS_AS(dispatcher.register_command("ordinary unlimited",
                                                 {daemon::Tier::Read, report_deadline, false,
                                                  std::nullopt, DeadlineDefault::Unlimited}),

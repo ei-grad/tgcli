@@ -63,6 +63,109 @@ namespace {
 
 enum class HandshakeState { AwaitingHello, Matched, BinaryMismatch };
 
+class AdmissionCancellation {
+  public:
+    AdmissionCancellation(int socket_fd, const std::stop_token& shutdown) : socket_fd_(socket_fd) {
+        if (!net::pipe_cloexec(wake_read_fd_, wake_write_fd_)) {
+            throw std::runtime_error("cannot create config-admission wake pipe");
+        }
+        monitor_ = std::thread([this] { monitor(); });
+        shutdown_callback_.emplace(shutdown, std::function<void()>([this] {
+                                       cancellation_.request_stop();
+                                       wake_monitor();
+                                   }));
+    }
+
+    ~AdmissionCancellation() {
+        static_cast<void>(finish());
+        ::close(wake_read_fd_);
+        ::close(wake_write_fd_);
+    }
+
+    AdmissionCancellation(const AdmissionCancellation&) = delete;
+    AdmissionCancellation& operator=(const AdmissionCancellation&) = delete;
+    AdmissionCancellation(AdmissionCancellation&&) = delete;
+    AdmissionCancellation& operator=(AdmissionCancellation&&) = delete;
+
+    [[nodiscard]] std::stop_token token() const {
+        return cancellation_.get_token();
+    }
+
+    bool finish() {
+        if (!finished_) {
+            shutdown_callback_.reset();
+            wake_monitor();
+            if (monitor_.joinable()) {
+                monitor_.join();
+            }
+            finished_ = true;
+        }
+        return peer_disconnected_.load(std::memory_order_acquire);
+    }
+
+  private:
+    void wake_monitor() const {
+        constexpr char byte = 1;
+        auto written = ::write(wake_write_fd_, &byte, 1);
+        while (written < 0 && errno == EINTR) {
+            written = ::write(wake_write_fd_, &byte, 1);
+        }
+    }
+
+    void disconnect() {
+        peer_disconnected_.store(true, std::memory_order_release);
+        cancellation_.request_stop();
+    }
+
+    void monitor() {
+        std::array<pollfd, 2> descriptors{{{socket_fd_, POLLIN, 0}, {wake_read_fd_, POLLIN, 0}}};
+        for (;;) {
+            const int ready = ::poll(descriptors.data(), descriptors.size(), -1);
+            if (ready < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                disconnect();
+                return;
+            }
+            const auto socket_events = descriptors[0].revents;
+            if ((socket_events & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+                disconnect();
+                return;
+            }
+            if ((socket_events & POLLIN) != 0) {
+                char byte = 0;
+                const auto count = ::recv(socket_fd_, &byte, 1, MSG_PEEK);
+                if (count == 0) {
+                    disconnect();
+                    return;
+                }
+                if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    disconnect();
+                    return;
+                }
+                if (count > 0) {
+                    descriptors[0].events = 0;
+                }
+            }
+            if ((descriptors[1].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+                return;
+            }
+        }
+    }
+
+    using ShutdownCallback = std::stop_callback<std::function<void()>>;
+
+    int socket_fd_ = -1;
+    int wake_read_fd_ = -1;
+    int wake_write_fd_ = -1;
+    std::stop_source cancellation_;
+    std::optional<ShutdownCallback> shutdown_callback_;
+    std::thread monitor_;
+    std::atomic<bool> peer_disconnected_{false};
+    bool finished_ = false;
+};
+
 bool is_canonical_binary_mismatch_stop(const proto::Request& request) {
     return request.id == 1 && request.command == std::vector<std::string>{"daemon", "stop"} &&
            request.args.is_object() && request.args.empty() && !request.context.tty &&
@@ -571,8 +674,13 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                 if (options_.request_observer) {
                     options_.request_observer(testing::RequestObservationStage::ConfigRead);
                 }
+                AdmissionCancellation admission_cancellation(connection->fd(),
+                                                             admission_cancellation_.get_token());
                 const auto admission = options_.config_runtime->admit(
-                    request->account, *deadline, admission_cancellation_.get_token());
+                    request->account, *deadline, admission_cancellation.token());
+                if (admission_cancellation.finish()) {
+                    break;
+                }
                 if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
                     const bool fetch =
                         request->command == std::vector<std::string>{"fetch"} &&

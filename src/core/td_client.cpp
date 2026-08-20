@@ -606,6 +606,14 @@ class TdClient::Impl {
         updates_.unsubscribe(id);
     }
 
+    std::uint64_t subscribe_response_completions(ResponseCompletionHandler handler) {
+        return response_completions_.subscribe(std::move(handler));
+    }
+
+    void unsubscribe_response_completions(std::uint64_t id) {
+        response_completions_.unsubscribe(id);
+    }
+
     std::shared_ptr<const AuthStateSnapshot> auth_state() const {
         return auth_state_.load(std::memory_order_acquire);
     }
@@ -1027,6 +1035,9 @@ class TdClient::Impl {
                 handle_closed(generation);
             }
         }
+        if (response_promise) {
+            response_completions_.publish(receive_event_sequence);
+        }
     }
 
     void handle_update(const std::shared_ptr<Generation>& generation, TdRuntimeEvent event,
@@ -1180,6 +1191,7 @@ class TdClient::Impl {
     std::uint64_t shutdown_generation_ = 0;
     std::atomic<std::shared_ptr<const AuthStateSnapshot>> auth_state_;
     UpdateBus<TdValue> updates_;
+    UpdateBus<std::uint64_t> response_completions_;
     UpdateBus<std::shared_ptr<const AuthStateSnapshot>> auth_states_;
     std::atomic<bool> stop_{false};
     std::mutex closed_mutex_;
@@ -1553,6 +1565,14 @@ std::uint64_t TdClient::subscribe_updates(UpdateHandler handler) {
 
 void TdClient::unsubscribe_updates(std::uint64_t id) {
     impl_->unsubscribe_updates(id);
+}
+
+std::uint64_t TdClient::subscribe_response_completions(ResponseCompletionHandler handler) {
+    return impl_->subscribe_response_completions(std::move(handler));
+}
+
+void TdClient::unsubscribe_response_completions(std::uint64_t id) {
+    impl_->unsubscribe_response_completions(id);
 }
 
 std::shared_ptr<const AuthStateSnapshot> TdClient::auth_state() const {

@@ -111,9 +111,9 @@ class ObservationProbe {
         return count_;
     }
 
-    bool await_count(std::size_t expected) {
+    bool await_count(std::size_t expected, std::chrono::milliseconds timeout = 2s) {
         std::unique_lock lock(mutex_);
-        return cv_.wait_for(lock, 2s, [this, expected] { return count_ >= expected; });
+        return cv_.wait_for(lock, timeout, [this, expected] { return count_ >= expected; });
     }
 
     [[nodiscard]] std::optional<Clock::time_point> last_observed_at() const {
@@ -141,9 +141,9 @@ class CallProbe {
         return count_;
     }
 
-    bool await_count(std::size_t expected) {
+    bool await_count(std::size_t expected, std::chrono::milliseconds timeout = 2s) {
         std::unique_lock lock(mutex_);
-        return cv_.wait_for(lock, 2s, [this, expected] { return count_ >= expected; });
+        return cv_.wait_for(lock, timeout, [this, expected] { return count_ >= expected; });
     }
 
   private:
@@ -194,7 +194,7 @@ class ReadyReadHarness {
     using Clock = tgcli::core::TdEventClock;
 
     explicit ReadyReadHarness(tgcli::RequestDeadline request_deadline)
-        : request_deadline_(std::move(request_deadline)),
+        : request_deadline_(request_deadline),
           deadline_(request_deadline_.expires_at.value_or(Clock::time_point(5s))),
           clock_(deadline_ - 1ms) {
         auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>();
@@ -277,10 +277,27 @@ class ReadyReadHarness {
                 *client_, *session_,
                 {.now = [this] { return clock_.now(); },
                  .wait = [this](const auto&, const auto&) { barrier_.wait(); },
-                 .before_event_arbitration = [this] { arbitration_.notify(); }});
+                 .before_event_arbitration = [this] { arbitration_.notify(); },
+                 .before_wait = {}});
             auto snapshot = reads.current();
             return reads.read(start, snapshot);
         });
+    }
+
+    void start_default() {
+        result_ = std::async(std::launch::async, [this] {
+            tgcli::daemon::ReadyReadSession reads(
+                *client_, *session_,
+                {.now = [this] { return clock_.now(); },
+                 .wait = {},
+                 .before_event_arbitration = {},
+                 .before_wait = [this] { default_waits_.notify(); }});
+            auto snapshot = reads.current();
+            return reads.read([this](const auto& ready) { return client_->get_chat(ready, -1); },
+                              snapshot);
+        });
+        REQUIRE(runtime_->wait_for_sent(2));
+        REQUIRE(default_waits_.await_count(1));
     }
 
     void await_wait() {
@@ -342,6 +359,10 @@ class ReadyReadHarness {
 
     bool result_ready_within(std::chrono::milliseconds timeout) {
         return result_.wait_for(timeout) == std::future_status::ready;
+    }
+
+    bool await_default_waits(std::size_t expected, std::chrono::milliseconds timeout) {
+        return default_waits_.await_count(expected, timeout);
     }
 
     tgcli::daemon::ReadyReadResult result() {
@@ -410,6 +431,7 @@ class ReadyReadHarness {
     CallProbe arbitration_;
     CallProbe lifecycle_callback_wait_;
     CallProbe closed_decisions_wait_;
+    CallProbe default_waits_;
     tgcli::test::ScriptedTdRuntime* runtime_ = nullptr;
     tgcli::test::ScriptedClient td_client_{};
     std::unique_ptr<tgcli::core::TdClient> client_;
@@ -421,6 +443,18 @@ class ReadyReadHarness {
 };
 
 } // namespace
+
+TEST_CASE("Unlimited Ready read default waits are event driven",
+          "[ready-read][deadline][unlimited][event-driven]") {
+    ReadyReadHarness harness(tgcli::RequestDeadline{});
+    harness.start_default();
+    CHECK_FALSE(harness.await_default_waits(2, 100ms));
+
+    harness.push_response(tgcli::core::TdEventClock::time_point(5s) - 1ns);
+    const auto result = harness.result();
+    CHECK(result.status == tgcli::daemon::ReadyReadStatus::Response);
+    CHECK(result.value.get_if<tgcli::core::TdOk>() != nullptr);
+}
 
 TEST_CASE("Ready read uses event observation time at the absolute deadline",
           "[ready-read][resolver][saved][deadline][fake-boundary]") {
@@ -772,7 +806,7 @@ TEST_CASE("Unlimited Ready reads terminate only through non-time cancellation",
                              std::string_view("shutdown")}) {
         DYNAMIC_SECTION(cause) {
             ReadyReadHarness harness(tgcli::RequestDeadline{});
-            harness.start();
+            harness.start_default();
             CHECK_FALSE(harness.result_ready_within(0ms));
 
             if (cause == "audit") {
@@ -782,8 +816,6 @@ TEST_CASE("Unlimited Ready reads terminate only through non-time cancellation",
             } else {
                 harness.session().shutdown();
             }
-            harness.release_before_deadline();
-
             CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::Cancelled);
             CHECK(harness.terminal_count() == (cause == "shutdown" ? 1 : 0));
         }

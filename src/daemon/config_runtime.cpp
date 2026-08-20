@@ -36,14 +36,22 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
         hooks_->admission_deadline(deadline);
     }
     std::unique_lock lock(mutex_);
+    const auto finish = [&](ConfigRefreshStatus status,
+                            std::optional<ConfigAdmissionDecision> decision = std::nullopt) {
+        lock.unlock();
+        if (hooks_ && hooks_->admission_finished) {
+            hooks_->admission_finished(status);
+        }
+        return ConfigAdmissionResult{status, std::move(decision)};
+    };
     if (stopped_) {
-        return {ConfigRefreshStatus::Stopped, std::nullopt};
+        return finish(ConfigRefreshStatus::Stopped);
     }
     if (cancellation.stop_requested()) {
-        return {ConfigRefreshStatus::Cancelled, std::nullopt};
+        return finish(ConfigRefreshStatus::Cancelled);
     }
     if (deadline_expired(deadline, now())) {
-        return {ConfigRefreshStatus::TimedOut, std::nullopt};
+        return finish(ConfigRefreshStatus::TimedOut);
     }
 
     const auto refresh = ++requested_refresh_;
@@ -52,13 +60,13 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
 
     while (completed_refresh_ < refresh) {
         if (stopped_) {
-            return {ConfigRefreshStatus::Stopped, std::nullopt};
+            return finish(ConfigRefreshStatus::Stopped);
         }
         if (cancellation.stop_requested()) {
-            return {ConfigRefreshStatus::Cancelled, std::nullopt};
+            return finish(ConfigRefreshStatus::Cancelled);
         }
         if (deadline_expired(deadline, now())) {
-            return {ConfigRefreshStatus::TimedOut, std::nullopt};
+            return finish(ConfigRefreshStatus::TimedOut);
         }
         const auto changed = [&] {
             return completed_refresh_ >= refresh || stopped_ || cancellation.stop_requested();
@@ -71,15 +79,15 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
     }
 
     if (cancellation.stop_requested()) {
-        return {ConfigRefreshStatus::Cancelled, std::nullopt};
+        return finish(ConfigRefreshStatus::Cancelled);
     }
     if (deadline_expired(deadline, now())) {
-        return {ConfigRefreshStatus::TimedOut, std::nullopt};
+        return finish(ConfigRefreshStatus::TimedOut);
     }
     if (stopped_) {
-        return {ConfigRefreshStatus::Stopped, std::nullopt};
+        return finish(ConfigRefreshStatus::Stopped);
     }
-    return {ConfigRefreshStatus::Completed, admission_decision(account)};
+    return finish(ConfigRefreshStatus::Completed, admission_decision(account));
 }
 
 ConfigRuntimeSnapshot ConfigRuntime::current(std::string_view account) const {

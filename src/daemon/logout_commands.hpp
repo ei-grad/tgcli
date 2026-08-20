@@ -8,6 +8,7 @@
 #include "daemon/request_session.hpp"
 #include "proto/frame.hpp"
 
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -42,6 +43,7 @@ struct LogoutHooks {
     std::function<void()> before_intent;
     std::function<void()> before_send;
     std::function<void()> after_send;
+    std::function<void()> after_operation_admission;
     std::function<void()> during_terminal_claim;
     std::shared_ptr<const LogoutAuditHooks> audit;
 };
@@ -61,9 +63,24 @@ class LogoutCoordinator final {
   private:
     enum class PreflightStep : std::uint8_t { Retry, Complete, Failed };
 
+    class OperationPermit {
+      public:
+        OperationPermit() = default;
+        explicit OperationPermit(LogoutCoordinator& owner) : owner_(&owner) {}
+        ~OperationPermit();
+        OperationPermit(const OperationPermit&) = delete;
+        OperationPermit& operator=(const OperationPermit&) = delete;
+        OperationPermit(OperationPermit&& other) noexcept;
+        OperationPermit& operator=(OperationPermit&& other) noexcept;
+
+      private:
+        LogoutCoordinator* owner_ = nullptr;
+    };
+
     static bool request_active(RequestSession& session);
-    static bool acquire_operation_lock(RequestSession& session,
-                                       std::unique_lock<std::mutex>& operation_lock);
+    std::optional<OperationPermit> acquire_operation(RequestSession& session);
+    void release_operation();
+    void report_recovery_deadline(RequestSession& session);
     [[nodiscard]] ChallengeOutcome request_challenge(RequestSession& session,
                                                      ChallengeSpec spec) const;
     PreflightStep reconcile_preflight(RequestSession& session);
@@ -88,6 +105,8 @@ class LogoutCoordinator final {
     std::shared_ptr<const testing::LogoutHooks> hooks_;
     LogoutAuditLog audit_;
     std::mutex operation_mutex_;
+    std::condition_variable_any operation_condition_;
+    bool operation_active_ = false;
 };
 
 void register_logout_command(Dispatcher& dispatcher, LogoutCoordinator& coordinator);

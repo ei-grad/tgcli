@@ -26,6 +26,7 @@
 #include <latch>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -34,6 +35,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <variant>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -492,6 +494,26 @@ class ForcedReloadGate {
     std::condition_variable condition_;
     bool entered_ = false;
     bool released_ = false;
+};
+
+class AdmissionFinishProbe {
+  public:
+    void notify(daemon::ConfigRefreshStatus status) {
+        const std::lock_guard lock(mutex_);
+        statuses_.push_back(status);
+        condition_.notify_all();
+    }
+
+    bool wait_for(daemon::ConfigRefreshStatus status, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        return condition_.wait_for(
+            lock, timeout, [&] { return std::ranges::find(statuses_, status) != statuses_.end(); });
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::vector<daemon::ConfigRefreshStatus> statuses_;
 };
 
 struct BlockingStopCommand {
@@ -1611,6 +1633,51 @@ TEST_CASE("daemon stop cancels a forced config admission without waiting for rel
     CHECK(std::chrono::steady_clock::now() - stopped_at < 500ms);
     gate.release();
     ::close(fd);
+}
+
+TEST_CASE("socket EOF cancels Unlimited config admission before session construction",
+          "[server][config-runtime][deadline][unlimited][disconnect]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    ForcedReloadGate gate;
+    AdmissionFinishProbe finished;
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->before_reload = [&gate](bool forced) { gate.before_reload(forced); };
+    hooks->admission_finished = [&finished](daemon::ConfigRefreshStatus status) {
+        finished.notify(status);
+    };
+    daemon::ConfigRuntime runtime(config.file(), hooks);
+    RequestObservationCounters observations;
+    std::atomic<int> handlers = 0;
+    const auto install = [&handlers](daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "fetch", {daemon::Tier::Read,
+                      [&handlers](const proto::Request&, daemon::RequestSession& session) {
+                          handlers.fetch_add(1, std::memory_order_relaxed);
+                          session.result({{"unexpected", true}});
+                      },
+                      false, std::nullopt, DeadlineDefault::Unlimited});
+    };
+    const TestDaemon daemon(install, false, {}, "main", observations.observer(), {}, &runtime);
+
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"fetch"}, 87, "main"));
+    gate.wait_until_entered();
+
+    REQUIRE(::shutdown(fd, SHUT_RDWR) == 0);
+    ::close(fd);
+    const bool cancelled = finished.wait_for(daemon::ConfigRefreshStatus::Cancelled, 100ms);
+    CHECK(cancelled);
+    CHECK(observations.get(daemon::testing::RequestObservationStage::SessionConstruction) == 0);
+    CHECK(handlers.load(std::memory_order_relaxed) == 0);
+
+    gate.release();
+    if (!cancelled) {
+        static_cast<void>(finished.wait_for(daemon::ConfigRefreshStatus::Completed, 2s));
+    }
 }
 
 TEST_CASE("malformed frame gets a USAGE error and a closed connection", "[server]") {

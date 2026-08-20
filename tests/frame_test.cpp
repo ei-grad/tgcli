@@ -654,7 +654,29 @@ TEST_CASE("request deadlines distinguish finite defaults from unlimited policy",
     CHECK_FALSE(event_precedes_deadline(now + Duration(2), *finite_default));
 
     const auto near_limit = Clock::time_point(Duration(std::numeric_limits<Rep>::max() - Rep{1}));
+    const auto adjacent_timeout = std::nextafter(static_cast<double>(seconds_per_tick), 0.0);
+    const auto adjacent =
+        request_deadline(adjacent_timeout, DeadlineDefault::Default60, near_limit);
+    REQUIRE(adjacent);
+    REQUIRE(adjacent->expires_at);
+    CHECK(*adjacent->expires_at == Clock::time_point(Duration(std::numeric_limits<Rep>::max())));
     CHECK_FALSE(request_deadline(1.0, DeadlineDefault::Default60, near_limit));
+}
+
+TEST_CASE("floating request bounds do not round an integer maximum upward",
+          "[proto][timeout][deadline][overflow]") {
+    const auto maximum = std::numeric_limits<std::int64_t>::max();
+    const auto requested = static_cast<double>(maximum);
+    CHECK_FALSE(tgcli::detail::ceil_request_ticks(requested, maximum));
+
+    const auto adjacent = std::nextafter(requested, 0.0);
+    const auto adjacent_ticks = tgcli::detail::ceil_request_ticks(adjacent, maximum);
+    REQUIRE(adjacent_ticks);
+    CHECK(*adjacent_ticks == static_cast<std::int64_t>(adjacent));
+
+    REQUIRE(tgcli::detail::ceil_request_ticks(10.0, std::int64_t{10}) == 10);
+    REQUIRE(tgcli::detail::ceil_request_ticks(std::nextafter(10.0, 0.0), std::int64_t{10}) == 10);
+    CHECK_FALSE(tgcli::detail::ceil_request_ticks(std::nextafter(10.0, 11.0), std::int64_t{10}));
 }
 
 TEST_CASE("write_authority outside the tri-state is rejected", "[proto]") {

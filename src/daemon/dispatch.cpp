@@ -190,8 +190,8 @@ std::optional<nlohmann::json> ResponseSink::challenge(nlohmann::json data) {
 }
 
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
-    if (descriptor.deadline_default == DeadlineDefault::Unlimited &&
-        !allows_unlimited_default(path)) {
+    if ((descriptor.deadline_default == DeadlineDefault::Unlimited) !=
+        allows_unlimited_default(path)) {
         throw std::invalid_argument("unlimited deadline policy does not match its command");
     }
     if (descriptor.m1_destructive_kernel &&

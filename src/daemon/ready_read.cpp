@@ -60,15 +60,11 @@ class ReadyReadSession::Impl {
     Impl(core::TdClient& client, RequestSession& session, ReadyReadHooks hooks)
         : client_(client), session_(session),
           now_(hooks.now ? std::move(hooks.now) : [] { return core::TdEventClock::now(); }),
-          wait_(hooks.wait ? std::move(hooks.wait)
-                           : [](const RequestDeadline&, const std::stop_token& cancellation) {
-                                 std::mutex mutex;
-                                 std::condition_variable_any condition;
-                                 std::unique_lock lock(mutex);
-                                 static_cast<void>(condition.wait_for(
-                                     lock, cancellation, 1ms, [] { return false; }));
-                             }),
-          before_event_arbitration_(std::move(hooks.before_event_arbitration)) {
+          wait_(std::move(hooks.wait)),
+          before_event_arbitration_(std::move(hooks.before_event_arbitration)),
+          before_wait_(std::move(hooks.before_wait)) {
+        response_subscription_ =
+            client_.subscribe_response_completions([this](std::uint64_t) { wake(); });
         subscription_ = client_.subscribe_auth_states(
             [this](const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
                 observe(snapshot);
@@ -77,6 +73,7 @@ class ReadyReadSession::Impl {
     }
 
     ~Impl() {
+        client_.unsubscribe_response_completions(response_subscription_);
         client_.unsubscribe_auth_states(subscription_);
     }
 
@@ -223,6 +220,11 @@ class ReadyReadSession::Impl {
     WaitResult wait_response(std::future<core::TdValue>& response,
                              const core::AuthStateSnapshot& sent) {
         for (;;) {
+            std::uint64_t wake_sequence = 0;
+            {
+                const std::lock_guard lock(wait_mutex_);
+                wake_sequence = wake_sequence_;
+            }
             {
                 if (before_event_arbitration_) {
                     before_event_arbitration_();
@@ -245,8 +247,29 @@ class ReadyReadSession::Impl {
             if (session_.cancellation_requested()) {
                 return {WaitStatus::Cancelled, {}, std::nullopt, nullptr};
             }
-            wait_(session_.deadline(), session_.cancellation_token());
+            if (before_wait_) {
+                before_wait_();
+            }
+            if (wait_) {
+                wait_(session_.deadline(), session_.cancellation_token());
+                continue;
+            }
+            std::unique_lock lock(wait_mutex_);
+            const auto changed = [this, wake_sequence] { return wake_sequence_ != wake_sequence; };
+            if (const auto expires_at = session_.deadline().expires_at) {
+                static_cast<void>(wait_condition_.wait_until(lock, session_.cancellation_token(),
+                                                             *expires_at, changed));
+            } else {
+                static_cast<void>(
+                    wait_condition_.wait(lock, session_.cancellation_token(), changed));
+            }
         }
+    }
+
+    void wake() {
+        const std::lock_guard lock(wait_mutex_);
+        ++wake_sequence_;
+        wait_condition_.notify_all();
     }
 
     bool record(const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
@@ -264,6 +287,7 @@ class ReadyReadSession::Impl {
     void observe(const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
         if (record(snapshot)) {
             session_.supersede(snapshot->client_generation, snapshot->auth_sequence);
+            wake();
         }
     }
 
@@ -272,9 +296,14 @@ class ReadyReadSession::Impl {
     std::function<core::TdEventClock::time_point()> now_;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait_;
     std::function<void()> before_event_arbitration_;
+    std::function<void()> before_wait_;
+    std::mutex wait_mutex_;
+    std::condition_variable_any wait_condition_;
+    std::uint64_t wake_sequence_ = 0;
     mutable std::mutex mutex_;
     std::shared_ptr<const core::AuthStateSnapshot> latest_;
     std::deque<std::shared_ptr<const core::AuthStateSnapshot>> pending_;
+    std::uint64_t response_subscription_ = 0;
     std::uint64_t subscription_ = 0;
 };
 

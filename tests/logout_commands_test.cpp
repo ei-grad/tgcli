@@ -327,6 +327,16 @@ class FakeLogout final {
     test::ScriptedTdRuntime& runtime() {
         return *runtime_;
     }
+
+    void register_fetch_for_test() {
+        dispatcher_.register_command("fetch",
+                                     {daemon::Tier::Read,
+                                      [](const proto::Request&, daemon::RequestSession& session) {
+                                          session.result({{"unexpected", true}});
+                                      },
+                                      false, std::nullopt, DeadlineDefault::Unlimited});
+    }
+
     [[nodiscard]] test::ScriptedClient first() const {
         return first_;
     }
@@ -923,6 +933,64 @@ TEST_CASE("logout preflight reconciles every definite prior audit prefix before 
         CHECK(records[3]["phase"] == "outcome");
         CHECK(records[3]["success"] == true);
         CHECK(records[3]["mutation_state"] == "confirmed");
+    }
+}
+
+TEST_CASE("finite fetch recovery terminates at deadline while logout admission is occupied",
+          "[logout][audit][reconciliation][deadline][fetch][concurrency]") {
+    const LogoutTree tree;
+    append_prior_logout(tree, {daemon::AuditStage::LogoutSendStarted});
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::size_t admissions = 0;
+    bool first_entered = false;
+    bool release_first = false;
+    auto hooks = fixed_hooks();
+    hooks->after_operation_admission = [&] {
+        std::unique_lock lock(mutex);
+        ++admissions;
+        if (admissions != 1) {
+            return;
+        }
+        first_entered = true;
+        condition.notify_all();
+        condition.wait(lock, [&] { return release_first; });
+    };
+    FakeLogout logout(tree, hooks);
+    logout.register_fetch_for_test();
+
+    auto occupying = logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 2.0,
+                                                false, std::nullopt, {"doctor"});
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 2s, [&] { return first_entered; }));
+    }
+
+    const auto expiry = daemon::RequestSession::Clock::now() + 50ms;
+    auto fetch = logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 0.05, false,
+                                            std::nullopt, {"fetch"}, {}, {}, expiry);
+    const bool finished = fetch.outcome.wait_for(500ms) == std::future_status::ready;
+    CHECK(finished);
+    if (!finished) {
+        fetch.session->disconnect();
+    }
+
+    {
+        const std::lock_guard lock(mutex);
+        release_first = true;
+    }
+    condition.notify_all();
+    static_cast<void>(occupying.outcome.get());
+
+    const auto outcome = fetch.outcome.get();
+    if (finished) {
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "AUDIT_INCOMPLETE");
+        CHECK((*outcome.error)["error"]["details"] ==
+              json{{"account", "main"},
+                   {"path", tree.audit_path()},
+                   {"mutation_state", "possible"},
+                   {"completed_stages", json::array({"intent_synced", "logout_send_started"})}});
     }
 }
 

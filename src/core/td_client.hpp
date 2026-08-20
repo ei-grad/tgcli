@@ -122,6 +122,7 @@ class TdClient {
   public:
     using UpdateHandler = std::function<void(const TdValue&)>;
     using AuthStateHandler = std::function<void(const std::shared_ptr<const AuthStateSnapshot>&)>;
+    using ResponseCompletionHandler = std::function<void(std::uint64_t)>;
 
     explicit TdClient(const TdLogConfiguration& logging);
     explicit TdClient(std::unique_ptr<TdRuntime> runtime);
@@ -234,6 +235,8 @@ class TdClient {
     // calls, no (un)subscribe from within a handler (see UpdateBus).
     std::uint64_t subscribe_updates(UpdateHandler handler);
     void unsubscribe_updates(std::uint64_t id);
+    std::uint64_t subscribe_response_completions(ResponseCompletionHandler handler);
+    void unsubscribe_response_completions(std::uint64_t id);
 
     // Every accepted authorization update produces a new immutable snapshot,
     // including payload-equal and repeated QR updates.

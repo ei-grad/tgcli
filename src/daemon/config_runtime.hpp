@@ -93,6 +93,7 @@ struct ConfigRuntimeHooks {
     std::function<Clock::time_point()> now;
     WaitUntil wait_until;
     std::function<void(const RequestDeadline&)> admission_deadline;
+    std::function<void(ConfigRefreshStatus)> admission_finished;
     std::function<void(bool forced)> before_reload;
     std::function<void(bool forced)> after_reload;
 };
