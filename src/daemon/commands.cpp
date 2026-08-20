@@ -11,6 +11,7 @@
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 
+#include <array>
 #include <cstdint>
 #include <tgcli/version.hpp>
 #include <unistd.h>
@@ -49,13 +50,15 @@ bool uses_account_removal_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
-           command == "daemon status" || command == "daemon stop" || command == "daemon restart";
+           command == "fetch" || command == "daemon status" || command == "daemon stop" ||
+           command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
-           command == "chats" || command == "msg get" || command == "msg link";
+           command == "chats" || command == "msg get" || command == "msg link" ||
+           command == "fetch";
 }
 
 void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& context) {
@@ -67,21 +70,37 @@ void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& co
             if (command == "account remove") {
                 return true;
             }
-            if (context.account_removal != nullptr && uses_account_removal_preflight(command) &&
-                !context.account_removal->preflight(context.account, session)) {
-                return false;
-            }
-            if (command == "logout" && session.request().context.dry_run) {
-                return true;
-            }
-            if (context.logout != nullptr && uses_logout_preflight(command)) {
-                return context.logout->preflight(session);
+            for (const auto preflight : recovery_preflight_order(command)) {
+                if (preflight == RecoveryPreflight::Removal && context.account_removal != nullptr &&
+                    !context.account_removal->preflight(context.account, session)) {
+                    return false;
+                }
+                if (preflight == RecoveryPreflight::Logout) {
+                    if (command == "logout" && session.request().context.dry_run) {
+                        continue;
+                    }
+                    if (context.logout != nullptr && !context.logout->preflight(session)) {
+                        return false;
+                    }
+                }
             }
             return true;
         });
 }
 
 } // namespace
+
+std::span<const RecoveryPreflight> recovery_preflight_order(std::string_view command) {
+    static constexpr std::array both{RecoveryPreflight::Removal, RecoveryPreflight::Logout};
+    static constexpr std::array removal{RecoveryPreflight::Removal};
+    if (uses_logout_preflight(command)) {
+        return both;
+    }
+    if (uses_account_removal_preflight(command)) {
+        return removal;
+    }
+    return {};
+}
 
 void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     if (context.login != nullptr) {

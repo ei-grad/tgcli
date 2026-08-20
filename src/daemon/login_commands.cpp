@@ -127,14 +127,19 @@ class AuthTracker {
         return {};
     }
 
-    std::shared_ptr<const AuthStateSnapshot>
-    wait_after(const AuthStateSnapshot& previous, RequestSession::Clock::time_point deadline) {
+    std::shared_ptr<const AuthStateSnapshot> wait_after(const AuthStateSnapshot& previous,
+                                                        const RequestDeadline& deadline) {
         std::unique_lock lock(mutex_);
-        cv_.wait_until(lock, deadline, [&] {
+        const auto changed = [&] {
             return !latest_ || latest_->client_generation != previous.client_generation ||
-                   latest_->auth_sequence != previous.auth_sequence ||
-                   session_.cancellation_requested();
-        });
+                   latest_->auth_sequence != previous.auth_sequence;
+        };
+        if (deadline.expires_at) {
+            static_cast<void>(
+                cv_.wait_until(lock, session_.cancellation_token(), *deadline.expires_at, changed));
+        } else {
+            static_cast<void>(cv_.wait(lock, session_.cancellation_token(), changed));
+        }
         return latest_;
     }
 
@@ -161,7 +166,7 @@ class AuthTracker {
     core::TdClient& client_;
     RequestSession& session_;
     mutable std::mutex mutex_;
-    std::condition_variable cv_;
+    std::condition_variable_any cv_;
     std::shared_ptr<const AuthStateSnapshot> latest_;
     std::deque<std::shared_ptr<const AuthStateSnapshot>> pending_;
     std::uint64_t subscription_ = 0;
@@ -209,7 +214,7 @@ WaitResult wait_query(std::future<core::TdValue>& response, const AuthStateSnaps
         if (tracker.first_change_after(sent)) {
             return {WaitKind::Updated, {}, std::nullopt, nullptr};
         }
-        if (RequestSession::Clock::now() >= session.deadline()) {
+        if (deadline_expired(session.deadline())) {
             return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
         }
         if (session.cancellation_requested() &&
@@ -263,7 +268,7 @@ WaitResult wait_ready_query(std::future<core::TdValue>& response, const AuthStat
         if (change.kind == ReadyChangeKind::Lost) {
             return {WaitKind::Updated, {}, std::nullopt, change.snapshot};
         }
-        if (RequestSession::Clock::now() >= session.deadline()) {
+        if (deadline_expired(session.deadline())) {
             return {WaitKind::TimedOut, {}, std::nullopt, nullptr};
         }
         if (session.cancellation_requested() &&
@@ -617,7 +622,8 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
             }
         }
     } else {
-        fallback_admission = store_.load({session.deadline(), session.cancellation_token()});
+        fallback_admission =
+            store_.load({session.deadline().expires_at, session.cancellation_token()});
         if (fallback_admission && fallback_admission.snapshot) {
             active_config_snapshot = fallback_admission.snapshot;
             const auto found = fallback_admission.snapshot->accounts.find(account_);
@@ -684,7 +690,7 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
         RequestSession& session;
         std::function<void()> transfer;
         ~TimeoutLifecycle() {
-            if (RequestSession::Clock::now() >= session.deadline()) {
+            if (deadline_expired(session.deadline())) {
                 transfer();
             }
         }
@@ -806,7 +812,7 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
         if (session.cancellation_requested() && session.in_flight_state() == InFlightState::None) {
             return;
         }
-        if (RequestSession::Clock::now() >= session.deadline()) {
+        if (deadline_expired(session.deadline())) {
             timeout(session, "login", snapshot);
             return;
         }
@@ -860,7 +866,7 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
                 wipe(api_hash.value);
                 const auto replacement = store_.replace_app_credentials(
                     expected_identity, account_, prompted,
-                    {session.deadline(), session.cancellation_token()});
+                    {session.deadline().expires_at, session.cancellation_token()});
                 if (prompted.api_hash) {
                     wipe(*prompted.api_hash);
                     prompted.api_hash.reset();
@@ -940,7 +946,7 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
             }
 
             core::BootstrapAttempt attempt{
-                {session.deadline(), session.cancellation_token()}, false, {}, {}};
+                {session.deadline().expires_at, session.cancellation_token()}, false, {}, {}};
             if (force_prompt[occurrence] && rejected_credential[occurrence] == "database_key") {
                 auto database_key =
                     challenge_value(session, *snapshot, account_, proto::ChallengeKind::DatabaseKey,
@@ -1107,9 +1113,9 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
                 if (admission_account_config && admission_account_config->bot_token_cmd &&
                     !hook_attempted[occurrence]) {
                     hook_attempted[occurrence] = true;
-                    auto hook = hook_runner_({secret_hook::HookField::BotToken,
-                                              *admission_account_config->bot_token_cmd,
-                                              session.deadline(), session.cancellation_token()});
+                    auto hook = hook_runner_(
+                        {secret_hook::HookField::BotToken, *admission_account_config->bot_token_cmd,
+                         session.deadline().expires_at, session.cancellation_token()});
                     if (hook) {
                         secure::transfer(hook.value, credential, {}, "bot_hook_value_source");
                     } else if (!request.context.tty) {
@@ -1338,9 +1344,9 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
             if (!force_prompt[occurrence] && !hook_attempted[occurrence]) {
                 if (admission_account_config && admission_account_config->password_cmd) {
                     hook_attempted[occurrence] = true;
-                    auto hook = hook_runner_({secret_hook::HookField::Password,
-                                              *admission_account_config->password_cmd,
-                                              session.deadline(), session.cancellation_token()});
+                    auto hook = hook_runner_(
+                        {secret_hook::HookField::Password, *admission_account_config->password_cmd,
+                         session.deadline().expires_at, session.cancellation_token()});
                     if (hook) {
                         secure::transfer(hook.value, credential, {}, "password_hook_value_source");
                     } else if (!request.context.tty) {

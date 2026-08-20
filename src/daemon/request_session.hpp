@@ -88,18 +88,18 @@ class RequestSession final : public ResponseSink {
                    NonceGenerator nonce_generator = {},
                    ActivityTracker::Token request_activity = {},
                    std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
-                   std::optional<Clock::time_point> admission_deadline = {},
+                   std::optional<RequestDeadline> admission_deadline = {},
                    ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback);
     RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
                    std::uint64_t connection_id = 0, NonceGenerator nonce_generator = {},
                    ActivityTracker::Token request_activity = {},
                    std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
-                   std::optional<Clock::time_point> admission_deadline = {},
+                   std::optional<RequestDeadline> admission_deadline = {},
                    ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback);
 
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t connection_id() const;
-    [[nodiscard]] Clock::time_point deadline() const;
+    [[nodiscard]] const RequestDeadline& deadline() const;
     [[nodiscard]] std::stop_token cancellation_token() const;
     [[nodiscard]] bool cancellation_requested() const;
     [[nodiscard]] bool shutdown_requested() const;
@@ -150,7 +150,7 @@ class RequestSession final : public ResponseSink {
     };
 
     static std::string secure_nonce();
-    static Clock::time_point compute_deadline(const proto::Request& request);
+    static RequestDeadline compute_deadline(const proto::Request& request);
     void remember_consumed(const Identity& identity);
     [[nodiscard]] bool exact_consumed(const proto::Answer& answer) const;
     void resolve_current(ChallengeOutcome outcome);
@@ -170,7 +170,7 @@ class RequestSession final : public ResponseSink {
     std::shared_ptr<ResponseSink> transport_owner_;
     ResponseSink* transport_;
     std::uint64_t connection_id_;
-    Clock::time_point deadline_;
+    RequestDeadline deadline_;
     NonceGenerator nonce_generator_;
     std::shared_ptr<const AdmittedAccountConfig> admitted_config_;
     ConfigAdmissionMode config_admission_mode_;

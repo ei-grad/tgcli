@@ -1311,6 +1311,24 @@ TEST_CASE("real CLI applies the deadline to bounded current-file reads",
     CHECK_THAT(error, test::matches_json_schema("account.error.schema.json"));
 }
 
+TEST_CASE("real CLI rejects invalid timeouts before account routing",
+          "[account][cli][process][deadline]") {
+    const ProcessEnvironment environment;
+    for (const auto timeout : {std::string_view("0"), std::string_view("-1"),
+                               std::string_view("1.7976931348623157e308")}) {
+        DYNAMIC_SECTION(timeout) {
+            const auto outcome =
+                run_cli(environment, {"--timeout", std::string(timeout), "version"});
+            REQUIRE(outcome.exit_code == kUsage);
+            CHECK(outcome.out.empty());
+            const auto error = json::parse(outcome.err);
+            CHECK(error["error"]["code"] == "USAGE");
+            CHECK(error["error"]["details"] ==
+                  json{{"argument", "--timeout"}, {"reason", "invalid_argument"}});
+        }
+    }
+}
+
 TEST_CASE("config-global CLI stays local while the selected daemon is running",
           "[account][cli][process][tdlib]") {
     const ProcessEnvironment environment;

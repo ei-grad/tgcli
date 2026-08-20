@@ -881,6 +881,10 @@ int run(int argc, char** argv) {
     }
     if (timeout_option->count() != 0) {
         request_context.timeout_seconds = timeout_seconds;
+        if (!tgcli::request_deadline(request_context.timeout_seconds,
+                                     tgcli::DeadlineDefault::Default60)) {
+            return report_usage("invalid request timeout", "--timeout");
+        }
     }
 
     const bool explicit_account = account_option->count() != 0;

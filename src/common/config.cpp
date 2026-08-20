@@ -828,18 +828,21 @@ TransactionObservation observe_transaction(int directory_fd, uid_t expected_uid,
     return TransactionObservation::Invalid;
 }
 
-TransactionReadAction
-inspect_transaction_for_load(int directory_fd, uid_t expected_uid,
-                             const std::shared_ptr<const testing::StoreHooks>& hooks,
-                             std::chrono::steady_clock::time_point deadline, ConfigError& error) {
+TransactionReadAction inspect_transaction_for_load(
+    int directory_fd, uid_t expected_uid, const std::shared_ptr<const testing::StoreHooks>& hooks,
+    std::optional<std::chrono::steady_clock::time_point> deadline, ConfigError& error) {
     if (!transaction_marker_present(directory_fd)) {
         return TransactionReadAction::ReadSnapshot;
     }
     notify_read_stage(hooks, testing::ReadStage::AfterTransactionMarker);
     switch (observe_transaction(directory_fd, expected_uid, error)) {
     case TransactionObservation::Active:
-        std::this_thread::sleep_until(
-            std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
+        if (deadline) {
+            std::this_thread::sleep_until(std::min(*deadline, std::chrono::steady_clock::now() +
+                                                                  std::chrono::milliseconds(1)));
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         return TransactionReadAction::Retry;
     case TransactionObservation::Cleared:
         return TransactionReadAction::Retry;
@@ -1104,7 +1107,7 @@ LoadResult Store::load(const MutationControl& control) const {
         if (control.cancellation.stop_requested()) {
             return LoadResult{{}, {}, false, true};
         }
-        if (std::chrono::steady_clock::now() >= control.deadline) {
+        if (control.deadline && std::chrono::steady_clock::now() >= *control.deadline) {
             return LoadResult{{}, {}, true, false};
         }
         return std::nullopt;
@@ -1199,7 +1202,7 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
     if (control.cancellation.stop_requested()) {
         return {MutationStatus::Cancelled, {}, {}};
     }
-    if (std::chrono::steady_clock::now() >= control.deadline) {
+    if (control.deadline && std::chrono::steady_clock::now() >= *control.deadline) {
         return {MutationStatus::TimedOut, {}, {}};
     }
     if (!paths::valid_account_name(mutation.account) ||
@@ -1236,7 +1239,7 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
             return {MutationStatus::Cancelled, {}, {}};
         }
         const auto now = std::chrono::steady_clock::now();
-        if (now >= control.deadline) {
+        if (control.deadline && now >= *control.deadline) {
             return {MutationStatus::TimedOut, {}, {}};
         }
         if (lock_error != EINTR && lock_error != EWOULDBLOCK && lock_error != EAGAIN) {
@@ -1245,10 +1248,14 @@ MutationResult Store::mutate(std::string_view expected_identity, const Mutation&
                     make_error(ConfigReason::IoError, "cannot lock config.lock: " +
                                                           std::string(std::strerror(lock_error)))};
         }
-        const auto remaining = control.deadline - now;
-        std::this_thread::sleep_for(
-            std::min(std::chrono::milliseconds(1),
-                     std::chrono::duration_cast<std::chrono::milliseconds>(remaining)));
+        if (control.deadline) {
+            const auto remaining = *control.deadline - now;
+            std::this_thread::sleep_for(
+                std::min(std::chrono::milliseconds(1),
+                         std::chrono::duration_cast<std::chrono::milliseconds>(remaining)));
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
     struct stat lock_entry {};
     if (::fstatat(directory->get(), kLockName.data(), &lock_entry, AT_SYMLINK_NOFOLLOW) != 0 ||

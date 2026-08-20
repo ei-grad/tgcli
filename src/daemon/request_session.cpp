@@ -127,7 +127,7 @@ RequestSession::RequestSession(proto::Request request, ResponseSink& transport,
                                std::uint64_t connection_id, NonceGenerator nonce_generator,
                                ActivityTracker::Token request_activity,
                                std::shared_ptr<const AdmittedAccountConfig> admitted_config,
-                               std::optional<Clock::time_point> admission_deadline,
+                               std::optional<RequestDeadline> admission_deadline,
                                ConfigAdmissionMode config_admission_mode)
     : request_(std::move(request)), transport_(&transport), connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
@@ -139,7 +139,7 @@ RequestSession::RequestSession(proto::Request request, std::shared_ptr<ResponseS
                                std::uint64_t connection_id, NonceGenerator nonce_generator,
                                ActivityTracker::Token request_activity,
                                std::shared_ptr<const AdmittedAccountConfig> admitted_config,
-                               std::optional<Clock::time_point> admission_deadline,
+                               std::optional<RequestDeadline> admission_deadline,
                                ConfigAdmissionMode config_admission_mode)
     : request_(std::move(request)), transport_owner_(std::move(transport)),
       transport_(transport_owner_.get()), connection_id_(connection_id),
@@ -160,7 +160,7 @@ std::uint64_t RequestSession::connection_id() const {
     return connection_id_;
 }
 
-RequestSession::Clock::time_point RequestSession::deadline() const {
+const RequestDeadline& RequestSession::deadline() const {
     return deadline_;
 }
 
@@ -210,7 +210,7 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
                 break;
             }
         }
-        if (Clock::now() >= deadline_) {
+        if (deadline_expired(deadline_)) {
             state_ = State::TimedOut;
             return {ChallengeStatus::TimedOut, std::monostate{}};
         }
@@ -267,11 +267,14 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
 
     std::unique_lock lock(session_mutex_);
     while (!resolution_ || resolution_->sequence != sequence) {
-        if (challenge_cv_.wait_until(lock, deadline_) == std::cv_status::timeout) {
-            if (Clock::now() >= deadline_ && current_ && current_->identity.sequence == sequence) {
-                state_ = State::TimedOut;
-                resolve_current({ChallengeStatus::TimedOut, std::monostate{}});
-            }
+        if (deadline_.expires_at) {
+            static_cast<void>(challenge_cv_.wait_until(lock, *deadline_.expires_at));
+        } else {
+            challenge_cv_.wait(lock);
+        }
+        if (deadline_expired(deadline_) && current_ && current_->identity.sequence == sequence) {
+            state_ = State::TimedOut;
+            resolve_current({ChallengeStatus::TimedOut, std::monostate{}});
         }
     }
     auto outcome = std::move(resolution_->outcome);
@@ -294,7 +297,7 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
         if (state_ != State::Running) {
             return AnswerDisposition::RequestTerminated;
         }
-        if (Clock::now() >= deadline_) {
+        if (deadline_expired(deadline_)) {
             state_ = State::TimedOut;
             if (current_) {
                 secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
@@ -463,7 +466,7 @@ AuditedTerminalStatus RequestSession::begin_audited_terminal() {
     }
     switch (state_) {
     case State::Running:
-        if (Clock::now() >= deadline_) {
+        if (deadline_expired(deadline_)) {
             state_ = State::TimedOut;
             return AuditedTerminalStatus::TimedOut;
         }
@@ -491,17 +494,17 @@ AuditedTerminalStatus RequestSession::claim_audited_terminal_event(Clock::time_p
     if (!audited_terminal_) {
         result = AuditedTerminalStatus::ProtocolError;
     } else {
-        auto terminal_at = deadline_;
-        result = AuditedTerminalStatus::TimedOut;
-        if (disconnected_at_ && *disconnected_at_ < terminal_at) {
-            terminal_at = *disconnected_at_;
+        auto terminal_at = deadline_.expires_at;
+        result = terminal_at ? AuditedTerminalStatus::TimedOut : AuditedTerminalStatus::Designated;
+        if (disconnected_at_ && (!terminal_at || *disconnected_at_ < *terminal_at)) {
+            terminal_at = disconnected_at_;
             result = AuditedTerminalStatus::Disconnected;
         }
-        if (shutdown_at_ && *shutdown_at_ < terminal_at) {
-            terminal_at = *shutdown_at_;
+        if (shutdown_at_ && (!terminal_at || *shutdown_at_ < *terminal_at)) {
+            terminal_at = shutdown_at_;
             result = AuditedTerminalStatus::Shutdown;
         }
-        if (committed_at < terminal_at) {
+        if (!terminal_at || committed_at < *terminal_at) {
             result = AuditedTerminalStatus::Designated;
         } else if (result == AuditedTerminalStatus::TimedOut) {
             state_ = State::TimedOut;
@@ -523,7 +526,7 @@ AuditedDispatchStatus RequestSession::dispatch_audited(const std::function<void(
     }
     switch (state_) {
     case State::Running:
-        if (Clock::now() >= deadline_) {
+        if (deadline_expired(deadline_)) {
             return AuditedDispatchStatus::TimedOut;
         }
         dispatch();
@@ -649,8 +652,9 @@ std::string RequestSession::secure_nonce() {
     return nonce;
 }
 
-RequestSession::Clock::time_point RequestSession::compute_deadline(const proto::Request& request) {
-    if (const auto deadline = proto::request_deadline(request.context.timeout_seconds)) {
+RequestDeadline RequestSession::compute_deadline(const proto::Request& request) {
+    if (const auto deadline =
+            request_deadline(request.context.timeout_seconds, DeadlineDefault::Default60)) {
         return *deadline;
     }
     throw std::invalid_argument("request timeout must be finite, positive, and representable");

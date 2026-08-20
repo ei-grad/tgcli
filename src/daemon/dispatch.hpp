@@ -136,6 +136,7 @@ struct CommandDescriptor {
     std::function<void(const proto::Request&, RequestSession&)> handler;
     bool m1_destructive_kernel = false;
     std::optional<M3Operation> m3_operation = std::nullopt;
+    DeadlineDefault deadline_default = DeadlineDefault::Default60;
 };
 
 // The daemon-side dispatch table and the single safety chokepoint (DESIGN.md
@@ -148,6 +149,7 @@ class Dispatcher {
     void register_command(const std::string& path, CommandDescriptor descriptor);
     void set_request_preflight(
         std::function<bool(const std::string&, RequestSession&)> request_preflight);
+    [[nodiscard]] DeadlineDefault deadline_default(const proto::Request& request) const;
     void dispatch(RequestSession& session) const;
     void dispatch(const proto::Request& request, ResponseSink& sink) const;
 

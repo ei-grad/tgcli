@@ -621,6 +621,42 @@ TEST_CASE("request timeout distinguishes default from invalid present values", "
     }
 }
 
+TEST_CASE("request deadlines distinguish finite defaults from unlimited policy",
+          "[proto][timeout][deadline]") {
+    using Clock = std::chrono::steady_clock;
+    using Duration = Clock::duration;
+    using Rep = Duration::rep;
+    const auto now = Clock::time_point(Duration(1000));
+
+    const auto ordinary = request_deadline(std::nullopt, DeadlineDefault::Default60, now);
+    REQUIRE(ordinary);
+    REQUIRE(ordinary->expires_at);
+    CHECK(*ordinary->expires_at == now + std::chrono::seconds(60));
+
+    const auto unlimited = request_deadline(std::nullopt, DeadlineDefault::Unlimited, now);
+    REQUIRE(unlimited);
+    CHECK_FALSE(unlimited->expires_at);
+    CHECK_FALSE(deadline_expired(*unlimited, now + std::chrono::hours(24)));
+
+    const auto seconds_per_tick = std::chrono::duration<long double>(Duration(1)).count();
+    const auto fraction = static_cast<double>(seconds_per_tick * 1.25L);
+    const auto finite_default = request_deadline(fraction, DeadlineDefault::Default60, now);
+    const auto finite_unlimited = request_deadline(fraction, DeadlineDefault::Unlimited, now);
+    REQUIRE(finite_default);
+    REQUIRE(finite_default->expires_at);
+    REQUIRE(finite_unlimited);
+    REQUIRE(finite_unlimited->expires_at);
+    CHECK(*finite_default->expires_at == now + Duration(2));
+    CHECK(finite_unlimited == finite_default);
+    CHECK_FALSE(deadline_expired(*finite_default, now + Duration(1)));
+    CHECK(deadline_expired(*finite_default, now + Duration(2)));
+    CHECK(event_precedes_deadline(now + Duration(1), *finite_default));
+    CHECK_FALSE(event_precedes_deadline(now + Duration(2), *finite_default));
+
+    const auto near_limit = Clock::time_point(Duration(std::numeric_limits<Rep>::max() - Rep{1}));
+    CHECK_FALSE(request_deadline(1.0, DeadlineDefault::Default60, near_limit));
+}
+
 TEST_CASE("write_authority outside the tri-state is rejected", "[proto]") {
     auto doc = json::parse(serialize(make_request()));
     doc["context"]["write_authority"] = "root";

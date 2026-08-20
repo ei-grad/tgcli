@@ -440,7 +440,7 @@ class Parser {
         }
         if (timeout->is_number()) {
             const double seconds = timeout->get<double>();
-            if (!request_deadline(seconds)) {
+            if (!request_deadline(seconds, DeadlineDefault::Default60)) {
                 fail("request context: 'timeout' must be finite, positive, and representable");
                 return std::nullopt;
             }
@@ -668,26 +668,6 @@ bool challenge_kind_is_secret(ChallengeKind kind) {
 bool challenge_kind_expects_boolean(ChallengeKind kind) {
     return kind == ChallengeKind::RegistrationTerms ||
            kind == ChallengeKind::DestructiveConfirmation;
-}
-
-std::optional<std::chrono::steady_clock::time_point>
-request_deadline(std::optional<double> timeout_seconds, std::chrono::steady_clock::time_point now) {
-    const double seconds = timeout_seconds.value_or(60.0);
-    if (!std::isfinite(seconds) || seconds <= 0.0) {
-        return std::nullopt;
-    }
-    using PreciseSeconds = std::chrono::duration<long double>;
-    const PreciseSeconds requested(static_cast<long double>(seconds));
-    const auto available = std::chrono::steady_clock::time_point::max() - now;
-    if (requested > PreciseSeconds(available)) {
-        return std::nullopt;
-    }
-    const auto duration =
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(requested);
-    if (duration <= std::chrono::steady_clock::duration::zero() || duration > available) {
-        return std::nullopt;
-    }
-    return now + duration;
 }
 
 bool validate_challenge_payload(const json& payload, std::string& error) {

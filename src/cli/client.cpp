@@ -1238,8 +1238,11 @@ int run_config_global(const proto::Request& request, const RunOptions& options,
     try {
         daemon::RequestSession session(request, sink);
         if (request.command == std::vector<std::string>{"account", "show"}) {
-            reconcile_account_show_logout(request, options, session.deadline());
-            if (std::chrono::steady_clock::now() >= session.deadline()) {
+            const auto expires_at = session.deadline().expires_at;
+            if (expires_at) {
+                reconcile_account_show_logout(request, options, expires_at.value());
+            }
+            if (deadline_expired(session.deadline())) {
                 if (auto details = account_show_incomplete_details(request)) {
                     session.error("AUDIT_INCOMPLETE", "logout audit reconciliation is incomplete",
                                   std::move(*details), kGeneric);
@@ -1316,7 +1319,9 @@ std::optional<Deadline> daemon_control_deadline(const proto::Request& request,
                                                 const RunOptions& options) {
     const auto now = std::chrono::steady_clock::now();
     if (request.context.timeout_seconds) {
-        return proto::request_deadline(request.context.timeout_seconds, now);
+        const auto deadline = proto::request_deadline(request.context.timeout_seconds,
+                                                      DeadlineDefault::Default60, now);
+        return deadline ? deadline->expires_at : std::nullopt;
     }
     if (options.restart_timeout <= std::chrono::milliseconds::zero()) {
         return std::nullopt;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -36,11 +37,6 @@ ReadyReadResult empty_result(ReadyReadStatus status) {
     return {status, {}, std::nullopt, nullptr};
 }
 
-bool event_precedes_deadline(const std::optional<core::TdEventClock::time_point>& observed_at,
-                             core::TdEventClock::time_point deadline) {
-    return observed_at && *observed_at < deadline;
-}
-
 bool ready_retry_failure(core::TdAuthorizationFailure failure) {
     switch (failure) {
     case core::TdAuthorizationFailure::GenerationMismatch:
@@ -64,7 +60,14 @@ class ReadyReadSession::Impl {
     Impl(core::TdClient& client, RequestSession& session, ReadyReadHooks hooks)
         : client_(client), session_(session),
           now_(hooks.now ? std::move(hooks.now) : [] { return core::TdEventClock::now(); }),
-          wait_(hooks.wait ? std::move(hooks.wait) : [] { std::this_thread::sleep_for(1ms); }),
+          wait_(hooks.wait ? std::move(hooks.wait)
+                           : [](const RequestDeadline&, const std::stop_token& cancellation) {
+                                 std::mutex mutex;
+                                 std::condition_variable_any condition;
+                                 std::unique_lock lock(mutex);
+                                 static_cast<void>(condition.wait_for(
+                                     lock, cancellation, 1ms, [] { return false; }));
+                             }),
           before_event_arbitration_(std::move(hooks.before_event_arbitration)) {
         subscription_ = client_.subscribe_auth_states(
             [this](const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
@@ -90,13 +93,13 @@ class ReadyReadSession::Impl {
     ReadyReadResult read(const ReadyReadStart& start,
                          std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
         for (;;) {
-            if (now_() >= session_.deadline()) {
+            if (deadline_expired(session_.deadline(), now_())) {
                 return empty_result(ReadyReadStatus::TimedOut);
             }
             if (!session_.reserve_direct_in_flight()) {
                 return empty_result(ReadyReadStatus::Cancelled);
             }
-            if (now_() >= session_.deadline()) {
+            if (deadline_expired(session_.deadline(), now_())) {
                 session_.settle_in_flight();
                 return empty_result(ReadyReadStatus::TimedOut);
             }
@@ -235,15 +238,14 @@ class ReadyReadSession::Impl {
                 if (change.kind == ReadyChangeKind::Invalid) {
                     return {WaitStatus::Failed, {}, std::nullopt, change.snapshot};
                 }
-                if (now_() >= session_.deadline()) {
+                if (deadline_expired(session_.deadline(), now_())) {
                     return {WaitStatus::TimedOut, {}, std::nullopt, nullptr};
                 }
             }
-            if (session_.cancellation_requested() &&
-                session_.in_flight_state() != InFlightState::Orphaned) {
+            if (session_.cancellation_requested()) {
                 return {WaitStatus::Cancelled, {}, std::nullopt, nullptr};
             }
-            wait_();
+            wait_(session_.deadline(), session_.cancellation_token());
         }
     }
 
@@ -268,7 +270,7 @@ class ReadyReadSession::Impl {
     core::TdClient& client_;
     RequestSession& session_;
     std::function<core::TdEventClock::time_point()> now_;
-    std::function<void()> wait_;
+    std::function<void(const RequestDeadline&, const std::stop_token&)> wait_;
     std::function<void()> before_event_arbitration_;
     mutable std::mutex mutex_;
     std::shared_ptr<const core::AuthStateSnapshot> latest_;

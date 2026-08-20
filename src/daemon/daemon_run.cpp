@@ -328,9 +328,21 @@ int run_daemon(const std::string& account) {
     return 0;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
                    std::string& error, const Dispatcher* dispatcher_override,
                    core::TdClient* td_client_override) {
+    const auto admitted_at = RequestClock::now();
+    std::optional<RequestDeadline> admitted_deadline;
+    if (request.context.timeout_seconds) {
+        admitted_deadline = request_deadline(request.context.timeout_seconds,
+                                             DeadlineDefault::Default60, admitted_at);
+        if (!admitted_deadline) {
+            sink.error("USAGE", "invalid request timeout",
+                       {{"argument", "--timeout"}, {"reason", "invalid_argument"}}, kUsage);
+            return true;
+        }
+    }
     const auto environment = paths::real_environment();
     if (request.command == std::vector<std::string>{"account", "remove"} &&
         request.args.is_object()) {
@@ -413,7 +425,53 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
 
     Dispatcher dispatcher;
     register_commands(dispatcher, context);
-    (dispatcher_override != nullptr ? *dispatcher_override : dispatcher).dispatch(request, sink);
+    const auto& selected_dispatcher =
+        dispatcher_override != nullptr ? *dispatcher_override : dispatcher;
+    const auto deadline_policy = selected_dispatcher.deadline_default(request);
+    if (!admitted_deadline) {
+        admitted_deadline = request_deadline(std::nullopt, deadline_policy, admitted_at);
+    }
+    const auto& deadline = admitted_deadline;
+    if (!deadline) {
+        sink.error("USAGE", "invalid request timeout",
+                   {{"argument", "--timeout"}, {"reason", "invalid_argument"}}, kUsage);
+    } else if (deadline_policy == DeadlineDefault::Default60) {
+        RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
+                               ActivityTracker::Token{}, nullptr, deadline,
+                               ConfigAdmissionMode::DirectFallback);
+        selected_dispatcher.dispatch(session);
+    } else {
+        const auto admission = config_runtime.admit(request.account, *deadline);
+        if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
+            const bool fetch = request.command == std::vector<std::string>{"fetch"} &&
+                               deadline_policy == DeadlineDefault::Unlimited;
+            sink.error("TIMEOUT", "config admission timed out",
+                       {{"operation", fetch ? "fetch" : "config_admission"}, {"state", nullptr}},
+                       kTimeout);
+        } else if (admission.refresh_status != ConfigRefreshStatus::Completed ||
+                   !admission.decision) {
+            sink.error("DAEMON_SHUTDOWN", "daemon is shutting down",
+                       {{"reason", "daemon_shutdown"}}, kGeneric);
+        } else if (const auto* accepted = std::get_if<std::shared_ptr<const AdmittedAccountConfig>>(
+                       &*admission.decision)) {
+            RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
+                                   ActivityTracker::Token{}, *accepted, deadline,
+                                   ConfigAdmissionMode::FrozenRuntime);
+            selected_dispatcher.dispatch(session);
+        } else {
+            const auto& denied = std::get<ConfigAdmissionDenied>(*admission.decision);
+            if (denied.state == ConfigAdmissionState::AccountMissing) {
+                sink.error("ACCOUNT_NOT_FOUND", "account is not configured",
+                           {{"account", denied.account}}, kNotFound);
+            } else {
+                const auto reason = denied.reload_diagnostic
+                                        ? config::reason_name(denied.reload_diagnostic->reason)
+                                        : std::string_view{"io_error"};
+                sink.error("CONFIG_INVALID", "cannot use current config.toml",
+                           {{"path", config_runtime.config_path()}, {"reason", reason}}, kGeneric);
+            }
+        }
+    }
 
     if (owned_td) {
         td.close();
@@ -456,8 +514,7 @@ bool run_account_removal_local(const proto::Request& request, ResponseSink& sink
     return true;
 }
 
-bool reconcile_logout_audit_offline(const std::string& account,
-                                    std::chrono::steady_clock::time_point deadline) {
+bool reconcile_logout_audit_offline(const std::string& account, const RequestDeadline& deadline) {
     const auto environment = paths::real_environment();
     const auto state_directory = paths::account_state_dir(account, environment);
     std::string error;
@@ -507,10 +564,9 @@ bool reconcile_logout_audit_offline(const std::string& account,
         proto::Request request(account);
         request.id = 1;
         request.command = {"doctor"};
-        const auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining > std::chrono::steady_clock::duration::zero()) {
-            request.context.timeout_seconds = std::chrono::duration<double>(remaining).count();
-            RequestSession session(std::move(request), sink);
+        if (!deadline_expired(deadline)) {
+            RequestSession session(std::move(request), sink, 0, RequestSession::NonceGenerator{},
+                                   ActivityTracker::Token{}, nullptr, deadline);
             reconciled = logout.preflight(session);
         }
         td.close();

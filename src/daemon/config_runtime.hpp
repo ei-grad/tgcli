@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/config.hpp"
+#include "common/deadline.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -91,6 +92,7 @@ struct ConfigRuntimeHooks {
 
     std::function<Clock::time_point()> now;
     WaitUntil wait_until;
+    std::function<void(const RequestDeadline&)> admission_deadline;
     std::function<void(bool forced)> before_reload;
     std::function<void(bool forced)> after_reload;
 };
@@ -114,7 +116,7 @@ class ConfigRuntime {
     ConfigRuntime& operator=(ConfigRuntime&&) = delete;
 
     [[nodiscard]] ConfigAdmissionResult admit(std::string_view account,
-                                              Clock::time_point deadline = Clock::time_point::max(),
+                                              const RequestDeadline& deadline = {},
                                               const std::stop_token& cancellation = {});
     [[nodiscard]] ConfigRuntimeSnapshot current(std::string_view account) const;
     // Publication callbacks are serialized on the runtime worker. A callback

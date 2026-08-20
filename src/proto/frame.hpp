@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/deadline.hpp"
 #include "common/secure_wipe.hpp"
 
 #include <chrono>
@@ -46,12 +47,11 @@ std::optional<ChallengeKind> parse_challenge_kind(std::string_view name);
 bool challenge_kind_is_secret(ChallengeKind kind);
 bool challenge_kind_expects_boolean(ChallengeKind kind);
 
-// Computes the one request deadline without overflowing the clock duration or
-// time point. A missing timeout selects the protocol's 60-second default;
-// present invalid values return nullopt.
-std::optional<std::chrono::steady_clock::time_point>
-request_deadline(std::optional<double> timeout_seconds,
-                 std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+using tgcli::deadline_expired;
+using tgcli::DeadlineDefault;
+using tgcli::event_precedes_deadline;
+using tgcli::request_deadline;
+using tgcli::RequestDeadline;
 
 // Validates the exact closed payload shapes from DESIGN.md §10.
 bool validate_challenge_payload(const nlohmann::json& payload, std::string& error);

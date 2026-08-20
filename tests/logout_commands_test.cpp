@@ -1096,7 +1096,7 @@ TEST_CASE("logout rechecks deadline and shutdown after syncing the send checkpoi
             logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 2.0);
         {
             const std::lock_guard lock(mutex);
-            request_deadline = controlled.session->deadline();
+            request_deadline = controlled.session->deadline().expires_at;
         }
         condition.notify_all();
         const auto result = controlled.outcome.get();

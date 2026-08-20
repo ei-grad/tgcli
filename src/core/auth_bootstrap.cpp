@@ -67,7 +67,7 @@ BootstrapResult failure(BootstrapFailure reason, std::vector<HookField> fields =
 }
 
 bool expired(const config::MutationControl& control) {
-    return std::chrono::steady_clock::now() >= control.deadline;
+    return control.deadline && std::chrono::steady_clock::now() >= *control.deadline;
 }
 
 std::optional<BootstrapResult> stopped(const config::MutationControl& control) {

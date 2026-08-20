@@ -431,13 +431,20 @@ TEST_CASE("forced admission honors deadline and cancellation", "[daemon][config-
 
     SECTION("deadline") {
         ReloadGate gate;
+        ManualRuntimeClock clock;
         auto hooks = std::make_shared<tgcli::daemon::testing::ConfigRuntimeHooks>();
+        clock.install(*hooks);
         hooks->before_reload = [&gate](bool forced) { gate.wait(forced); };
         ConfigRuntime runtime(temp.file(), hooks);
-        const auto result = runtime.admit("main", ConfigRuntime::Clock::now() + 40ms);
+        ConfigAdmissionResult result;
+        std::thread caller(
+            [&] { result = runtime.admit("main", tgcli::RequestDeadline{clock.now() + 1ns}); });
+        gate.wait_until_entered();
+        clock.advance(1ns);
+        gate.release();
+        caller.join();
         CHECK(result.refresh_status == ConfigRefreshStatus::TimedOut);
         CHECK_FALSE(result.decision);
-        gate.release();
     }
 
     SECTION("cancellation") {
@@ -447,10 +454,8 @@ TEST_CASE("forced admission honors deadline and cancellation", "[daemon][config-
         ConfigRuntime runtime(temp.file(), hooks);
         std::stop_source stop;
         ConfigAdmissionResult result;
-        std::thread caller([&] {
-            result =
-                runtime.admit("main", ConfigRuntime::Clock::time_point::max(), stop.get_token());
-        });
+        std::thread caller(
+            [&] { result = runtime.admit("main", tgcli::RequestDeadline{}, stop.get_token()); });
         gate.wait_until_entered();
         stop.request_stop();
         caller.join();

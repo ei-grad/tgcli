@@ -43,6 +43,10 @@ constexpr bool is_m1_destructive_command(std::string_view path) noexcept {
     return path == "logout" || path == "account remove";
 }
 
+constexpr bool allows_unlimited_default(std::string_view path) noexcept {
+    return path == "fetch" || path == "download" || path == "listen" || path == "wait-for";
+}
+
 constexpr bool is_valid_m3_schedule(M3ScheduleKind schedule) noexcept {
     switch (schedule) {
     case M3ScheduleKind::None:
@@ -186,6 +190,10 @@ std::optional<nlohmann::json> ResponseSink::challenge(nlohmann::json data) {
 }
 
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
+    if (descriptor.deadline_default == DeadlineDefault::Unlimited &&
+        !allows_unlimited_default(path)) {
+        throw std::invalid_argument("unlimited deadline policy does not match its command");
+    }
     if (descriptor.m1_destructive_kernel &&
         (descriptor.tier != Tier::Destructive || !is_m1_destructive_command(path))) {
         throw std::invalid_argument("M1 destructive bypass does not match its static policy");
@@ -203,6 +211,11 @@ void Dispatcher::register_command(const std::string& path, CommandDescriptor des
         }
     }
     commands_.emplace(path, std::move(descriptor));
+}
+
+DeadlineDefault Dispatcher::deadline_default(const proto::Request& request) const {
+    const auto found = commands_.find(command_key(request.command));
+    return found == commands_.end() ? DeadlineDefault::Default60 : found->second.deadline_default;
 }
 
 void Dispatcher::set_request_preflight(
@@ -256,7 +269,13 @@ void Dispatcher::dispatch(RequestSession& session) const {
 }
 
 void Dispatcher::dispatch(const proto::Request& request, ResponseSink& sink) const {
-    RequestSession session(request, sink);
+    const auto deadline =
+        request_deadline(request.context.timeout_seconds, deadline_default(request));
+    if (!deadline) {
+        throw std::invalid_argument("request timeout must be finite, positive, and representable");
+    }
+    RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
+                           ActivityTracker::Token{}, nullptr, deadline);
     dispatch(session);
 }
 

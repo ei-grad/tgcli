@@ -29,8 +29,12 @@ ConfigRuntime::~ConfigRuntime() {
     }
 }
 
-ConfigAdmissionResult ConfigRuntime::admit(std::string_view account, Clock::time_point deadline,
+ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
+                                           const RequestDeadline& deadline,
                                            const std::stop_token& cancellation) {
+    if (hooks_ && hooks_->admission_deadline) {
+        hooks_->admission_deadline(deadline);
+    }
     std::unique_lock lock(mutex_);
     if (stopped_) {
         return {ConfigRefreshStatus::Stopped, std::nullopt};
@@ -38,7 +42,7 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account, Clock::time
     if (cancellation.stop_requested()) {
         return {ConfigRefreshStatus::Cancelled, std::nullopt};
     }
-    if (Clock::now() >= deadline) {
+    if (deadline_expired(deadline, now())) {
         return {ConfigRefreshStatus::TimedOut, std::nullopt};
     }
 
@@ -53,20 +57,23 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account, Clock::time
         if (cancellation.stop_requested()) {
             return {ConfigRefreshStatus::Cancelled, std::nullopt};
         }
-        if (Clock::now() >= deadline) {
+        if (deadline_expired(deadline, now())) {
             return {ConfigRefreshStatus::TimedOut, std::nullopt};
         }
-        if (deadline == Clock::time_point::max()) {
-            condition_.wait(lock);
+        const auto changed = [&] {
+            return completed_refresh_ >= refresh || stopped_ || cancellation.stop_requested();
+        };
+        if (deadline.expires_at) {
+            wait_for_work(lock, *deadline.expires_at, changed);
         } else {
-            condition_.wait_until(lock, deadline);
+            condition_.wait(lock, changed);
         }
     }
 
     if (cancellation.stop_requested()) {
         return {ConfigRefreshStatus::Cancelled, std::nullopt};
     }
-    if (Clock::now() >= deadline) {
+    if (deadline_expired(deadline, now())) {
         return {ConfigRefreshStatus::TimedOut, std::nullopt};
     }
     if (stopped_) {

@@ -62,15 +62,20 @@ class AuthQueue final {
         return client_.auth_state();
     }
 
-    std::shared_ptr<const AuthStateSnapshot>
-    take_after(std::uint64_t receive_sequence, std::chrono::steady_clock::time_point deadline) {
+    std::shared_ptr<const AuthStateSnapshot> take_after(std::uint64_t receive_sequence,
+                                                        const RequestDeadline& deadline) {
         std::unique_lock lock(mutex_);
         auto available = [&] {
             return !snapshots_.empty() &&
                    snapshots_.back()->receive_event_sequence > receive_sequence;
         };
         if (!available()) {
-            condition_.wait_until(lock, deadline, available);
+            if (deadline.expires_at) {
+                static_cast<void>(condition_.wait_until(lock, session_->cancellation_token(),
+                                                        *deadline.expires_at, available));
+            } else {
+                static_cast<void>(condition_.wait(lock, session_->cancellation_token(), available));
+            }
         }
         while (!snapshots_.empty() &&
                snapshots_.front()->receive_event_sequence <= receive_sequence) {
@@ -89,7 +94,7 @@ class AuthQueue final {
     RequestSession* session_;
     std::uint64_t subscription_ = 0;
     mutable std::mutex mutex_;
-    std::condition_variable condition_;
+    std::condition_variable_any condition_;
     std::deque<std::shared_ptr<const AuthStateSnapshot>> snapshots_;
 };
 
@@ -257,7 +262,8 @@ bool LogoutCoordinator::request_active(RequestSession& session) {
     if (session.cancellation_requested()) {
         return false;
     }
-    if (std::chrono::steady_clock::now() >= session.deadline()) {
+    const bool fetch = session.request().command == std::vector<std::string>{"fetch"};
+    if (!fetch && deadline_expired(session.deadline())) {
         session.error("TIMEOUT", "logout audit preflight timed out",
                       {{"operation", "audit"}, {"state", nullptr}}, kTimeout);
         return false;
@@ -275,7 +281,11 @@ bool LogoutCoordinator::acquire_operation_lock(RequestSession& session,
             return request_active(session);
         }
         const auto now = std::chrono::steady_clock::now();
-        const auto retry_at = std::min(session.deadline(), now + std::chrono::milliseconds(2));
+        auto retry_at = now + std::chrono::milliseconds(2);
+        const auto expires_at = session.deadline().expires_at;
+        if (expires_at) {
+            retry_at = std::min(expires_at.value(), retry_at);
+        }
         if (retry_at > now) {
             std::this_thread::sleep_until(retry_at);
         }
@@ -361,8 +371,7 @@ std::optional<AuthState> LogoutCoordinator::wait_for_bootstrap_observation(
                 return std::nullopt;
             }
         }
-        if (std::chrono::steady_clock::now() >= session.deadline() ||
-            session.cancellation_requested()) {
+        if (deadline_expired(session.deadline()) || session.cancellation_requested()) {
             return std::nullopt;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -372,8 +381,7 @@ std::optional<AuthState> LogoutCoordinator::wait_for_bootstrap_observation(
 std::optional<AuthState> LogoutCoordinator::observe_recovery_state(RequestSession& session) {
     auto observed = client_.auth_state();
     while ((!observed || observed->data.state == AuthState::Unknown) &&
-           std::chrono::steady_clock::now() < session.deadline() &&
-           !session.cancellation_requested()) {
+           !deadline_expired(session.deadline()) && !session.cancellation_requested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         observed = client_.auth_state();
     }
@@ -384,7 +392,8 @@ std::optional<AuthState> LogoutCoordinator::observe_recovery_state(RequestSessio
         return observed->data.state;
     }
 
-    const auto loaded = config_store_.load({session.deadline(), session.cancellation_token()});
+    const auto loaded =
+        config_store_.load({session.deadline().expires_at, session.cancellation_token()});
     if (!loaded || !loaded.snapshot) {
         return std::nullopt;
     }
@@ -396,7 +405,7 @@ std::optional<AuthState> LogoutCoordinator::observe_recovery_state(RequestSessio
     }
     core::AuthBootstrap bootstrap(client_, config_store_, std::move(*captured.snapshot));
     auto result = bootstrap.run(
-        observed, {{session.deadline(), session.cancellation_token()}, false, {}, {}});
+        observed, {{session.deadline().expires_at, session.cancellation_token()}, false, {}, {}});
     if (!result || !result.response) {
         return std::nullopt;
     }
@@ -829,10 +838,13 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
         if (fail_decision(closed_decision->status())) {
             return;
         }
-        if (const auto update =
-                auth.take_after(observed->receive_event_sequence,
-                                std::min(session.deadline(), std::chrono::steady_clock::now() +
-                                                                 std::chrono::milliseconds(2)))) {
+        auto update_expires_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+        const auto request_expires_at = session.deadline().expires_at;
+        if (request_expires_at) {
+            update_expires_at = std::min(request_expires_at.value(), update_expires_at);
+        }
+        if (const auto update = auth.take_after(observed->receive_event_sequence,
+                                                RequestDeadline{update_expires_at})) {
             observed = update;
             if (observed->client_generation != starting->client_generation) {
                 session.settle_in_flight();
@@ -907,7 +919,7 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
         }
 
         if (session.shutdown_requested() || session.cancellation_requested() ||
-            std::chrono::steady_clock::now() >= session.deadline()) {
+            deadline_expired(session.deadline())) {
             if (fail_decision(closed_decision->settle_terminal())) {
                 return;
             }

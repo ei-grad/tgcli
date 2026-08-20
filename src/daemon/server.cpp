@@ -559,28 +559,30 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                                               nlohmann::json::object(), kUsage});
                 break;
             }
+            const auto deadline = request_deadline(request->context.timeout_seconds,
+                                                   dispatcher_.deadline_default(*request));
+            if (!deadline) {
+                connection->send(proto::Error{request->id, "USAGE", "invalid request timeout",
+                                              nlohmann::json::object(), kUsage});
+                break;
+            }
             std::shared_ptr<const AdmittedAccountConfig> admitted_config;
-            std::optional<RequestSession::Clock::time_point> admission_deadline;
             if (options_.config_runtime != nullptr) {
                 if (options_.request_observer) {
                     options_.request_observer(testing::RequestObservationStage::ConfigRead);
                 }
-                const auto deadline = proto::request_deadline(request->context.timeout_seconds);
-                if (!deadline) {
-                    connection->send(proto::Error{request->id, "USAGE", "invalid request timeout",
-                                                  nlohmann::json::object(), kUsage});
-                    break;
-                }
-                admission_deadline = *deadline;
                 const auto admission = options_.config_runtime->admit(
                     request->account, *deadline, admission_cancellation_.get_token());
                 if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
-                    connection->send(
-                        proto::Error{request->id,
-                                     "TIMEOUT",
-                                     "config admission timed out",
-                                     {{"operation", "config_admission"}, {"state", nullptr}},
-                                     kTimeout});
+                    const bool fetch =
+                        request->command == std::vector<std::string>{"fetch"} &&
+                        dispatcher_.deadline_default(*request) == DeadlineDefault::Unlimited;
+                    connection->send(proto::Error{
+                        request->id,
+                        "TIMEOUT",
+                        "config admission timed out",
+                        {{"operation", fetch ? "fetch" : "config_admission"}, {"state", nullptr}},
+                        kTimeout});
                     continue;
                 }
                 if (admission.refresh_status != ConfigRefreshStatus::Completed ||
@@ -637,7 +639,7 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
             auto sink = std::make_shared<ConnectionSink>(connection, request->id);
             active_session = std::make_shared<RequestSession>(
                 *request, sink, connection->id(), RequestSession::NonceGenerator{},
-                std::move(*activity), std::move(admitted_config), admission_deadline,
+                std::move(*activity), std::move(admitted_config), *deadline,
                 ConfigAdmissionMode::FrozenRuntime);
             if (options_.request_observer) {
                 options_.request_observer(testing::RequestObservationStage::SessionConstruction);

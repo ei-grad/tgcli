@@ -60,11 +60,16 @@ class RemovalAuthTracker final {
     }
 
     [[nodiscard]] std::shared_ptr<const AuthStateSnapshot>
-    wait_current(RequestSession::Clock::time_point deadline) {
+    wait_current(const RequestDeadline& deadline) {
         std::unique_lock lock(mutex_);
-        while (!latest_ && !session_.cancellation_requested() &&
-               RequestSession::Clock::now() < deadline) {
-            condition_.wait_until(lock, std::min(deadline, RequestSession::Clock::now() + 10ms));
+        const auto available = [this] { return latest_ != nullptr; };
+        if (!available()) {
+            if (deadline.expires_at) {
+                static_cast<void>(condition_.wait_until(lock, session_.cancellation_token(),
+                                                        *deadline.expires_at, available));
+            } else {
+                static_cast<void>(condition_.wait(lock, session_.cancellation_token(), available));
+            }
         }
         return latest_;
     }
@@ -76,11 +81,16 @@ class RemovalAuthTracker final {
     }
 
     [[nodiscard]] std::shared_ptr<const AuthStateSnapshot>
-    wait_after(const AuthStateSnapshot& previous, RequestSession::Clock::time_point deadline) {
+    wait_after(const AuthStateSnapshot& previous, const RequestDeadline& deadline) {
         std::unique_lock lock(mutex_);
-        while (first_after_locked(previous) == nullptr && !session_.cancellation_requested() &&
-               RequestSession::Clock::now() < deadline) {
-            condition_.wait_until(lock, std::min(deadline, RequestSession::Clock::now() + 10ms));
+        const auto available = [&] { return first_after_locked(previous) != nullptr; };
+        if (!available()) {
+            if (deadline.expires_at) {
+                static_cast<void>(condition_.wait_until(lock, session_.cancellation_token(),
+                                                        *deadline.expires_at, available));
+            } else {
+                static_cast<void>(condition_.wait(lock, session_.cancellation_token(), available));
+            }
         }
         return first_after_locked(previous);
     }
@@ -105,7 +115,7 @@ class RemovalAuthTracker final {
     core::TdClient& client_;
     RequestSession& session_;
     mutable std::mutex mutex_;
-    std::condition_variable condition_;
+    std::condition_variable_any condition_;
     std::shared_ptr<const AuthStateSnapshot> latest_;
     std::deque<std::shared_ptr<const AuthStateSnapshot>> pending_;
     std::uint64_t subscription_ = 0;
@@ -256,7 +266,7 @@ TransitionResult wait_for_transition(std::future<core::TdValue>& response,
         if (changed) {
             return {std::move(changed), std::nullopt};
         }
-        if (RequestSession::Clock::now() >= session.deadline()) {
+        if (deadline_expired(session.deadline())) {
             return {{}, timeout_error(tracker.current())};
         }
         if (session.cancellation_requested()) {
@@ -400,7 +410,7 @@ consume_logout_response(std::future<core::TdValue>& response, core::TdClosedDeci
 
 bool terminal_requested(const RequestSession& session) {
     return session.shutdown_requested() || session.cancellation_requested() ||
-           RequestSession::Clock::now() >= session.deadline();
+           deadline_expired(session.deadline());
 }
 
 RemovalRemoteProof wait_for_logout_decision(
@@ -497,7 +507,7 @@ std::shared_ptr<const AuthStateSnapshot> wait_for_known_state(RemovalAuthTracker
                                                               RequestSession& session) {
     auto current = tracker.wait_current(session.deadline());
     while (current && current->data.state == AuthState::Unknown &&
-           RequestSession::Clock::now() < session.deadline() && !session.cancellation_requested()) {
+           !deadline_expired(session.deadline()) && !session.cancellation_requested()) {
         auto changed = tracker.wait_after(*current, session.deadline());
         if (!changed) {
             break;
@@ -566,7 +576,7 @@ prepare_parameter_state(const RemoteBootstrapContext& context, const proto::Acco
     core::AuthBootstrap bootstrap(context.client.get(), context.store.get(),
                                   std::move(captured.snapshot.value()), context.hook_runner.get());
     core::BootstrapAttempt attempt;
-    attempt.control = {session.deadline(), session.cancellation_token()};
+    attempt.control = {session.deadline().expires_at, session.cancellation_token()};
     auto started = bootstrap.run(current, attempt);
     if (!started.response) {
         const auto error = started.error.value_or(core::BootstrapError{
@@ -631,7 +641,8 @@ RemovalRemoteProof TdAccountRemovalRemote::prove_remote_logout(
 }
 
 std::optional<RemovalOperationError> TdAccountRemovalRemote::quiesce(RequestSession& session) {
-    if (!client_.close_until(session.deadline())) {
+    const auto expires_at = session.deadline().expires_at;
+    if (!expires_at || !client_.close_until(expires_at.value())) {
         return timeout_error(client_.auth_state());
     }
     return std::nullopt;

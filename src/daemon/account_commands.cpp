@@ -47,11 +47,12 @@ std::shared_ptr<const config::ConfigSnapshot> load_current(RequestSession& sessi
     if (session.cancellation_requested()) {
         return {};
     }
-    if (RequestSession::Clock::now() >= session.deadline()) {
+    if (deadline_expired(session.deadline())) {
         timeout(session, operation);
         return {};
     }
-    auto loaded = context.store.get().load({session.deadline(), session.cancellation_token()});
+    auto loaded =
+        context.store.get().load({session.deadline().expires_at, session.cancellation_token()});
     if (loaded.cancelled || session.cancellation_requested()) {
         return {};
     }
@@ -59,7 +60,7 @@ std::shared_ptr<const config::ConfigSnapshot> load_current(RequestSession& sessi
         timeout(session, operation);
         return {};
     }
-    if (RequestSession::Clock::now() >= session.deadline()) {
+    if (deadline_expired(session.deadline())) {
         timeout(session, operation);
         return {};
     }
@@ -247,7 +248,7 @@ void mutation_failure(RequestSession& session, const ConfigGlobalContext& contex
 }
 
 config::MutationControl mutation_control(const RequestSession& session) {
-    return {session.deadline(), session.cancellation_token()};
+    return {session.deadline().expires_at, session.cancellation_token()};
 }
 
 void account_add(const ConfigGlobalContext& context, const proto::Request& request,

@@ -88,11 +88,11 @@ enum class MutationStatus {
 
 struct MutationControl {
     MutationControl() = default;
-    MutationControl(std::chrono::steady_clock::time_point deadline_value,
+    MutationControl(std::optional<std::chrono::steady_clock::time_point> deadline_value,
                     std::stop_token cancellation_value)
         : deadline(deadline_value), cancellation(std::move(cancellation_value)) {}
 
-    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    std::optional<std::chrono::steady_clock::time_point> deadline;
     std::stop_token cancellation;
     std::function<bool()> pre_commit;
     std::function<bool()> commit_admission;

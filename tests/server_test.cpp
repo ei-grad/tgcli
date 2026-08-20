@@ -944,6 +944,75 @@ TEST_CASE("request deadline terminates a socket challenge once", "[server][chall
     ::close(fd);
 }
 
+TEST_CASE("socket and direct dispatch share finite and unlimited deadline policy",
+          "[server][dispatch][deadline][unlimited]") {
+    const auto install = [](daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "fetch", {daemon::Tier::Read,
+                      [](const proto::Request&, daemon::RequestSession& session) {
+                          session.result({{"finite", session.deadline().expires_at.has_value()}});
+                      },
+                      false, std::nullopt, DeadlineDefault::Unlimited});
+    };
+    const TestDaemon test_daemon(install, false);
+
+    auto fetch = make_request({"fetch"}, 771);
+    auto socket_result = std::get<proto::Result>(send_request(test_daemon, fetch));
+    CHECK(socket_result.data == json{{"finite", false}});
+
+    std::optional<json> direct_result;
+    daemon::CallbackSink sink([](const json&) {}, [](const json&) {},
+                              [&direct_result](json data) { direct_result = std::move(data); },
+                              [](const std::string&, const std::string&, const json&, int) {});
+    test_daemon.dispatcher.dispatch(fetch, sink);
+    CHECK(direct_result == socket_result.data);
+
+    fetch.id = 772;
+    fetch.context.timeout_seconds = 0.25;
+    socket_result = std::get<proto::Result>(send_request(test_daemon, fetch));
+    CHECK(socket_result.data == json{{"finite", true}});
+}
+
+TEST_CASE("config admission and handlers observe one deadline tag",
+          "[server][config-runtime][admission][deadline]") {
+    using Rep = RequestClock::duration::rep;
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    std::atomic<Rep> admitted_ticks{0};
+    std::atomic<bool> admitted_unlimited{false};
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->admission_deadline = [&](const RequestDeadline& deadline) {
+        admitted_unlimited.store(!deadline.expires_at, std::memory_order_release);
+        if (deadline.expires_at) {
+            admitted_ticks.store(deadline.expires_at->time_since_epoch().count(),
+                                 std::memory_order_release);
+        }
+    };
+    daemon::ConfigRuntime runtime(config.file(), hooks);
+    const auto install = [&](daemon::Dispatcher& dispatcher) {
+        const auto handler = [&](const proto::Request&, daemon::RequestSession& session) {
+            const bool same = session.deadline().expires_at
+                                  ? !admitted_unlimited.load(std::memory_order_acquire) &&
+                                        session.deadline().expires_at->time_since_epoch().count() ==
+                                            admitted_ticks.load(std::memory_order_acquire)
+                                  : admitted_unlimited.load(std::memory_order_acquire);
+            session.result({{"same", same}});
+        };
+        dispatcher.register_command("ordinary deadline", {daemon::Tier::Read, handler});
+        dispatcher.register_command("fetch", {daemon::Tier::Read, handler, false, std::nullopt,
+                                              DeadlineDefault::Unlimited});
+    };
+    const TestDaemon test_daemon(install, false, {}, "main", {}, {}, &runtime);
+
+    auto finite = make_request({"ordinary", "deadline"}, 773, "main");
+    finite.context.timeout_seconds = 5.0;
+    CHECK(std::get<proto::Result>(send_request(test_daemon, finite)).data == json{{"same", true}});
+
+    auto unlimited = make_request({"fetch"}, 774, "main");
+    CHECK(std::get<proto::Result>(send_request(test_daemon, unlimited)).data ==
+          json{{"same", true}});
+}
+
 TEST_CASE("daemon stop sends shutdown terminal to a challenge before EOF",
           "[server][challenge][process]") {
     TestDaemon daemon(install_challenge_command);
@@ -1282,6 +1351,8 @@ TEST_CASE("strict request mutations are connection-scoped malformed frames",
              [](json& value) { value["account"] = "w\xC3\xB6rk"; },
              [](json& value) { value["context"].erase("idempotency_key"); },
              [](json& value) { value["context"]["extra"] = true; },
+             [](json& value) { value["context"]["timeout"] = 0; },
+             [](json& value) { value["context"]["timeout"] = 1.7976931348623157e308; },
              [](json& value) { value["context"]["idempotency_key"] = "raw/key-sentinel"; },
              [](json& value) { value["context"]["idempotency_key"] = "valid-key"; },
              [](json& value) {

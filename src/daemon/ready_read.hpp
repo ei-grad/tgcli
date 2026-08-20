@@ -1,11 +1,13 @@
 #pragma once
 
+#include "common/deadline.hpp"
 #include "core/td_client.hpp"
 
 #include <functional>
 #include <future>
 #include <memory>
 #include <optional>
+#include <stop_token>
 
 namespace tgcli::daemon {
 
@@ -25,7 +27,7 @@ using ReadyReadStart = std::function<std::future<core::TdValue>(
 
 struct ReadyReadHooks {
     std::function<core::TdEventClock::time_point()> now;
-    std::function<void()> wait;
+    std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
     std::function<void()> before_event_arbitration;
 };
 

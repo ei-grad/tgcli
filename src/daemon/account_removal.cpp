@@ -242,10 +242,10 @@ void AccountRemovalCoordinator::remove(const proto::Request& request, RequestSes
         return;
     }
 
-    auto planned = plan_account_removal(store_, journal_, environment_, arguments->account,
-                                        arguments->keep_session, arguments->reassign_default,
-                                        {session.deadline(), session.cancellation_token()},
-                                        hooks_ ? hooks_->filesystem : nullptr);
+    auto planned = plan_account_removal(
+        store_, journal_, environment_, arguments->account, arguments->keep_session,
+        arguments->reassign_default, {session.deadline().expires_at, session.cancellation_token()},
+        hooks_ ? hooks_->filesystem : nullptr);
     if (planned.error) {
         const auto& error = planned.error.value();
         session.error(error.code, error.message, error.details, error.exit_code);
@@ -561,7 +561,7 @@ void AccountRemovalCoordinator::remove(const proto::Request& request, RequestSes
         return;
     }
     bool created = removal.recovery.has_value();
-    config::MutationControl control{session.deadline(), session.cancellation_token()};
+    config::MutationControl control{session.deadline().expires_at, session.cancellation_token()};
     control.pre_commit = [&] {
         if (!created) {
             RemovalFilesystemFailure filesystem_failure;

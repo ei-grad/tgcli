@@ -149,7 +149,8 @@ daemon::ActivityTracker tracked_activity() {
 }
 
 void wait_until_deadline(const daemon::RequestSession& session) {
-    while (daemon::RequestSession::Clock::now() < session.deadline()) {
+    REQUIRE(session.deadline().expires_at.has_value());
+    while (daemon::RequestSession::Clock::now() < *session.deadline().expires_at) {
         std::this_thread::yield();
     }
 }
@@ -204,6 +205,34 @@ TEST_CASE("request session retains activity across challenge reservation and in-
     CHECK(session.in_flight_state() == daemon::InFlightState::InFlight);
     session.settle_in_flight();
     CHECK(tracker.snapshot().requests == 0);
+}
+
+TEST_CASE("unlimited request challenges remain disconnect and shutdown aware",
+          "[challenge][session][deadline][unlimited]") {
+    for (const auto cause : {std::string_view("disconnect"), std::string_view("shutdown")}) {
+        DYNAMIC_SECTION(cause) {
+            Captured captured;
+            auto sink = make_sink(captured);
+            daemon::RequestSession session(
+                request(), sink, 17, [] { return std::string(kNonce); },
+                daemon::ActivityTracker::Token{}, nullptr, RequestDeadline{});
+            CHECK_FALSE(session.deadline().expires_at);
+
+            auto future = std::async(std::launch::async,
+                                     [&session] { return session.challenge(challenge()); });
+            static_cast<void>(wait_challenge(captured));
+            CHECK(future.wait_for(std::chrono::seconds(0)) != std::future_status::ready);
+
+            if (cause == "disconnect") {
+                session.disconnect();
+            } else {
+                session.shutdown();
+            }
+            CHECK(future.get().status() == (cause == "disconnect"
+                                                ? daemon::ChallengeStatus::Disconnected
+                                                : daemon::ChallengeStatus::Shutdown));
+        }
+    }
 }
 
 TEST_CASE("request session disconnect releases activity before orphaned work settles",

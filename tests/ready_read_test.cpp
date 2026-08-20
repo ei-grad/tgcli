@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -192,8 +193,10 @@ class ReadyReadHarness {
   public:
     using Clock = tgcli::core::TdEventClock;
 
-    explicit ReadyReadHarness(Clock::time_point deadline)
-        : deadline_(deadline), clock_(deadline - 1ms) {
+    explicit ReadyReadHarness(tgcli::RequestDeadline request_deadline)
+        : request_deadline_(std::move(request_deadline)),
+          deadline_(request_deadline_.expires_at.value_or(Clock::time_point(5s))),
+          clock_(deadline_ - 1ms) {
         auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>();
         runtime_ = runtime.get();
         client_ = std::make_unique<tgcli::core::TdClient>(
@@ -226,7 +229,7 @@ class ReadyReadHarness {
         request.context.cwd = "/";
         session_ = std::make_unique<tgcli::daemon::RequestSession>(
             std::move(request), *sink_, 0, tgcli::daemon::RequestSession::NonceGenerator{},
-            tgcli::daemon::ActivityTracker::Token{}, nullptr, deadline_);
+            tgcli::daemon::ActivityTracker::Token{}, nullptr, request_deadline_);
     }
 
     ~ReadyReadHarness() {
@@ -273,7 +276,7 @@ class ReadyReadHarness {
             tgcli::daemon::ReadyReadSession reads(
                 *client_, *session_,
                 {.now = [this] { return clock_.now(); },
-                 .wait = [this] { barrier_.wait(); },
+                 .wait = [this](const auto&, const auto&) { barrier_.wait(); },
                  .before_event_arbitration = [this] { arbitration_.notify(); }});
             auto snapshot = reads.current();
             return reads.read(start, snapshot);
@@ -399,6 +402,7 @@ class ReadyReadHarness {
     }
 
   private:
+    tgcli::RequestDeadline request_deadline_;
     Clock::time_point deadline_;
     ManualClock clock_;
     PollBarrier barrier_;
@@ -759,5 +763,29 @@ TEST_CASE("Ready read retains cancellation and shutdown terminal behavior",
         CHECK(harness.terminal_count() == 1);
         REQUIRE(harness.terminal_code());
         CHECK(*harness.terminal_code() == "DAEMON_SHUTDOWN");
+    }
+}
+
+TEST_CASE("Unlimited Ready reads terminate only through non-time cancellation",
+          "[ready-read][deadline][unlimited][cancellation][fake-boundary]") {
+    for (const auto cause : {std::string_view("audit"), std::string_view("disconnect"),
+                             std::string_view("shutdown")}) {
+        DYNAMIC_SECTION(cause) {
+            ReadyReadHarness harness(tgcli::RequestDeadline{});
+            harness.start();
+            CHECK_FALSE(harness.result_ready_within(0ms));
+
+            if (cause == "audit") {
+                harness.session().audit_fatal();
+            } else if (cause == "disconnect") {
+                harness.session().disconnect();
+            } else {
+                harness.session().shutdown();
+            }
+            harness.release_before_deadline();
+
+            CHECK(harness.result().status == tgcli::daemon::ReadyReadStatus::Cancelled);
+            CHECK(harness.terminal_count() == (cause == "shutdown" ? 1 : 0));
+        }
     }
 }

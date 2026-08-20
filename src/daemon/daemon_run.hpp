@@ -27,8 +27,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
 // Reconciles an unmatched account-local logout audit without binding sockets or
 // starting a background daemon. The caller should isolate this bounded DB-open
 // operation in a child process so a tardy TDLib close cannot extend its deadline.
-bool reconcile_logout_audit_offline(const std::string& account,
-                                    std::chrono::steady_clock::time_point deadline);
+bool reconcile_logout_audit_offline(const std::string& account, const RequestDeadline& deadline);
 
 // Executes only the no-spawn removal modes. Dry-run remains entirely
 // observational; keep-session uses no TDLib client when no daemon is present.

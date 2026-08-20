@@ -353,6 +353,57 @@ TEST_CASE("dormant M6 session functions do not extend or activate the M3 command
     }
 }
 
+TEST_CASE("dispatcher activates unlimited defaults only for registered eligible commands",
+          "[dispatch][deadline][unlimited]") {
+    const auto report_deadline = [](const proto::Request&, daemon::RequestSession& session) {
+        session.result({{"finite", session.deadline().expires_at.has_value()}});
+    };
+
+    daemon::Dispatcher dispatcher;
+    dispatcher.register_command("ordinary", {daemon::Tier::Read, report_deadline});
+    dispatcher.register_command("fetch", {daemon::Tier::Read, report_deadline, false, std::nullopt,
+                                          DeadlineDefault::Unlimited});
+
+    proto::Request ordinary("testacct");
+    ordinary.command = {"ordinary"};
+    auto outcome = dispatch_request(dispatcher, ordinary);
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["finite"] == true);
+
+    proto::Request fetch("testacct");
+    fetch.command = {"fetch"};
+    outcome = dispatch_request(dispatcher, fetch);
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["finite"] == false);
+
+    fetch.context.timeout_seconds = 0.25;
+    outcome = dispatch_request(dispatcher, fetch);
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["finite"] == true);
+
+    proto::Request unregistered("testacct");
+    unregistered.command = {"listen"};
+    CHECK(dispatcher.deadline_default(unregistered) == DeadlineDefault::Default60);
+    CHECK_THROWS_AS(dispatcher.register_command("ordinary unlimited",
+                                                {daemon::Tier::Read, report_deadline, false,
+                                                 std::nullopt, DeadlineDefault::Unlimited}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("fetch retains removal before logout recovery without broadening read history",
+          "[dispatch][deadline][preflight][ordering]") {
+    const auto fetch = daemon::recovery_preflight_order("fetch");
+    REQUIRE(fetch.size() == 2);
+    CHECK(fetch[0] == daemon::RecoveryPreflight::Removal);
+    CHECK(fetch[1] == daemon::RecoveryPreflight::Logout);
+
+    CHECK(daemon::recovery_preflight_order("read").empty());
+    CHECK(daemon::recovery_preflight_order("history").empty());
+    const auto daemon_status = daemon::recovery_preflight_order("daemon status");
+    REQUIRE(daemon_status.size() == 1);
+    CHECK(daemon_status.front() == daemon::RecoveryPreflight::Removal);
+}
+
 TEST_CASE("dispatcher independently rejects invalid or out-of-scope raw idempotency keys",
           "[dispatch][m3][idempotency][safety]") {
     daemon::Dispatcher dispatcher;
