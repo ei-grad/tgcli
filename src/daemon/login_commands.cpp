@@ -342,6 +342,23 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetSupergroup:
     case TdFunctionKind::GetSupergroupFullInfo:
     case TdFunctionKind::CreatePrivateChat:
+    case TdFunctionKind::GetMessage:
+    case TdFunctionKind::GetMessageProperties:
+    case TdFunctionKind::GetMessageAvailableReactions:
+    case TdFunctionKind::ParseTextEntities:
+    case TdFunctionKind::EditMessageText:
+    case TdFunctionKind::DeleteMessages:
+    case TdFunctionKind::AddMessageReaction:
+    case TdFunctionKind::RemoveMessageReaction:
+    case TdFunctionKind::PinChatMessage:
+    case TdFunctionKind::UnpinChatMessage:
+    case TdFunctionKind::ViewMessages:
+    case TdFunctionKind::SetChatNotificationSettings:
+    case TdFunctionKind::ToggleChatIsPinned:
+    case TdFunctionKind::AddChatToList:
+    case TdFunctionKind::JoinChat:
+    case TdFunctionKind::JoinChatByInviteLink:
+    case TdFunctionKind::LeaveChat:
         return "other";
     }
     return "other";

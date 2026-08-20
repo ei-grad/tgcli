@@ -57,6 +57,28 @@ TdClosedDecisionStatus terminal_decision(TdLifecycleClaimStatus claim) {
     return TdClosedDecisionStatus::Rejected;
 }
 
+std::optional<DescriptorKind> direct_mutation_tier(TdFunctionKind function) {
+    switch (function) {
+    case TdFunctionKind::EditMessageText:
+    case TdFunctionKind::AddMessageReaction:
+    case TdFunctionKind::RemoveMessageReaction:
+    case TdFunctionKind::PinChatMessage:
+    case TdFunctionKind::UnpinChatMessage:
+    case TdFunctionKind::ViewMessages:
+    case TdFunctionKind::SetChatNotificationSettings:
+    case TdFunctionKind::ToggleChatIsPinned:
+    case TdFunctionKind::AddChatToList:
+    case TdFunctionKind::JoinChat:
+    case TdFunctionKind::JoinChatByInviteLink:
+        return DescriptorKind::Write;
+    case TdFunctionKind::DeleteMessages:
+    case TdFunctionKind::LeaveChat:
+        return DescriptorKind::Destructive;
+    default:
+        return std::nullopt;
+    }
+}
+
 } // namespace
 
 struct TdSendLease::State {
@@ -157,7 +179,11 @@ class TdClient::Impl {
              function != TdFunctionKind::CheckChatInviteLink &&
              function != TdFunctionKind::GetUser && function != TdFunctionKind::GetSupergroup &&
              function != TdFunctionKind::GetSupergroupFullInfo &&
-             function != TdFunctionKind::CreatePrivateChat)) {
+             function != TdFunctionKind::CreatePrivateChat &&
+             function != TdFunctionKind::GetMessage &&
+             function != TdFunctionKind::GetMessageProperties &&
+             function != TdFunctionKind::GetMessageAvailableReactions &&
+             function != TdFunctionKind::ParseTextEntities)) {
             return failed_future(TdAuthorizationFailure::FunctionDenied);
         }
         auto owner = issue_owner(TdOwnerKind::Request);
@@ -347,6 +373,132 @@ class TdClient::Impl {
                         std::int64_t user_id, bool force) {
         return send_read(authorization, TdFunctionKind::CreatePrivateChat,
                          runtime_->make_create_private_chat(user_id, force));
+    }
+
+    std::future<TdValue> get_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                     std::int64_t chat_id, std::int64_t message_id) {
+        return send_read(authorization, TdFunctionKind::GetMessage,
+                         runtime_->make_get_message(chat_id, message_id));
+    }
+
+    std::future<TdValue>
+    get_message_properties(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t chat_id, std::int64_t message_id) {
+        return send_read(authorization, TdFunctionKind::GetMessageProperties,
+                         runtime_->make_get_message_properties(chat_id, message_id));
+    }
+
+    std::future<TdValue>
+    get_message_available_reactions(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    std::int64_t chat_id, std::int64_t message_id) {
+        return send_read(authorization, TdFunctionKind::GetMessageAvailableReactions,
+                         runtime_->make_get_message_available_reactions(chat_id, message_id));
+    }
+
+    std::future<TdValue>
+    get_unix_time(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+        return send_read(authorization, TdFunctionKind::GetOption, runtime_->make_get_unix_time());
+    }
+
+    std::future<TdValue>
+    parse_text_entities(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                        std::string text, TdTextParseMode mode) {
+        return send_read(authorization, TdFunctionKind::ParseTextEntities,
+                         runtime_->make_parse_text_entities(std::move(text), mode));
+    }
+
+    std::future<TdValue>
+    send_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         TdValue request) {
+        if (!authorization) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        const auto& function_data = request.function_data();
+        if (!function_data) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        const auto function = function_data->kind();
+        if (!function) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        const auto tier = direct_mutation_tier(function.value_or(TdFunctionKind::Close));
+        if (!tier) {
+            return failed_future(TdAuthorizationFailure::FunctionDenied);
+        }
+        auto owner = issue_owner(TdOwnerKind::Request);
+        if (!owner) {
+            return failed_future(TdAuthorizationFailure::GenerationClosed);
+        }
+        return send(TdSendDescriptor{.function = function.value_or(TdFunctionKind::Close),
+                                     .tier = tier.value_or(DescriptorKind::Read),
+                                     .owner = owner.owner(),
+                                     .client_generation = authorization->client_generation,
+                                     .auth_sequence = authorization->auth_sequence,
+                                     .auth_state = authorization->data.state},
+                    std::move(request));
+    }
+
+    std::future<TdValue>
+    edit_message_text(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                      TdEditMessageTextRequest request) {
+        return send_direct_mutation(authorization,
+                                    runtime_->make_edit_message_text(std::move(request)));
+    }
+
+    std::future<TdValue>
+    delete_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    TdDeleteMessagesRequest request) {
+        return send_direct_mutation(authorization,
+                                    runtime_->make_delete_messages(std::move(request)));
+    }
+
+    std::future<TdValue>
+    set_message_reaction(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         TdMessageReactionRequest request) {
+        return send_direct_mutation(authorization,
+                                    runtime_->make_message_reaction(std::move(request)));
+    }
+
+    std::future<TdValue>
+    set_message_pinned(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       TdPinMessageRequest request) {
+        return send_direct_mutation(authorization, runtime_->make_pin_message(request));
+    }
+
+    std::future<TdValue>
+    view_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                  TdViewMessagesRequest request) {
+        return send_direct_mutation(authorization,
+                                    runtime_->make_view_messages(std::move(request)));
+    }
+
+    std::future<TdValue>
+    set_chat_notification_settings(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdSetChatNotificationSettingsRequest request) {
+        return send_direct_mutation(authorization,
+                                    runtime_->make_set_chat_notification_settings(request));
+    }
+
+    std::future<TdValue>
+    toggle_chat_is_pinned(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          TdToggleChatIsPinnedRequest request) {
+        return send_direct_mutation(authorization, runtime_->make_toggle_chat_is_pinned(request));
+    }
+
+    std::future<TdValue>
+    add_chat_to_list(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     TdAddChatToListRequest request) {
+        return send_direct_mutation(authorization, runtime_->make_add_chat_to_list(request));
+    }
+
+    std::future<TdValue> join_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdJoinChatRequest request) {
+        return send_direct_mutation(authorization, runtime_->make_join_chat(std::move(request)));
+    }
+
+    std::future<TdValue> leave_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    TdLeaveChatRequest request) {
+        return send_direct_mutation(authorization, runtime_->make_leave_chat(request));
     }
 
     std::future<TdValue> send_login(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -1523,6 +1675,95 @@ std::future<TdValue>
 TdClient::create_private_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                               std::int64_t user_id, bool force) {
     return impl_->create_private_chat(authorization, user_id, force);
+}
+
+std::future<TdValue>
+TdClient::get_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                      std::int64_t chat_id, std::int64_t message_id) {
+    return impl_->get_message(authorization, chat_id, message_id);
+}
+
+std::future<TdValue>
+TdClient::get_message_properties(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                 std::int64_t chat_id, std::int64_t message_id) {
+    return impl_->get_message_properties(authorization, chat_id, message_id);
+}
+
+std::future<TdValue> TdClient::get_message_available_reactions(
+    const std::shared_ptr<const AuthStateSnapshot>& authorization, std::int64_t chat_id,
+    std::int64_t message_id) {
+    return impl_->get_message_available_reactions(authorization, chat_id, message_id);
+}
+
+std::future<TdValue>
+TdClient::get_unix_time(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+    return impl_->get_unix_time(authorization);
+}
+
+std::future<TdValue>
+TdClient::parse_text_entities(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                              std::string text, TdTextParseMode mode) {
+    return impl_->parse_text_entities(authorization, std::move(text), mode);
+}
+
+std::future<TdValue>
+TdClient::edit_message_text(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            TdEditMessageTextRequest request) {
+    return impl_->edit_message_text(authorization, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::delete_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          TdDeleteMessagesRequest request) {
+    return impl_->delete_messages(authorization, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::set_message_reaction(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                               TdMessageReactionRequest request) {
+    return impl_->set_message_reaction(authorization, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::set_message_pinned(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             TdPinMessageRequest request) {
+    return impl_->set_message_pinned(authorization, request);
+}
+
+std::future<TdValue>
+TdClient::view_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                        TdViewMessagesRequest request) {
+    return impl_->view_messages(authorization, std::move(request));
+}
+
+std::future<TdValue> TdClient::set_chat_notification_settings(
+    const std::shared_ptr<const AuthStateSnapshot>& authorization,
+    TdSetChatNotificationSettingsRequest request) {
+    return impl_->set_chat_notification_settings(authorization, request);
+}
+
+std::future<TdValue>
+TdClient::toggle_chat_is_pinned(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                TdToggleChatIsPinnedRequest request) {
+    return impl_->toggle_chat_is_pinned(authorization, request);
+}
+
+std::future<TdValue>
+TdClient::add_chat_to_list(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           TdAddChatToListRequest request) {
+    return impl_->add_chat_to_list(authorization, request);
+}
+
+std::future<TdValue>
+TdClient::join_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    TdJoinChatRequest request) {
+    return impl_->join_chat(authorization, std::move(request));
+}
+
+std::future<TdValue>
+TdClient::leave_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     TdLeaveChatRequest request) {
+    return impl_->leave_chat(authorization, request);
 }
 
 std::future<TdValue>

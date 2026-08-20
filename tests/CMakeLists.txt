@@ -19,6 +19,8 @@ add_executable(tgcli_unit_tests
     daemon_lock_test.cpp
     dependency_lock_schema_test.cpp
     destructive_contract_test.cpp
+    direct_td_runtime_test.cpp
+    direct_rpc_test.cpp
     destructive_plan_test.cpp
     file_spool_test.cpp
     fetch_domain_test.cpp
@@ -93,6 +95,11 @@ add_test(
     NAME tdlib-session-source-contract
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_SOURCE_DIR}/scripts/verify_tdlib_session_source_contract.py"
+        --repo-root "${CMAKE_SOURCE_DIR}")
+add_test(
+    NAME td-api-source-boundary
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/scripts/verify_td_api_source_boundary.py"
         --repo-root "${CMAKE_SOURCE_DIR}")
 add_test(
     NAME dependency-lock-enforcement

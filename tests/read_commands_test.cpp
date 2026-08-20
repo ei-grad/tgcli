@@ -116,7 +116,8 @@ class FakeRead {
                                     .unread_mention_count = 0,
                                     .unread_reaction_count = 0,
                                     .unread_poll_vote_count = 0,
-                                    .last_message = std::nullopt});
+                                    .last_message = std::nullopt,
+                                    .notification_settings = std::nullopt});
         if (kind == tgcli::core::TdChatKind::Supergroup ||
             kind == tgcli::core::TdChatKind::Channel) {
             respond(
@@ -519,7 +520,8 @@ TEST_CASE("read dispatches every non-thread topic seam and enforces Saved owners
                                              .unread_mention_count = 0,
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
-                                             .last_message = std::nullopt});
+                                             .last_message = std::nullopt,
+                                             .notification_settings = std::nullopt});
         CHECK(field_as<std::int64_t>(ownership, "user_id") == 42);
         CHECK_FALSE(field_as<bool>(ownership, "force"));
         const auto descriptor = fake.respond(
@@ -560,7 +562,8 @@ TEST_CASE("read Saved ownership reuses resolver materialization and closes failu
                                          .unread_mention_count = 0,
                                          .unread_reaction_count = 0,
                                          .unread_poll_vote_count = 0,
-                                         .last_message = std::nullopt});
+                                         .last_message = std::nullopt,
+                                         .notification_settings = std::nullopt});
         fake.respond(tgcli::core::TdFunctionKind::GetUser,
                      tgcli::core::TdUserSummary{.id = 42,
                                                 .first_name = "Ada",
@@ -608,7 +611,8 @@ TEST_CASE("read Saved ownership reuses resolver materialization and closes failu
                                          .unread_mention_count = 0,
                                          .unread_reaction_count = 0,
                                          .unread_poll_vote_count = 0,
-                                         .last_message = std::nullopt});
+                                         .last_message = std::nullopt,
+                                         .notification_settings = std::nullopt});
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["code"] == "USAGE");
@@ -701,7 +705,8 @@ TEST_CASE("read Saved ownership reuses resolver materialization and closes failu
                                          .unread_mention_count = 0,
                                          .unread_reaction_count = 0,
                                          .unread_poll_vote_count = 0,
-                                         .last_message = std::nullopt});
+                                         .last_message = std::nullopt,
+                                         .notification_settings = std::nullopt});
         const auto history = fake.respond(
             tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory,
             tgcli::core::TdMessages{

@@ -228,6 +228,19 @@ bool valid_utf8(std::string_view value) {
     return true;
 }
 
+bool valid_persistable_message_text(std::string_view value) {
+    if (value.size() > 16'384 || !valid_utf8(value)) {
+        return false;
+    }
+    std::size_t scalar_count = 0;
+    for (const auto byte : value) {
+        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalar_count > 4'096) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<TdSessionDeviceType>
 convert_session_device_type(const td_api::SessionDeviceType* device,
                             std::optional<std::int32_t>& unsupported_type_id) {
@@ -608,6 +621,276 @@ TdMessageSummary convert_message(const td_api::message& message) {
     return converted;
 }
 
+TdPlanningMessage convert_planning_message(const td_api::message& message) {
+    auto summary = convert_message(message);
+    return {.id = summary.id,
+            .chat_id = summary.chat_id,
+            .date = summary.date,
+            .sender = summary.sender,
+            .is_outgoing = summary.is_outgoing,
+            .topic = summary.topic,
+            .content_kind = summary.content_kind,
+            .text = std::move(summary.text),
+            .has_scheduling_state = message.scheduling_state_ != nullptr,
+            .has_reply_markup = message.reply_markup_ != nullptr};
+}
+
+TdMessageWriteResult convert_write_message(const td_api::message& message) {
+    auto summary = convert_message(message);
+    const bool scheduled = message.scheduling_state_ != nullptr;
+    return {.id = summary.id,
+            .chat_id = summary.chat_id,
+            .date = scheduled ? std::nullopt : std::optional<std::int32_t>{summary.date},
+            .sender = summary.sender,
+            .is_outgoing = summary.is_outgoing,
+            .topic = summary.topic,
+            .content_kind = summary.content_kind,
+            .text = std::move(summary.text),
+            .scheduled = scheduled};
+}
+
+TdMessageProperties convert_message_properties(const td_api::messageProperties& value) {
+    return {.can_add_offer = value.can_add_offer_,
+            .can_add_tasks = value.can_add_tasks_,
+            .can_be_approved = value.can_be_approved_,
+            .can_be_copied = value.can_be_copied_,
+            .can_be_copied_to_secret_chat = value.can_be_copied_to_secret_chat_,
+            .can_be_declined = value.can_be_declined_,
+            .can_be_deleted_only_for_self = value.can_be_deleted_only_for_self_,
+            .can_be_deleted_for_all_users = value.can_be_deleted_for_all_users_,
+            .can_be_edited = value.can_be_edited_,
+            .can_be_forwarded = value.can_be_forwarded_,
+            .can_be_paid = value.can_be_paid_,
+            .can_be_pinned = value.can_be_pinned_,
+            .can_be_replied = value.can_be_replied_,
+            .can_be_replied_in_another_chat = value.can_be_replied_in_another_chat_,
+            .can_be_saved = value.can_be_saved_,
+            .can_be_shared_in_story = value.can_be_shared_in_story_,
+            .can_delete_reactions = value.can_delete_reactions_,
+            .can_edit_media = value.can_edit_media_,
+            .can_edit_scheduling_state = value.can_edit_scheduling_state_,
+            .can_edit_suggested_post_info = value.can_edit_suggested_post_info_,
+            .can_get_author = value.can_get_author_,
+            .can_get_embedding_code = value.can_get_embedding_code_,
+            .can_get_link = value.can_get_link_,
+            .can_get_media_timestamp_links = value.can_get_media_timestamp_links_,
+            .can_get_message_thread = value.can_get_message_thread_,
+            .can_get_poll_vote_statistics = value.can_get_poll_vote_statistics_,
+            .can_get_read_date = value.can_get_read_date_,
+            .can_get_statistics = value.can_get_statistics_,
+            .can_get_video_advertisements = value.can_get_video_advertisements_,
+            .can_get_viewers = value.can_get_viewers_,
+            .can_mark_tasks_as_done = value.can_mark_tasks_as_done_,
+            .can_recognize_speech = value.can_recognize_speech_,
+            .can_report_chat = value.can_report_chat_,
+            .can_report_reactions = value.can_report_reactions_,
+            .can_report_supergroup_spam = value.can_report_supergroup_spam_,
+            .can_set_fact_check = value.can_set_fact_check_,
+            .has_protected_content_by_current_user = value.has_protected_content_by_current_user_,
+            .has_protected_content_by_other_user = value.has_protected_content_by_other_user_,
+            .need_show_statistics = value.need_show_statistics_};
+}
+
+TdReactionUnavailabilityReason
+convert_reaction_unavailability(const td_api::ReactionUnavailabilityReason* reason,
+                                std::optional<std::int32_t>& unsupported) {
+    if (reason == nullptr) {
+        return TdReactionUnavailabilityReason::None;
+    }
+    switch (reason->get_id()) {
+    case td_api::reactionUnavailabilityReasonAnonymousAdministrator::ID:
+        return TdReactionUnavailabilityReason::AnonymousAdministrator;
+    case td_api::reactionUnavailabilityReasonGuest::ID:
+        return TdReactionUnavailabilityReason::Guest;
+    case td_api::reactionUnavailabilityReasonRestricted::ID:
+        return TdReactionUnavailabilityReason::Restricted;
+    default:
+        unsupported = reason->get_id();
+        return TdReactionUnavailabilityReason::Unknown;
+    }
+}
+
+std::optional<std::vector<TdAvailableReaction>> convert_available_reactions(
+    const std::vector<td_api::object_ptr<td_api::availableReaction>>& values) {
+    std::vector<TdAvailableReaction> converted;
+    converted.reserve(values.size());
+    for (const auto& value : values) {
+        if (value == nullptr || value->type_ == nullptr) {
+            return std::nullopt;
+        }
+        converted.push_back(
+            {.type = convert_reaction(value->type_.get()), .needs_premium = value->needs_premium_});
+    }
+    return converted;
+}
+
+TdValue convert_message_available_reactions(const td_api::availableReactions& value) {
+    auto top = convert_available_reactions(value.top_reactions_);
+    auto recent = convert_available_reactions(value.recent_reactions_);
+    auto popular = convert_available_reactions(value.popular_reactions_);
+    if (!top || !recent || !popular) {
+        return TdValue::from(TdDirectConversionError{});
+    }
+    TdMessageAvailableReactions converted;
+    converted.top = std::move(*top);
+    converted.recent = std::move(*recent);
+    converted.popular = std::move(*popular);
+    converted.allow_custom_emoji = value.allow_custom_emoji_;
+    converted.are_tags = value.are_tags_;
+    converted.unavailability_reason = convert_reaction_unavailability(
+        value.unavailability_reason_.get(), converted.unsupported_unavailability_tdlib_type_id);
+    return TdValue::from(std::move(converted));
+}
+
+TdTextEntity convert_text_entity(const td_api::textEntity& entity) {
+    TdTextEntity result{.offset = entity.offset_,
+                        .length = entity.length_,
+                        .kind = TdTextEntityKind::Unknown,
+                        .value = {},
+                        .numeric_value = 0,
+                        .tdlib_type_id = entity.type_ == nullptr ? 0 : entity.type_->get_id()};
+    if (entity.type_ == nullptr) {
+        return result;
+    }
+    switch (entity.type_->get_id()) {
+    case td_api::textEntityTypeMention::ID:
+        result.kind = TdTextEntityKind::Mention;
+        break;
+    case td_api::textEntityTypeHashtag::ID:
+        result.kind = TdTextEntityKind::Hashtag;
+        break;
+    case td_api::textEntityTypeCashtag::ID:
+        result.kind = TdTextEntityKind::Cashtag;
+        break;
+    case td_api::textEntityTypeBotCommand::ID:
+        result.kind = TdTextEntityKind::BotCommand;
+        break;
+    case td_api::textEntityTypeUrl::ID:
+        result.kind = TdTextEntityKind::Url;
+        break;
+    case td_api::textEntityTypeEmailAddress::ID:
+        result.kind = TdTextEntityKind::EmailAddress;
+        break;
+    case td_api::textEntityTypePhoneNumber::ID:
+        result.kind = TdTextEntityKind::PhoneNumber;
+        break;
+    case td_api::textEntityTypeBankCardNumber::ID:
+        result.kind = TdTextEntityKind::BankCardNumber;
+        break;
+    case td_api::textEntityTypeBold::ID:
+        result.kind = TdTextEntityKind::Bold;
+        break;
+    case td_api::textEntityTypeItalic::ID:
+        result.kind = TdTextEntityKind::Italic;
+        break;
+    case td_api::textEntityTypeUnderline::ID:
+        result.kind = TdTextEntityKind::Underline;
+        break;
+    case td_api::textEntityTypeStrikethrough::ID:
+        result.kind = TdTextEntityKind::Strikethrough;
+        break;
+    case td_api::textEntityTypeSpoiler::ID:
+        result.kind = TdTextEntityKind::Spoiler;
+        break;
+    case td_api::textEntityTypeCode::ID:
+        result.kind = TdTextEntityKind::Code;
+        break;
+    case td_api::textEntityTypePre::ID:
+        result.kind = TdTextEntityKind::Pre;
+        break;
+    case td_api::textEntityTypePreCode::ID:
+        result.kind = TdTextEntityKind::PreCode;
+        result.value = static_cast<const td_api::textEntityTypePreCode&>(*entity.type_).language_;
+        break;
+    case td_api::textEntityTypeBlockQuote::ID:
+        result.kind = TdTextEntityKind::BlockQuote;
+        break;
+    case td_api::textEntityTypeExpandableBlockQuote::ID:
+        result.kind = TdTextEntityKind::ExpandableBlockQuote;
+        break;
+    case td_api::textEntityTypeTextUrl::ID:
+        result.kind = TdTextEntityKind::TextUrl;
+        result.value = static_cast<const td_api::textEntityTypeTextUrl&>(*entity.type_).url_;
+        break;
+    case td_api::textEntityTypeMentionName::ID:
+        result.kind = TdTextEntityKind::MentionName;
+        result.numeric_value =
+            static_cast<const td_api::textEntityTypeMentionName&>(*entity.type_).user_id_;
+        break;
+    case td_api::textEntityTypeCustomEmoji::ID:
+        result.kind = TdTextEntityKind::CustomEmoji;
+        result.numeric_value =
+            static_cast<const td_api::textEntityTypeCustomEmoji&>(*entity.type_).custom_emoji_id_;
+        break;
+    case td_api::textEntityTypeMediaTimestamp::ID:
+        result.kind = TdTextEntityKind::MediaTimestamp;
+        result.numeric_value =
+            static_cast<const td_api::textEntityTypeMediaTimestamp&>(*entity.type_)
+                .media_timestamp_;
+        break;
+    case td_api::textEntityTypeDateTime::ID:
+        result.kind = TdTextEntityKind::DateTime;
+        result.numeric_value =
+            static_cast<const td_api::textEntityTypeDateTime&>(*entity.type_).unix_time_;
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+TdValue convert_formatted_text(const td_api::formattedText& value) {
+    TdFormattedText converted{.text = value.text_, .entities = {}};
+    converted.entities.reserve(value.entities_.size());
+    for (const auto& entity : value.entities_) {
+        if (entity == nullptr || entity->type_ == nullptr) {
+            return TdValue::from(TdDirectConversionError{});
+        }
+        converted.entities.push_back(convert_text_entity(*entity));
+    }
+    return TdValue::from(std::move(converted));
+}
+
+TdValue convert_chat_join_result(const td_api::ChatJoinResult& value) {
+    switch (value.get_id()) {
+    case td_api::chatJoinResultSuccess::ID:
+        return TdValue::from(TdChatJoinResult{
+            .kind = TdChatJoinResultKind::Success,
+            .chat_id = static_cast<const td_api::chatJoinResultSuccess&>(value).chat_id_,
+            .guard_bot_user_id = std::nullopt,
+            .guard_query_id = std::nullopt,
+            .unsupported_tdlib_type_id = std::nullopt});
+    case td_api::chatJoinResultRequestSent::ID:
+        return TdValue::from(TdChatJoinResult{.kind = TdChatJoinResultKind::RequestSent,
+                                              .chat_id = std::nullopt,
+                                              .guard_bot_user_id = std::nullopt,
+                                              .guard_query_id = std::nullopt,
+                                              .unsupported_tdlib_type_id = std::nullopt});
+    case td_api::chatJoinResultGuardBotApprovalRequired::ID: {
+        const auto& guard =
+            static_cast<const td_api::chatJoinResultGuardBotApprovalRequired&>(value);
+        return TdValue::from(
+            TdChatJoinResult{.kind = TdChatJoinResultKind::GuardBotApprovalRequired,
+                             .chat_id = std::nullopt,
+                             .guard_bot_user_id = guard.bot_user_id_,
+                             .guard_query_id = guard.query_id_,
+                             .unsupported_tdlib_type_id = std::nullopt});
+    }
+    case td_api::chatJoinResultDeclined::ID:
+        return TdValue::from(TdChatJoinResult{.kind = TdChatJoinResultKind::Declined,
+                                              .chat_id = std::nullopt,
+                                              .guard_bot_user_id = std::nullopt,
+                                              .guard_query_id = std::nullopt,
+                                              .unsupported_tdlib_type_id = std::nullopt});
+    default:
+        return TdValue::from(TdChatJoinResult{.kind = TdChatJoinResultKind::Unknown,
+                                              .chat_id = std::nullopt,
+                                              .guard_bot_user_id = std::nullopt,
+                                              .guard_query_id = std::nullopt,
+                                              .unsupported_tdlib_type_id = value.get_id()});
+    }
+}
+
 TdMessages convert_messages(const td_api::messages& messages) {
     TdMessages converted{.total_count = messages.total_count_, .messages = {}};
     converted.messages.reserve(messages.messages_.size());
@@ -636,6 +919,28 @@ TdMessageLink convert_message_link(td_api::messageLink& link) {
     return {.link = std::move(link.link_), .is_public = link.is_public_};
 }
 
+TdChatNotificationSettings
+convert_chat_notification_settings(const td_api::chatNotificationSettings& value) {
+    return {.use_default_mute_for = value.use_default_mute_for_,
+            .mute_for = value.mute_for_,
+            .use_default_sound = value.use_default_sound_,
+            .sound_id = value.sound_id_,
+            .use_default_show_preview = value.use_default_show_preview_,
+            .show_preview = value.show_preview_,
+            .use_default_mute_stories = value.use_default_mute_stories_,
+            .mute_stories = value.mute_stories_,
+            .use_default_story_sound = value.use_default_story_sound_,
+            .story_sound_id = value.story_sound_id_,
+            .use_default_show_story_poster = value.use_default_show_story_poster_,
+            .show_story_poster = value.show_story_poster_,
+            .use_default_disable_pinned_message_notifications =
+                value.use_default_disable_pinned_message_notifications_,
+            .disable_pinned_message_notifications = value.disable_pinned_message_notifications_,
+            .use_default_disable_mention_notifications =
+                value.use_default_disable_mention_notifications_,
+            .disable_mention_notifications = value.disable_mention_notifications_};
+}
+
 TdChat convert_chat(td_api::chat& chat) {
     TdChat converted{.id = chat.id_,
                      .title = std::move(chat.title_),
@@ -649,7 +954,8 @@ TdChat convert_chat(td_api::chat& chat) {
                      .unread_mention_count = chat.unread_mention_count_,
                      .unread_reaction_count = chat.unread_reaction_count_,
                      .unread_poll_vote_count = chat.unread_poll_vote_count_,
-                     .last_message = std::nullopt};
+                     .last_message = std::nullopt,
+                     .notification_settings = std::nullopt};
     converted.positions.reserve(chat.positions_.size());
     for (const auto& position : chat.positions_) {
         if (position == nullptr) {
@@ -665,6 +971,10 @@ TdChat convert_chat(td_api::chat& chat) {
     }
     if (chat.last_message_ != nullptr) {
         converted.last_message = convert_message(*chat.last_message_);
+    }
+    if (chat.notification_settings_ != nullptr) {
+        converted.notification_settings =
+            convert_chat_notification_settings(*chat.notification_settings_);
     }
     if (chat.type_ == nullptr) {
         return converted;
@@ -951,6 +1261,103 @@ TdValue convert_response(NativeObjectPtr object) {
     }
 }
 
+TdValue unexpected_direct_response(const NativeObjectPtr& object) {
+    return TdValue::from(TdDirectConversionError{
+        .tdlib_type_id =
+            object == nullptr ? std::nullopt : std::optional<std::int32_t>{object->get_id()}});
+}
+
+TdValue convert_planning_message_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::message::ID) {
+        return unexpected_direct_response(object);
+    }
+    auto converted = convert_planning_message(static_cast<const td_api::message&>(*object));
+    if (!valid_persistable_message_text(converted.text)) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(std::move(converted));
+}
+
+TdValue convert_write_message_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::message::ID) {
+        return unexpected_direct_response(object);
+    }
+    auto converted = convert_write_message(static_cast<const td_api::message&>(*object));
+    if (!valid_persistable_message_text(converted.text)) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(std::move(converted));
+}
+
+TdValue convert_join_response(const NativeObjectPtr& object) {
+    switch (object->get_id()) {
+    case td_api::chatJoinResultSuccess::ID:
+    case td_api::chatJoinResultRequestSent::ID:
+    case td_api::chatJoinResultGuardBotApprovalRequired::ID:
+    case td_api::chatJoinResultDeclined::ID:
+        return convert_chat_join_result(static_cast<const td_api::ChatJoinResult&>(*object));
+    default:
+        return unexpected_direct_response(object);
+    }
+}
+
+TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object) {
+    if (object == nullptr) {
+        return TdValue::from(TdDirectConversionError{});
+    }
+    if (object->get_id() == td_api::error::ID) {
+        return convert_response(std::move(object));
+    }
+    switch (function) {
+    case TdFunctionKind::GetMessage:
+        return convert_planning_message_response(object);
+    case TdFunctionKind::EditMessageText:
+        return convert_write_message_response(object);
+    case TdFunctionKind::GetMessageProperties:
+        if (object->get_id() == td_api::messageProperties::ID) {
+            return TdValue::from(
+                convert_message_properties(static_cast<const td_api::messageProperties&>(*object)));
+        }
+        return unexpected_direct_response(object);
+    case TdFunctionKind::GetMessageAvailableReactions:
+        if (object->get_id() == td_api::availableReactions::ID) {
+            return convert_message_available_reactions(
+                static_cast<const td_api::availableReactions&>(*object));
+        }
+        return unexpected_direct_response(object);
+    case TdFunctionKind::GetOption:
+        if (object->get_id() == td_api::optionValueInteger::ID) {
+            return TdValue::from(TdOptionInteger{
+                .value = static_cast<const td_api::optionValueInteger&>(*object).value_});
+        }
+        return unexpected_direct_response(object);
+    case TdFunctionKind::ParseTextEntities:
+        if (object->get_id() == td_api::formattedText::ID) {
+            return convert_formatted_text(static_cast<const td_api::formattedText&>(*object));
+        }
+        return unexpected_direct_response(object);
+    case TdFunctionKind::JoinChat:
+    case TdFunctionKind::JoinChatByInviteLink:
+        return convert_join_response(object);
+    case TdFunctionKind::DeleteMessages:
+    case TdFunctionKind::AddMessageReaction:
+    case TdFunctionKind::RemoveMessageReaction:
+    case TdFunctionKind::PinChatMessage:
+    case TdFunctionKind::UnpinChatMessage:
+    case TdFunctionKind::ViewMessages:
+    case TdFunctionKind::SetChatNotificationSettings:
+    case TdFunctionKind::ToggleChatIsPinned:
+    case TdFunctionKind::AddChatToList:
+    case TdFunctionKind::LeaveChat:
+        if (object->get_id() == td_api::ok::ID) {
+            return TdValue::from(TdOk{});
+        }
+        return unexpected_direct_response(object);
+    default:
+        return convert_response(std::move(object));
+    }
+}
+
 bool native_function_matches(const td_api::Function& function, TdFunctionKind kind) {
     switch (kind) {
     case TdFunctionKind::GetAuthorizationState:
@@ -1025,12 +1432,306 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getSupergroupFullInfo::ID;
     case TdFunctionKind::CreatePrivateChat:
         return function.get_id() == td_api::createPrivateChat::ID;
+    case TdFunctionKind::GetMessage:
+        return function.get_id() == td_api::getMessage::ID;
+    case TdFunctionKind::GetMessageProperties:
+        return function.get_id() == td_api::getMessageProperties::ID;
+    case TdFunctionKind::GetMessageAvailableReactions:
+        return function.get_id() == td_api::getMessageAvailableReactions::ID;
+    case TdFunctionKind::ParseTextEntities:
+        return function.get_id() == td_api::parseTextEntities::ID;
+    case TdFunctionKind::EditMessageText:
+        return function.get_id() == td_api::editMessageText::ID;
+    case TdFunctionKind::DeleteMessages:
+        return function.get_id() == td_api::deleteMessages::ID;
+    case TdFunctionKind::AddMessageReaction:
+        return function.get_id() == td_api::addMessageReaction::ID;
+    case TdFunctionKind::RemoveMessageReaction:
+        return function.get_id() == td_api::removeMessageReaction::ID;
+    case TdFunctionKind::PinChatMessage:
+        return function.get_id() == td_api::pinChatMessage::ID;
+    case TdFunctionKind::UnpinChatMessage:
+        return function.get_id() == td_api::unpinChatMessage::ID;
+    case TdFunctionKind::ViewMessages:
+        return function.get_id() == td_api::viewMessages::ID;
+    case TdFunctionKind::SetChatNotificationSettings:
+        return function.get_id() == td_api::setChatNotificationSettings::ID;
+    case TdFunctionKind::ToggleChatIsPinned:
+        return function.get_id() == td_api::toggleChatIsPinned::ID;
+    case TdFunctionKind::AddChatToList:
+        return function.get_id() == td_api::addChatToList::ID;
+    case TdFunctionKind::JoinChat:
+        return function.get_id() == td_api::joinChat::ID;
+    case TdFunctionKind::JoinChatByInviteLink:
+        return function.get_id() == td_api::joinChatByInviteLink::ID;
+    case TdFunctionKind::LeaveChat:
+        return function.get_id() == td_api::leaveChat::ID;
     case TdFunctionKind::LogOut:
         return function.get_id() == td_api::logOut::ID;
     case TdFunctionKind::Close:
         return function.get_id() == td_api::close::ID;
     }
     return false;
+}
+
+void require_direct_ids(std::int64_t chat_id, std::optional<std::int64_t> message_id = {}) {
+    if (!valid_td_chat_id(chat_id) || (message_id && !valid_td_message_id(*message_id))) {
+        throw std::invalid_argument("direct TD request contains an invalid int53 identifier");
+    }
+}
+
+void require_message_ids(std::int64_t chat_id, const std::vector<std::int64_t>& message_ids) {
+    if (!valid_td_chat_id(chat_id) || message_ids.empty() ||
+        !std::ranges::all_of(message_ids, valid_td_message_id)) {
+        throw std::invalid_argument("direct TD request contains invalid message identifiers");
+    }
+}
+
+td_api::object_ptr<td_api::ChatList> make_direct_chat_list(TdDirectChatList list) {
+    switch (list) {
+    case TdDirectChatList::Main:
+        return td_api::make_object<td_api::chatListMain>();
+    case TdDirectChatList::Archive:
+        return td_api::make_object<td_api::chatListArchive>();
+    }
+    throw std::invalid_argument("unsupported direct chat list");
+}
+
+std::string direct_chat_list_name(TdDirectChatList list) {
+    return list == TdDirectChatList::Main ? "main" : "archive";
+}
+
+TdValue make_native_get_message(std::int64_t chat_id, std::int64_t message_id) {
+    require_direct_ids(chat_id, message_id);
+    NativeFunctionPtr native = td_api::make_object<td_api::getMessage>(chat_id, message_id);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetMessage,
+                                            {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+TdValue make_native_get_message_properties(std::int64_t chat_id, std::int64_t message_id) {
+    require_direct_ids(chat_id, message_id);
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::getMessageProperties>(chat_id, message_id);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetMessageProperties,
+                                            {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+TdValue make_native_get_message_available_reactions(std::int64_t chat_id, std::int64_t message_id) {
+    require_direct_ids(chat_id, message_id);
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::getMessageAvailableReactions>(chat_id, message_id, 25);
+    return TdValue::function(
+        std::move(native),
+        TdFunctionData{
+            TdFunctionKind::GetMessageAvailableReactions,
+            {{"chat_id", chat_id}, {"message_id", message_id}, {"row_size", std::int64_t{25}}}});
+}
+
+TdValue make_native_get_unix_time() {
+    NativeFunctionPtr native = td_api::make_object<td_api::getOption>("unix_time");
+    return TdValue::function(
+        std::move(native),
+        TdFunctionData{TdFunctionKind::GetOption, {{"name", std::string{"unix_time"}}}});
+}
+
+TdValue make_native_parse_text_entities(std::string text, TdTextParseMode mode) {
+    td_api::object_ptr<td_api::TextParseMode> parse_mode;
+    std::string mode_name;
+    switch (mode) {
+    case TdTextParseMode::MarkdownV2:
+        parse_mode = td_api::make_object<td_api::textParseModeMarkdown>(2);
+        mode_name = "markdown_v2";
+        break;
+    case TdTextParseMode::Html:
+        parse_mode = td_api::make_object<td_api::textParseModeHTML>();
+        mode_name = "html";
+        break;
+    }
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::parseTextEntities>(text, std::move(parse_mode));
+    return TdValue::function(
+        std::move(native),
+        TdFunctionData{TdFunctionKind::ParseTextEntities,
+                       {{"text", std::move(text)}, {"parse_mode", std::move(mode_name)}}});
+}
+
+TdValue make_native_edit_message_text(TdEditMessageTextRequest request) {
+    require_direct_ids(request.chat_id, request.message_id);
+    auto text = td_api::make_object<td_api::formattedText>(
+        request.text, std::vector<td_api::object_ptr<td_api::textEntity>>{});
+    auto content = td_api::make_object<td_api::inputMessageText>(std::move(text), nullptr, false);
+    NativeFunctionPtr native = td_api::make_object<td_api::editMessageText>(
+        request.chat_id, request.message_id, nullptr, std::move(content));
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::EditMessageText,
+                                            {{"chat_id", request.chat_id},
+                                             {"message_id", request.message_id},
+                                             {"reply_markup_is_null", true},
+                                             {"text", std::move(request.text)},
+                                             {"entities_count", std::int64_t{0}},
+                                             {"link_preview_options_is_null", true},
+                                             {"clear_draft", false}}});
+}
+
+TdValue make_native_delete_messages(TdDeleteMessagesRequest request) {
+    require_message_ids(request.chat_id, request.message_ids);
+    auto descriptor_ids = request.message_ids;
+    NativeFunctionPtr native = td_api::make_object<td_api::deleteMessages>(
+        request.chat_id, std::move(request.message_ids), request.revoke);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::DeleteMessages,
+                                            {{"chat_id", request.chat_id},
+                                             {"message_ids", std::move(descriptor_ids)},
+                                             {"revoke", request.revoke}}});
+}
+
+TdValue make_native_message_reaction(TdMessageReactionRequest request) {
+    require_direct_ids(request.chat_id, request.message_id);
+    if (request.reaction.empty() || (request.remove && request.big)) {
+        throw std::invalid_argument("direct reaction request is invalid");
+    }
+    auto reaction = td_api::make_object<td_api::reactionTypeEmoji>(request.reaction);
+    const auto function =
+        request.remove ? TdFunctionKind::RemoveMessageReaction : TdFunctionKind::AddMessageReaction;
+    NativeFunctionPtr native;
+    std::vector<TdFunctionField> fields{{"chat_id", request.chat_id},
+                                        {"message_id", request.message_id},
+                                        {"reaction", std::move(request.reaction)}};
+    if (request.remove) {
+        native = td_api::make_object<td_api::removeMessageReaction>(
+            request.chat_id, request.message_id, std::move(reaction));
+    } else {
+        native = td_api::make_object<td_api::addMessageReaction>(
+            request.chat_id, request.message_id, std::move(reaction), request.big, true);
+        fields.emplace_back("is_big", request.big);
+        fields.emplace_back("update_recent_reactions", true);
+    }
+    return TdValue::function(std::move(native), TdFunctionData{function, std::move(fields)});
+}
+
+TdValue make_native_pin_message(TdPinMessageRequest request) {
+    require_direct_ids(request.chat_id, request.message_id);
+    const auto function =
+        request.pinned ? TdFunctionKind::PinChatMessage : TdFunctionKind::UnpinChatMessage;
+    NativeFunctionPtr native;
+    std::vector<TdFunctionField> fields{{"chat_id", request.chat_id},
+                                        {"message_id", request.message_id}};
+    if (request.pinned) {
+        native = td_api::make_object<td_api::pinChatMessage>(request.chat_id, request.message_id,
+                                                             false, false);
+        fields.emplace_back("disable_notification", false);
+        fields.emplace_back("only_for_self", false);
+    } else {
+        native = td_api::make_object<td_api::unpinChatMessage>(request.chat_id, request.message_id);
+    }
+    return TdValue::function(std::move(native), TdFunctionData{function, std::move(fields)});
+}
+
+TdValue make_native_view_messages(TdViewMessagesRequest request) {
+    require_message_ids(request.chat_id, request.message_ids);
+    auto descriptor_ids = request.message_ids;
+    NativeFunctionPtr native = td_api::make_object<td_api::viewMessages>(
+        request.chat_id, std::move(request.message_ids), nullptr, true);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::ViewMessages,
+                                            {{"chat_id", request.chat_id},
+                                             {"message_ids", std::move(descriptor_ids)},
+                                             {"source_is_null", true},
+                                             {"force_read", true}}});
+}
+
+std::vector<TdFunctionField>
+describe_notification_settings(const TdSetChatNotificationSettingsRequest& request) {
+    const auto& settings = request.settings;
+    return {{"chat_id", request.chat_id},
+            {"use_default_mute_for", settings.use_default_mute_for},
+            {"mute_for", static_cast<std::int64_t>(settings.mute_for)},
+            {"use_default_sound", settings.use_default_sound},
+            {"sound_id", settings.sound_id},
+            {"use_default_show_preview", settings.use_default_show_preview},
+            {"show_preview", settings.show_preview},
+            {"use_default_mute_stories", settings.use_default_mute_stories},
+            {"mute_stories", settings.mute_stories},
+            {"use_default_story_sound", settings.use_default_story_sound},
+            {"story_sound_id", settings.story_sound_id},
+            {"use_default_show_story_poster", settings.use_default_show_story_poster},
+            {"show_story_poster", settings.show_story_poster},
+            {"use_default_disable_pinned_message_notifications",
+             settings.use_default_disable_pinned_message_notifications},
+            {"disable_pinned_message_notifications", settings.disable_pinned_message_notifications},
+            {"use_default_disable_mention_notifications",
+             settings.use_default_disable_mention_notifications},
+            {"disable_mention_notifications", settings.disable_mention_notifications}};
+}
+
+TdValue make_native_set_chat_notification_settings(TdSetChatNotificationSettingsRequest request) {
+    require_direct_ids(request.chat_id);
+    const auto& value = request.settings;
+    auto settings = td_api::make_object<td_api::chatNotificationSettings>(
+        value.use_default_mute_for, value.mute_for, value.use_default_sound, value.sound_id,
+        value.use_default_show_preview, value.show_preview, value.use_default_mute_stories,
+        value.mute_stories, value.use_default_story_sound, value.story_sound_id,
+        value.use_default_show_story_poster, value.show_story_poster,
+        value.use_default_disable_pinned_message_notifications,
+        value.disable_pinned_message_notifications, value.use_default_disable_mention_notifications,
+        value.disable_mention_notifications);
+    NativeFunctionPtr native = td_api::make_object<td_api::setChatNotificationSettings>(
+        request.chat_id, std::move(settings));
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::SetChatNotificationSettings,
+                                            describe_notification_settings(request)});
+}
+
+TdValue make_native_toggle_chat_is_pinned(TdToggleChatIsPinnedRequest request) {
+    require_direct_ids(request.chat_id);
+    auto list = make_direct_chat_list(request.list);
+    NativeFunctionPtr native = td_api::make_object<td_api::toggleChatIsPinned>(
+        std::move(list), request.chat_id, request.pinned);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::ToggleChatIsPinned,
+                                            {{"chat_list", direct_chat_list_name(request.list)},
+                                             {"chat_id", request.chat_id},
+                                             {"is_pinned", request.pinned}}});
+}
+
+TdValue make_native_add_chat_to_list(TdAddChatToListRequest request) {
+    require_direct_ids(request.chat_id);
+    auto list = make_direct_chat_list(request.list);
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::addChatToList>(request.chat_id, std::move(list));
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::AddChatToList,
+                                            {{"chat_id", request.chat_id},
+                                             {"chat_list", direct_chat_list_name(request.list)}}});
+}
+
+TdValue make_native_join_chat(TdJoinChatRequest request) {
+    const bool by_id = request.chat_id.has_value();
+    const bool by_invite = request.invite_link.has_value();
+    if (by_id == by_invite || (by_id && !valid_td_chat_id(*request.chat_id)) ||
+        (by_invite && request.invite_link->empty())) {
+        throw std::invalid_argument("join request must contain exactly one valid source");
+    }
+    if (by_id) {
+        NativeFunctionPtr native = td_api::make_object<td_api::joinChat>(*request.chat_id);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::JoinChat, {{"chat_id", *request.chat_id}}});
+    }
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::joinChatByInviteLink>(*request.invite_link);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::JoinChatByInviteLink,
+                                            {{"invite_link", std::move(*request.invite_link)}}});
+}
+
+TdValue make_native_leave_chat(TdLeaveChatRequest request) {
+    require_direct_ids(request.chat_id);
+    NativeFunctionPtr native = td_api::make_object<td_api::leaveChat>(request.chat_id);
+    return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::LeaveChat,
+                                                               {{"chat_id", request.chat_id}}});
 }
 
 void enforce_error_verbosity() {
@@ -1579,6 +2280,68 @@ class ProductionTdRuntime final : public TdRuntime {
                                                 {{"user_id", user_id}, {"force", force}}});
     }
 
+    TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) override {
+        return make_native_get_message(chat_id, message_id);
+    }
+
+    TdValue make_get_message_properties(std::int64_t chat_id, std::int64_t message_id) override {
+        return make_native_get_message_properties(chat_id, message_id);
+    }
+
+    TdValue make_get_message_available_reactions(std::int64_t chat_id,
+                                                 std::int64_t message_id) override {
+        return make_native_get_message_available_reactions(chat_id, message_id);
+    }
+
+    TdValue make_get_unix_time() override {
+        return make_native_get_unix_time();
+    }
+
+    TdValue make_parse_text_entities(std::string text, TdTextParseMode mode) override {
+        return make_native_parse_text_entities(std::move(text), mode);
+    }
+
+    TdValue make_edit_message_text(TdEditMessageTextRequest request) override {
+        return make_native_edit_message_text(std::move(request));
+    }
+
+    TdValue make_delete_messages(TdDeleteMessagesRequest request) override {
+        return make_native_delete_messages(std::move(request));
+    }
+
+    TdValue make_message_reaction(TdMessageReactionRequest request) override {
+        return make_native_message_reaction(std::move(request));
+    }
+
+    TdValue make_pin_message(TdPinMessageRequest request) override {
+        return make_native_pin_message(request);
+    }
+
+    TdValue make_view_messages(TdViewMessagesRequest request) override {
+        return make_native_view_messages(std::move(request));
+    }
+
+    TdValue
+    make_set_chat_notification_settings(TdSetChatNotificationSettingsRequest request) override {
+        return make_native_set_chat_notification_settings(request);
+    }
+
+    TdValue make_toggle_chat_is_pinned(TdToggleChatIsPinnedRequest request) override {
+        return make_native_toggle_chat_is_pinned(request);
+    }
+
+    TdValue make_add_chat_to_list(TdAddChatToListRequest request) override {
+        return make_native_add_chat_to_list(request);
+    }
+
+    TdValue make_join_chat(TdJoinChatRequest request) override {
+        return make_native_join_chat(std::move(request));
+    }
+
+    TdValue make_leave_chat(TdLeaveChatRequest request) override {
+        return make_native_leave_chat(request);
+    }
+
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               TdValue function) override {
         static_cast<void>(client_generation);
@@ -1594,11 +2357,33 @@ class ProductionTdRuntime final : public TdRuntime {
         }
         const bool is_authorization_state_query =
             (*native_function)->get_id() == td_api::getAuthorizationState::ID;
-        if (is_authorization_state_query) {
+        {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
-            authorization_queries_[client_id].insert(query_id);
+            response_functions_[client_id].insert_or_assign(query_id, *function_kind);
+            if (is_authorization_state_query) {
+                authorization_queries_[client_id].insert(query_id);
+            }
         }
-        manager_->send(client_id, query_id, std::move(*native_function));
+        try {
+            manager_->send(client_id, query_id, std::move(*native_function));
+        } catch (...) {
+            const std::lock_guard<std::mutex> lock(generations_mutex_);
+            const auto functions = response_functions_.find(client_id);
+            if (functions != response_functions_.end()) {
+                functions->second.erase(query_id);
+                if (functions->second.empty()) {
+                    response_functions_.erase(functions);
+                }
+            }
+            const auto authorization = authorization_queries_.find(client_id);
+            if (authorization != authorization_queries_.end()) {
+                authorization->second.erase(query_id);
+                if (authorization->second.empty()) {
+                    authorization_queries_.erase(authorization);
+                }
+            }
+            throw;
+        }
     }
 
     std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override {
@@ -1609,6 +2394,7 @@ class ProductionTdRuntime final : public TdRuntime {
 
         std::uint64_t generation = 0;
         bool authorization_state_response = false;
+        std::optional<TdFunctionKind> response_function;
         {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
             const auto it = generations_.find(response.client_id);
@@ -1616,6 +2402,17 @@ class ProductionTdRuntime final : public TdRuntime {
                 return std::nullopt;
             }
             generation = it->second;
+            const auto functions = response_functions_.find(response.client_id);
+            if (functions != response_functions_.end()) {
+                const auto function = functions->second.find(response.request_id);
+                if (function != functions->second.end()) {
+                    response_function = function->second;
+                    functions->second.erase(function);
+                }
+                if (functions->second.empty()) {
+                    response_functions_.erase(functions);
+                }
+            }
             const auto queries = authorization_queries_.find(response.client_id);
             if (queries != authorization_queries_.end()) {
                 authorization_state_response = queries->second.erase(response.request_id) != 0;
@@ -1631,12 +2428,16 @@ class ProductionTdRuntime final : public TdRuntime {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
             generations_.erase(response.client_id);
             authorization_queries_.erase(response.client_id);
+            response_functions_.erase(response.client_id);
         }
-        return TdRuntimeEvent{.client_id = response.client_id,
-                              .client_generation = generation,
-                              .query_id = response.request_id,
-                              .object = convert_response(std::move(response.object)),
-                              .authorization_state = std::move(authorization_state)};
+        return TdRuntimeEvent{
+            .client_id = response.client_id,
+            .client_generation = generation,
+            .query_id = response.request_id,
+            .object = response_function
+                          ? convert_response_for(*response_function, std::move(response.object))
+                          : convert_response(std::move(response.object)),
+            .authorization_state = std::move(authorization_state)};
     }
 
   private:
@@ -1645,6 +2446,8 @@ class ProductionTdRuntime final : public TdRuntime {
     std::mutex generations_mutex_;
     std::unordered_map<std::int32_t, std::uint64_t> generations_;
     std::unordered_map<std::int32_t, std::unordered_set<std::uint64_t>> authorization_queries_;
+    std::unordered_map<std::int32_t, std::unordered_map<std::uint64_t, TdFunctionKind>>
+        response_functions_;
 };
 
 } // namespace
@@ -1735,6 +2538,66 @@ TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int
                                                   bool in_message_thread) {
     return make_native_get_message_link(chat_id, message_id, media_timestamp, checklist_task_id,
                                         std::move(poll_option_id), for_album, in_message_thread);
+}
+
+TdValue make_production_get_message_for_test(std::int64_t chat_id, std::int64_t message_id) {
+    return make_native_get_message(chat_id, message_id);
+}
+
+TdValue make_production_get_message_properties_for_test(std::int64_t chat_id,
+                                                        std::int64_t message_id) {
+    return make_native_get_message_properties(chat_id, message_id);
+}
+
+TdValue make_production_get_message_available_reactions_for_test(std::int64_t chat_id,
+                                                                 std::int64_t message_id) {
+    return make_native_get_message_available_reactions(chat_id, message_id);
+}
+
+TdValue make_production_get_unix_time_for_test() {
+    return make_native_get_unix_time();
+}
+
+TdValue make_production_parse_text_entities_for_test(std::string text, TdTextParseMode mode) {
+    return make_native_parse_text_entities(std::move(text), mode);
+}
+
+TdValue make_production_direct_request_for_test(const TdDirectRequest& request) {
+    return std::visit(
+        [](const auto& value) {
+            using Request = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<Request, TdEditMessageTextRequest>) {
+                return make_native_edit_message_text(value);
+            } else if constexpr (std::is_same_v<Request, TdDeleteMessagesRequest>) {
+                return make_native_delete_messages(value);
+            } else if constexpr (std::is_same_v<Request, TdMessageReactionRequest>) {
+                return make_native_message_reaction(value);
+            } else if constexpr (std::is_same_v<Request, TdPinMessageRequest>) {
+                return make_native_pin_message(value);
+            } else if constexpr (std::is_same_v<Request, TdViewMessagesRequest>) {
+                return make_native_view_messages(value);
+            } else if constexpr (std::is_same_v<Request, TdSetChatNotificationSettingsRequest>) {
+                return make_native_set_chat_notification_settings(value);
+            } else if constexpr (std::is_same_v<Request, TdToggleChatIsPinnedRequest>) {
+                return make_native_toggle_chat_is_pinned(value);
+            } else if constexpr (std::is_same_v<Request, TdAddChatToListRequest>) {
+                return make_native_add_chat_to_list(value);
+            } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
+                return make_native_join_chat(value);
+            } else {
+                static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
+                return make_native_leave_chat(value);
+            }
+        },
+        request);
+}
+
+TdValue convert_production_direct_response_for_test(TdFunctionKind function, TdValue object) {
+    auto* native = object.get_if<NativeObjectPtr>();
+    if (native == nullptr) {
+        return TdValue::from(TdDirectConversionError{});
+    }
+    return convert_response_for(function, std::move(*native));
 }
 
 bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind) {
@@ -1874,6 +2737,235 @@ bool production_get_message_link_matches_for_test(const TdValue& function, std::
            request.checklist_task_id_ == checklist_task_id &&
            request.poll_option_id_ == poll_option_id && request.for_album_ == for_album &&
            request.in_message_thread_ == in_message_thread;
+}
+
+bool production_get_message_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                             std::int64_t message_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr || (*native)->get_id() != td_api::getMessage::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessage&>(**native);
+    return request.chat_id_ == chat_id && request.message_id_ == message_id;
+}
+
+bool production_get_message_properties_matches_for_test(const TdValue& function,
+                                                        std::int64_t chat_id,
+                                                        std::int64_t message_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getMessageProperties::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessageProperties&>(**native);
+    return request.chat_id_ == chat_id && request.message_id_ == message_id;
+}
+
+bool production_get_message_available_reactions_matches_for_test(const TdValue& function,
+                                                                 std::int64_t chat_id,
+                                                                 std::int64_t message_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getMessageAvailableReactions::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getMessageAvailableReactions&>(**native);
+    return request.chat_id_ == chat_id && request.message_id_ == message_id &&
+           request.row_size_ == 25;
+}
+
+bool production_get_unix_time_matches_for_test(const TdValue& function) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    return native != nullptr && *native != nullptr &&
+           (*native)->get_id() == td_api::getOption::ID &&
+           static_cast<const td_api::getOption&>(**native).name_ == "unix_time";
+}
+
+bool production_parse_text_entities_matches_for_test(const TdValue& function, std::string_view text,
+                                                     TdTextParseMode mode) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::parseTextEntities::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::parseTextEntities&>(**native);
+    if (request.text_ != text || request.parse_mode_ == nullptr) {
+        return false;
+    }
+    if (mode == TdTextParseMode::Html) {
+        return request.parse_mode_->get_id() == td_api::textParseModeHTML::ID;
+    }
+    return request.parse_mode_->get_id() == td_api::textParseModeMarkdown::ID &&
+           static_cast<const td_api::textParseModeMarkdown&>(*request.parse_mode_).version_ == 2;
+}
+
+bool native_direct_chat_list_matches(const td_api::ChatList* list, TdDirectChatList expected) {
+    return list != nullptr &&
+           ((expected == TdDirectChatList::Main && list->get_id() == td_api::chatListMain::ID) ||
+            (expected == TdDirectChatList::Archive &&
+             list->get_id() == td_api::chatListArchive::ID));
+}
+
+bool native_emoji_reaction_matches(const td_api::ReactionType* reaction,
+                                   std::string_view expected) {
+    return reaction != nullptr && reaction->get_id() == td_api::reactionTypeEmoji::ID &&
+           static_cast<const td_api::reactionTypeEmoji&>(*reaction).emoji_ == expected;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdEditMessageTextRequest& expected) {
+    if (function.get_id() != td_api::editMessageText::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::editMessageText&>(function);
+    if (actual.chat_id_ != expected.chat_id || actual.message_id_ != expected.message_id ||
+        actual.reply_markup_ != nullptr || actual.input_message_content_ == nullptr ||
+        actual.input_message_content_->get_id() != td_api::inputMessageText::ID) {
+        return false;
+    }
+    const auto& content =
+        static_cast<const td_api::inputMessageText&>(*actual.input_message_content_);
+    return content.text_ != nullptr && content.text_->text_ == expected.text &&
+           content.text_->entities_.empty() && content.link_preview_options_ == nullptr &&
+           !content.clear_draft_;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdDeleteMessagesRequest& expected) {
+    if (function.get_id() != td_api::deleteMessages::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::deleteMessages&>(function);
+    return actual.chat_id_ == expected.chat_id && actual.message_ids_ == expected.message_ids &&
+           actual.revoke_ == expected.revoke;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdMessageReactionRequest& expected) {
+    if (expected.remove) {
+        if (function.get_id() != td_api::removeMessageReaction::ID) {
+            return false;
+        }
+        const auto& actual = static_cast<const td_api::removeMessageReaction&>(function);
+        return actual.chat_id_ == expected.chat_id && actual.message_id_ == expected.message_id &&
+               native_emoji_reaction_matches(actual.reaction_type_.get(), expected.reaction);
+    }
+    if (function.get_id() != td_api::addMessageReaction::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::addMessageReaction&>(function);
+    return actual.chat_id_ == expected.chat_id && actual.message_id_ == expected.message_id &&
+           native_emoji_reaction_matches(actual.reaction_type_.get(), expected.reaction) &&
+           actual.is_big_ == expected.big && actual.update_recent_reactions_;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdPinMessageRequest& expected) {
+    if (expected.pinned) {
+        if (function.get_id() != td_api::pinChatMessage::ID) {
+            return false;
+        }
+        const auto& actual = static_cast<const td_api::pinChatMessage&>(function);
+        return actual.chat_id_ == expected.chat_id && actual.message_id_ == expected.message_id &&
+               !actual.disable_notification_ && !actual.only_for_self_;
+    }
+    if (function.get_id() != td_api::unpinChatMessage::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::unpinChatMessage&>(function);
+    return actual.chat_id_ == expected.chat_id && actual.message_id_ == expected.message_id;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdViewMessagesRequest& expected) {
+    if (function.get_id() != td_api::viewMessages::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::viewMessages&>(function);
+    return actual.chat_id_ == expected.chat_id && actual.message_ids_ == expected.message_ids &&
+           actual.source_ == nullptr && actual.force_read_;
+}
+
+bool native_notification_settings_match(const td_api::chatNotificationSettings& actual,
+                                        const TdChatNotificationSettings& expected) {
+    return actual.use_default_mute_for_ == expected.use_default_mute_for &&
+           actual.mute_for_ == expected.mute_for &&
+           actual.use_default_sound_ == expected.use_default_sound &&
+           actual.sound_id_ == expected.sound_id &&
+           actual.use_default_show_preview_ == expected.use_default_show_preview &&
+           actual.show_preview_ == expected.show_preview &&
+           actual.use_default_mute_stories_ == expected.use_default_mute_stories &&
+           actual.mute_stories_ == expected.mute_stories &&
+           actual.use_default_story_sound_ == expected.use_default_story_sound &&
+           actual.story_sound_id_ == expected.story_sound_id &&
+           actual.use_default_show_story_poster_ == expected.use_default_show_story_poster &&
+           actual.show_story_poster_ == expected.show_story_poster &&
+           actual.use_default_disable_pinned_message_notifications_ ==
+               expected.use_default_disable_pinned_message_notifications &&
+           actual.disable_pinned_message_notifications_ ==
+               expected.disable_pinned_message_notifications &&
+           actual.use_default_disable_mention_notifications_ ==
+               expected.use_default_disable_mention_notifications &&
+           actual.disable_mention_notifications_ == expected.disable_mention_notifications;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdSetChatNotificationSettingsRequest& expected) {
+    if (function.get_id() != td_api::setChatNotificationSettings::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::setChatNotificationSettings&>(function);
+    return actual.chat_id_ == expected.chat_id && actual.notification_settings_ != nullptr &&
+           native_notification_settings_match(*actual.notification_settings_, expected.settings);
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdToggleChatIsPinnedRequest& expected) {
+    if (function.get_id() != td_api::toggleChatIsPinned::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::toggleChatIsPinned&>(function);
+    return native_direct_chat_list_matches(actual.chat_list_.get(), expected.list) &&
+           actual.chat_id_ == expected.chat_id && actual.is_pinned_ == expected.pinned;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdAddChatToListRequest& expected) {
+    if (function.get_id() != td_api::addChatToList::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::addChatToList&>(function);
+    return actual.chat_id_ == expected.chat_id &&
+           native_direct_chat_list_matches(actual.chat_list_.get(), expected.list);
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdJoinChatRequest& expected) {
+    if (expected.chat_id.has_value()) {
+        return function.get_id() == td_api::joinChat::ID &&
+               static_cast<const td_api::joinChat&>(function).chat_id_ ==
+                   expected.chat_id.value_or(0);
+    }
+    return function.get_id() == td_api::joinChatByInviteLink::ID &&
+           static_cast<const td_api::joinChatByInviteLink&>(function).invite_link_ ==
+               expected.invite_link.value_or(std::string{});
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdLeaveChatRequest& expected) {
+    return function.get_id() == td_api::leaveChat::ID &&
+           static_cast<const td_api::leaveChat&>(function).chat_id_ == expected.chat_id;
+}
+
+bool production_direct_request_matches_for_test(const TdValue& function,
+                                                const TdDirectRequest& request) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr) {
+        return false;
+    }
+    return std::visit(
+        [&](const auto& expected) { return native_direct_request_matches(**native, expected); },
+        request);
 }
 
 std::optional<AuthStateData>

@@ -319,6 +319,166 @@ core::TdValue ScriptedTdRuntime::make_create_private_chat(std::int64_t user_id, 
         core::TdFunctionKind::CreatePrivateChat, {{"user_id", user_id}, {"force", force}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_message(std::int64_t chat_id, std::int64_t message_id) {
+    before_make(core::TdFunctionKind::GetMessage);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetMessage, {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_message_properties(std::int64_t chat_id,
+                                                             std::int64_t message_id) {
+    before_make(core::TdFunctionKind::GetMessageProperties);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetMessageProperties,
+                             {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_message_available_reactions(std::int64_t chat_id,
+                                                                      std::int64_t message_id) {
+    before_make(core::TdFunctionKind::GetMessageAvailableReactions);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetMessageAvailableReactions,
+        {{"chat_id", chat_id}, {"message_id", message_id}, {"row_size", std::int64_t{25}}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_unix_time() {
+    before_make(core::TdFunctionKind::GetOption);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetOption, {{"name", std::string{"unix_time"}}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_parse_text_entities(std::string text,
+                                                          core::TdTextParseMode mode) {
+    before_make(core::TdFunctionKind::ParseTextEntities);
+    const auto mode_name = mode == core::TdTextParseMode::MarkdownV2 ? "markdown_v2" : "html";
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::ParseTextEntities,
+                             {{"text", std::move(text)}, {"parse_mode", std::string{mode_name}}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_edit_message_text(core::TdEditMessageTextRequest request) {
+    before_make(core::TdFunctionKind::EditMessageText);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::EditMessageText,
+                             {{"chat_id", request.chat_id},
+                              {"message_id", request.message_id},
+                              {"reply_markup_is_null", true},
+                              {"text", std::move(request.text)},
+                              {"entities_count", std::int64_t{0}},
+                              {"link_preview_options_is_null", true},
+                              {"clear_draft", false}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_delete_messages(core::TdDeleteMessagesRequest request) {
+    before_make(core::TdFunctionKind::DeleteMessages);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::DeleteMessages,
+                             {{"chat_id", request.chat_id},
+                              {"message_ids", std::move(request.message_ids)},
+                              {"revoke", request.revoke}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_message_reaction(core::TdMessageReactionRequest request) {
+    const auto function = request.remove ? core::TdFunctionKind::RemoveMessageReaction
+                                         : core::TdFunctionKind::AddMessageReaction;
+    before_make(function);
+    std::vector<core::TdFunctionField> fields{{"chat_id", request.chat_id},
+                                              {"message_id", request.message_id},
+                                              {"reaction", std::move(request.reaction)}};
+    if (!request.remove) {
+        fields.emplace_back("is_big", request.big);
+        fields.emplace_back("update_recent_reactions", true);
+    }
+    return core::TdValue::scripted_function(core::TdFunctionData{function, std::move(fields)});
+}
+
+core::TdValue ScriptedTdRuntime::make_pin_message(core::TdPinMessageRequest request) {
+    const auto function = request.pinned ? core::TdFunctionKind::PinChatMessage
+                                         : core::TdFunctionKind::UnpinChatMessage;
+    before_make(function);
+    std::vector<core::TdFunctionField> fields{{"chat_id", request.chat_id},
+                                              {"message_id", request.message_id}};
+    if (request.pinned) {
+        fields.emplace_back("disable_notification", false);
+        fields.emplace_back("only_for_self", false);
+    }
+    return core::TdValue::scripted_function(core::TdFunctionData{function, std::move(fields)});
+}
+
+core::TdValue ScriptedTdRuntime::make_view_messages(core::TdViewMessagesRequest request) {
+    before_make(core::TdFunctionKind::ViewMessages);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::ViewMessages,
+                             {{"chat_id", request.chat_id},
+                              {"message_ids", std::move(request.message_ids)},
+                              {"source_is_null", true},
+                              {"force_read", true}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_set_chat_notification_settings(
+    core::TdSetChatNotificationSettingsRequest request) {
+    before_make(core::TdFunctionKind::SetChatNotificationSettings);
+    const auto& settings = request.settings;
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::SetChatNotificationSettings,
+        {{"chat_id", request.chat_id},
+         {"use_default_mute_for", settings.use_default_mute_for},
+         {"mute_for", static_cast<std::int64_t>(settings.mute_for)},
+         {"use_default_sound", settings.use_default_sound},
+         {"sound_id", settings.sound_id},
+         {"use_default_show_preview", settings.use_default_show_preview},
+         {"show_preview", settings.show_preview},
+         {"use_default_mute_stories", settings.use_default_mute_stories},
+         {"mute_stories", settings.mute_stories},
+         {"use_default_story_sound", settings.use_default_story_sound},
+         {"story_sound_id", settings.story_sound_id},
+         {"use_default_show_story_poster", settings.use_default_show_story_poster},
+         {"show_story_poster", settings.show_story_poster},
+         {"use_default_disable_pinned_message_notifications",
+          settings.use_default_disable_pinned_message_notifications},
+         {"disable_pinned_message_notifications", settings.disable_pinned_message_notifications},
+         {"use_default_disable_mention_notifications",
+          settings.use_default_disable_mention_notifications},
+         {"disable_mention_notifications", settings.disable_mention_notifications}}});
+}
+
+core::TdValue
+ScriptedTdRuntime::make_toggle_chat_is_pinned(core::TdToggleChatIsPinnedRequest request) {
+    before_make(core::TdFunctionKind::ToggleChatIsPinned);
+    const auto list = request.list == core::TdDirectChatList::Main ? "main" : "archive";
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::ToggleChatIsPinned,
+                             {{"chat_list", std::string{list}},
+                              {"chat_id", request.chat_id},
+                              {"is_pinned", request.pinned}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_add_chat_to_list(core::TdAddChatToListRequest request) {
+    before_make(core::TdFunctionKind::AddChatToList);
+    const auto list = request.list == core::TdDirectChatList::Main ? "main" : "archive";
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::AddChatToList,
+                             {{"chat_id", request.chat_id}, {"chat_list", std::string{list}}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_join_chat(core::TdJoinChatRequest request) {
+    if (request.chat_id.has_value()) {
+        before_make(core::TdFunctionKind::JoinChat);
+        return core::TdValue::scripted_function(
+            core::TdFunctionData{core::TdFunctionKind::JoinChat, {{"chat_id", *request.chat_id}}});
+    }
+    before_make(core::TdFunctionKind::JoinChatByInviteLink);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::JoinChatByInviteLink,
+                             {{"invite_link", std::move(*request.invite_link)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_leave_chat(core::TdLeaveChatRequest request) {
+    before_make(core::TdFunctionKind::LeaveChat);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::LeaveChat, {{"chat_id", request.chat_id}}});
+}
+
 void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_generation,
                              std::uint64_t query_id, core::TdValue function) {
     if (!function.function_data().has_value()) {

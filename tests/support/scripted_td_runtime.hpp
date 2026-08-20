@@ -80,6 +80,24 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_get_supergroup(std::int64_t supergroup_id) override;
     core::TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) override;
     core::TdValue make_create_private_chat(std::int64_t user_id, bool force) override;
+    core::TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) override;
+    core::TdValue make_get_message_properties(std::int64_t chat_id,
+                                              std::int64_t message_id) override;
+    core::TdValue make_get_message_available_reactions(std::int64_t chat_id,
+                                                       std::int64_t message_id) override;
+    core::TdValue make_get_unix_time() override;
+    core::TdValue make_parse_text_entities(std::string text, core::TdTextParseMode mode) override;
+    core::TdValue make_edit_message_text(core::TdEditMessageTextRequest request) override;
+    core::TdValue make_delete_messages(core::TdDeleteMessagesRequest request) override;
+    core::TdValue make_message_reaction(core::TdMessageReactionRequest request) override;
+    core::TdValue make_pin_message(core::TdPinMessageRequest request) override;
+    core::TdValue make_view_messages(core::TdViewMessagesRequest request) override;
+    core::TdValue make_set_chat_notification_settings(
+        core::TdSetChatNotificationSettingsRequest request) override;
+    core::TdValue make_toggle_chat_is_pinned(core::TdToggleChatIsPinnedRequest request) override;
+    core::TdValue make_add_chat_to_list(core::TdAddChatToListRequest request) override;
+    core::TdValue make_join_chat(core::TdJoinChatRequest request) override;
+    core::TdValue make_leave_chat(core::TdLeaveChatRequest request) override;
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
               core::TdValue function) override;
     std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;

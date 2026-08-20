@@ -41,6 +41,15 @@ TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int
                                                   std::int32_t checklist_task_id,
                                                   std::string poll_option_id, bool for_album,
                                                   bool in_message_thread);
+TdValue make_production_get_message_for_test(std::int64_t chat_id, std::int64_t message_id);
+TdValue make_production_get_message_properties_for_test(std::int64_t chat_id,
+                                                        std::int64_t message_id);
+TdValue make_production_get_message_available_reactions_for_test(std::int64_t chat_id,
+                                                                 std::int64_t message_id);
+TdValue make_production_get_unix_time_for_test();
+TdValue make_production_parse_text_entities_for_test(std::string text, TdTextParseMode mode);
+TdValue make_production_direct_request_for_test(const TdDirectRequest& request);
+TdValue convert_production_direct_response_for_test(TdFunctionKind function, TdValue object);
 bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind);
 bool production_get_chat_history_matches_for_test(const TdValue& function, std::int64_t chat_id,
                                                   std::int64_t from_message_id, std::int32_t offset,
@@ -74,6 +83,19 @@ bool production_get_message_link_matches_for_test(const TdValue& function, std::
                                                   std::int32_t checklist_task_id,
                                                   std::string_view poll_option_id, bool for_album,
                                                   bool in_message_thread);
+bool production_get_message_matches_for_test(const TdValue& function, std::int64_t chat_id,
+                                             std::int64_t message_id);
+bool production_get_message_properties_matches_for_test(const TdValue& function,
+                                                        std::int64_t chat_id,
+                                                        std::int64_t message_id);
+bool production_get_message_available_reactions_matches_for_test(const TdValue& function,
+                                                                 std::int64_t chat_id,
+                                                                 std::int64_t message_id);
+bool production_get_unix_time_matches_for_test(const TdValue& function);
+bool production_parse_text_entities_matches_for_test(const TdValue& function, std::string_view text,
+                                                     TdTextParseMode mode);
+bool production_direct_request_matches_for_test(const TdValue& function,
+                                                const TdDirectRequest& request);
 
 std::optional<AuthStateData>
 convert_production_authorization_state_for_test(const TdValue& object,

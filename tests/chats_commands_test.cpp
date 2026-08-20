@@ -201,7 +201,8 @@ tgcli::core::TdChat chat(std::int64_t id, std::int64_t order, tgcli::core::TdCha
             .unread_mention_count = 0,
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
-            .last_message = std::nullopt};
+            .last_message = std::nullopt,
+            .notification_settings = std::nullopt};
 }
 
 tgcli::proto::Request chats_request(std::optional<std::int32_t> folder = std::nullopt,

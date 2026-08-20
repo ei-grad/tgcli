@@ -58,7 +58,25 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetSupergroup:
     case TdFunctionKind::GetSupergroupFullInfo:
     case TdFunctionKind::CreatePrivateChat:
+    case TdFunctionKind::GetMessage:
+    case TdFunctionKind::GetMessageProperties:
+    case TdFunctionKind::GetMessageAvailableReactions:
+    case TdFunctionKind::ParseTextEntities:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
+    case TdFunctionKind::EditMessageText:
+    case TdFunctionKind::AddMessageReaction:
+    case TdFunctionKind::RemoveMessageReaction:
+    case TdFunctionKind::PinChatMessage:
+    case TdFunctionKind::UnpinChatMessage:
+    case TdFunctionKind::ViewMessages:
+    case TdFunctionKind::SetChatNotificationSettings:
+    case TdFunctionKind::ToggleChatIsPinned:
+    case TdFunctionKind::AddChatToList:
+    case TdFunctionKind::JoinChat:
+    case TdFunctionKind::JoinChatByInviteLink:
+        return {DescriptorKind::Write, AuthState::Ready, TdOwnerKind::Request};
+    case TdFunctionKind::DeleteMessages:
+    case TdFunctionKind::LeaveChat:
     case TdFunctionKind::TerminateSession:
     case TdFunctionKind::LogOut:
         return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request};

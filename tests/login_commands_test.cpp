@@ -411,6 +411,23 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetSupergroup:
     case core::TdFunctionKind::GetSupergroupFullInfo:
     case core::TdFunctionKind::CreatePrivateChat:
+    case core::TdFunctionKind::GetMessage:
+    case core::TdFunctionKind::GetMessageProperties:
+    case core::TdFunctionKind::GetMessageAvailableReactions:
+    case core::TdFunctionKind::ParseTextEntities:
+    case core::TdFunctionKind::EditMessageText:
+    case core::TdFunctionKind::DeleteMessages:
+    case core::TdFunctionKind::AddMessageReaction:
+    case core::TdFunctionKind::RemoveMessageReaction:
+    case core::TdFunctionKind::PinChatMessage:
+    case core::TdFunctionKind::UnpinChatMessage:
+    case core::TdFunctionKind::ViewMessages:
+    case core::TdFunctionKind::SetChatNotificationSettings:
+    case core::TdFunctionKind::ToggleChatIsPinned:
+    case core::TdFunctionKind::AddChatToList:
+    case core::TdFunctionKind::JoinChat:
+    case core::TdFunctionKind::JoinChatByInviteLink:
+    case core::TdFunctionKind::LeaveChat:
     case core::TdFunctionKind::LogOut:
     case core::TdFunctionKind::Close:
         break;

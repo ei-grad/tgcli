@@ -312,17 +312,35 @@ TEST_CASE("read functions require Ready in every authorization state",
             .data = core::AuthStateData{state},
             .receive_observed_at = std::nullopt,
         };
-        for (const auto function :
-             {core::TdFunctionKind::GetOption, core::TdFunctionKind::GetMe,
-              core::TdFunctionKind::GetSavedMessagesTags, core::TdFunctionKind::SearchSavedMessages,
-              core::TdFunctionKind::GetActiveSessions, core::TdFunctionKind::GetChat,
-              core::TdFunctionKind::GetMessages, core::TdFunctionKind::GetMessageLink,
-              core::TdFunctionKind::GetChats, core::TdFunctionKind::LoadChats,
-              core::TdFunctionKind::SearchPublicChat, core::TdFunctionKind::GetInternalLinkType,
-              core::TdFunctionKind::GetMessageLinkInfo, core::TdFunctionKind::CheckChatInviteLink,
-              core::TdFunctionKind::GetUser, core::TdFunctionKind::GetSupergroup,
-              core::TdFunctionKind::GetSupergroupFullInfo,
-              core::TdFunctionKind::CreatePrivateChat}) {
+        for (const auto function : {core::TdFunctionKind::GetOption,
+                                    core::TdFunctionKind::GetMe,
+                                    core::TdFunctionKind::GetSavedMessagesTags,
+                                    core::TdFunctionKind::SearchSavedMessages,
+                                    core::TdFunctionKind::GetActiveSessions,
+                                    core::TdFunctionKind::GetChat,
+                                    core::TdFunctionKind::GetChatHistory,
+                                    core::TdFunctionKind::GetChatMessageByDate,
+                                    core::TdFunctionKind::GetMessageThread,
+                                    core::TdFunctionKind::GetForumTopicHistory,
+                                    core::TdFunctionKind::GetMessageThreadHistory,
+                                    core::TdFunctionKind::GetDirectMessagesChatTopicHistory,
+                                    core::TdFunctionKind::GetSavedMessagesTopicHistory,
+                                    core::TdFunctionKind::GetMessages,
+                                    core::TdFunctionKind::GetMessageLink,
+                                    core::TdFunctionKind::GetChats,
+                                    core::TdFunctionKind::LoadChats,
+                                    core::TdFunctionKind::SearchPublicChat,
+                                    core::TdFunctionKind::GetInternalLinkType,
+                                    core::TdFunctionKind::GetMessageLinkInfo,
+                                    core::TdFunctionKind::CheckChatInviteLink,
+                                    core::TdFunctionKind::GetUser,
+                                    core::TdFunctionKind::GetSupergroup,
+                                    core::TdFunctionKind::GetSupergroupFullInfo,
+                                    core::TdFunctionKind::CreatePrivateChat,
+                                    core::TdFunctionKind::GetMessage,
+                                    core::TdFunctionKind::GetMessageProperties,
+                                    core::TdFunctionKind::GetMessageAvailableReactions,
+                                    core::TdFunctionKind::ParseTextEntities}) {
             const core::TdFunctionData function_data{function};
             const auto denied = core::authorize_td_send(
                 descriptor_for(snapshot, function, core::DescriptorKind::Read,
@@ -330,6 +348,62 @@ TEST_CASE("read functions require Ready in every authorization state",
                 &function_data, snapshot, state == core::AuthState::Closed);
             CHECK(denied.has_value() == (state != core::AuthState::Ready));
         }
+    }
+}
+
+TEST_CASE("direct mutation policies are closed Ready-only exact-tier request functions",
+          "[core][auth-bootstrap][safety][direct]") {
+    struct Entry {
+        core::TdFunctionKind function;
+        core::DescriptorKind tier;
+    };
+    const std::array entries{
+        Entry{core::TdFunctionKind::EditMessageText, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::DeleteMessages, core::DescriptorKind::Destructive},
+        Entry{core::TdFunctionKind::AddMessageReaction, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::RemoveMessageReaction, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::PinChatMessage, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::UnpinChatMessage, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::ViewMessages, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::SetChatNotificationSettings, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::ToggleChatIsPinned, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::AddChatToList, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::JoinChat, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::JoinChatByInviteLink, core::DescriptorKind::Write},
+        Entry{core::TdFunctionKind::LeaveChat, core::DescriptorKind::Destructive},
+    };
+    const core::AuthStateSnapshot ready{
+        .client_id = 1001,
+        .client_generation = 1,
+        .auth_sequence = 1,
+        .data = core::AuthStateData{core::AuthState::Ready},
+        .receive_observed_at = std::nullopt,
+    };
+    for (const auto& entry : entries) {
+        INFO(core::td_function_name(entry.function));
+        const core::TdFunctionData function{entry.function};
+        const auto descriptor =
+            descriptor_for(ready, entry.function, entry.tier, {core::TdOwnerKind::Request, 1});
+        CHECK_FALSE(core::authorize_td_send(descriptor, &function, ready, false));
+
+        auto wrong_tier = descriptor;
+        wrong_tier.tier = entry.tier == core::DescriptorKind::Write
+                              ? core::DescriptorKind::Destructive
+                              : core::DescriptorKind::Write;
+        CHECK(core::authorize_td_send(wrong_tier, &function, ready, false) ==
+              core::TdAuthorizationFailure::TierMismatch);
+
+        auto wrong_owner = descriptor;
+        wrong_owner.owner = {core::TdOwnerKind::Login, 1};
+        CHECK(core::authorize_td_send(wrong_owner, &function, ready, false) ==
+              core::TdAuthorizationFailure::OwnerMismatch);
+
+        auto not_ready = ready;
+        not_ready.data = core::AuthStateData{core::AuthState::WaitCode};
+        auto stale = descriptor;
+        stale.auth_state = core::AuthState::WaitCode;
+        CHECK(core::authorize_td_send(stale, &function, not_ready, false) ==
+              core::TdAuthorizationFailure::FunctionDenied);
     }
 }
 
@@ -429,6 +503,13 @@ TEST_CASE("TdClient read admission is an exact closed function allowlist",
         Entry{core::TdFunctionKind::GetActiveSessions, true},
         Entry{core::TdFunctionKind::TerminateSession, false},
         Entry{core::TdFunctionKind::GetChat, true},
+        Entry{core::TdFunctionKind::GetChatHistory, true},
+        Entry{core::TdFunctionKind::GetChatMessageByDate, true},
+        Entry{core::TdFunctionKind::GetMessageThread, true},
+        Entry{core::TdFunctionKind::GetForumTopicHistory, true},
+        Entry{core::TdFunctionKind::GetMessageThreadHistory, true},
+        Entry{core::TdFunctionKind::GetDirectMessagesChatTopicHistory, true},
+        Entry{core::TdFunctionKind::GetSavedMessagesTopicHistory, true},
         Entry{core::TdFunctionKind::GetMessages, true},
         Entry{core::TdFunctionKind::GetMessageLink, true},
         Entry{core::TdFunctionKind::GetChats, true},
@@ -441,6 +522,23 @@ TEST_CASE("TdClient read admission is an exact closed function allowlist",
         Entry{core::TdFunctionKind::GetSupergroup, true},
         Entry{core::TdFunctionKind::GetSupergroupFullInfo, true},
         Entry{core::TdFunctionKind::CreatePrivateChat, true},
+        Entry{core::TdFunctionKind::GetMessage, true},
+        Entry{core::TdFunctionKind::GetMessageProperties, true},
+        Entry{core::TdFunctionKind::GetMessageAvailableReactions, true},
+        Entry{core::TdFunctionKind::ParseTextEntities, true},
+        Entry{core::TdFunctionKind::EditMessageText, false},
+        Entry{core::TdFunctionKind::DeleteMessages, false},
+        Entry{core::TdFunctionKind::AddMessageReaction, false},
+        Entry{core::TdFunctionKind::RemoveMessageReaction, false},
+        Entry{core::TdFunctionKind::PinChatMessage, false},
+        Entry{core::TdFunctionKind::UnpinChatMessage, false},
+        Entry{core::TdFunctionKind::ViewMessages, false},
+        Entry{core::TdFunctionKind::SetChatNotificationSettings, false},
+        Entry{core::TdFunctionKind::ToggleChatIsPinned, false},
+        Entry{core::TdFunctionKind::AddChatToList, false},
+        Entry{core::TdFunctionKind::JoinChat, false},
+        Entry{core::TdFunctionKind::JoinChatByInviteLink, false},
+        Entry{core::TdFunctionKind::LeaveChat, false},
         Entry{core::TdFunctionKind::LogOut, false},
         Entry{core::TdFunctionKind::Close, false},
     };

@@ -153,7 +153,8 @@ tgcli::core::TdChat chat(std::int64_t id,
             .unread_mention_count = 0,
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
-            .last_message = std::nullopt};
+            .last_message = std::nullopt,
+            .notification_settings = std::nullopt};
 }
 
 tgcli::core::TdMessageSummary message(std::int64_t chat_id, std::int64_t id) {

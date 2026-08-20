@@ -2611,7 +2611,8 @@ TEST_CASE("read no-daemon fake boundary preserves canonical JSON discipline",
                                              .unread_mention_count = 0,
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
-                                             .last_message = std::nullopt}));
+                                             .last_message = std::nullopt,
+                                             .notification_settings = std::nullopt}));
     respond(
         4, core::TdFunctionKind::GetChatHistory,
         core::TdValue::from(core::TdMessages{
@@ -2727,7 +2728,8 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
                                              .unread_mention_count = 0,
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
-                                             .last_message = std::nullopt}));
+                                             .last_message = std::nullopt,
+                                             .notification_settings = std::nullopt}));
     const auto cutoff = core::TdMessageSummary{
         .id = 99,
         .chat_id = -1001,
@@ -2821,7 +2823,8 @@ TEST_CASE("msg get and link no-daemon fake boundary preserve strict JSON discipl
                                           .unread_mention_count = 0,
                                           .unread_reaction_count = 0,
                                           .unread_poll_vote_count = 0,
-                                          .last_message = std::nullopt};
+                                          .last_message = std::nullopt,
+                                          .notification_settings = std::nullopt};
     const auto target_message = core::TdMessageSummary{
         .id = 123,
         .chat_id = -1001,
@@ -2915,20 +2918,22 @@ TEST_CASE("resolve no-daemon fake boundary preserves JSON stream discipline",
     REQUIRE(scripted->wait_for_sent(3));
     sent = scripted->sent_functions();
     REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetChat);
-    scripted->push_response(td_client, sent.back().query_id,
-                            core::TdValue::from(core::TdChat{.id = -1001,
-                                                             .title = "Project",
-                                                             .kind = core::TdChatKind::BasicGroup,
-                                                             .related_id = 0,
-                                                             .tdlib_type_id = 1,
-                                                             .positions = {},
-                                                             .chat_lists = {},
-                                                             .is_marked_unread = false,
-                                                             .unread_count = 0,
-                                                             .unread_mention_count = 0,
-                                                             .unread_reaction_count = 0,
-                                                             .unread_poll_vote_count = 0,
-                                                             .last_message = std::nullopt}));
+    scripted->push_response(
+        td_client, sent.back().query_id,
+        core::TdValue::from(core::TdChat{.id = -1001,
+                                         .title = "Project",
+                                         .kind = core::TdChatKind::BasicGroup,
+                                         .related_id = 0,
+                                         .tdlib_type_id = 1,
+                                         .positions = {},
+                                         .chat_lists = {},
+                                         .is_marked_unread = false,
+                                         .unread_count = 0,
+                                         .unread_mention_count = 0,
+                                         .unread_reaction_count = 0,
+                                         .unread_poll_vote_count = 0,
+                                         .last_message = std::nullopt,
+                                         .notification_settings = std::nullopt}));
     const auto outcome = pending.get();
     CHECK(outcome.exit_code == kOk);
     CHECK(outcome.err.empty());

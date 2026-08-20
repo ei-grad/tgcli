@@ -228,6 +228,48 @@ class TdClient {
     std::future<TdValue>
     create_private_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                         std::int64_t user_id, bool force);
+    std::future<TdValue> get_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                     std::int64_t chat_id, std::int64_t message_id);
+    std::future<TdValue>
+    get_message_properties(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t chat_id, std::int64_t message_id);
+    std::future<TdValue>
+    get_message_available_reactions(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    std::int64_t chat_id, std::int64_t message_id);
+    std::future<TdValue>
+    get_unix_time(const std::shared_ptr<const AuthStateSnapshot>& authorization);
+    std::future<TdValue>
+    parse_text_entities(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                        std::string text, TdTextParseMode mode);
+
+    std::future<TdValue>
+    edit_message_text(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                      TdEditMessageTextRequest request);
+    std::future<TdValue>
+    delete_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    TdDeleteMessagesRequest request);
+    std::future<TdValue>
+    set_message_reaction(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         TdMessageReactionRequest request);
+    std::future<TdValue>
+    set_message_pinned(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       TdPinMessageRequest request);
+    std::future<TdValue>
+    view_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                  TdViewMessagesRequest request);
+    std::future<TdValue>
+    set_chat_notification_settings(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdSetChatNotificationSettingsRequest request);
+    std::future<TdValue>
+    toggle_chat_is_pinned(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                          TdToggleChatIsPinnedRequest request);
+    std::future<TdValue>
+    add_chat_to_list(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                     TdAddChatToListRequest request);
+    std::future<TdValue> join_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdJoinChatRequest request);
+    std::future<TdValue> leave_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    TdLeaveChatRequest request);
 
     [[nodiscard]] bool owns(const TdRequestOwner& owner, std::uint64_t client_generation) const;
 

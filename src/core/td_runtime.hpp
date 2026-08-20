@@ -55,6 +55,23 @@ enum class TdFunctionKind {
     GetSupergroup,
     GetSupergroupFullInfo,
     CreatePrivateChat,
+    GetMessage,
+    GetMessageProperties,
+    GetMessageAvailableReactions,
+    ParseTextEntities,
+    EditMessageText,
+    DeleteMessages,
+    AddMessageReaction,
+    RemoveMessageReaction,
+    PinChatMessage,
+    UnpinChatMessage,
+    ViewMessages,
+    SetChatNotificationSettings,
+    ToggleChatIsPinned,
+    AddChatToList,
+    JoinChat,
+    JoinChatByInviteLink,
+    LeaveChat,
     LogOut,
     Close,
 };
@@ -133,6 +150,40 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getSupergroupFullInfo";
     case TdFunctionKind::CreatePrivateChat:
         return "createPrivateChat";
+    case TdFunctionKind::GetMessage:
+        return "getMessage";
+    case TdFunctionKind::GetMessageProperties:
+        return "getMessageProperties";
+    case TdFunctionKind::GetMessageAvailableReactions:
+        return "getMessageAvailableReactions";
+    case TdFunctionKind::ParseTextEntities:
+        return "parseTextEntities";
+    case TdFunctionKind::EditMessageText:
+        return "editMessageText";
+    case TdFunctionKind::DeleteMessages:
+        return "deleteMessages";
+    case TdFunctionKind::AddMessageReaction:
+        return "addMessageReaction";
+    case TdFunctionKind::RemoveMessageReaction:
+        return "removeMessageReaction";
+    case TdFunctionKind::PinChatMessage:
+        return "pinChatMessage";
+    case TdFunctionKind::UnpinChatMessage:
+        return "unpinChatMessage";
+    case TdFunctionKind::ViewMessages:
+        return "viewMessages";
+    case TdFunctionKind::SetChatNotificationSettings:
+        return "setChatNotificationSettings";
+    case TdFunctionKind::ToggleChatIsPinned:
+        return "toggleChatIsPinned";
+    case TdFunctionKind::AddChatToList:
+        return "addChatToList";
+    case TdFunctionKind::JoinChat:
+        return "joinChat";
+    case TdFunctionKind::JoinChatByInviteLink:
+        return "joinChatByInviteLink";
+    case TdFunctionKind::LeaveChat:
+        return "leaveChat";
     case TdFunctionKind::LogOut:
         return "logOut";
     case TdFunctionKind::Close:
@@ -766,6 +817,298 @@ struct TdMessageSummary {
     bool operator==(const TdMessageSummary&) const = default;
 };
 
+inline constexpr std::int64_t kTdInt53Max = 9'007'199'254'740'991LL;
+
+constexpr bool valid_td_chat_id(std::int64_t value) noexcept {
+    return value != 0 && value >= -kTdInt53Max && value <= kTdInt53Max;
+}
+
+constexpr bool valid_td_message_id(std::int64_t value) noexcept {
+    return value > 0 && value <= kTdInt53Max;
+}
+
+struct TdPlanningMessage {
+    std::int64_t id = 0;
+    std::int64_t chat_id = 0;
+    std::int32_t date = 0;
+    TdMessageSender sender;
+    bool is_outgoing = false;
+    std::optional<TdTopic> topic;
+    TdMessageContentKind content_kind = TdMessageContentKind::Other;
+    std::string text;
+    bool has_scheduling_state = false;
+    bool has_reply_markup = false;
+
+    bool operator==(const TdPlanningMessage&) const = default;
+};
+
+struct TdMessageWriteResult {
+    std::int64_t id = 0;
+    std::int64_t chat_id = 0;
+    std::optional<std::int32_t> date;
+    TdMessageSender sender;
+    bool is_outgoing = false;
+    std::optional<TdTopic> topic;
+    TdMessageContentKind content_kind = TdMessageContentKind::Other;
+    std::string text;
+    bool scheduled = false;
+
+    bool operator==(const TdMessageWriteResult&) const = default;
+};
+
+struct TdMessageProperties {
+    bool can_add_offer = false;
+    bool can_add_tasks = false;
+    bool can_be_approved = false;
+    bool can_be_copied = false;
+    bool can_be_copied_to_secret_chat = false;
+    bool can_be_declined = false;
+    bool can_be_deleted_only_for_self = false;
+    bool can_be_deleted_for_all_users = false;
+    bool can_be_edited = false;
+    bool can_be_forwarded = false;
+    bool can_be_paid = false;
+    bool can_be_pinned = false;
+    bool can_be_replied = false;
+    bool can_be_replied_in_another_chat = false;
+    bool can_be_saved = false;
+    bool can_be_shared_in_story = false;
+    bool can_delete_reactions = false;
+    bool can_edit_media = false;
+    bool can_edit_scheduling_state = false;
+    bool can_edit_suggested_post_info = false;
+    bool can_get_author = false;
+    bool can_get_embedding_code = false;
+    bool can_get_link = false;
+    bool can_get_media_timestamp_links = false;
+    bool can_get_message_thread = false;
+    bool can_get_poll_vote_statistics = false;
+    bool can_get_read_date = false;
+    bool can_get_statistics = false;
+    bool can_get_video_advertisements = false;
+    bool can_get_viewers = false;
+    bool can_mark_tasks_as_done = false;
+    bool can_recognize_speech = false;
+    bool can_report_chat = false;
+    bool can_report_reactions = false;
+    bool can_report_supergroup_spam = false;
+    bool can_set_fact_check = false;
+    bool has_protected_content_by_current_user = false;
+    bool has_protected_content_by_other_user = false;
+    bool need_show_statistics = false;
+
+    bool operator==(const TdMessageProperties&) const = default;
+};
+
+struct TdAvailableReaction {
+    TdReactionType type;
+    bool needs_premium = false;
+
+    bool operator==(const TdAvailableReaction&) const = default;
+};
+
+enum class TdReactionUnavailabilityReason {
+    None,
+    AnonymousAdministrator,
+    Guest,
+    Restricted,
+    Unknown
+};
+
+struct TdMessageAvailableReactions {
+    std::vector<TdAvailableReaction> top;
+    std::vector<TdAvailableReaction> recent;
+    std::vector<TdAvailableReaction> popular;
+    bool allow_custom_emoji = false;
+    bool are_tags = false;
+    TdReactionUnavailabilityReason unavailability_reason = TdReactionUnavailabilityReason::None;
+    std::optional<std::int32_t> unsupported_unavailability_tdlib_type_id;
+
+    bool operator==(const TdMessageAvailableReactions&) const = default;
+};
+
+enum class TdTextParseMode { MarkdownV2, Html };
+
+enum class TdTextEntityKind {
+    Mention,
+    Hashtag,
+    Cashtag,
+    BotCommand,
+    Url,
+    EmailAddress,
+    PhoneNumber,
+    BankCardNumber,
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    Spoiler,
+    Code,
+    Pre,
+    PreCode,
+    BlockQuote,
+    ExpandableBlockQuote,
+    TextUrl,
+    MentionName,
+    CustomEmoji,
+    MediaTimestamp,
+    DateTime,
+    Unknown,
+};
+
+struct TdTextEntity {
+    std::int32_t offset = 0;
+    std::int32_t length = 0;
+    TdTextEntityKind kind = TdTextEntityKind::Unknown;
+    std::string value;
+    std::int64_t numeric_value = 0;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdTextEntity&) const = default;
+};
+
+struct TdFormattedText {
+    std::string text;
+    std::vector<TdTextEntity> entities;
+
+    bool operator==(const TdFormattedText&) const = default;
+};
+
+struct TdOptionInteger {
+    std::int64_t value = 0;
+
+    bool operator==(const TdOptionInteger&) const = default;
+};
+
+struct TdChatNotificationSettings {
+    bool use_default_mute_for = false;
+    std::int32_t mute_for = 0;
+    bool use_default_sound = false;
+    std::int64_t sound_id = 0;
+    bool use_default_show_preview = false;
+    bool show_preview = false;
+    bool use_default_mute_stories = false;
+    bool mute_stories = false;
+    bool use_default_story_sound = false;
+    std::int64_t story_sound_id = 0;
+    bool use_default_show_story_poster = false;
+    bool show_story_poster = false;
+    bool use_default_disable_pinned_message_notifications = false;
+    bool disable_pinned_message_notifications = false;
+    bool use_default_disable_mention_notifications = false;
+    bool disable_mention_notifications = false;
+
+    bool operator==(const TdChatNotificationSettings&) const = default;
+};
+
+enum class TdDirectChatList { Main, Archive };
+
+struct TdEditMessageTextRequest {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::string text;
+
+    bool operator==(const TdEditMessageTextRequest&) const = default;
+};
+
+struct TdDeleteMessagesRequest {
+    std::int64_t chat_id = 0;
+    std::vector<std::int64_t> message_ids;
+    bool revoke = false;
+
+    bool operator==(const TdDeleteMessagesRequest&) const = default;
+};
+
+struct TdMessageReactionRequest {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::string reaction;
+    bool remove = false;
+    bool big = false;
+
+    bool operator==(const TdMessageReactionRequest&) const = default;
+};
+
+struct TdPinMessageRequest {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    bool pinned = false;
+
+    bool operator==(const TdPinMessageRequest&) const = default;
+};
+
+struct TdViewMessagesRequest {
+    std::int64_t chat_id = 0;
+    std::vector<std::int64_t> message_ids;
+
+    bool operator==(const TdViewMessagesRequest&) const = default;
+};
+
+struct TdSetChatNotificationSettingsRequest {
+    std::int64_t chat_id = 0;
+    TdChatNotificationSettings settings;
+
+    bool operator==(const TdSetChatNotificationSettingsRequest&) const = default;
+};
+
+struct TdToggleChatIsPinnedRequest {
+    std::int64_t chat_id = 0;
+    TdDirectChatList list = TdDirectChatList::Main;
+    bool pinned = false;
+
+    bool operator==(const TdToggleChatIsPinnedRequest&) const = default;
+};
+
+struct TdAddChatToListRequest {
+    std::int64_t chat_id = 0;
+    TdDirectChatList list = TdDirectChatList::Main;
+
+    bool operator==(const TdAddChatToListRequest&) const = default;
+};
+
+struct TdJoinChatRequest {
+    std::optional<std::int64_t> chat_id;
+    std::optional<std::string> invite_link;
+
+    bool operator==(const TdJoinChatRequest&) const = default;
+};
+
+struct TdLeaveChatRequest {
+    std::int64_t chat_id = 0;
+
+    bool operator==(const TdLeaveChatRequest&) const = default;
+};
+
+using TdDirectRequest =
+    std::variant<TdEditMessageTextRequest, TdDeleteMessagesRequest, TdMessageReactionRequest,
+                 TdPinMessageRequest, TdViewMessagesRequest, TdSetChatNotificationSettingsRequest,
+                 TdToggleChatIsPinnedRequest, TdAddChatToListRequest, TdJoinChatRequest,
+                 TdLeaveChatRequest>;
+
+enum class TdChatJoinResultKind {
+    Success,
+    RequestSent,
+    GuardBotApprovalRequired,
+    Declined,
+    Unknown
+};
+
+struct TdChatJoinResult {
+    TdChatJoinResultKind kind = TdChatJoinResultKind::Unknown;
+    std::optional<std::int64_t> chat_id;
+    std::optional<std::int64_t> guard_bot_user_id;
+    std::optional<std::int64_t> guard_query_id;
+    std::optional<std::int32_t> unsupported_tdlib_type_id;
+
+    bool operator==(const TdChatJoinResult&) const = default;
+};
+
+struct TdDirectConversionError {
+    std::optional<std::int32_t> tdlib_type_id;
+
+    bool operator==(const TdDirectConversionError&) const = default;
+};
+
 struct TdChatPosition {
     TdChatList list;
     std::int64_t order = 0;
@@ -787,6 +1130,7 @@ struct TdChat {
     std::int32_t unread_reaction_count = 0;
     std::int32_t unread_poll_vote_count = 0;
     std::optional<TdMessageSummary> last_message;
+    std::optional<TdChatNotificationSettings> notification_settings;
 
     bool operator==(const TdChat&) const = default;
 };
@@ -939,6 +1283,23 @@ class TdRuntime {
     virtual TdValue make_get_supergroup(std::int64_t supergroup_id) = 0;
     virtual TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) = 0;
     virtual TdValue make_create_private_chat(std::int64_t user_id, bool force) = 0;
+    virtual TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) = 0;
+    virtual TdValue make_get_message_properties(std::int64_t chat_id, std::int64_t message_id) = 0;
+    virtual TdValue make_get_message_available_reactions(std::int64_t chat_id,
+                                                         std::int64_t message_id) = 0;
+    virtual TdValue make_get_unix_time() = 0;
+    virtual TdValue make_parse_text_entities(std::string text, TdTextParseMode mode) = 0;
+    virtual TdValue make_edit_message_text(TdEditMessageTextRequest request) = 0;
+    virtual TdValue make_delete_messages(TdDeleteMessagesRequest request) = 0;
+    virtual TdValue make_message_reaction(TdMessageReactionRequest request) = 0;
+    virtual TdValue make_pin_message(TdPinMessageRequest request) = 0;
+    virtual TdValue make_view_messages(TdViewMessagesRequest request) = 0;
+    virtual TdValue
+    make_set_chat_notification_settings(TdSetChatNotificationSettingsRequest request) = 0;
+    virtual TdValue make_toggle_chat_is_pinned(TdToggleChatIsPinnedRequest request) = 0;
+    virtual TdValue make_add_chat_to_list(TdAddChatToListRequest request) = 0;
+    virtual TdValue make_join_chat(TdJoinChatRequest request) = 0;
+    virtual TdValue make_leave_chat(TdLeaveChatRequest request) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
                       std::uint64_t query_id, TdValue function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;
