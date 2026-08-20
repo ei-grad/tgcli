@@ -1750,7 +1750,7 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
     }
     auto root = std::move(std::get<RootHandle>(root_result));
     if (root.absent) {
-        return SpoolCleanupResult{.removed = false};
+        return SpoolCleanupResult{.removed = false, .root_synced = false};
     }
     const auto& [invocation_id, name] = *parsed;
     const auto invocation_diagnostic = diagnostic_for(account_state, "/" + invocation_id);
@@ -1775,7 +1775,7 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
             if (const auto error = sync_root()) {
                 return *error;
             }
-            return SpoolCleanupResult{.removed = false};
+            return SpoolCleanupResult{.removed = false, .root_synced = true};
         }
         return durability_error(DurabilityReason::ReadFailed);
     }
@@ -1845,7 +1845,7 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
     if (removal_error) {
         return *removal_error;
     }
-    return SpoolCleanupResult{.removed = true};
+    return SpoolCleanupResult{.removed = true, .root_synced = true};
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -22,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 
@@ -2060,7 +2062,9 @@ bool exclusive_rename(int directory, const char* source, const char* destination
 struct SegmentIdentity {
     std::string name;
     bool present = false;
+    std::uint64_t device = 0;
     std::uint64_t inode = 0;
+    std::uint64_t size = 0;
 };
 
 std::optional<std::vector<SegmentIdentity>> inspect_segments(int directory, uid_t uid,
@@ -2072,7 +2076,7 @@ std::optional<std::vector<SegmentIdentity>> inspect_segments(int directory, uid_
         struct stat metadata {};
         if (::fstatat(directory, name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
             if (errno == ENOENT) {
-                result.push_back({name, false, 0});
+                result.push_back({name, false, 0, 0, 0});
                 continue;
             }
             failure.reason = AccountAuditDurabilityReason::OpenFailed;
@@ -2091,131 +2095,53 @@ std::optional<std::vector<SegmentIdentity>> inspect_segments(int directory, uid_
             failure.reason = AccountAuditDurabilityReason::PathInvalid;
             return std::nullopt;
         }
-        result.push_back({name, true, inode});
+        result.push_back({name, true, static_cast<std::uint64_t>(metadata.st_dev), inode,
+                          static_cast<std::uint64_t>(metadata.st_size)});
     }
     return result;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): bounded streaming JSONL validation.
-bool segment_contains_pin_relation(int directory, std::string_view name, uid_t uid,
-                                   const AccountAuditPin& pin,
-                                   const AccountAuditScanControl& scan_control,
-                                   const std::shared_ptr<const testing::AccountAuditHooks>& hooks,
-                                   AccountAuditFailure& failure) {
-    const Descriptor file(
-        ::openat(directory, std::string(name).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-    struct stat metadata {};
-    if (file.get() < 0 || ::fstat(file.get(), &metadata) != 0) {
-        failure.reason = AccountAuditDurabilityReason::OpenFailed;
-        return false;
-    }
-    if (!valid_file_metadata(metadata, uid, failure) ||
-        static_cast<std::uint64_t>(metadata.st_ino) != pin.audit_generation) {
-        failure.reason = AccountAuditDurabilityReason::Contradiction;
-        return false;
-    }
-    std::string line;
-    std::array<char, kIoChunkBytes> chunk{};
-    for (;;) {
-        if (scan_interrupted(scan_control, failure)) {
-            return false;
-        }
-        const auto count = ::read(file.get(), chunk.data(), chunk.size());
-        if (count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (count < 0) {
-            failure.reason = AccountAuditDurabilityReason::ReadFailed;
-            return false;
-        }
-        if (count == 0) {
-            break;
-        }
-        for (std::size_t index = 0; index < static_cast<std::size_t>(count); ++index) {
-            if (chunk.at(index) != '\n') {
-                if (line.size() == kIntentJsonBytes) {
-                    failure.reason = AccountAuditDurabilityReason::PathInvalid;
-                    return false;
-                }
-                line.push_back(chunk.at(index));
-                continue;
-            }
-            const auto parsed = parse_audit_json(line, scan_control, hooks);
-            if (parsed_scan_interrupted(parsed, failure)) {
-                return false;
-            }
-            const auto& document = parsed.document;
-            if (!parsed.valid || parsed.duplicate_key) {
-                failure.reason = AccountAuditDurabilityReason::Contradiction;
-                return false;
-            }
-            if (document.is_object() && document.contains("schema_version") &&
-                document["schema_version"] == 2 && document.contains("phase") &&
-                document["phase"].is_string() && document["phase"] == "intent" &&
-                document.contains("invocation_id") && document["invocation_id"].is_string() &&
-                document["invocation_id"] == pin.invocation_id &&
-                document.contains("request_fingerprint") &&
-                document["request_fingerprint"].is_string() &&
-                document["request_fingerprint"] == pin.request_fingerprint &&
-                document.contains("command") && document["command"].is_string() &&
-                document["command"] == account_audit_operation_name(pin.operation)) {
-                return true;
-            }
-            line.clear();
-        }
-    }
-    if (!line.empty()) {
-        failure.reason = AccountAuditDurabilityReason::Contradiction;
-        return false;
-    }
-    failure.reason = AccountAuditDurabilityReason::Contradiction;
-    return false;
-}
-
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): exact hole-first crash automaton.
-bool rotate_for_intent(int directory, uid_t uid, std::uint64_t incoming,
-                       const AccountAuditPinSource& pins,
+bool rotate_for_intent(int directory, uid_t uid, std::uint64_t incoming, bool absent_by_policy,
+                       const std::vector<AccountAuditPin>& pins,
+                       const std::vector<std::uint64_t>& retained_generations,
+                       const std::vector<SegmentIdentity>& expected_segments,
                        const AccountAuditScanControl& scan_control,
                        const std::shared_ptr<const testing::AccountAuditHooks>& hooks,
                        AccountAuditFailure& failure) {
-    if (const auto* unavailable = std::get_if<UnavailableAccountAuditPins>(&pins)) {
-        failure.reason = unavailable->reason;
+    if (scan_interrupted(scan_control, failure)) {
         return false;
     }
     auto segments = inspect_segments(directory, uid, failure);
     if (!segments) {
         return false;
     }
-    std::set<std::uint64_t> pinned_inodes;
-    if (const auto* known = std::get_if<KnownAccountAuditPins>(&pins)) {
-        for (const auto& pin : known->pins) {
-            const auto found =
-                std::find_if(segments->begin(), segments->end(), [&pin](const auto& item) {
-                    return item.present && item.inode == pin.audit_generation;
-                });
-            if (found == segments->end() ||
-                !segment_contains_pin_relation(directory, found->name, uid, pin, scan_control,
-                                               hooks, failure)) {
-                if (!failure.interruption) {
-                    failure.reason = AccountAuditDurabilityReason::Contradiction;
-                }
-                return false;
-            }
-            pinned_inodes.insert(pin.audit_generation);
+    const auto same_segment = [](const SegmentIdentity& left, const SegmentIdentity& right) {
+        return left.name == right.name && left.present == right.present &&
+               left.device == right.device && left.inode == right.inode && left.size == right.size;
+    };
+    for (const auto& expected : expected_segments) {
+        const auto found = std::ranges::find_if(
+            *segments, [&](const auto& observed) { return observed.name == expected.name; });
+        if (found == segments->end() || !same_segment(expected, *found)) {
+            failure = {AccountAuditDurabilityReason::Contradiction,
+                       "audit segment changed after append permit validation"};
+            return false;
         }
+    }
+    std::set<std::uint64_t> pinned_inodes;
+    for (const auto& pin : pins) {
+        pinned_inodes.insert(pin.audit_generation);
+    }
+    for (const auto generation : retained_generations) {
+        pinned_inodes.insert(generation);
     }
     auto& active = segments->at(0);
     if (!active.present) {
         return true;
     }
-    struct stat active_metadata {};
-    if (::fstatat(directory, "audit.log", &active_metadata, AT_SYMLINK_NOFOLLOW) != 0 ||
-        active_metadata.st_size < 0) {
-        failure.reason = AccountAuditDurabilityReason::OpenFailed;
-        return false;
-    }
     const auto threshold = hooks ? hooks->rotation_bytes : kRotationBytes;
-    const auto active_size = static_cast<std::uint64_t>(active_metadata.st_size);
+    const auto active_size = active.size;
     if (active_size == 0 || (incoming <= threshold && active_size <= threshold - incoming)) {
         return true;
     }
@@ -2228,7 +2154,7 @@ bool rotate_for_intent(int directory, uid_t uid, std::uint64_t incoming,
         }
     }
     if (hole == 0) {
-        if (!std::holds_alternative<KnownAccountAuditPins>(pins)) {
+        if (absent_by_policy) {
             failure.reason = AccountAuditDurabilityReason::CapacityExhausted;
             return false;
         }
@@ -2437,6 +2363,139 @@ struct ScanState {
     bool positive_v2 = false;
 };
 
+struct AccountAuditHoldSeed {
+    std::uint64_t audit_generation = 0;
+    std::string invocation_id;
+    SpoolRef spool;
+};
+
+struct AccountAuditPinMatch {
+    AccountAuditPin pin;
+    bool matched = false;
+};
+
+using AccountAuditPinKey = std::pair<std::uint64_t, std::string>;
+
+std::optional<std::map<AccountAuditPinKey, AccountAuditPinMatch>>
+make_pin_index(const AccountAuditPinSource* source, std::string& error) {
+    std::map<AccountAuditPinKey, AccountAuditPinMatch> result;
+    if (source == nullptr || !std::holds_alternative<KnownAccountAuditPins>(*source)) {
+        return result;
+    }
+    const auto& pins = std::get<KnownAccountAuditPins>(*source).pins;
+    constexpr std::size_t maximum_pins = 10'000;
+    if (pins.size() > maximum_pins) {
+        error = "audit pin count exceeds the bounded store maximum";
+        return std::nullopt;
+    }
+    for (const auto& pin : pins) {
+        const json fingerprint = pin.request_fingerprint;
+        if (pin.audit_generation == 0 || !valid_hex(pin.invocation_id, 32) ||
+            !valid_hash(fingerprint) || account_audit_operation_name(pin.operation).empty()) {
+            error = "audit pin has an invalid tuple";
+            return std::nullopt;
+        }
+        const AccountAuditPinKey key{pin.audit_generation, pin.invocation_id};
+        if (!result.emplace(key, AccountAuditPinMatch{pin, false}).second) {
+            error = "audit pin tuple is duplicated";
+            return std::nullopt;
+        }
+    }
+    return result;
+}
+
+bool match_pin(std::map<AccountAuditPinKey, AccountAuditPinMatch>& pins,
+               std::uint64_t audit_generation, const json& intent, std::string& error) {
+    const AccountAuditPinKey key{audit_generation,
+                                 intent["invocation_id"].get_ref<const std::string&>()};
+    const auto found = pins.find(key);
+    if (found == pins.end()) {
+        return true;
+    }
+    const auto operation =
+        parse_account_audit_operation(intent["command"].get_ref<const std::string&>());
+    if (found->second.matched || !operation ||
+        found->second.pin.request_fingerprint !=
+            intent["request_fingerprint"].get_ref<const std::string&>() ||
+        found->second.pin.operation != *operation) {
+        error = "audit pin does not uniquely match its durable intent";
+        return false;
+    }
+    found->second.matched = true;
+    return true;
+}
+
+bool all_pins_matched(const std::map<AccountAuditPinKey, AccountAuditPinMatch>& pins,
+                      std::string& error) {
+    if (std::ranges::any_of(pins, [](const auto& item) { return !item.second.matched; })) {
+        error = "audit pin is dangling or mismatched";
+        return false;
+    }
+    return true;
+}
+
+FileSnapshot file_snapshot_from_audit(const json& value) {
+    return {.path = value["path"].get<std::string>(),
+            .name = value["name"].get<std::string>(),
+            .size = value["size"].get<std::uint64_t>(),
+            .sha256 = value["sha256"].get<std::string>(),
+            .device = value["device"].get<std::uint64_t>(),
+            .inode = value["inode"].get<std::uint64_t>(),
+            .mtime_ns = value["mtime_ns"].get<std::int64_t>(),
+            .ctime_ns = value["ctime_ns"].get<std::int64_t>()};
+}
+
+std::optional<AccountAuditCompletedGroupView>
+make_completed_view(const AccountAuditOpenGroup& group, const json& outcome, std::string& error) {
+    const auto operation =
+        parse_account_audit_operation(group.intent["command"].get_ref<const std::string&>());
+    const auto unix_seconds = timestamp_unix_seconds(group.intent["timestamp"]);
+    if (!operation || !unix_seconds) {
+        error = "validated completed group lost its typed intent facts";
+        return std::nullopt;
+    }
+    AccountAuditCompletedGroupView view;
+    view.audit_generation = group.audit_generation;
+    view.invocation_id = group.intent["invocation_id"].get<std::string>();
+    view.account = group.intent["account"].get<std::string>();
+    view.operation = *operation;
+    view.request_fingerprint = group.intent["request_fingerprint"].get<std::string>();
+    if (!group.intent["idempotency_key_hash"].is_null()) {
+        view.idempotency_key_hash = group.intent["idempotency_key_hash"].get<std::string>();
+    }
+    view.plan = group.intent["plan"];
+    view.intent_timestamp = group.intent["timestamp"].get<std::string>();
+    view.intent_unix_seconds = *unix_seconds;
+    for (const auto& checkpoint : group.checkpoints) {
+        const auto& stage = checkpoint["stage"].get_ref<const std::string&>();
+        const auto& data = checkpoint["data"];
+        if (stage == "idempotency_pending") {
+            view.idempotency_pending = data;
+        } else if (stage == "spool_ready") {
+            view.spool = SpoolRef{.relative_path = data["relative_path"].get<std::string>(),
+                                  .file = file_snapshot_from_audit(data["file"])};
+        } else if (stage == "temporary_ids_observed") {
+            view.temporary_message_ids = data["temporary_message_ids"];
+        } else if (stage == "forward_progress") {
+            view.forward_progress = data["items"];
+        } else if (stage == "mutation_confirmed") {
+            view.mutation_proof = data;
+        }
+    }
+    view.completed_stages = group.completed_stages;
+    view.outcome = outcome;
+    if (!group.keyed) {
+        view.store_disposition = AccountAuditStoreDisposition::NoStore;
+    } else if (outcome["mutation_state"] == "none") {
+        view.store_disposition = AccountAuditStoreDisposition::Remove;
+    } else if (outcome["mutation_state"] == "possible") {
+        view.store_disposition = AccountAuditStoreDisposition::RetainPending;
+    } else {
+        view.store_disposition = AccountAuditStoreDisposition::Complete;
+    }
+    return view;
+}
+
 constexpr std::array<const char*, 5> kSegmentNames{"audit.log.4", "audit.log.3", "audit.log.2",
                                                    "audit.log.1", "audit.log"};
 
@@ -2614,7 +2673,10 @@ AccountAuditMutationState derive_mutation_state(const AccountAuditOpenGroup& gro
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): strict v2 group automaton.
-bool consume_v2(const json& document, ScanState& state, std::string& error) {
+bool consume_v2(const json& document, ScanState& state, std::string& error,
+                std::uint64_t audit_generation = 0,
+                const AccountAuditCompletedGroupVisitor* completed_visitor = nullptr,
+                std::vector<AccountAuditHoldSeed>* hold_seeds = nullptr) {
     if (!document.is_object() || !document.contains("phase") || !document["phase"].is_string()) {
         error = "invalid v2 record phase";
         return false;
@@ -2626,6 +2688,7 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
             return false;
         }
         AccountAuditOpenGroup group;
+        group.audit_generation = audit_generation;
         group.intent = document;
         group.keyed = !document["idempotency_key_hash"].is_null();
         state.open = std::move(group);
@@ -2846,6 +2909,17 @@ bool consume_v2(const json& document, ScanState& state, std::string& error) {
             return false;
         }
     }
+    auto completed_view = make_completed_view(*state.open, document, error);
+    if (!completed_view) {
+        return false;
+    }
+    if (completed_visitor != nullptr && *completed_visitor) {
+        (*completed_visitor)(*completed_view);
+    }
+    if (hold_seeds != nullptr && completed_view->spool) {
+        hold_seeds->push_back({completed_view->audit_generation, completed_view->invocation_id,
+                               *completed_view->spool});
+    }
     state.open.reset();
     return true;
 }
@@ -2865,6 +2939,213 @@ AccountAuditInspection contradiction(const ScanState& state, std::string_view ac
 }
 
 } // namespace
+
+struct AccountAuditAppendPermit::Impl {
+    struct HoldRecord {
+        std::uint64_t hold_id = 0;
+        AccountAuditHoldSeed seed;
+        bool released = false;
+    };
+
+    std::uint64_t permit_id = 0;
+    std::string state_directory;
+    std::string account;
+    uid_t expected_uid = 0;
+    bool absent_by_policy = false;
+    bool holds_issued = false;
+    bool consumed = false;
+    std::string intent_line;
+    std::vector<SegmentIdentity> segments;
+    std::vector<AccountAuditPin> pins;
+    std::vector<HoldRecord> holds;
+};
+
+AccountAuditSpoolHold::AccountAuditSpoolHold(std::uint64_t permit_id, std::uint64_t hold_id,
+                                             std::uint64_t audit_generation,
+                                             std::string invocation_id, SpoolRef spool)
+    : permit_id_(permit_id), hold_id_(hold_id), audit_generation_(audit_generation),
+      invocation_id_(std::move(invocation_id)), spool_(std::move(spool)) {}
+
+AccountAuditSpoolHold::AccountAuditSpoolHold(AccountAuditSpoolHold&& other) noexcept
+    : permit_id_(std::exchange(other.permit_id_, 0)), hold_id_(std::exchange(other.hold_id_, 0)),
+      audit_generation_(std::exchange(other.audit_generation_, 0)),
+      invocation_id_(std::move(other.invocation_id_)), spool_(std::move(other.spool_)) {}
+
+AccountAuditSpoolHold& AccountAuditSpoolHold::operator=(AccountAuditSpoolHold&& other) noexcept {
+    if (this != &other) {
+        permit_id_ = std::exchange(other.permit_id_, 0);
+        hold_id_ = std::exchange(other.hold_id_, 0);
+        audit_generation_ = std::exchange(other.audit_generation_, 0);
+        invocation_id_ = std::move(other.invocation_id_);
+        spool_ = std::move(other.spool_);
+    }
+    return *this;
+}
+
+bool AccountAuditSpoolHold::valid() const {
+    return permit_id_ != 0 && hold_id_ != 0 && audit_generation_ != 0 && !invocation_id_.empty() &&
+           !spool_.relative_path.empty();
+}
+
+std::uint64_t AccountAuditSpoolHold::audit_generation() const {
+    return audit_generation_;
+}
+
+const std::string& AccountAuditSpoolHold::invocation_id() const {
+    return invocation_id_;
+}
+
+const SpoolRef& AccountAuditSpoolHold::spool() const {
+    return spool_;
+}
+
+void AccountAuditSpoolHold::invalidate() {
+    permit_id_ = 0;
+    hold_id_ = 0;
+    audit_generation_ = 0;
+    invocation_id_.clear();
+    spool_ = {};
+}
+
+AccountAuditSpoolReleaseReceipt::AccountAuditSpoolReleaseReceipt(AccountAuditSpoolHold hold)
+    : permit_id_(std::exchange(hold.permit_id_, 0)), hold_id_(std::exchange(hold.hold_id_, 0)),
+      audit_generation_(std::exchange(hold.audit_generation_, 0)),
+      invocation_id_(std::move(hold.invocation_id_)), spool_(std::move(hold.spool_)) {}
+
+AccountAuditSpoolReleaseReceipt::AccountAuditSpoolReleaseReceipt(
+    AccountAuditSpoolReleaseReceipt&& other) noexcept
+    : permit_id_(std::exchange(other.permit_id_, 0)), hold_id_(std::exchange(other.hold_id_, 0)),
+      audit_generation_(std::exchange(other.audit_generation_, 0)),
+      invocation_id_(std::move(other.invocation_id_)), spool_(std::move(other.spool_)) {}
+
+AccountAuditSpoolReleaseReceipt&
+AccountAuditSpoolReleaseReceipt::operator=(AccountAuditSpoolReleaseReceipt&& other) noexcept {
+    if (this != &other) {
+        permit_id_ = std::exchange(other.permit_id_, 0);
+        hold_id_ = std::exchange(other.hold_id_, 0);
+        audit_generation_ = std::exchange(other.audit_generation_, 0);
+        invocation_id_ = std::move(other.invocation_id_);
+        spool_ = std::move(other.spool_);
+    }
+    return *this;
+}
+
+bool AccountAuditSpoolReleaseReceipt::valid() const {
+    return permit_id_ != 0 && hold_id_ != 0 && audit_generation_ != 0 && !invocation_id_.empty() &&
+           !spool_.relative_path.empty();
+}
+
+void AccountAuditSpoolReleaseReceipt::invalidate() {
+    permit_id_ = 0;
+    hold_id_ = 0;
+    audit_generation_ = 0;
+    invocation_id_.clear();
+    spool_ = {};
+}
+
+AccountAuditSpoolCleanupCallResult
+cleanup_spool_file_with_hold(std::string_view account_state, AccountAuditSpoolHold&& hold,
+                             uid_t expected_uid, const FileSpoolControl& control,
+                             const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+    const auto contradiction = [] {
+        FileSpoolError error;
+        error.kind = FileSpoolErrorKind::Contradiction;
+        error.durability_reason = DurabilityReason::Contradiction;
+        return error;
+    };
+    if (!hold.valid()) {
+        return contradiction();
+    }
+    auto cleanup = cleanup_spool_file(account_state, hold.spool_, expected_uid, control, hooks);
+    if (auto* error = std::get_if<FileSpoolError>(&cleanup)) {
+        return *error;
+    }
+    if (!std::get<SpoolCleanupResult>(cleanup).root_synced) {
+        return contradiction();
+    }
+    return AccountAuditSpoolReleaseReceipt(std::move(hold));
+}
+
+AccountAuditAppendPermit::AccountAuditAppendPermit() = default;
+AccountAuditAppendPermit::AccountAuditAppendPermit(std::unique_ptr<Impl> implementation)
+    : implementation_(std::move(implementation)) {}
+AccountAuditAppendPermit::AccountAuditAppendPermit(AccountAuditAppendPermit&&) noexcept = default;
+AccountAuditAppendPermit&
+AccountAuditAppendPermit::operator=(AccountAuditAppendPermit&&) noexcept = default;
+AccountAuditAppendPermit::~AccountAuditAppendPermit() = default;
+
+bool AccountAuditAppendPermit::valid() const {
+    return implementation_ && !implementation_->consumed && implementation_->permit_id != 0;
+}
+
+std::vector<AccountAuditSpoolHold> AccountAuditAppendPermit::issue_spool_holds() {
+    std::vector<AccountAuditSpoolHold> result;
+    if (!valid() || implementation_->holds_issued) {
+        return result;
+    }
+    implementation_->holds_issued = true;
+    result.reserve(implementation_->holds.size());
+    for (const auto& hold : implementation_->holds) {
+        result.push_back(AccountAuditSpoolHold(implementation_->permit_id, hold.hold_id,
+                                               hold.seed.audit_generation, hold.seed.invocation_id,
+                                               hold.seed.spool));
+    }
+    return result;
+}
+
+bool AccountAuditAppendPermit::release_spool_hold(AccountAuditSpoolReleaseReceipt receipt,
+                                                  AccountAuditFailure& failure) {
+    if (!valid() || !receipt.valid()) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "spool release receipt is invalid or stale"};
+        return false;
+    }
+    const auto found = std::ranges::find_if(implementation_->holds, [&](const auto& hold) {
+        return hold.hold_id == receipt.hold_id_ &&
+               hold.seed.audit_generation == receipt.audit_generation_ &&
+               hold.seed.invocation_id == receipt.invocation_id_ &&
+               hold.seed.spool == receipt.spool_;
+    });
+    if (receipt.permit_id_ != implementation_->permit_id || found == implementation_->holds.end() ||
+        found->released) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "spool release receipt does not match an unreleased hold"};
+        receipt.invalidate();
+        return false;
+    }
+    found->released = true;
+    receipt.invalidate();
+    failure.detail.clear();
+    return true;
+}
+
+bool AccountAuditAppendPermit::narrow_pins(std::vector<AccountAuditPin> surviving,
+                                           AccountAuditFailure& failure) {
+    if (!valid() || implementation_->absent_by_policy) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "pin narrowing is unavailable for this append permit"};
+        return false;
+    }
+    std::set<std::tuple<std::uint64_t, std::string, std::string, AccountAuditOperation>> unique;
+    for (const auto& pin : surviving) {
+        const auto identity = std::tuple{pin.audit_generation, pin.invocation_id,
+                                         pin.request_fingerprint, pin.operation};
+        const bool present = std::ranges::any_of(implementation_->pins, [&](const auto& original) {
+            return original.audit_generation == pin.audit_generation &&
+                   original.invocation_id == pin.invocation_id &&
+                   original.request_fingerprint == pin.request_fingerprint &&
+                   original.operation == pin.operation;
+        });
+        if (!present || !unique.emplace(identity).second) {
+            failure = {AccountAuditDurabilityReason::Contradiction,
+                       "surviving pins are not a unique subset of validated pins"};
+            return false;
+        }
+    }
+    implementation_->pins = std::move(surviving);
+    failure.detail.clear();
+    return true;
+}
 
 std::string_view account_audit_operation_name(AccountAuditOperation operation) {
     const auto* const found =
@@ -3083,7 +3364,7 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 
-AccountAuditCoordinator::Guard::Guard(std::unique_lock<std::mutex> lock,
+AccountAuditCoordinator::Guard::Guard(std::unique_lock<std::timed_mutex> lock,
                                       std::shared_ptr<const AccountAuditCoordinator> owner,
                                       AccountAuditScanControl scan_control)
     : lock_(std::move(lock)), owner_(std::move(owner)), scan_control_(std::move(scan_control)) {}
@@ -3148,8 +3429,44 @@ std::shared_ptr<AccountAuditCoordinator> AccountAuditCoordinator::create(
     return created;
 }
 
-AccountAuditCoordinator::Guard AccountAuditCoordinator::lock(AccountAuditScanControl scan_control) {
-    return {std::unique_lock(mutex_), shared_from_this(), std::move(scan_control)};
+AccountAuditCoordinator::Guard AccountAuditCoordinator::lock() {
+    return {std::unique_lock(mutex_), shared_from_this(), {}};
+}
+
+AccountAuditCoordinator::LockResult
+AccountAuditCoordinator::lock(AccountAuditScanControl scan_control) {
+    std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
+    if (!scan_control.cancelled &&
+        scan_control.deadline == std::chrono::steady_clock::time_point::max()) {
+        lock.lock();
+        return Guard(std::move(lock), shared_from_this(), std::move(scan_control));
+    }
+    constexpr auto cancellation_poll = std::chrono::milliseconds(1);
+    for (;;) {
+        if (const auto interruption = current_scan_interruption(scan_control)) {
+            AccountAuditFailure failure;
+            assign_scan_interruption(*interruption, failure);
+            return failure;
+        }
+        if (lock.try_lock()) {
+            if (const auto interruption = current_scan_interruption(scan_control)) {
+                AccountAuditFailure failure;
+                assign_scan_interruption(*interruption, failure);
+                return failure;
+            }
+            return Guard(std::move(lock), shared_from_this(), std::move(scan_control));
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto poll_deadline = std::min(scan_control.deadline, now + cancellation_poll);
+        if (lock.try_lock_until(poll_deadline)) {
+            if (const auto interruption = current_scan_interruption(scan_control)) {
+                AccountAuditFailure failure;
+                assign_scan_interruption(*interruption, failure);
+                return failure;
+            }
+            return Guard(std::move(lock), shared_from_this(), std::move(scan_control));
+        }
+    }
 }
 
 bool AccountAuditCoordinator::validate_lease(std::string& error) const {
@@ -3169,8 +3486,26 @@ const std::string& AccountAuditLog::path() const {
 AccountAuditInspection
 AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-complexity):
                                       // mixed-version scanner.
-    const AccountAuditCoordinator::Guard& guard) const {
+    const AccountAuditCoordinator::Guard& guard, const AccountAuditPinSource* pins,
+    const AccountAuditCompletedGroupVisitor* completed_visitor, AccountAuditAppendPermit* permit,
+    const AccountAuditIntent* next_intent) const {
     AccountAuditInspection result;
+    if (const auto* unavailable =
+            pins == nullptr ? nullptr : std::get_if<UnavailableAccountAuditPins>(pins)) {
+        result.status = AccountAuditInspectionStatus::Unavailable;
+        result.failure = {unavailable->reason, "audit pin source is unavailable"};
+        return result;
+    }
+    std::string pin_error;
+    auto pin_index = make_pin_index(pins, pin_error);
+    if (!pin_index) {
+        result.status = AccountAuditInspectionStatus::Contradiction;
+        result.failure = {AccountAuditDurabilityReason::Contradiction, std::move(pin_error)};
+        return result;
+    }
+    std::vector<SegmentIdentity> scanned_segments;
+    scanned_segments.reserve(kSegmentNames.size());
+    std::vector<AccountAuditHoldSeed> hold_seeds;
     std::string lease_error;
     if (!guard.validate_lease(state_directory_, account_, expected_uid_, lease_error)) {
         result.status = AccountAuditInspectionStatus::Unavailable;
@@ -3212,6 +3547,7 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
         struct stat metadata {};
         if (::fstatat(directory.get(), name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
             if (errno == ENOENT) {
+                scanned_segments.push_back({name, false, 0, 0, 0});
                 continue;
             }
             result.status = AccountAuditInspectionStatus::Unavailable;
@@ -3228,6 +3564,9 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
             result.failure.reason = AccountAuditDurabilityReason::PathInvalid;
             return result;
         }
+        scanned_segments.push_back({name, true, static_cast<std::uint64_t>(metadata.st_dev),
+                                    static_cast<std::uint64_t>(metadata.st_ino),
+                                    static_cast<std::uint64_t>(metadata.st_size)});
         if (state.open && metadata.st_size > 0 && prior_nonempty) {
             return contradiction(state, account_, audit_path_, "v2 group spans audit segments");
         }
@@ -3240,6 +3579,9 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
             result.status = AccountAuditInspectionStatus::Unavailable;
             result.failure = {AccountAuditDurabilityReason::OpenFailed, {}};
             return result;
+        }
+        if (hooks_ && hooks_->before_segment_scan) {
+            hooks_->before_segment_scan(name);
         }
         std::string line;
         line.reserve(static_cast<std::size_t>(
@@ -3354,9 +3696,17 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
                             return contradiction(state, account_, audit_path_,
                                                  "invocation id is reused in prior audit bytes");
                         }
+                        if (!match_pin(*pin_index,
+                                       static_cast<std::uint64_t>(descriptor_metadata.st_ino),
+                                       document, pin_error)) {
+                            return contradiction(state, account_, audit_path_,
+                                                 std::move(pin_error));
+                        }
                     }
                     std::string record_error;
-                    if (!consume_v2(document, state, record_error)) {
+                    if (!consume_v2(document, state, record_error,
+                                    static_cast<std::uint64_t>(descriptor_metadata.st_ino),
+                                    completed_visitor, &hold_seeds)) {
                         return contradiction(state, account_, audit_path_, std::move(record_error));
                     }
                 } else if (state.positive_v2) {
@@ -3439,6 +3789,9 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
         }
         prior_nonempty = prior_nonempty || metadata.st_size > 0;
     }
+    if (!all_pins_matched(*pin_index, pin_error)) {
+        return contradiction(state, account_, audit_path_, std::move(pin_error));
+    }
     if (state.open) {
         result.status = AccountAuditInspectionStatus::Open;
         result.oldest_open = std::move(state.open);
@@ -3448,6 +3801,32 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
     if (legacy.status == LogoutAuditInspectionStatus::Incomplete) {
         result.status = AccountAuditInspectionStatus::LegacyOpen;
         result.legacy_logout = std::move(legacy.incomplete);
+    }
+    if (result.status == AccountAuditInspectionStatus::Clean && permit != nullptr &&
+        next_intent != nullptr && pins != nullptr) {
+        static std::atomic<std::uint64_t> next_permit_id{1};
+        auto implementation = std::make_unique<AccountAuditAppendPermit::Impl>();
+        implementation->permit_id = next_permit_id.fetch_add(1, std::memory_order_relaxed);
+        if (implementation->permit_id == 0) {
+            implementation->permit_id = next_permit_id.fetch_add(1, std::memory_order_relaxed);
+        }
+        implementation->state_directory = state_directory_;
+        implementation->account = account_;
+        implementation->expected_uid = expected_uid_;
+        implementation->absent_by_policy =
+            std::holds_alternative<AbsentAccountAuditPinsByPolicy>(*pins);
+        implementation->intent_line =
+            serialize_account_audit_record(next_intent->document()) + '\n';
+        implementation->segments = std::move(scanned_segments);
+        if (const auto* known = std::get_if<KnownAccountAuditPins>(pins)) {
+            implementation->pins = known->pins;
+        }
+        implementation->holds.reserve(hold_seeds.size());
+        std::uint64_t hold_id = 1;
+        for (auto& seed : hold_seeds) {
+            implementation->holds.push_back({hold_id++, std::move(seed), false});
+        }
+        *permit = AccountAuditAppendPermit(std::move(implementation));
     }
     return result;
 }
@@ -3461,6 +3840,55 @@ AccountAuditInspection AccountAuditLog::inspect(const AccountAuditCoordinator::G
     if (scan_interrupted(guard.scan_control_, interruption)) {
         result.status = AccountAuditInspectionStatus::Interrupted;
         result.failure = std::move(interruption);
+    }
+    return result;
+}
+
+AccountAuditInspection
+AccountAuditLog::prepare_append(const AccountAuditIntent& intent, const AccountAuditPinSource& pins,
+                                const AccountAuditCoordinator::Guard& guard,
+                                AccountAuditAppendPermit& permit,
+                                const AccountAuditCompletedGroupVisitor& completed_visitor) const {
+    permit = AccountAuditAppendPermit{};
+    AccountAuditInspection result;
+    if (intent.document()["account"] != account_) {
+        result.status = AccountAuditInspectionStatus::Contradiction;
+        result.failure = {AccountAuditDurabilityReason::Contradiction,
+                          "v2 intent is routed to another account"};
+        return result;
+    }
+    const auto operation =
+        parse_account_audit_operation(intent.document()["command"].get<std::string>());
+    if (!operation) {
+        result.status = AccountAuditInspectionStatus::Contradiction;
+        result.failure = {AccountAuditDurabilityReason::SchemaError,
+                          "typed intent lost its operation identity"};
+        return result;
+    }
+    const bool absent_by_policy = std::holds_alternative<AbsentAccountAuditPinsByPolicy>(pins);
+    if ((*operation == AccountAuditOperation::SessionTerminate) != absent_by_policy) {
+        result.status = AccountAuditInspectionStatus::Contradiction;
+        result.failure = {AccountAuditDurabilityReason::Contradiction,
+                          "pin source contradicts the operation policy"};
+        return result;
+    }
+    const auto line_size = serialize_account_audit_record(intent.document()).size() + 1;
+    if (line_size > kIntentLineBytes) {
+        result.status = AccountAuditInspectionStatus::Unavailable;
+        result.failure = {AccountAuditDurabilityReason::TooLarge, {}};
+        return result;
+    }
+    result = inspect_unfinalized(guard, &pins, &completed_visitor, &permit, &intent);
+    if (hooks_ && hooks_->before_final_classification) {
+        hooks_->before_final_classification();
+    }
+    AccountAuditFailure interruption;
+    if (scan_interrupted(guard.scan_control_, interruption)) {
+        result.status = AccountAuditInspectionStatus::Interrupted;
+        result.failure = std::move(interruption);
+    }
+    if (result.status != AccountAuditInspectionStatus::Clean) {
+        permit = AccountAuditAppendPermit{};
     }
     return result;
 }
@@ -3520,7 +3948,7 @@ bool append_document(const std::string& state_directory, uid_t uid, const json& 
 } // namespace
 
 bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
-                                    const AccountAuditPinSource& pins,
+                                    AccountAuditAppendPermit permit,
                                     const AccountAuditCoordinator::Guard& guard,
                                     AccountAuditAppendReceipt& receipt,
                                     AccountAuditFailure& failure) const {
@@ -3529,9 +3957,18 @@ bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
         failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
         return false;
     }
-    if (intent.document()["account"] != account_) {
+    if (!permit.valid() || permit.implementation_->state_directory != state_directory_ ||
+        permit.implementation_->account != account_ ||
+        permit.implementation_->expected_uid != expected_uid_) {
         failure = {AccountAuditDurabilityReason::Contradiction,
-                   "v2 intent is routed to another account"};
+                   "append permit is invalid or bound to another account"};
+        return false;
+    }
+    auto& permitted = *permit.implementation_;
+    const auto line = serialize_account_audit_record(intent.document()) + '\n';
+    if (line != permitted.intent_line) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "append intent differs from its validated permit"};
         return false;
     }
     const auto operation =
@@ -3541,26 +3978,12 @@ bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
                    "typed intent lost its operation identity"};
         return false;
     }
-    const bool pins_absent_by_policy = std::holds_alternative<AbsentAccountAuditPinsByPolicy>(pins);
-    if ((*operation == AccountAuditOperation::SessionTerminate) != pins_absent_by_policy) {
+    if ((*operation == AccountAuditOperation::SessionTerminate) != permitted.absent_by_policy) {
         failure = {AccountAuditDurabilityReason::Contradiction,
                    "pin source contradicts the operation policy"};
         return false;
     }
-    const auto inspection = inspect(guard);
-    if (inspection.status != AccountAuditInspectionStatus::Clean) {
-        failure = (inspection.status == AccountAuditInspectionStatus::Unavailable ||
-                   inspection.status == AccountAuditInspectionStatus::Interrupted)
-                      ? inspection.failure
-                      : AccountAuditFailure{AccountAuditDurabilityReason::Contradiction,
-                                            "prior audit history is not terminal"};
-        return false;
-    }
-    const auto line_size = serialize_account_audit_record(intent.document()).size() + 1;
-    if (line_size > kIntentLineBytes) {
-        failure.reason = AccountAuditDurabilityReason::TooLarge;
-        return false;
-    }
+    permitted.consumed = true;
     const Descriptor directory(
         ::open(state_directory_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW));
     if (directory.get() < 0 || !valid_directory_metadata(directory.get(), expected_uid_, failure)) {
@@ -3569,8 +3992,15 @@ bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
         }
         return false;
     }
-    if (!rotate_for_intent(directory.get(), expected_uid_, line_size, pins, guard.scan_control_,
-                           hooks_, failure)) {
+    std::vector<std::uint64_t> retained_generations;
+    for (const auto& hold : permitted.holds) {
+        if (!hold.released) {
+            retained_generations.push_back(hold.seed.audit_generation);
+        }
+    }
+    if (!rotate_for_intent(directory.get(), expected_uid_, line.size(), permitted.absent_by_policy,
+                           permitted.pins, retained_generations, permitted.segments,
+                           guard.scan_control_, hooks_, failure)) {
         return false;
     }
     struct stat metadata {};

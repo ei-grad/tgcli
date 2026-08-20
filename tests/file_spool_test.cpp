@@ -617,6 +617,7 @@ TEST_CASE("file spool cleanup is exact, durable and idempotent", "[file-spool]")
         cleanup_spool_file(temp.state().string(), created.reference, ::getuid(), {}, hooks);
     REQUIRE(std::holds_alternative<SpoolCleanupResult>(cleanup));
     CHECK(std::get<SpoolCleanupResult>(cleanup).removed);
+    CHECK(std::get<SpoolCleanupResult>(cleanup).root_synced);
     CHECK(syncs == std::vector{FileSpoolStage::BeforeCleanupRootSync});
     CHECK_FALSE(std::filesystem::exists(temp.state() / "spool" / std::string(kInvocation)));
     CHECK(std::filesystem::exists(temp.state() / "spool"));
@@ -624,6 +625,7 @@ TEST_CASE("file spool cleanup is exact, durable and idempotent", "[file-spool]")
     cleanup = cleanup_spool_file(temp.state().string(), created.reference, ::getuid());
     REQUIRE(std::holds_alternative<SpoolCleanupResult>(cleanup));
     CHECK_FALSE(std::get<SpoolCleanupResult>(cleanup).removed);
+    CHECK(std::get<SpoolCleanupResult>(cleanup).root_synced);
 }
 
 TEST_CASE("file spool cleanup retains unexpected objects", "[file-spool]") {
@@ -996,6 +998,7 @@ TEST_CASE("file spool cleanup retry proves an already absent invocation durable"
         cleanup_spool_file(temp.state().string(), created.reference, ::getuid(), {}, retry_hooks);
     REQUIRE(std::holds_alternative<SpoolCleanupResult>(retry));
     CHECK_FALSE(std::get<SpoolCleanupResult>(retry).removed);
+    CHECK(std::get<SpoolCleanupResult>(retry).root_synced);
     CHECK(root_syncs == 1);
 }
 

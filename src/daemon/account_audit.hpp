@@ -1,6 +1,7 @@
 #pragma once
 
 #include "daemon/account_audit_limits.hpp"
+#include "daemon/file_spool.hpp"
 #include "daemon/logout_audit.hpp"
 
 #include <chrono>
@@ -211,6 +212,7 @@ struct AccountAuditAppendReceipt {
 };
 
 struct AccountAuditOpenGroup {
+    std::uint64_t audit_generation = 0;
     nlohmann::json intent;
     std::vector<nlohmann::json> checkpoints;
     std::vector<AccountAuditStage> completed_stages;
@@ -220,6 +222,125 @@ struct AccountAuditOpenGroup {
     bool mutation_confirmed = false;
     bool forward_complete = false;
     bool any_forward_sent = false;
+};
+
+enum class AccountAuditStoreDisposition { NoStore, Remove, RetainPending, Complete };
+
+struct AccountAuditCompletedGroupView {
+    std::uint64_t audit_generation = 0;
+    std::string invocation_id;
+    std::string account;
+    AccountAuditOperation operation = AccountAuditOperation::Send;
+    std::string request_fingerprint;
+    std::optional<std::string> idempotency_key_hash;
+    nlohmann::json plan;
+    std::string intent_timestamp;
+    std::int64_t intent_unix_seconds = 0;
+    std::optional<nlohmann::json> idempotency_pending;
+    std::optional<SpoolRef> spool;
+    nlohmann::json temporary_message_ids = nlohmann::json::array();
+    nlohmann::json forward_progress = nlohmann::json::array();
+    std::optional<nlohmann::json> mutation_proof;
+    std::vector<AccountAuditStage> completed_stages;
+    std::optional<nlohmann::json> outcome;
+    AccountAuditStoreDisposition store_disposition = AccountAuditStoreDisposition::NoStore;
+};
+
+using AccountAuditCompletedGroupVisitor =
+    std::function<void(const AccountAuditCompletedGroupView&)>;
+
+class AccountAuditSpoolReleaseReceipt;
+
+class AccountAuditSpoolHold final {
+  public:
+    AccountAuditSpoolHold(AccountAuditSpoolHold&& other) noexcept;
+    AccountAuditSpoolHold& operator=(AccountAuditSpoolHold&& other) noexcept;
+    ~AccountAuditSpoolHold() = default;
+    AccountAuditSpoolHold(const AccountAuditSpoolHold&) = delete;
+    AccountAuditSpoolHold& operator=(const AccountAuditSpoolHold&) = delete;
+
+    [[nodiscard]] bool valid() const;
+    [[nodiscard]] std::uint64_t audit_generation() const;
+    [[nodiscard]] const std::string& invocation_id() const;
+    [[nodiscard]] const SpoolRef& spool() const;
+
+  private:
+    AccountAuditSpoolHold(std::uint64_t permit_id, std::uint64_t hold_id,
+                          std::uint64_t audit_generation, std::string invocation_id,
+                          SpoolRef spool);
+    void invalidate();
+
+    std::uint64_t permit_id_ = 0;
+    std::uint64_t hold_id_ = 0;
+    std::uint64_t audit_generation_ = 0;
+    std::string invocation_id_;
+    SpoolRef spool_;
+
+    friend class AccountAuditAppendPermit;
+    friend class AccountAuditSpoolReleaseReceipt;
+    friend std::variant<AccountAuditSpoolReleaseReceipt, FileSpoolError>
+    cleanup_spool_file_with_hold(std::string_view account_state, AccountAuditSpoolHold&& hold,
+                                 uid_t expected_uid, const FileSpoolControl& control,
+                                 const std::shared_ptr<const testing::FileSpoolHooks>& hooks);
+};
+
+class AccountAuditSpoolReleaseReceipt final {
+  public:
+    AccountAuditSpoolReleaseReceipt(AccountAuditSpoolReleaseReceipt&& other) noexcept;
+    AccountAuditSpoolReleaseReceipt& operator=(AccountAuditSpoolReleaseReceipt&& other) noexcept;
+    ~AccountAuditSpoolReleaseReceipt() = default;
+    AccountAuditSpoolReleaseReceipt(const AccountAuditSpoolReleaseReceipt&) = delete;
+    AccountAuditSpoolReleaseReceipt& operator=(const AccountAuditSpoolReleaseReceipt&) = delete;
+
+    [[nodiscard]] bool valid() const;
+
+  private:
+    explicit AccountAuditSpoolReleaseReceipt(AccountAuditSpoolHold hold);
+    void invalidate();
+
+    std::uint64_t permit_id_ = 0;
+    std::uint64_t hold_id_ = 0;
+    std::uint64_t audit_generation_ = 0;
+    std::string invocation_id_;
+    SpoolRef spool_;
+
+    friend class AccountAuditAppendPermit;
+    friend std::variant<AccountAuditSpoolReleaseReceipt, FileSpoolError>
+    cleanup_spool_file_with_hold(std::string_view account_state, AccountAuditSpoolHold&& hold,
+                                 uid_t expected_uid, const FileSpoolControl& control,
+                                 const std::shared_ptr<const testing::FileSpoolHooks>& hooks);
+};
+
+using AccountAuditSpoolCleanupCallResult =
+    std::variant<AccountAuditSpoolReleaseReceipt, FileSpoolError>;
+
+[[nodiscard]] AccountAuditSpoolCleanupCallResult
+cleanup_spool_file_with_hold(std::string_view account_state, AccountAuditSpoolHold&& hold,
+                             uid_t expected_uid, const FileSpoolControl& control = {},
+                             const std::shared_ptr<const testing::FileSpoolHooks>& hooks = {});
+
+class AccountAuditAppendPermit final {
+  public:
+    AccountAuditAppendPermit();
+    AccountAuditAppendPermit(AccountAuditAppendPermit&&) noexcept;
+    AccountAuditAppendPermit& operator=(AccountAuditAppendPermit&&) noexcept;
+    ~AccountAuditAppendPermit();
+    AccountAuditAppendPermit(const AccountAuditAppendPermit&) = delete;
+    AccountAuditAppendPermit& operator=(const AccountAuditAppendPermit&) = delete;
+
+    [[nodiscard]] bool valid() const;
+    [[nodiscard]] std::vector<AccountAuditSpoolHold> issue_spool_holds();
+    [[nodiscard]] bool release_spool_hold(AccountAuditSpoolReleaseReceipt receipt,
+                                          AccountAuditFailure& failure);
+    [[nodiscard]] bool narrow_pins(std::vector<AccountAuditPin> surviving,
+                                   AccountAuditFailure& failure);
+
+  private:
+    struct Impl;
+    explicit AccountAuditAppendPermit(std::unique_ptr<Impl> implementation);
+    std::unique_ptr<Impl> implementation_;
+
+    friend class AccountAuditLog;
 };
 
 enum class AccountAuditInspectionStatus {
@@ -278,6 +399,7 @@ struct AccountAuditHooks {
     std::function<void()> before_identity_rescan;
     std::function<void()> after_parser_poll;
     std::function<void()> before_final_classification;
+    std::function<void(std::string_view)> before_segment_scan;
     std::uint64_t rotation_bytes = account_audit_limits::kRotationBytes;
 };
 } // namespace testing
@@ -300,10 +422,10 @@ class AccountAuditCoordinator final : public std::enable_shared_from_this<Accoun
       private:
         friend class AccountAuditCoordinator;
         friend class AccountAuditLog;
-        Guard(std::unique_lock<std::mutex> lock,
+        Guard(std::unique_lock<std::timed_mutex> lock,
               std::shared_ptr<const AccountAuditCoordinator> owner,
               AccountAuditScanControl scan_control);
-        std::unique_lock<std::mutex> lock_;
+        std::unique_lock<std::timed_mutex> lock_;
         std::shared_ptr<const AccountAuditCoordinator> owner_;
         AccountAuditScanControl scan_control_;
     };
@@ -311,7 +433,9 @@ class AccountAuditCoordinator final : public std::enable_shared_from_this<Accoun
     static std::shared_ptr<AccountAuditCoordinator>
     create(std::string state_directory, std::string account, uid_t expected_uid,
            std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease, std::string& error);
-    [[nodiscard]] Guard lock(AccountAuditScanControl scan_control = {});
+    using LockResult = std::variant<Guard, AccountAuditFailure>;
+    [[nodiscard]] Guard lock();
+    [[nodiscard]] LockResult lock(AccountAuditScanControl scan_control);
     [[nodiscard]] bool validate_lease(std::string& error) const;
 
   private:
@@ -322,7 +446,7 @@ class AccountAuditCoordinator final : public std::enable_shared_from_this<Accoun
     std::string account_;
     uid_t expected_uid_ = 0;
     std::shared_ptr<const daemon_lock::LifetimeLease> daemon_lock_lease_;
-    mutable std::mutex mutex_;
+    mutable std::timed_mutex mutex_;
 };
 
 class AccountAuditLog final {
@@ -332,8 +456,12 @@ class AccountAuditLog final {
 
     [[nodiscard]] const std::string& path() const;
     [[nodiscard]] AccountAuditInspection inspect(const AccountAuditCoordinator::Guard& guard) const;
+    [[nodiscard]] AccountAuditInspection
+    prepare_append(const AccountAuditIntent& intent, const AccountAuditPinSource& pins,
+                   const AccountAuditCoordinator::Guard& guard, AccountAuditAppendPermit& permit,
+                   const AccountAuditCompletedGroupVisitor& completed_visitor = {}) const;
     [[nodiscard]] bool append_intent(const AccountAuditIntent& intent,
-                                     const AccountAuditPinSource& pins,
+                                     AccountAuditAppendPermit permit,
                                      const AccountAuditCoordinator::Guard& guard,
                                      AccountAuditAppendReceipt& receipt,
                                      AccountAuditFailure& failure) const;
@@ -346,7 +474,12 @@ class AccountAuditLog final {
 
   private:
     [[nodiscard]]
-    AccountAuditInspection inspect_unfinalized(const AccountAuditCoordinator::Guard& guard) const;
+    AccountAuditInspection
+    inspect_unfinalized(const AccountAuditCoordinator::Guard& guard,
+                        const AccountAuditPinSource* pins = nullptr,
+                        const AccountAuditCompletedGroupVisitor* completed_visitor = nullptr,
+                        AccountAuditAppendPermit* permit = nullptr,
+                        const AccountAuditIntent* next_intent = nullptr) const;
     std::string state_directory_;
     std::string audit_path_;
     std::string account_;

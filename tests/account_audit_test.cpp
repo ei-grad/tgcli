@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 
@@ -468,6 +469,165 @@ std::vector<json> complete_v2_records(std::string invocation) {
     return {std::move(intent), outcome->document()};
 }
 
+std::string hex_invocation(std::uint64_t value) {
+    constexpr std::string_view digits = "0123456789abcdef";
+    std::string result(32, '0');
+    for (std::size_t index = result.size(); index > 0 && value != 0; --index) {
+        result[index - 1] = digits[value & 0x0fU];
+        value >>= 4U;
+    }
+    return result;
+}
+
+json checkpoint_record(daemon::AccountAuditOperation operation, daemon::AccountAuditStage stage,
+                       std::uint32_t sequence, json data, std::string_view invocation) {
+    std::string error;
+    auto value =
+        daemon::make_account_audit_checkpoint({{std::string(invocation), "2026-08-19T12:00:01Z"},
+                                               "main",
+                                               operation,
+                                               sequence,
+                                               stage,
+                                               std::move(data)},
+                                              error);
+    INFO(error);
+    REQUIRE(value);
+    return value->document();
+}
+
+json outcome_record(daemon::AccountAuditOperation operation, std::string invocation,
+                    daemon::AccountAuditMutationState mutation,
+                    std::vector<daemon::AccountAuditStage> stages, json terminal) {
+    std::string error;
+    auto outcome =
+        daemon::make_account_audit_outcome({{std::move(invocation), "2026-08-19T12:00:06Z"},
+                                            "main",
+                                            operation,
+                                            terminal["kind"] == "result",
+                                            mutation,
+                                            std::move(stages),
+                                            std::move(terminal)},
+                                           error);
+    INFO(error);
+    REQUIRE(outcome);
+    return outcome->document();
+}
+
+std::vector<json> complete_saved_attach_records(const std::string& invocation) {
+    using S = daemon::AccountAuditStage;
+    const auto intent =
+        make_intent(daemon::AccountAuditOperation::SavedAttach, invocation, std::string(kKeyHash))
+            .document();
+    const json pending{{"key_hash", kKeyHash},
+                       {"request_fingerprint", kFingerprint},
+                       {"expires_at", std::uint64_t{1}},
+                       {"reserved_terminal_bytes", std::uint64_t{65'536}}};
+    const json spool{{"file", intent["plan"]["file"]},
+                     {"relative_path", "spool/" + invocation + "/input"}};
+    const json dispatch{{"tdlib_function", "sendMessage"},
+                        {"dispatch_token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        {"client_generation", std::uint64_t{1}}};
+    const json temporary{{"temporary_message_ids", json::array({-1})}};
+    const auto terminal = result_terminal(daemon::AccountAuditOperation::SavedAttach);
+    const json proof{{"terminal", terminal}};
+    const std::vector<S> stages{S::IdempotencyPending, S::SpoolReady, S::DispatchStarted,
+                                S::TemporaryIdsObserved, S::MutationConfirmed};
+    return {intent,
+            checkpoint_record(daemon::AccountAuditOperation::SavedAttach, S::IdempotencyPending, 1,
+                              pending, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::SavedAttach, S::SpoolReady, 2, spool,
+                              invocation),
+            checkpoint_record(daemon::AccountAuditOperation::SavedAttach, S::DispatchStarted, 3,
+                              dispatch, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::SavedAttach, S::TemporaryIdsObserved,
+                              4, temporary, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::SavedAttach, S::MutationConfirmed, 5,
+                              proof, invocation),
+            outcome_record(daemon::AccountAuditOperation::SavedAttach, invocation,
+                           daemon::AccountAuditMutationState::Confirmed, stages, terminal)};
+}
+
+std::vector<json> complete_forward_records(const std::string& invocation) {
+    using S = daemon::AccountAuditStage;
+    const auto intent =
+        make_intent(daemon::AccountAuditOperation::MsgForward, invocation, std::string(kKeyHash))
+            .document();
+    const json pending{{"key_hash", kKeyHash},
+                       {"request_fingerprint", kFingerprint},
+                       {"expires_at", std::uint64_t{1}},
+                       {"reserved_terminal_bytes", std::uint64_t{4'194'304}}};
+    const json dispatch{{"tdlib_function", "forwardMessages"},
+                        {"dispatch_token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        {"client_generation", std::uint64_t{1}}};
+    const json temporary{{"temporary_message_ids", json::array({-1})}};
+    const json pending_vector{
+        {"items", json::array({json{
+                      {"source_id", 1}, {"status", "pending"}, {"temporary_message_id", -1}}})}};
+    const json sent_vector{
+        {"items",
+         json::array({json{{"source_id", 1}, {"status", "sent"}, {"message", message_write()}}})}};
+    const auto terminal = result_terminal(daemon::AccountAuditOperation::MsgForward);
+    const json proof{{"terminal", terminal}};
+    const std::vector<S> stages{S::IdempotencyPending, S::DispatchStarted, S::TemporaryIdsObserved,
+                                S::ForwardProgress, S::MutationConfirmed};
+    return {intent,
+            checkpoint_record(daemon::AccountAuditOperation::MsgForward, S::IdempotencyPending, 1,
+                              pending, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::MsgForward, S::DispatchStarted, 2,
+                              dispatch, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::MsgForward, S::TemporaryIdsObserved, 3,
+                              temporary, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::MsgForward, S::ForwardProgress, 4,
+                              pending_vector, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::MsgForward, S::ForwardProgress, 5,
+                              sent_vector, invocation),
+            checkpoint_record(daemon::AccountAuditOperation::MsgForward, S::MutationConfirmed, 6,
+                              proof, invocation),
+            outcome_record(daemon::AccountAuditOperation::MsgForward, invocation,
+                           daemon::AccountAuditMutationState::Confirmed, stages, terminal)};
+}
+
+void create_spool_object(const AuditTree& tree, std::string_view invocation) {
+    const auto root = tree.state() + "/spool";
+    const auto directory = root + "/" + std::string(invocation);
+    REQUIRE(std::filesystem::create_directory(root));
+    REQUIRE(::chmod(root.c_str(), 0700) == 0);
+    REQUIRE(std::filesystem::create_directory(directory));
+    REQUIRE(::chmod(directory.c_str(), 0700) == 0);
+    std::ofstream output(directory + "/input", std::ios::binary);
+    REQUIRE(output.good());
+    output.put('x');
+    output.close();
+    REQUIRE(::chmod((directory + "/input").c_str(), 0600) == 0);
+}
+
+bool append_intent(daemon::AccountAuditLog& log, const daemon::AccountAuditIntent& intent,
+                   const daemon::AccountAuditPinSource& pins,
+                   const daemon::AccountAuditCoordinator::Guard& guard,
+                   daemon::AccountAuditAppendReceipt& receipt,
+                   daemon::AccountAuditFailure& failure) {
+    daemon::AccountAuditAppendPermit permit;
+    const auto inspection = log.prepare_append(intent, pins, guard, permit);
+    if (inspection.status != daemon::AccountAuditInspectionStatus::Clean) {
+        failure = inspection.failure;
+        if (inspection.status != daemon::AccountAuditInspectionStatus::Unavailable &&
+            inspection.status != daemon::AccountAuditInspectionStatus::Interrupted &&
+            inspection.status != daemon::AccountAuditInspectionStatus::Contradiction) {
+            failure = {daemon::AccountAuditDurabilityReason::Contradiction,
+                       "prior audit history is not terminal"};
+        }
+        return false;
+    }
+    return log.append_intent(intent, std::move(permit), guard, receipt, failure);
+}
+
+daemon::AccountAuditCoordinator::Guard acquire_guard(daemon::AccountAuditCoordinator& coordinator,
+                                                     daemon::AccountAuditScanControl control) {
+    auto result = coordinator.lock(std::move(control));
+    REQUIRE(std::holds_alternative<daemon::AccountAuditCoordinator::Guard>(result));
+    return std::get<daemon::AccountAuditCoordinator::Guard>(std::move(result));
+}
+
 daemon::AccountAuditDurabilityReason expected_fault_reason(daemon::AccountAuditFault fault) {
     switch (fault) {
     case daemon::AccountAuditFault::Open:
@@ -828,7 +988,7 @@ TEST_CASE("account audit streams mixed history and applies recognition precedenc
     daemon::AccountAuditAppendReceipt receipt;
     daemon::AccountAuditFailure failure;
     const auto intent = make_intent(daemon::AccountAuditOperation::Send);
-    REQUIRE(log.append_intent(intent, daemon::KnownAccountAuditPins{}, guard, receipt, failure));
+    REQUIRE(append_intent(log, intent, daemon::KnownAccountAuditPins{}, guard, receipt, failure));
     CHECK(receipt.audit_generation != 0);
     auto inspection = log.inspect(guard);
     REQUIRE(inspection.status == daemon::AccountAuditInspectionStatus::Open);
@@ -948,8 +1108,8 @@ TEST_CASE("account audit hole-first rotation covers every occupancy mask",
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
         const daemon::AccountAuditPinSource pins = daemon::KnownAccountAuditPins{};
-        REQUIRE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send), pins, guard,
-                                  receipt, failure));
+        REQUIRE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send), pins, guard,
+                              receipt, failure));
         unsigned after = 0;
         for (unsigned slot = 1; slot <= 4; ++slot) {
             after += std::filesystem::exists(tree.audit("." + std::to_string(slot))) ? 1U : 0U;
@@ -973,9 +1133,8 @@ TEST_CASE("account audit ordinary writes refuse absent pins and preserve pinned 
     auto guard = tree.coordinator().lock();
     daemon::AccountAuditAppendReceipt receipt;
     daemon::AccountAuditFailure failure;
-    CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                  daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
-                                  failure));
+    CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send),
+                              daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt, failure));
     CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
 
     struct stat pinned {};
@@ -984,8 +1143,8 @@ TEST_CASE("account audit ordinary writes refuse absent pins and preserve pinned 
     daemon::KnownAccountAuditPins pins{
         {{static_cast<std::uint64_t>(pinned.st_ino), invocation, std::string(kFingerprint),
           daemon::AccountAuditOperation::Send}}};
-    REQUIRE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send), pins, guard,
-                              receipt, failure));
+    REQUIRE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send), pins, guard,
+                          receipt, failure));
     struct stat retained {};
     REQUIRE(::stat(tree.audit(".4").c_str(), &retained) == 0);
     CHECK(retained.st_ino == pinned.st_ino);
@@ -1016,8 +1175,8 @@ TEST_CASE("account audit full rotation covers every pin mask",
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        const bool appended = log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                                pins, guard, receipt, failure);
+        const bool appended = append_intent(log, make_intent(daemon::AccountAuditOperation::Send),
+                                            pins, guard, receipt, failure);
         if (mask == 15) {
             CHECK_FALSE(appended);
             CHECK(failure.reason == daemon::AccountAuditDurabilityReason::CapacityExhausted);
@@ -1067,9 +1226,8 @@ TEST_CASE("account audit rotation crash states resume without a second eviction"
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK_THROWS_AS(first.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                            daemon::KnownAccountAuditPins{}, guard, receipt,
-                                            failure),
+        CHECK_THROWS_AS(append_intent(first, make_intent(daemon::AccountAuditOperation::Send),
+                                      daemon::KnownAccountAuditPins{}, guard, receipt, failure),
                         RotationCrash);
 
         auto resumed_hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
@@ -1083,7 +1241,8 @@ TEST_CASE("account audit rotation crash states resume without a second eviction"
         if (cut == 5) {
             CHECK_FALSE(std::filesystem::exists(tree.audit()));
         }
-        REQUIRE(resumed.append_intent(
+        REQUIRE(append_intent(
+            resumed,
             make_intent(daemon::AccountAuditOperation::Send, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
             daemon::KnownAccountAuditPins{}, guard, receipt, failure));
         CHECK(std::find(resumed_steps.begin(), resumed_steps.end(), "unlink") ==
@@ -1100,8 +1259,8 @@ TEST_CASE("account audit maps filesystem faults and binds the coordinator accoun
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK_FALSE(log.append_intent(
-            make_intent(daemon::AccountAuditOperation::Send),
+        CHECK_FALSE(append_intent(
+            log, make_intent(daemon::AccountAuditOperation::Send),
             daemon::UnavailableAccountAuditPins{daemon::AccountAuditDurabilityReason::ReadFailed},
             guard, receipt, failure));
         CHECK(failure.reason == daemon::AccountAuditDurabilityReason::ReadFailed);
@@ -1115,8 +1274,8 @@ TEST_CASE("account audit maps filesystem faults and binds the coordinator accoun
         auto guard = second.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                      daemon::KnownAccountAuditPins{}, guard, receipt, failure));
+        CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send),
+                                  daemon::KnownAccountAuditPins{}, guard, receipt, failure));
         CHECK(failure.reason == daemon::AccountAuditDurabilityReason::LockFailed);
     }
 
@@ -1139,9 +1298,8 @@ TEST_CASE("account audit maps filesystem faults and binds the coordinator accoun
             auto guard = tree.coordinator().lock();
             daemon::AccountAuditAppendReceipt receipt;
             daemon::AccountAuditFailure failure;
-            CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                          daemon::KnownAccountAuditPins{}, guard, receipt,
-                                          failure));
+            CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send),
+                                      daemon::KnownAccountAuditPins{}, guard, receipt, failure));
             CHECK(failure.reason == expected_fault_reason(fault));
         }
     }
@@ -1636,8 +1794,8 @@ TEST_CASE("account audit validates every known pin before any rotation decision"
           daemon::AccountAuditOperation::Send}}};
     daemon::AccountAuditAppendReceipt receipt;
     daemon::AccountAuditFailure failure;
-    CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send), pins, guard,
-                                  receipt, failure));
+    CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send), pins, guard,
+                              receipt, failure));
     CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
 }
 
@@ -1699,15 +1857,13 @@ TEST_CASE("account audit scan and identity rescan share one interruption budget"
           "[account-audit][scanner][deadline][cancellation]") {
     SECTION("primary scan observes the absolute deadline") {
         AuditTree tree;
-        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
         daemon::AccountAuditScanControl control;
         control.deadline = std::chrono::steady_clock::now();
-        auto guard = tree.coordinator().lock(std::move(control));
-        const auto inspection = log.inspect(guard);
-        CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Interrupted);
-        REQUIRE(inspection.failure.interruption);
-        CHECK(*inspection.failure.interruption ==
-              daemon::AccountAuditFailure::Interruption::Deadline);
+        auto result = tree.coordinator().lock(std::move(control));
+        REQUIRE(std::holds_alternative<daemon::AccountAuditFailure>(result));
+        const auto& failure = std::get<daemon::AccountAuditFailure>(result);
+        REQUIRE(failure.interruption);
+        CHECK(*failure.interruption == daemon::AccountAuditFailure::Interruption::Deadline);
     }
 
     SECTION("deterministic identity rescan observes the same cancellation") {
@@ -1719,7 +1875,7 @@ TEST_CASE("account audit scan and identity rescan share one interruption budget"
         daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
         daemon::AccountAuditScanControl control;
         control.cancelled = [&] { return cancelled.load(std::memory_order_acquire); };
-        auto guard = tree.coordinator().lock(std::move(control));
+        auto guard = acquire_guard(tree.coordinator(), std::move(control));
         const auto inspection = log.inspect(guard);
         CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Interrupted);
         REQUIRE(inspection.failure.interruption);
@@ -1746,7 +1902,7 @@ TEST_CASE("account audit scan and identity rescan share one interruption budget"
         daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
         daemon::AccountAuditScanControl control;
         control.cancelled = [&] { return cancelled.load(std::memory_order_acquire); };
-        auto guard = tree.coordinator().lock(std::move(control));
+        auto guard = acquire_guard(tree.coordinator(), std::move(control));
         const auto inspection = log.inspect(guard);
         CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Interrupted);
         REQUIRE(inspection.failure.interruption);
@@ -1764,7 +1920,7 @@ TEST_CASE("account audit scan and identity rescan share one interruption budget"
         daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
         daemon::AccountAuditScanControl control;
         control.cancelled = [&] { return cancelled.load(std::memory_order_acquire); };
-        auto guard = tree.coordinator().lock(std::move(control));
+        auto guard = acquire_guard(tree.coordinator(), std::move(control));
         const auto inspection = log.inspect(guard);
         CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Interrupted);
     }
@@ -2343,8 +2499,8 @@ TEST_CASE("account audit validates dangling pins for every numbered occupancy ma
               std::string(kFingerprint), daemon::AccountAuditOperation::Send}}};
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send), pins, guard,
-                                      receipt, failure));
+        CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send), pins,
+                                  guard, receipt, failure));
         CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
     }
 }
@@ -2738,9 +2894,9 @@ TEST_CASE("account audit pin absence is reserved for session terminate policy",
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::Send),
-                                      daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
-                                      failure));
+        CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::Send),
+                                  daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt,
+                                  failure));
         CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
     }
     SECTION("session terminate requires AbsentByPolicy") {
@@ -2749,8 +2905,8 @@ TEST_CASE("account audit pin absence is reserved for session terminate policy",
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK_FALSE(log.append_intent(make_intent(daemon::AccountAuditOperation::SessionTerminate),
-                                      daemon::KnownAccountAuditPins{}, guard, receipt, failure));
+        CHECK_FALSE(append_intent(log, make_intent(daemon::AccountAuditOperation::SessionTerminate),
+                                  daemon::KnownAccountAuditPins{}, guard, receipt, failure));
         CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
     }
     SECTION("session terminate accepts only non-evicting AbsentByPolicy capacity") {
@@ -2759,8 +2915,8 @@ TEST_CASE("account audit pin absence is reserved for session terminate policy",
         auto guard = tree.coordinator().lock();
         daemon::AccountAuditAppendReceipt receipt;
         daemon::AccountAuditFailure failure;
-        CHECK(log.append_intent(make_intent(daemon::AccountAuditOperation::SessionTerminate),
-                                daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt, failure));
+        CHECK(append_intent(log, make_intent(daemon::AccountAuditOperation::SessionTerminate),
+                            daemon::AbsentAccountAuditPinsByPolicy{}, guard, receipt, failure));
     }
 }
 
@@ -2833,6 +2989,450 @@ TEST_CASE("account audit enforces file path roles and positive-int32 session tim
     CHECK(make_session("2038-01-19T03:14:07Z").has_value());
     CHECK_FALSE(make_session("1970-01-01T00:00:00Z"));
     CHECK_FALSE(make_session("2038-01-19T03:14:08Z"));
+}
+
+TEST_CASE("account audit streams immutable completed views across every generation",
+          "[account-audit][completed-view][stream][generation]") {
+    AuditTree tree;
+    const std::array invocations{hex_invocation(1), hex_invocation(2), hex_invocation(3),
+                                 hex_invocation(4), hex_invocation(5)};
+    tree.write(".4", json_lines(complete_v2_records(invocations[0])));
+    tree.write(".3", json_lines(complete_saved_attach_records(invocations[1])));
+    tree.write(".2", json_lines(complete_v2_records(invocations[2])));
+    tree.write(".1", json_lines(complete_forward_records(invocations[3])));
+    tree.write({}, json_lines(complete_v2_records(invocations[4])));
+
+    std::array<std::uint64_t, 5> generations{};
+    for (std::size_t index = 0; index < generations.size(); ++index) {
+        const auto suffix = index == 4 ? std::string{} : "." + std::to_string(4 - index);
+        struct stat metadata {};
+        REQUIRE(::lstat(tree.audit(suffix).c_str(), &metadata) == 0);
+        generations.at(index) = static_cast<std::uint64_t>(metadata.st_ino);
+    }
+
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    daemon::AccountAuditAppendPermit permit;
+    std::vector<daemon::AccountAuditCompletedGroupView> completed;
+    const auto inspection = log.prepare_append(
+        make_intent(daemon::AccountAuditOperation::Send, hex_invocation(15)),
+        daemon::KnownAccountAuditPins{}, guard, permit,
+        [&](const daemon::AccountAuditCompletedGroupView& view) { completed.push_back(view); });
+    REQUIRE(inspection.status == daemon::AccountAuditInspectionStatus::Clean);
+    CHECK(permit.valid());
+    REQUIRE(completed.size() == invocations.size());
+    for (std::size_t index = 0; index < completed.size(); ++index) {
+        CHECK(completed.at(index).invocation_id == invocations.at(index));
+        CHECK(completed.at(index).audit_generation == generations.at(index));
+        CHECK(completed.at(index).account == "main");
+        CHECK(completed.at(index).request_fingerprint == kFingerprint);
+        CHECK(completed.at(index).intent_timestamp == "2026-08-19T12:00:00Z");
+        CHECK(completed.at(index).intent_unix_seconds == 1'787'140'800);
+        REQUIRE(completed.at(index).outcome);
+    }
+    CHECK(completed[0].store_disposition == daemon::AccountAuditStoreDisposition::NoStore);
+
+    const auto& saved = completed[1];
+    CHECK(saved.operation == daemon::AccountAuditOperation::SavedAttach);
+    CHECK(saved.idempotency_key_hash == kKeyHash);
+    CHECK(saved.plan == plan(daemon::AccountAuditOperation::SavedAttach));
+    REQUIRE(saved.idempotency_pending);
+    CHECK((*saved.idempotency_pending)["reserved_terminal_bytes"] == 65'536);
+    REQUIRE(saved.spool);
+    CHECK(saved.spool->relative_path == "spool/" + invocations[1] + "/input");
+    CHECK(saved.temporary_message_ids == json::array({-1}));
+    CHECK(saved.forward_progress == json::array());
+    REQUIRE(saved.mutation_proof);
+    CHECK((*saved.mutation_proof)["terminal"] ==
+          result_terminal(daemon::AccountAuditOperation::SavedAttach));
+    CHECK(saved.store_disposition == daemon::AccountAuditStoreDisposition::Complete);
+
+    const auto& forward = completed[3];
+    CHECK(forward.operation == daemon::AccountAuditOperation::MsgForward);
+    CHECK(forward.temporary_message_ids == json::array({-1}));
+    CHECK(forward.forward_progress ==
+          result_terminal(daemon::AccountAuditOperation::MsgForward)["data"]["items"]);
+    CHECK(forward.completed_stages == std::vector{daemon::AccountAuditStage::IdempotencyPending,
+                                                  daemon::AccountAuditStage::DispatchStarted,
+                                                  daemon::AccountAuditStage::TemporaryIdsObserved,
+                                                  daemon::AccountAuditStage::ForwardProgress,
+                                                  daemon::AccountAuditStage::MutationConfirmed});
+}
+
+TEST_CASE("account audit open groups expose their intent generation",
+          "[account-audit][open][generation]") {
+    AuditTree tree;
+    tree.write({}, make_intent(daemon::AccountAuditOperation::Send).document().dump() + "\n");
+    struct stat metadata {};
+    REQUIRE(::lstat(tree.audit().c_str(), &metadata) == 0);
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    const auto inspection = log.inspect(guard);
+    REQUIRE(inspection.status == daemon::AccountAuditInspectionStatus::Open);
+    REQUIRE(inspection.oldest_open);
+    CHECK(inspection.oldest_open->audit_generation == static_cast<std::uint64_t>(metadata.st_ino));
+}
+
+TEST_CASE("account audit completed views derive every keyed store disposition",
+          "[account-audit][completed-view][store-disposition]") {
+    using M = daemon::AccountAuditMutationState;
+    using S = daemon::AccountAuditStage;
+    const auto removed_invocation = hex_invocation(20);
+    const auto retained_invocation = hex_invocation(21);
+    const json pending{{"key_hash", kKeyHash},
+                       {"request_fingerprint", kFingerprint},
+                       {"expires_at", std::uint64_t{1}},
+                       {"reserved_terminal_bytes", std::uint64_t{32'768}}};
+    const json dispatch{{"tdlib_function", "sendMessage"},
+                        {"dispatch_token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        {"client_generation", std::uint64_t{1}}};
+    const json shutdown{{"kind", "error"},
+                        {"code", "DAEMON_SHUTDOWN"},
+                        {"message", "daemon is shutting down"},
+                        {"details", {{"reason", "daemon_shutdown"}}},
+                        {"exit_code", 1}};
+    std::vector<json> records;
+    records.push_back(
+        make_intent(daemon::AccountAuditOperation::Send, removed_invocation, std::string(kKeyHash))
+            .document());
+    records.push_back(checkpoint_record(daemon::AccountAuditOperation::Send, S::IdempotencyPending,
+                                        1, pending, removed_invocation));
+    records.push_back(outcome_record(daemon::AccountAuditOperation::Send, removed_invocation,
+                                     M::None, {S::IdempotencyPending}, error_terminal()));
+    records.push_back(
+        make_intent(daemon::AccountAuditOperation::Send, retained_invocation, std::string(kKeyHash))
+            .document());
+    records.push_back(checkpoint_record(daemon::AccountAuditOperation::Send, S::IdempotencyPending,
+                                        1, pending, retained_invocation));
+    records.push_back(checkpoint_record(daemon::AccountAuditOperation::Send, S::DispatchStarted, 2,
+                                        dispatch, retained_invocation));
+    records.push_back(outcome_record(daemon::AccountAuditOperation::Send, retained_invocation,
+                                     M::Possible, {S::IdempotencyPending, S::DispatchStarted},
+                                     shutdown));
+
+    AuditTree tree;
+    tree.write({}, json_lines(records));
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    daemon::AccountAuditAppendPermit permit;
+    std::vector<daemon::AccountAuditCompletedGroupView> completed;
+    const auto inspection = log.prepare_append(
+        make_intent(daemon::AccountAuditOperation::Send, hex_invocation(22)),
+        daemon::KnownAccountAuditPins{}, guard, permit,
+        [&](const daemon::AccountAuditCompletedGroupView& view) { completed.push_back(view); });
+    REQUIRE(inspection.status == daemon::AccountAuditInspectionStatus::Clean);
+    REQUIRE(completed.size() == 2);
+    CHECK(completed[0].store_disposition == daemon::AccountAuditStoreDisposition::Remove);
+    CHECK(completed[1].store_disposition == daemon::AccountAuditStoreDisposition::RetainPending);
+    CHECK(completed[1].idempotency_pending == pending);
+}
+
+TEST_CASE("account audit validates bounded pin indexes in one segment pass",
+          "[account-audit][pins][one-pass][bounded]") {
+    AuditTree tree;
+    const auto existing = hex_invocation(42);
+    tree.write({}, json_lines(complete_v2_records(existing)));
+    struct stat metadata {};
+    REQUIRE(::lstat(tree.audit().c_str(), &metadata) == 0);
+    const auto generation = static_cast<std::uint64_t>(metadata.st_ino);
+    std::atomic<unsigned> segment_scans = 0;
+    auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+    hooks->before_segment_scan = [&](std::string_view) {
+        segment_scans.fetch_add(1, std::memory_order_relaxed);
+    };
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+    auto guard = tree.coordinator().lock();
+    const auto next = make_intent(daemon::AccountAuditOperation::Send, hex_invocation(43));
+
+    daemon::AccountAuditAppendPermit one_permit;
+    const daemon::KnownAccountAuditPins one{
+        {{generation, existing, std::string(kFingerprint), daemon::AccountAuditOperation::Send}}};
+    CHECK(log.prepare_append(next, one, guard, one_permit).status ==
+          daemon::AccountAuditInspectionStatus::Clean);
+    CHECK(segment_scans.load(std::memory_order_relaxed) == 1);
+
+    std::vector<daemon::AccountAuditPin> many;
+    many.reserve(10'000);
+    many.push_back(one.pins.front());
+    for (std::uint64_t index = 1; index < 10'000; ++index) {
+        many.push_back({generation, hex_invocation(1'000 + index), std::string(kFingerprint),
+                        daemon::AccountAuditOperation::Send});
+    }
+    daemon::AccountAuditAppendPermit many_permit;
+    const auto before = segment_scans.load(std::memory_order_relaxed);
+    const auto many_inspection = log.prepare_append(
+        next, daemon::KnownAccountAuditPins{std::move(many)}, guard, many_permit);
+    CHECK(many_inspection.status == daemon::AccountAuditInspectionStatus::Contradiction);
+    CHECK(segment_scans.load(std::memory_order_relaxed) == before + 1);
+    CHECK_FALSE(many_permit.valid());
+
+    daemon::AccountAuditAppendPermit duplicate_permit;
+    CHECK(log.prepare_append(next,
+                             daemon::KnownAccountAuditPins{{one.pins.front(), one.pins.front()}},
+                             guard, duplicate_permit)
+              .status == daemon::AccountAuditInspectionStatus::Contradiction);
+    daemon::AccountAuditAppendPermit mismatch_permit;
+    auto mismatch = one.pins.front();
+    mismatch.request_fingerprint =
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    CHECK(
+        log.prepare_append(next, daemon::KnownAccountAuditPins{{mismatch}}, guard, mismatch_permit)
+            .status == daemon::AccountAuditInspectionStatus::Contradiction);
+}
+
+TEST_CASE("account audit spool holds require durable cleanup receipts before eviction",
+          "[account-audit][spool-hold][rotation][receipt]") {
+    static_assert(!std::is_copy_constructible_v<daemon::AccountAuditAppendPermit>);
+    static_assert(!std::is_copy_constructible_v<daemon::AccountAuditSpoolHold>);
+    static_assert(!std::is_copy_constructible_v<daemon::AccountAuditSpoolReleaseReceipt>);
+
+    const auto exercise = [](bool release) {
+        AuditTree tree;
+        const auto spool_invocation = hex_invocation(100);
+        tree.write(".4", json_lines(complete_saved_attach_records(spool_invocation)));
+        tree.write(".3", json_lines(complete_v2_records(hex_invocation(101))));
+        tree.write(".2", json_lines(complete_v2_records(hex_invocation(102))));
+        tree.write(".1", json_lines(complete_v2_records(hex_invocation(103))));
+        tree.write({}, json_lines(complete_v2_records(hex_invocation(104))));
+        create_spool_object(tree, spool_invocation);
+        struct stat oldest {};
+        REQUIRE(::lstat(tree.audit(".4").c_str(), &oldest) == 0);
+
+        auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+        hooks->rotation_bytes = 1;
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+        auto guard = tree.coordinator().lock();
+        const auto next = make_intent(daemon::AccountAuditOperation::Send, hex_invocation(105));
+        daemon::AccountAuditAppendPermit permit;
+        REQUIRE(log.prepare_append(next, daemon::KnownAccountAuditPins{}, guard, permit).status ==
+                daemon::AccountAuditInspectionStatus::Clean);
+        auto holds = permit.issue_spool_holds();
+        REQUIRE(holds.size() == 1);
+        CHECK(holds.front().audit_generation() == static_cast<std::uint64_t>(oldest.st_ino));
+        CHECK(holds.front().invocation_id() == spool_invocation);
+        CHECK(permit.issue_spool_holds().empty());
+        if (release) {
+            auto cleanup = daemon::cleanup_spool_file_with_hold(
+                tree.state(), std::move(holds.front()), ::getuid());
+            REQUIRE(std::holds_alternative<daemon::AccountAuditSpoolReleaseReceipt>(cleanup));
+            daemon::AccountAuditFailure release_failure;
+            REQUIRE(permit.release_spool_hold(
+                std::move(std::get<daemon::AccountAuditSpoolReleaseReceipt>(cleanup)),
+                release_failure));
+        }
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        REQUIRE(log.append_intent(next, std::exchange(permit, daemon::AccountAuditAppendPermit{}),
+                                  guard, receipt, failure));
+        bool oldest_survived = false;
+        for (const auto* suffix : {".1", ".2", ".3", ".4"}) {
+            struct stat observed {};
+            if (::lstat(tree.audit(suffix).c_str(), &observed) == 0 &&
+                observed.st_ino == oldest.st_ino) {
+                oldest_survived = true;
+            }
+        }
+        CHECK(oldest_survived == !release);
+    };
+
+    SECTION("unreleased hold protects its generation") {
+        exercise(false);
+    }
+    SECTION("cleanup and root fsync receipt releases its generation") {
+        exercise(true);
+    }
+    SECTION("an absent spool root cannot mint a release receipt") {
+        AuditTree tree;
+        const auto spool_invocation = hex_invocation(110);
+        tree.write({}, json_lines(complete_saved_attach_records(spool_invocation)));
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+        auto guard = tree.coordinator().lock();
+        const auto next = make_intent(daemon::AccountAuditOperation::Send, hex_invocation(111));
+        daemon::AccountAuditAppendPermit permit;
+        REQUIRE(log.prepare_append(next, daemon::KnownAccountAuditPins{}, guard, permit).status ==
+                daemon::AccountAuditInspectionStatus::Clean);
+        auto holds = permit.issue_spool_holds();
+        REQUIRE(holds.size() == 1);
+        auto cleanup = daemon::cleanup_spool_file_with_hold(tree.state(), std::move(holds.front()),
+                                                            ::getuid());
+        REQUIRE(std::holds_alternative<daemon::FileSpoolError>(cleanup));
+        const auto& error = std::get<daemon::FileSpoolError>(cleanup);
+        CHECK(error.kind == daemon::FileSpoolErrorKind::Contradiction);
+        CHECK(error.durability_reason == daemon::DurabilityReason::Contradiction);
+    }
+}
+
+TEST_CASE("account audit permits revalidate segments and narrow only validated pins",
+          "[account-audit][permit][pins][replacement]") {
+    SECTION("segment replacement invalidates the permit before rotation") {
+        AuditTree tree;
+        tree.write({}, json_lines(complete_v2_records(hex_invocation(200))));
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+        auto guard = tree.coordinator().lock();
+        const auto next = make_intent(daemon::AccountAuditOperation::Send, hex_invocation(201));
+        daemon::AccountAuditAppendPermit permit;
+        REQUIRE(log.prepare_append(next, daemon::KnownAccountAuditPins{}, guard, permit).status ==
+                daemon::AccountAuditInspectionStatus::Clean);
+        REQUIRE_NOTHROW(std::filesystem::rename(tree.audit(), tree.audit(".replaced")));
+        tree.write({}, json_lines(complete_v2_records(hex_invocation(202))));
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        CHECK_FALSE(log.append_intent(next,
+                                      std::exchange(permit, daemon::AccountAuditAppendPermit{}),
+                                      guard, receipt, failure));
+        CHECK(failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
+    }
+
+    SECTION("surviving pins are an exact unique subset") {
+        AuditTree tree;
+        const std::array invocations{hex_invocation(210), hex_invocation(211), hex_invocation(212),
+                                     hex_invocation(213), hex_invocation(214)};
+        tree.write(".4", json_lines(complete_v2_records(invocations[0])));
+        tree.write(".3", json_lines(complete_v2_records(invocations[1])));
+        tree.write(".2", json_lines(complete_v2_records(invocations[2])));
+        tree.write(".1", json_lines(complete_v2_records(invocations[3])));
+        tree.write({}, json_lines(complete_v2_records(invocations[4])));
+        struct stat fourth {};
+        struct stat third {};
+        REQUIRE(::lstat(tree.audit(".4").c_str(), &fourth) == 0);
+        REQUIRE(::lstat(tree.audit(".3").c_str(), &third) == 0);
+        const daemon::AccountAuditPin pin4{static_cast<std::uint64_t>(fourth.st_ino),
+                                           invocations[0], std::string(kFingerprint),
+                                           daemon::AccountAuditOperation::Send};
+        const daemon::AccountAuditPin pin3{static_cast<std::uint64_t>(third.st_ino), invocations[1],
+                                           std::string(kFingerprint),
+                                           daemon::AccountAuditOperation::Send};
+        auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+        hooks->rotation_bytes = 1;
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+        auto guard = tree.coordinator().lock();
+        const auto next = make_intent(daemon::AccountAuditOperation::Send, hex_invocation(215));
+        daemon::AccountAuditAppendPermit permit;
+        REQUIRE(log.prepare_append(next, daemon::KnownAccountAuditPins{{pin4, pin3}}, guard, permit)
+                    .status == daemon::AccountAuditInspectionStatus::Clean);
+        daemon::AccountAuditFailure failure;
+        auto foreign = pin4;
+        foreign.invocation_id = hex_invocation(999);
+        CHECK_FALSE(permit.narrow_pins({foreign}, failure));
+        REQUIRE(permit.narrow_pins({pin4}, failure));
+        daemon::AccountAuditAppendReceipt receipt;
+        REQUIRE(log.append_intent(next, std::exchange(permit, daemon::AccountAuditAppendPermit{}),
+                                  guard, receipt, failure));
+        struct stat retained {};
+        REQUIRE(::lstat(tree.audit(".4").c_str(), &retained) == 0);
+        CHECK(retained.st_ino == fourth.st_ino);
+        bool third_survived = false;
+        for (const auto* suffix : {".1", ".2", ".3", ".4"}) {
+            struct stat observed {};
+            if (::lstat(tree.audit(suffix).c_str(), &observed) == 0 &&
+                observed.st_ino == third.st_ino) {
+                third_survived = true;
+            }
+        }
+        CHECK_FALSE(third_survived);
+    }
+}
+
+TEST_CASE("account audit AbsentByPolicy rotation is hole-only",
+          "[account-audit][absent-by-policy][rotation][session]") {
+    SECTION("a missing numbered slot is consumed without eviction") {
+        AuditTree tree;
+        tree.write(".3", json_lines(complete_v2_records(hex_invocation(301))));
+        tree.write(".2", json_lines(complete_v2_records(hex_invocation(302))));
+        tree.write(".1", json_lines(complete_v2_records(hex_invocation(303))));
+        tree.write({}, json_lines(complete_v2_records(hex_invocation(304))));
+        std::vector<std::string> steps;
+        auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+        hooks->rotation_bytes = 1;
+        hooks->after_rotation_step = [&](std::string_view step) { steps.emplace_back(step); };
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+        auto guard = tree.coordinator().lock();
+        const auto next =
+            make_intent(daemon::AccountAuditOperation::SessionTerminate, hex_invocation(305));
+        daemon::AccountAuditAppendPermit permit;
+        REQUIRE(log.prepare_append(next, daemon::AbsentAccountAuditPinsByPolicy{}, guard, permit)
+                    .status == daemon::AccountAuditInspectionStatus::Clean);
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        CHECK(log.append_intent(next, std::exchange(permit, daemon::AccountAuditAppendPermit{}),
+                                guard, receipt, failure));
+        CHECK(std::ranges::find(steps, "unlink") == steps.end());
+    }
+    SECTION("a full set never evicts without pin knowledge") {
+        AuditTree tree;
+        for (std::size_t slot = 1; slot <= 4; ++slot) {
+            tree.write("." + std::to_string(slot),
+                       json_lines(complete_v2_records(hex_invocation(310 + slot))));
+        }
+        tree.write({}, json_lines(complete_v2_records(hex_invocation(315))));
+        auto hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+        hooks->rotation_bytes = 1;
+        daemon::AccountAuditLog log(tree.state(), "main", ::getuid(), hooks);
+        auto guard = tree.coordinator().lock();
+        const auto next =
+            make_intent(daemon::AccountAuditOperation::SessionTerminate, hex_invocation(316));
+        daemon::AccountAuditAppendPermit permit;
+        REQUIRE(log.prepare_append(next, daemon::AbsentAccountAuditPinsByPolicy{}, guard, permit)
+                    .status == daemon::AccountAuditInspectionStatus::Clean);
+        daemon::AccountAuditAppendReceipt receipt;
+        daemon::AccountAuditFailure failure;
+        CHECK_FALSE(log.append_intent(next,
+                                      std::exchange(permit, daemon::AccountAuditAppendPermit{}),
+                                      guard, receipt, failure));
+        CHECK(failure.reason == daemon::AccountAuditDurabilityReason::CapacityExhausted);
+    }
+}
+
+TEST_CASE("account audit controlled mutex acquisition obeys deadline and cancellation",
+          "[account-audit][lock][deadline][cancellation][concurrency]") {
+    SECTION("deadline before and at acquisition fails before taking a free mutex") {
+        AuditTree tree;
+        for (const auto deadline :
+             {std::chrono::steady_clock::now() - 1ms, std::chrono::steady_clock::now()}) {
+            daemon::AccountAuditScanControl control;
+            control.deadline = deadline;
+            auto result = tree.coordinator().lock(std::move(control));
+            REQUIRE(std::holds_alternative<daemon::AccountAuditFailure>(result));
+            const auto& failure = std::get<daemon::AccountAuditFailure>(result);
+            REQUIRE(failure.interruption);
+            CHECK(*failure.interruption == daemon::AccountAuditFailure::Interruption::Deadline);
+        }
+    }
+
+    SECTION("deadline expires while another epoch remains held") {
+        AuditTree tree;
+        auto first = tree.coordinator().lock();
+        auto waiter = std::async(std::launch::async, [&] {
+            daemon::AccountAuditScanControl control;
+            control.deadline = std::chrono::steady_clock::now() + 30ms;
+            return tree.coordinator().lock(std::move(control));
+        });
+        REQUIRE(waiter.wait_for(500ms) == std::future_status::ready);
+        auto result = waiter.get();
+        REQUIRE(std::holds_alternative<daemon::AccountAuditFailure>(result));
+        CHECK(std::get<daemon::AccountAuditFailure>(result).interruption ==
+              daemon::AccountAuditFailure::Interruption::Deadline);
+        CHECK(first.valid());
+    }
+
+    SECTION("cancellation interrupts a queued acquisition") {
+        AuditTree tree;
+        auto first = tree.coordinator().lock();
+        std::atomic<bool> cancelled = false;
+        auto waiter = std::async(std::launch::async, [&] {
+            daemon::AccountAuditScanControl control;
+            control.cancelled = [&] { return cancelled.load(std::memory_order_acquire); };
+            return tree.coordinator().lock(std::move(control));
+        });
+        std::this_thread::sleep_for(10ms);
+        cancelled.store(true, std::memory_order_release);
+        REQUIRE(waiter.wait_for(500ms) == std::future_status::ready);
+        auto result = waiter.get();
+        REQUIRE(std::holds_alternative<daemon::AccountAuditFailure>(result));
+        CHECK(std::get<daemon::AccountAuditFailure>(result).interruption ==
+              daemon::AccountAuditFailure::Interruption::Cancelled);
+        CHECK(first.valid());
+    }
 }
 
 // NOLINTEND(misc-const-correctness)

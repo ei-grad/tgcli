@@ -279,6 +279,7 @@ reconcile_spool_inventory(const SpoolInventory& inventory,
 
 struct SpoolCleanupResult {
     bool removed{false};
+    bool root_synced{false};
 
     friend bool operator==(const SpoolCleanupResult&, const SpoolCleanupResult&) = default;
 };
