@@ -151,7 +151,7 @@ current_scan_interruption(const AccountAuditScanControl& control) {
     if (control.cancelled && control.cancelled()) {
         return AccountAuditFailure::Interruption::Cancelled;
     }
-    if (std::chrono::steady_clock::now() >= control.deadline) {
+    if (deadline_expired(control.deadline)) {
         return AccountAuditFailure::Interruption::Deadline;
     }
     return std::nullopt;
@@ -3597,8 +3597,7 @@ AccountAuditCoordinator::Guard AccountAuditCoordinator::lock() {
 AccountAuditCoordinator::LockResult
 AccountAuditCoordinator::lock(AccountAuditScanControl scan_control) {
     std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
-    if (!scan_control.cancelled &&
-        scan_control.deadline == std::chrono::steady_clock::time_point::max()) {
+    if (!scan_control.cancelled && !scan_control.deadline.expires_at) {
         lock.lock();
         return Guard(std::move(lock), shared_from_this(), std::move(scan_control));
     }
@@ -3618,7 +3617,10 @@ AccountAuditCoordinator::lock(AccountAuditScanControl scan_control) {
             return Guard(std::move(lock), shared_from_this(), std::move(scan_control));
         }
         const auto now = std::chrono::steady_clock::now();
-        const auto poll_deadline = std::min(scan_control.deadline, now + cancellation_poll);
+        const auto poll_deadline =
+            scan_control.deadline.expires_at
+                ? std::min(*scan_control.deadline.expires_at, now + cancellation_poll)
+                : now + cancellation_poll;
         if (lock.try_lock_until(poll_deadline)) {
             if (const auto interruption = current_scan_interruption(scan_control)) {
                 AccountAuditFailure failure;

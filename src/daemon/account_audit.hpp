@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/deadline.hpp"
 #include "daemon/account_audit_limits.hpp"
 #include "daemon/file_spool.hpp"
 #include "daemon/logout_audit.hpp"
@@ -200,7 +201,7 @@ struct AccountAuditFailure {
 };
 
 struct AccountAuditScanControl {
-    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    RequestDeadline deadline;
     std::function<bool()> cancelled;
 };
 

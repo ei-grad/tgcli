@@ -1878,7 +1878,7 @@ TEST_CASE("account audit scan and identity rescan share one interruption budget"
     SECTION("primary scan observes the absolute deadline") {
         AuditTree tree;
         daemon::AccountAuditScanControl control;
-        control.deadline = std::chrono::steady_clock::now();
+        control.deadline = RequestDeadline{std::chrono::steady_clock::now()};
         auto result = tree.coordinator().lock(std::move(control));
         REQUIRE(std::holds_alternative<daemon::AccountAuditFailure>(result));
         const auto& failure = std::get<daemon::AccountAuditFailure>(result);
@@ -3596,12 +3596,17 @@ TEST_CASE("account audit AbsentByPolicy rotation is hole-only",
 
 TEST_CASE("account audit controlled mutex acquisition obeys deadline and cancellation",
           "[account-audit][lock][deadline][cancellation][concurrency]") {
+    SECTION("default scan control carries the shared unlimited deadline") {
+        daemon::AccountAuditScanControl control;
+        CHECK_FALSE(control.deadline.expires_at);
+    }
+
     SECTION("deadline before and at acquisition fails before taking a free mutex") {
         AuditTree tree;
         for (const auto deadline :
              {std::chrono::steady_clock::now() - 1ms, std::chrono::steady_clock::now()}) {
             daemon::AccountAuditScanControl control;
-            control.deadline = deadline;
+            control.deadline = RequestDeadline{deadline};
             auto result = tree.coordinator().lock(std::move(control));
             REQUIRE(std::holds_alternative<daemon::AccountAuditFailure>(result));
             const auto& failure = std::get<daemon::AccountAuditFailure>(result);
@@ -3615,7 +3620,7 @@ TEST_CASE("account audit controlled mutex acquisition obeys deadline and cancell
         auto first = tree.coordinator().lock();
         auto waiter = std::async(std::launch::async, [&] {
             daemon::AccountAuditScanControl control;
-            control.deadline = std::chrono::steady_clock::now() + 30ms;
+            control.deadline = RequestDeadline{std::chrono::steady_clock::now() + 30ms};
             return tree.coordinator().lock(std::move(control));
         });
         REQUIRE(waiter.wait_for(500ms) == std::future_status::ready);
