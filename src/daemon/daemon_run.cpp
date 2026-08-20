@@ -334,8 +334,11 @@ int run_daemon(const std::string& account) {
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
                    std::string& error, const Dispatcher* dispatcher_override,
-                   core::TdClient* td_client_override) {
+                   core::TdClient* td_client_override,
+                   const testing::RequestWallClock& request_wall_clock) {
     const auto admitted_at = RequestClock::now();
+    const auto admission_wall_time =
+        request_wall_clock ? request_wall_clock() : RequestSession::WallClock::now();
     std::optional<RequestDeadline> admitted_deadline;
     if (request.context.timeout_seconds) {
         admitted_deadline = request_deadline(request.context.timeout_seconds,
@@ -443,7 +446,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     } else if (deadline_policy == DeadlineDefault::Default60) {
         RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
                                ActivityTracker::Token{}, nullptr, deadline,
-                               ConfigAdmissionMode::DirectFallback);
+                               ConfigAdmissionMode::DirectFallback, admission_wall_time);
         selected_dispatcher.dispatch(session);
     } else {
         const auto admission = config_runtime.admit(request.account, *deadline);
@@ -461,7 +464,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
                        &*admission.decision)) {
             RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
                                    ActivityTracker::Token{}, *accepted, deadline,
-                                   ConfigAdmissionMode::FrozenRuntime);
+                                   ConfigAdmissionMode::FrozenRuntime, admission_wall_time);
             selected_dispatcher.dispatch(session);
         } else {
             const auto& denied = std::get<ConfigAdmissionDenied>(*admission.decision);

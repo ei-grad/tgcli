@@ -342,8 +342,7 @@ PageDisposition incorporate_page(const core::TdMessages& page, FetchRunState& st
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void FetchCoordinator::fetch(const proto::Request& request, RequestSession& session) {
-    const auto request_start = wall_clock_ ? wall_clock_() : std::chrono::system_clock::now();
-    const auto parsed = parse_request(request.args, request_start, session);
+    const auto parsed = parse_request(request.args, session.admission_wall_time(), session);
     if (!parsed) {
         return;
     }

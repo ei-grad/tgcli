@@ -29,6 +29,7 @@
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -44,6 +45,25 @@ struct Outcome {
     std::optional<json> error;
     int exit_code = -1;
 };
+
+const tgcli::core::TdFieldValue* field(const tgcli::core::TdFunctionData& function,
+                                       std::string_view name) {
+    for (const auto& candidate : function.fields()) {
+        if (candidate.has_name(name)) {
+            return &candidate.value();
+        }
+    }
+    return nullptr;
+}
+
+template <typename T>
+const T& field_as(const tgcli::core::TdFunctionData& function, std::string_view name) {
+    const auto* value = field(function, name);
+    REQUIRE(value != nullptr);
+    const auto* typed = std::get_if<T>(value);
+    REQUIRE(typed != nullptr);
+    return *typed;
+}
 
 class RecoveryTree {
   public:
@@ -236,8 +256,12 @@ class RecoveryFixture {
         clear_trace();
     }
 
-    std::future<Outcome> dispatch(std::vector<std::string> command) {
-        return std::async(std::launch::async, [this, command = std::move(command)]() mutable {
+    std::future<Outcome> dispatch(
+        std::vector<std::string> command, std::optional<std::string> fetch_since = std::nullopt,
+        std::optional<std::chrono::system_clock::time_point> admission_wall_time = std::nullopt) {
+        return std::async(std::launch::async, [this, command = std::move(command),
+                                               fetch_since = std::move(fetch_since),
+                                               admission_wall_time]() mutable {
             Outcome outcome;
             tgcli::daemon::CallbackSink sink(
                 [](const json&) {}, [](const json&) {},
@@ -261,27 +285,35 @@ class RecoveryFixture {
                                 {"until", nullptr}, {"topic", nullptr},  {"local", false},
                                 {"limit", 20},      {"cursor", nullptr}};
             } else if (command == std::vector<std::string>{"fetch"}) {
-                request.args = {
-                    {"chat", "-1001"}, {"limit", 1}, {"all", false}, {"since", nullptr}};
+                request.args = {{"chat", "-1001"},
+                                {"limit", 1},
+                                {"all", false},
+                                {"since", fetch_since ? json(*fetch_since) : json(nullptr)}};
             } else {
                 request.args = {{"chat", "-1001"}, {"message_id", 123}};
             }
             request.context.timeout_seconds = 1.0;
             request.context.cwd = "/";
-            tgcli::daemon::RequestSession session(std::move(request), sink);
+            tgcli::daemon::RequestSession session(
+                std::move(request), sink, 0, tgcli::daemon::RequestSession::NonceGenerator{},
+                tgcli::daemon::ActivityTracker::Token{}, nullptr, std::nullopt,
+                tgcli::daemon::ConfigAdmissionMode::DirectFallback, admission_wall_time);
             dispatcher_.dispatch(session);
             return outcome;
         });
     }
 
-    template <typename T> void respond(tgcli::core::TdFunctionKind expected, T value) {
+    template <typename T>
+    tgcli::core::TdFunctionData respond(tgcli::core::TdFunctionKind expected, T value) {
         REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
         const auto sent = runtime_->sent_functions();
         REQUIRE(sent.size() == sent_count_ + 1);
         REQUIRE(sent.back().function.kind() == expected);
+        const auto descriptor = sent.back().function;
         runtime_->push_response(client_id_, sent.back().query_id,
                                 tgcli::core::TdValue::from(std::move(value)));
         ++sent_count_;
+        return descriptor;
     }
 
     [[nodiscard]] std::size_t sent_count() const {
@@ -536,4 +568,36 @@ TEST_CASE("fetch real dispatch orders both recoveries before Ready resolver and 
     CHECK(first_index(trace, "logout") < first_index(trace, "getMe"));
     CHECK(first_index(trace, "getMe") < first_index(trace, "getChat"));
     CHECK(first_index(trace, "getChat") < first_index(trace, "getChatHistory"));
+}
+
+TEST_CASE("fetch relative since remains admission-bound across both recovery preflights",
+          "[fetch][recovery][dispatch][fake-boundary][admission][since]") {
+    RecoveryFixture fixture;
+    const auto admitted_at = std::chrono::system_clock::time_point{10'000s + 500ms};
+    auto pending = fixture.dispatch({"fetch"}, "1h", admitted_at);
+    fixture.respond(tgcli::core::TdFunctionKind::GetMe, user());
+    fixture.respond(tgcli::core::TdFunctionKind::GetChat, chat());
+    const auto cutoff = tgcli::core::TdMessageSummary{
+        .id = 98,
+        .chat_id = -1001,
+        .date = 6'400,
+        .sender = {.kind = tgcli::core::TdMessageSenderKind::User, .id = 42, .tdlib_type_id = 1},
+        .is_outgoing = false,
+        .topic = std::nullopt,
+        .content_kind = tgcli::core::TdMessageContentKind::Text,
+        .text = "cutoff"};
+    const auto probe = fixture.respond(tgcli::core::TdFunctionKind::GetChatMessageByDate, cutoff);
+    CHECK(field_as<std::int64_t>(probe, "date") == 6'400);
+    fixture.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                    tgcli::core::TdMessages{.total_count = 1, .messages = {cutoff}});
+    fixture.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                    tgcli::core::TdMessages{.total_count = 0, .messages = {}});
+
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["target"]["since"] == "1970-01-01T01:46:41Z");
+    CHECK((*outcome.result)["stop_reason"] == "since_anchor_reached");
+    const auto trace = fixture.trace();
+    CHECK(first_index(trace, "removal") < first_index(trace, "logout"));
+    CHECK(first_index(trace, "logout") < first_index(trace, "getChatMessageByDate"));
 }

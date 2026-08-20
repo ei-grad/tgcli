@@ -662,8 +662,13 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                                               nlohmann::json::object(), kUsage});
                 break;
             }
-            const auto deadline = request_deadline(request->context.timeout_seconds,
-                                                   dispatcher_.deadline_default(*request));
+            const auto admitted_at = RequestClock::now();
+            const auto admission_wall_time = options_.request_wall_clock
+                                                 ? options_.request_wall_clock()
+                                                 : RequestSession::WallClock::now();
+            const auto deadline =
+                request_deadline(request->context.timeout_seconds,
+                                 dispatcher_.deadline_default(*request), admitted_at);
             if (!deadline) {
                 connection->send(proto::Error{request->id, "USAGE", "invalid request timeout",
                                               nlohmann::json::object(), kUsage});
@@ -748,7 +753,7 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
             active_session = std::make_shared<RequestSession>(
                 *request, sink, connection->id(), RequestSession::NonceGenerator{},
                 std::move(*activity), std::move(admitted_config), *deadline,
-                ConfigAdmissionMode::FrozenRuntime);
+                ConfigAdmissionMode::FrozenRuntime, admission_wall_time);
             if (options_.request_observer) {
                 options_.request_observer(testing::RequestObservationStage::SessionConstruction);
             }

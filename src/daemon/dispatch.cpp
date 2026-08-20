@@ -269,13 +269,17 @@ void Dispatcher::dispatch(RequestSession& session) const {
 }
 
 void Dispatcher::dispatch(const proto::Request& request, ResponseSink& sink) const {
+    const auto admitted_at = RequestClock::now();
+    const auto admission_wall_time =
+        request_wall_clock_ ? request_wall_clock_() : RequestSession::WallClock::now();
     const auto deadline =
-        request_deadline(request.context.timeout_seconds, deadline_default(request));
+        request_deadline(request.context.timeout_seconds, deadline_default(request), admitted_at);
     if (!deadline) {
         throw std::invalid_argument("request timeout must be finite, positive, and representable");
     }
     RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
-                           ActivityTracker::Token{}, nullptr, deadline);
+                           ActivityTracker::Token{}, nullptr, deadline,
+                           ConfigAdmissionMode::DirectFallback, admission_wall_time);
     dispatch(session);
 }
 

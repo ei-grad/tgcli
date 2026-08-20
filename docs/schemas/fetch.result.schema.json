@@ -140,12 +140,12 @@
       "required": ["chat_id", "cached_count", "oldest_message_id", "target", "target_reached", "stop_reason", "resume_from_message_id"],
       "properties": {
         "chat_id": { "$ref": "#/$defs/int53_nonzero" },
-        "cached_count": { "$ref": "#/$defs/uint64" },
-        "oldest_message_id": { "oneOf": [{ "$ref": "#/$defs/int53_nonzero" }, { "type": "null" }] },
+        "cached_count": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
+        "oldest_message_id": { "$ref": "#/$defs/int53_nonzero" },
         "target": { "$ref": "#/$defs/limit_target" },
         "target_reached": { "const": true },
         "stop_reason": { "const": "target_reached" },
-        "resume_from_message_id": { "oneOf": [{ "$ref": "#/$defs/int53_nonzero" }, { "type": "null" }] }
+        "resume_from_message_id": { "$ref": "#/$defs/int53_nonzero" }
       }
     },
     "since_reached_result": {
@@ -154,12 +154,12 @@
       "required": ["chat_id", "cached_count", "oldest_message_id", "target", "target_reached", "stop_reason", "resume_from_message_id"],
       "properties": {
         "chat_id": { "$ref": "#/$defs/int53_nonzero" },
-        "cached_count": { "$ref": "#/$defs/uint64" },
-        "oldest_message_id": { "oneOf": [{ "$ref": "#/$defs/int53_nonzero" }, { "type": "null" }] },
+        "cached_count": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
+        "oldest_message_id": { "$ref": "#/$defs/int53_nonzero" },
         "target": { "oneOf": [{ "$ref": "#/$defs/limit_since_target" }, { "$ref": "#/$defs/since_target" }, { "$ref": "#/$defs/all_since_target" }] },
         "target_reached": { "const": true },
         "stop_reason": { "const": "since_anchor_reached" },
-        "resume_from_message_id": { "oneOf": [{ "$ref": "#/$defs/int53_nonzero" }, { "type": "null" }] }
+        "resume_from_message_id": { "$ref": "#/$defs/int53_nonzero" }
       }
     },
     "finite_idle_result": {

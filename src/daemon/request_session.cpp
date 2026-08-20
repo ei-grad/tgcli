@@ -128,9 +128,11 @@ RequestSession::RequestSession(proto::Request request, ResponseSink& transport,
                                ActivityTracker::Token request_activity,
                                std::shared_ptr<const AdmittedAccountConfig> admitted_config,
                                std::optional<RequestDeadline> admission_deadline,
-                               ConfigAdmissionMode config_admission_mode)
+                               ConfigAdmissionMode config_admission_mode,
+                               std::optional<WallClock::time_point> admission_wall_time)
     : request_(std::move(request)), transport_(&transport), connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
+      admission_wall_time_(admission_wall_time ? admission_wall_time.value() : WallClock::now()),
       nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
       admitted_config_(std::move(admitted_config)), config_admission_mode_(config_admission_mode),
       activity_(std::move(request_activity)) {}
@@ -140,10 +142,12 @@ RequestSession::RequestSession(proto::Request request, std::shared_ptr<ResponseS
                                ActivityTracker::Token request_activity,
                                std::shared_ptr<const AdmittedAccountConfig> admitted_config,
                                std::optional<RequestDeadline> admission_deadline,
-                               ConfigAdmissionMode config_admission_mode)
+                               ConfigAdmissionMode config_admission_mode,
+                               std::optional<WallClock::time_point> admission_wall_time)
     : request_(std::move(request)), transport_owner_(std::move(transport)),
       transport_(transport_owner_.get()), connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
+      admission_wall_time_(admission_wall_time ? admission_wall_time.value() : WallClock::now()),
       nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
       admitted_config_(std::move(admitted_config)), config_admission_mode_(config_admission_mode),
       activity_(std::move(request_activity)) {
@@ -162,6 +166,10 @@ std::uint64_t RequestSession::connection_id() const {
 
 const RequestDeadline& RequestSession::deadline() const {
     return deadline_;
+}
+
+RequestSession::WallClock::time_point RequestSession::admission_wall_time() const {
+    return admission_wall_time_;
 }
 
 std::stop_token RequestSession::cancellation_token() const {

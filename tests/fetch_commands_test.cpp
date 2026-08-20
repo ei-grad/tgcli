@@ -4,6 +4,7 @@
 #include "schema_matcher.hpp"
 #include "support/scripted_td_runtime.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -39,7 +40,15 @@ class FakeFetch {
         std::future<std::shared_ptr<tgcli::daemon::RequestSession>> session;
     };
 
-    explicit FakeFetch(tgcli::core::AuthState state = tgcli::core::AuthState::Ready) {
+    explicit FakeFetch(tgcli::core::AuthState state = tgcli::core::AuthState::Ready,
+                       std::chrono::system_clock::time_point admission_wall_time = {},
+                       std::chrono::system_clock::time_point handler_wall_time = {})
+        : admission_wall_time_(admission_wall_time),
+          wall_clock_reads_(std::make_shared<std::atomic<unsigned>>(0)),
+          dispatcher_({}, [reads = wall_clock_reads_, admission_wall_time, handler_wall_time] {
+              return reads->fetch_add(1, std::memory_order_relaxed) == 0 ? admission_wall_time
+                                                                         : handler_wall_time;
+          }) {
         auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>();
         runtime_ = runtime.get();
         client_ = std::make_unique<tgcli::core::TdClient>(std::move(runtime));
@@ -47,8 +56,8 @@ class FakeFetch {
         client_id_ = runtime_->clients().front();
         runtime_->push_response(client_id_, 1, {}, tgcli::core::AuthStateData{state});
         REQUIRE(eventually([&] { return client_->auth_state()->auth_sequence == 1; }));
-        coordinator_ = std::make_unique<tgcli::daemon::FetchCoordinator>(
-            *client_, "main", [] { return std::chrono::system_clock::time_point{}; });
+        coordinator_ =
+            std::make_unique<tgcli::daemon::FetchCoordinator>(*client_, std::string("main"));
         tgcli::daemon::register_fetch_command(dispatcher_, *coordinator_);
     }
 
@@ -104,7 +113,8 @@ class FakeFetch {
             REQUIRE(deadline);
             auto active = std::make_shared<tgcli::daemon::RequestSession>(
                 std::move(request), sink, 0, tgcli::daemon::RequestSession::NonceGenerator{},
-                tgcli::daemon::ActivityTracker::Token{}, nullptr, deadline);
+                tgcli::daemon::ActivityTracker::Token{}, nullptr, deadline,
+                tgcli::daemon::ConfigAdmissionMode::DirectFallback, admission_wall_time_);
             published->set_value(active);
             dispatcher_.dispatch(*active);
             return result;
@@ -167,6 +177,10 @@ class FakeFetch {
         });
     }
 
+    [[nodiscard]] unsigned wall_clock_reads() const {
+        return wall_clock_reads_->load(std::memory_order_relaxed);
+    }
+
   private:
     template <typename Predicate> static bool eventually(Predicate predicate) {
         const auto deadline = std::chrono::steady_clock::now() + 2s;
@@ -183,6 +197,8 @@ class FakeFetch {
     tgcli::test::ScriptedClient client_id_{};
     std::unique_ptr<tgcli::core::TdClient> client_;
     std::unique_ptr<tgcli::daemon::FetchCoordinator> coordinator_;
+    std::chrono::system_clock::time_point admission_wall_time_;
+    std::shared_ptr<std::atomic<unsigned>> wall_clock_reads_;
     tgcli::daemon::Dispatcher dispatcher_;
     std::size_t sent_count_ = 1;
 };
@@ -239,6 +255,29 @@ void resolve_basic(FakeFetch& fake) {
 }
 
 } // namespace
+
+TEST_CASE("fetch relative since stays bound to request admission across delayed preflight",
+          "[fetch][fake-boundary][since][admission]") {
+    const auto admitted_at = std::chrono::system_clock::time_point{10'000s + 500ms};
+    const auto handler_started_at = admitted_at + 2h;
+    FakeFetch fake(tgcli::core::AuthState::Ready, admitted_at, handler_started_at);
+    auto pending = fake.dispatch(request(std::nullopt, false, "1h"));
+    resolve_basic(fake);
+
+    const auto probe =
+        fake.respond(tgcli::core::TdFunctionKind::GetChatMessageByDate, message(98, 6'400));
+    CHECK(field_as<std::int64_t>(probe, "date") == 6'400);
+    fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                 tgcli::core::TdMessages{.total_count = 1, .messages = {message(98, 6'400)}});
+    fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                 tgcli::core::TdMessages{.total_count = 0, .messages = {}});
+
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["target"]["since"] == "1970-01-01T01:46:41Z");
+    CHECK((*outcome.result)["stop_reason"] == "since_anchor_reached");
+    CHECK(fake.wall_clock_reads() == 1);
+}
 
 TEST_CASE("fetch defaults to depth 100 and incorporates the complete local page",
           "[fetch][fake-boundary][default][schema]") {

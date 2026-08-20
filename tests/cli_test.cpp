@@ -2684,11 +2684,14 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
     options.json = true;
     options.no_daemon = true;
     options.in_process_td_client = &client;
+    const auto admitted_at = std::chrono::system_clock::time_point{std::chrono::seconds(10'000) +
+                                                                   std::chrono::milliseconds(500)};
+    options.in_process_request_wall_clock = [admitted_at] { return admitted_at; };
 
     proto::Request request("main");
     request.id = 1;
     request.command = {"fetch"};
-    request.args = {{"chat", "-1001"}, {"limit", 1}, {"all", false}, {"since", nullptr}};
+    request.args = {{"chat", "-1001"}, {"limit", 1}, {"all", false}, {"since", "1h"}};
     request.context.json = true;
     request.context.cwd = "/";
     auto pending =
@@ -2699,7 +2702,9 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
         const auto sent = scripted->sent_functions();
         REQUIRE(sent.size() == count);
         REQUIRE(sent.back().function.kind() == kind);
+        const auto descriptor = sent.back().function;
         scripted->push_response(td_client, sent.back().query_id, std::move(value));
+        return descriptor;
     };
     respond(2, core::TdFunctionKind::GetMe,
             core::TdValue::from(core::TdUserSummary{.id = 42,
@@ -2723,8 +2728,23 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
                                              .last_message = std::nullopt}));
+    const auto cutoff = core::TdMessageSummary{
+        .id = 99,
+        .chat_id = -1001,
+        .date = 6'400,
+        .sender = {.kind = core::TdMessageSenderKind::User, .id = 42, .tdlib_type_id = 1},
+        .is_outgoing = false,
+        .topic = std::nullopt,
+        .content_kind = core::TdMessageContentKind::Text,
+        .text = "second"};
+    const auto probe =
+        respond(4, core::TdFunctionKind::GetChatMessageByDate, core::TdValue::from(cutoff));
+    const auto probe_date = std::ranges::find_if(
+        probe.fields(), [](const auto& candidate) { return candidate.has_name("date"); });
+    REQUIRE(probe_date != probe.fields().end());
+    CHECK(std::get<std::int64_t>(probe_date->value()) == 6'400);
     respond(
-        4, core::TdFunctionKind::GetChatHistory,
+        5, core::TdFunctionKind::GetChatHistory,
         core::TdValue::from(core::TdMessages{
             .total_count = 2,
             .messages = {core::TdMessageSummary{.id = 100,
@@ -2737,17 +2757,8 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
                                                 .topic = std::nullopt,
                                                 .content_kind = core::TdMessageContentKind::Text,
                                                 .text = "first"},
-                         core::TdMessageSummary{.id = 99,
-                                                .chat_id = -1001,
-                                                .date = 19,
-                                                .sender = {.kind = core::TdMessageSenderKind::User,
-                                                           .id = 42,
-                                                           .tdlib_type_id = 1},
-                                                .is_outgoing = false,
-                                                .topic = std::nullopt,
-                                                .content_kind = core::TdMessageContentKind::Text,
-                                                .text = "second"}}}));
-    respond(5, core::TdFunctionKind::GetChatHistory,
+                         cutoff}}));
+    respond(6, core::TdFunctionKind::GetChatHistory,
             core::TdValue::from(core::TdMessages{.total_count = 0, .messages = {}}));
 
     const auto outcome = pending.get();
@@ -2755,7 +2766,8 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
     const auto result = json::parse(outcome.out);
     CHECK_THAT(result, test::matches_json_schema("fetch.result.schema.json"));
     CHECK(result["cached_count"] == 2);
-    CHECK(result["stop_reason"] == "target_reached");
+    CHECK(result["target"]["since"] == "1970-01-01T01:46:41Z");
+    CHECK(result["stop_reason"] == "since_anchor_reached");
     CHECK(outcome.out.find("progress") == std::string::npos);
     CHECK(outcome.err == "{\"progress\":{\"cached\":2,\"chat_id\":-1001,\"oldest_message_id\":99,"
                          "\"operation\":\"fetch\",\"target\":1}}\n");

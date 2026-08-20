@@ -4,6 +4,7 @@
 #include "proto/frame.hpp"
 
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +47,8 @@ struct RunOptions {
     // Shared fake-boundary seam for --no-daemon contract tests. Null creates
     // the production TDLib client; the caller retains ownership when set.
     core::TdClient* in_process_td_client = nullptr;
+    // Shared fake-boundary seam for request-admission wall-clock tests.
+    std::function<std::chrono::system_clock::time_point()> in_process_request_wall_clock;
 };
 
 // Only the two M1 dry-runs bypass daemon routing. M3/M4 dry-runs are

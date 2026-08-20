@@ -34,6 +34,7 @@ class ServerOptions {
     testing::RequestAdmissionProbe request_admission_probe;
     ConfigRuntime* config_runtime = nullptr;
     std::shared_ptr<const testing::ActivityTrackerHooks> activity_hooks;
+    testing::RequestWallClock request_wall_clock;
 
     friend class Server;
 
@@ -45,7 +46,8 @@ class ServerOptions {
                   testing::RequestObservationObserver request_observer_value = {},
                   testing::RequestAdmissionProbe request_admission_probe_value = {},
                   ConfigRuntime* config_runtime_value = nullptr,
-                  std::shared_ptr<const testing::ActivityTrackerHooks> activity_hooks_value = {})
+                  std::shared_ptr<const testing::ActivityTrackerHooks> activity_hooks_value = {},
+                  testing::RequestWallClock request_wall_clock_value = {})
         : account_(std::move(account_value)), socket_path(std::move(socket_path_value)),
           binary_version(std::move(binary_version_value)), protocol_version(protocol_version_value),
           control_socket_path(std::move(control_socket_path_value)),
@@ -53,7 +55,8 @@ class ServerOptions {
           wipe_observer(std::move(wipe_observer_value)),
           request_observer(std::move(request_observer_value)),
           request_admission_probe(std::move(request_admission_probe_value)),
-          config_runtime(config_runtime_value), activity_hooks(std::move(activity_hooks_value)) {
+          config_runtime(config_runtime_value), activity_hooks(std::move(activity_hooks_value)),
+          request_wall_clock(std::move(request_wall_clock_value)) {
         if (!paths::valid_account_name(account_)) {
             throw std::invalid_argument("server account is invalid");
         }

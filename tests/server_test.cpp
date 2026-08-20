@@ -9,6 +9,7 @@
 #include "daemon/context.hpp"
 #include "daemon/destructive_contract.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
 #include "proto/frame_io.hpp"
@@ -285,7 +286,8 @@ struct TestDaemon {
         const daemon::testing::RequestObservationObserver& request_observer = {},
         daemon::testing::RequestAdmissionProbe request_admission_probe = {},
         daemon::ConfigRuntime* config_runtime = nullptr,
-        std::shared_ptr<const daemon::testing::ActivityTrackerHooks> activity_hooks = {})
+        std::shared_ptr<const daemon::testing::ActivityTrackerHooks> activity_hooks = {},
+        daemon::testing::RequestWallClock request_wall_clock = {})
         : dispatcher(request_observer), account(std::move(account_value)),
           socket(test_socket_path(account)), server({account,
                                                      socket,
@@ -297,7 +299,8 @@ struct TestDaemon {
                                                      request_observer,
                                                      std::move(request_admission_probe),
                                                      config_runtime,
-                                                     std::move(activity_hooks)},
+                                                     std::move(activity_hooks),
+                                                     std::move(request_wall_clock)},
                                                     dispatcher) {
         std::string error;
         const auto separator = socket.rfind('/');
@@ -1033,6 +1036,46 @@ TEST_CASE("config admission and handlers observe one deadline tag",
     auto unlimited = make_request({"fetch"}, 774, "main");
     CHECK(std::get<proto::Result>(send_request(test_daemon, unlimited)).data ==
           json{{"same", true}});
+}
+
+TEST_CASE("socket admission wall clock survives a logically delayed config refresh",
+          "[server][config-runtime][admission][wall-clock][fetch]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    std::atomic<bool> config_finished = false;
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->admission_finished = [&](daemon::ConfigRefreshStatus) {
+        config_finished.store(true, std::memory_order_release);
+    };
+    daemon::ConfigRuntime runtime(config.file(), hooks);
+
+    const auto admitted_at = std::chrono::system_clock::time_point{10'000s + 500ms};
+    const auto after_config = admitted_at + 2h;
+    std::atomic<unsigned> wall_clock_reads = 0;
+    const auto wall_clock = [&] {
+        wall_clock_reads.fetch_add(1, std::memory_order_relaxed);
+        return config_finished.load(std::memory_order_acquire) ? after_config : admitted_at;
+    };
+    const auto install = [&](daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "fetch", {daemon::Tier::Read,
+                      [&](const proto::Request&, daemon::RequestSession& session) {
+                          const auto since =
+                              daemon::parse_read_timestamp("1h", daemon::ReadTimestampBound::Since,
+                                                           session.admission_wall_time());
+                          session.result({{"since", since ? json(*since) : json(nullptr)},
+                                          {"config_finished",
+                                           config_finished.load(std::memory_order_acquire)}});
+                      },
+                      false, std::nullopt, DeadlineDefault::Unlimited});
+    };
+    const TestDaemon test_daemon(install, false, {}, "main", {}, {}, &runtime, {}, wall_clock);
+
+    const auto terminal = send_request(test_daemon, make_request({"fetch"}, 775, "main"));
+    REQUIRE(std::holds_alternative<proto::Result>(terminal));
+    CHECK(std::get<proto::Result>(terminal).data ==
+          json{{"since", 6'401}, {"config_finished", true}});
+    CHECK(wall_clock_reads.load(std::memory_order_relaxed) == 1);
 }
 
 TEST_CASE("daemon stop sends shutdown terminal to a challenge before EOF",

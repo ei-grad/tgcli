@@ -170,6 +170,7 @@ TEST_CASE("fetch result construction enforces runtime-only latch, count, and bou
     REQUIRE(reached);
     CHECK((*reached)["oldest_message_id"] == (*reached)["resume_from_message_id"]);
     CHECK((*reached)["target_reached"] == true);
+    CHECK_FALSE(make_fetch_result(-1001, 0, std::nullopt, limit, limit_completion));
     CHECK_FALSE(make_fetch_result(-1001, 1, 99, limit, limit_completion));
     auto insufficient_count = *reached;
     insufficient_count["cached_count"] = 1;
@@ -192,6 +193,7 @@ TEST_CASE("fetch result construction enforces runtime-only latch, count, and bou
                                            .terminal_page_advanced = true};
     const auto since_reached = make_fetch_result(-1001, 1, 99, since, since_completion);
     REQUIRE(since_reached);
+    CHECK_FALSE(make_fetch_result(-1001, 0, std::nullopt, since, since_completion));
     CHECK(fetch_result_matches_runtime(*since_reached, -1001, 1, 99, since, since_completion));
     wrong_completion = since_completion;
     wrong_completion.since_latched = false;
@@ -253,6 +255,20 @@ TEST_CASE("fetch schema asserts every structural target count and stop branch",
         {"stop_reason", "since_anchor_reached"},
         {"resume_from_message_id", 97}};
     CHECK_THAT(since_reached, tgcli::test::matches_json_schema("fetch.result.schema.json"));
+
+    auto zero_target_reached = since_reached;
+    zero_target_reached["cached_count"] = 0;
+    zero_target_reached["oldest_message_id"] = nullptr;
+    zero_target_reached["resume_from_message_id"] = nullptr;
+    zero_target_reached["target"] = {{"limit", 1}, {"all", false}, {"since", nullptr}};
+    zero_target_reached["stop_reason"] = "target_reached";
+    CHECK_THAT(zero_target_reached, !tgcli::test::matches_json_schema("fetch.result.schema.json"));
+
+    auto zero_since_reached = since_reached;
+    zero_since_reached["cached_count"] = 0;
+    zero_since_reached["oldest_message_id"] = nullptr;
+    zero_since_reached["resume_from_message_id"] = nullptr;
+    CHECK_THAT(zero_since_reached, !tgcli::test::matches_json_schema("fetch.result.schema.json"));
     auto upper = since_reached;
     upper["target"]["since"] = "2038-01-19T03:14:07Z";
     CHECK_THAT(upper, tgcli::test::matches_json_schema("fetch.result.schema.json"));

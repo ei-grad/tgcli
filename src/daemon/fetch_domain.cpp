@@ -138,14 +138,15 @@ std::optional<nlohmann::json> make_fetch_result(std::int64_t chat_id, std::uint6
     std::optional<bool> target_reached;
     switch (completion.stop_reason) {
     case FetchStopReason::TargetReached:
-        if (!completion.numeric_latched || completion.since_latched ||
+        if (cached_count == 0 || !oldest_message_id || !completion.numeric_latched ||
+            completion.since_latched ||
             (completion.network_fill_started != completion.terminal_page_advanced)) {
             return std::nullopt;
         }
         target_reached = true;
         break;
     case FetchStopReason::SinceAnchorReached:
-        if (!completion.since_latched ||
+        if (cached_count == 0 || !oldest_message_id || !completion.since_latched ||
             (completion.network_fill_started != completion.terminal_page_advanced)) {
             return std::nullopt;
         }

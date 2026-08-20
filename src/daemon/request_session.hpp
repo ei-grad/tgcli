@@ -80,6 +80,7 @@ enum class ConfigAdmissionMode { DirectFallback, FrozenRuntime };
 class RequestSession final : public ResponseSink {
   public:
     using Clock = std::chrono::steady_clock;
+    using WallClock = std::chrono::system_clock;
     using NonceGenerator = std::function<std::string()>;
     using InFlightHook = std::function<void(InFlightState)>;
     using ChallengeReturnHook = std::function<void(ChallengeStatus)>;
@@ -89,17 +90,20 @@ class RequestSession final : public ResponseSink {
                    ActivityTracker::Token request_activity = {},
                    std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
                    std::optional<RequestDeadline> admission_deadline = {},
-                   ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback);
+                   ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback,
+                   std::optional<WallClock::time_point> admission_wall_time = {});
     RequestSession(proto::Request request, std::shared_ptr<ResponseSink> transport,
                    std::uint64_t connection_id = 0, NonceGenerator nonce_generator = {},
                    ActivityTracker::Token request_activity = {},
                    std::shared_ptr<const AdmittedAccountConfig> admitted_config = {},
                    std::optional<RequestDeadline> admission_deadline = {},
-                   ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback);
+                   ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback,
+                   std::optional<WallClock::time_point> admission_wall_time = {});
 
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t connection_id() const;
     [[nodiscard]] const RequestDeadline& deadline() const;
+    [[nodiscard]] WallClock::time_point admission_wall_time() const;
     [[nodiscard]] std::stop_token cancellation_token() const;
     [[nodiscard]] bool cancellation_requested() const;
     [[nodiscard]] bool shutdown_requested() const;
@@ -171,6 +175,7 @@ class RequestSession final : public ResponseSink {
     ResponseSink* transport_;
     std::uint64_t connection_id_;
     RequestDeadline deadline_;
+    WallClock::time_point admission_wall_time_;
     NonceGenerator nonce_generator_;
     std::shared_ptr<const AdmittedAccountConfig> admitted_config_;
     ConfigAdmissionMode config_admission_mode_;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 
 namespace tgcli::daemon::testing {
@@ -22,5 +23,8 @@ using RequestObservationObserver = std::function<void(RequestObservationStage)>;
 // Invoked after routed-account and production config checks. Tests use it for
 // the remaining hook/auth/path sentinels before activity admission.
 using RequestAdmissionProbe = std::function<void()>;
+
+// Boundary clock seam for deterministic request-admission timestamp tests.
+using RequestWallClock = std::function<std::chrono::system_clock::time_point()>;
 
 } // namespace tgcli::daemon::testing

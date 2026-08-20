@@ -143,8 +143,10 @@ struct CommandDescriptor {
 // §7): every request — socket or --no-daemon — passes through dispatch().
 class Dispatcher {
   public:
-    explicit Dispatcher(testing::RequestObservationObserver request_observer = {})
-        : request_observer_(std::move(request_observer)) {}
+    explicit Dispatcher(testing::RequestObservationObserver request_observer = {},
+                        testing::RequestWallClock request_wall_clock = {})
+        : request_observer_(std::move(request_observer)),
+          request_wall_clock_(std::move(request_wall_clock)) {}
 
     void register_command(const std::string& path, CommandDescriptor descriptor);
     void set_request_preflight(
@@ -157,6 +159,7 @@ class Dispatcher {
     std::map<std::string, CommandDescriptor> commands_;
     std::function<bool(const std::string&, RequestSession&)> request_preflight_;
     testing::RequestObservationObserver request_observer_;
+    testing::RequestWallClock request_wall_clock_;
 };
 
 } // namespace tgcli::daemon
