@@ -177,6 +177,65 @@ endif()
 resolve_revision("${symlink_checkout}" symlink_clean)
 expect_revision("${symlink_clean}" "${linked_revision}" "symlink-spelled checkout root")
 
+set(submodule_origin "${TEST_OUTPUT_DIR}/submodule-origin")
+file(MAKE_DIRECTORY "${submodule_origin}")
+run_git_in("${submodule_origin}" init --quiet --initial-branch=main)
+run_git_in("${submodule_origin}" config user.email tgcli@example.invalid)
+run_git_in("${submodule_origin}" config user.name "tgcli test")
+file(WRITE "${submodule_origin}/tracked.txt" "submodule clean\n")
+run_git_in("${submodule_origin}" add tracked.txt)
+run_git_in("${submodule_origin}" commit --quiet -m "initial")
+
+set(submodule_checkout "${TEST_OUTPUT_DIR}/submodule-checkout")
+file(MAKE_DIRECTORY "${submodule_checkout}")
+run_git_in("${submodule_checkout}" init --quiet --initial-branch=main)
+run_git_in("${submodule_checkout}" config user.email tgcli@example.invalid)
+run_git_in("${submodule_checkout}" config user.name "tgcli test")
+file(WRITE "${submodule_checkout}/tracked.txt" "superproject clean\n")
+run_git_in("${submodule_checkout}" add tracked.txt)
+run_git_in("${submodule_checkout}" commit --quiet -m "initial")
+run_git_in("${submodule_checkout}" -c protocol.file.allow=always submodule add --quiet
+    "${submodule_origin}" dependency)
+run_git_in("${submodule_checkout}" commit --quiet -am "add submodule")
+read_head_revision("${submodule_checkout}" submodule_checkout_revision)
+set(submodule_worktree "${submodule_checkout}/dependency")
+run_git_in("${submodule_worktree}" config user.email tgcli@example.invalid)
+run_git_in("${submodule_worktree}" config user.name "tgcli test")
+
+resolve_revision("${submodule_checkout}" submodule_clean)
+expect_revision("${submodule_clean}" "${submodule_checkout_revision}" "clean submodule checkout")
+
+file(WRITE "${submodule_worktree}/untracked.txt" "untracked only\n")
+resolve_revision("${submodule_checkout}" submodule_untracked_only)
+expect_revision("${submodule_untracked_only}" "${submodule_checkout_revision}"
+    "untracked-only submodule content")
+file(REMOVE "${submodule_worktree}/untracked.txt")
+
+file(WRITE "${submodule_worktree}/tracked.txt" "tracked worktree modification\n")
+resolve_revision("${submodule_checkout}" submodule_tracked_worktree_dirty)
+expect_revision("${submodule_tracked_worktree_dirty}" "${submodule_checkout_revision}-dirty"
+    "tracked submodule worktree modification")
+
+run_git_in("${submodule_worktree}" reset --quiet --hard HEAD)
+file(WRITE "${submodule_worktree}/tracked.txt" "staged index modification\n")
+run_git_in("${submodule_worktree}" add tracked.txt)
+resolve_revision("${submodule_checkout}" submodule_index_dirty)
+expect_revision("${submodule_index_dirty}" "${submodule_checkout_revision}-dirty"
+    "staged submodule index modification")
+
+run_git_in("${submodule_worktree}" reset --quiet --hard HEAD)
+file(WRITE "${submodule_worktree}/tracked.txt" "advanced submodule head\n")
+run_git_in("${submodule_worktree}" add tracked.txt)
+run_git_in("${submodule_worktree}" commit --quiet -m "advance")
+resolve_revision("${submodule_checkout}" submodule_head_dirty)
+expect_revision("${submodule_head_dirty}" "${submodule_checkout_revision}-dirty"
+    "submodule HEAD differs from recorded gitlink")
+
+run_git_in("${submodule_checkout}" add dependency)
+resolve_revision("${submodule_checkout}" submodule_gitlink_index_dirty)
+expect_revision("${submodule_gitlink_index_dirty}" "${submodule_checkout_revision}-dirty"
+    "staged superproject gitlink modification")
+
 set(shallow_checkout "${TEST_OUTPUT_DIR}/shallow-checkout")
 execute_process(
     COMMAND "${git_executable}" -c protocol.file.allow=always clone --quiet --depth=1 --no-tags
@@ -187,9 +246,11 @@ execute_process(
 if(NOT shallow_status EQUAL 0)
     message(FATAL_ERROR "cannot create shallow tagless checkout: ${shallow_output}")
 endif()
+run_git_in("${shallow_checkout}" checkout --quiet --detach HEAD)
 read_head_revision("${shallow_checkout}" shallow_revision)
 resolve_revision("${shallow_checkout}" shallow_clean)
 expect_revision("${shallow_clean}" "${shallow_revision}" "shallow tagless checkout")
+string(LENGTH "${shallow_clean}" shallow_revision_length)
 execute_process(
     COMMAND "${git_executable}" -C "${shallow_checkout}" rev-list --count HEAD
     OUTPUT_VARIABLE shallow_count
@@ -200,9 +261,22 @@ execute_process(
     OUTPUT_VARIABLE shallow_tags
     OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE shallow_tag_status)
+execute_process(
+    COMMAND "${git_executable}" -C "${shallow_checkout}" rev-parse --is-shallow-repository
+    OUTPUT_VARIABLE shallow_state
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE shallow_state_status)
+execute_process(
+    COMMAND "${git_executable}" -C "${shallow_checkout}" symbolic-ref --quiet HEAD
+    OUTPUT_QUIET
+    ERROR_QUIET
+    RESULT_VARIABLE shallow_symbolic_head_status)
 if(NOT shallow_count_status EQUAL 0 OR NOT shallow_tag_status EQUAL 0 OR
-   NOT shallow_count STREQUAL "1" OR NOT shallow_tags STREQUAL "")
-    message(FATAL_ERROR "shallow release fixture retained history or tag refs")
+   NOT shallow_state_status EQUAL 0 OR NOT shallow_count STREQUAL "1" OR
+   NOT shallow_tags STREQUAL "" OR NOT shallow_state STREQUAL "true" OR
+   shallow_symbolic_head_status EQUAL 0 OR NOT shallow_clean MATCHES "^[0-9a-f]+$" OR
+   shallow_revision_length LESS 7)
+    message(FATAL_ERROR "release fixture is not an exact detached shallow tagless checkout")
 endif()
 
 set(nested_source "${checkout}/nested-source")

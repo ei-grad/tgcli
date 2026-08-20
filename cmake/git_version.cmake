@@ -49,7 +49,7 @@ if(TGCLI_SOURCE_IS_CHECKOUT)
        tgcli_sha_length GREATER_EQUAL 7)
         execute_process(
             COMMAND "${TGCLI_GIT_EXECUTABLE}" -C "${TGCLI_SOURCE_DIR}" status --porcelain
-                    --untracked-files=no --ignore-submodules=none
+                    --untracked-files=no --ignore-submodules=untracked
             RESULT_VARIABLE tgcli_status_result
             OUTPUT_VARIABLE tgcli_status
             OUTPUT_STRIP_TRAILING_WHITESPACE
