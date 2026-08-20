@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
@@ -73,13 +74,17 @@ class FakeRead {
 
     template <typename T>
     tgcli::core::TdFunctionData respond(tgcli::core::TdFunctionKind expected, T value) {
+        return respond_value(expected, tgcli::core::TdValue::from(std::move(value)));
+    }
+
+    tgcli::core::TdFunctionData respond_value(tgcli::core::TdFunctionKind expected,
+                                              tgcli::core::TdValue value) {
         REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
         const auto sent = runtime_->sent_functions();
         REQUIRE(sent.size() == sent_count_ + 1);
         CHECK(sent.back().function.kind() == expected);
         const auto descriptor = sent.back().function;
-        runtime_->push_response(client_id_, sent.back().query_id,
-                                tgcli::core::TdValue::from(std::move(value)));
+        runtime_->push_response(client_id_, sent.back().query_id, std::move(value));
         ++sent_count_;
         return descriptor;
     }
@@ -139,6 +144,18 @@ class FakeRead {
         return std::ranges::count_if(runtime_->sent_functions(), [&](const auto& sent) {
             return sent.function.kind() == kind;
         });
+    }
+
+    [[nodiscard]] std::vector<tgcli::core::TdFunctionKind> command_calls() const {
+        std::vector<tgcli::core::TdFunctionKind> result;
+        const auto sent = runtime_->sent_functions();
+        result.reserve(sent.size() > 1 ? sent.size() - 1 : 0);
+        for (const auto& call : sent | std::views::drop(1)) {
+            const auto kind = call.function.kind();
+            REQUIRE(kind);
+            result.push_back(*kind);
+        }
+        return result;
     }
 
   private:
@@ -249,6 +266,49 @@ TEST_CASE("read returns an advancing raw cursor and schema-valid shared summarie
     CHECK(cursor->from_message_id == 100);
     CHECK(cursor->history_chat_id == -1001);
     CHECK_THAT(*outcome.result, tgcli::test::matches_json_schema("read.result.schema.json"));
+}
+
+TEST_CASE("read refetches an unconsumed match after an exclusive anchor vanished",
+          "[read][anchor][filter][fake-boundary]") {
+    FakeRead fake;
+    auto input = request("-1001", 1, true);
+    input.args["before"] = 100;
+    input.args["topic"] = "forum:7";
+    auto pending = fake.dispatch(std::move(input));
+    resolve_basic(fake);
+    const tgcli::core::TdTopic forum{
+        .kind = tgcli::core::TdTopicKind::Forum, .id = 7, .tdlib_type_id = 1};
+
+    const auto missing_anchor = fake.respond(
+        tgcli::core::TdFunctionKind::GetChatHistory,
+        tgcli::core::TdMessages{.total_count = 2,
+                                .messages = {message(-1001, 99), message(-1001, 98, 20, forum)}});
+    CHECK(field_as<std::int64_t>(missing_anchor, "from_message_id") == 100);
+    CHECK(field_as<std::int64_t>(missing_anchor, "limit") == 2);
+    CHECK(field_as<bool>(missing_anchor, "only_local"));
+
+    const auto resumed = fake.respond(
+        tgcli::core::TdFunctionKind::GetChatHistory,
+        tgcli::core::TdMessages{.total_count = 2,
+                                .messages = {message(-1001, 99), message(-1001, 98, 20, forum)}});
+    CHECK(field_as<std::int64_t>(resumed, "from_message_id") == 99);
+    CHECK(field_as<std::int64_t>(resumed, "limit") == 2);
+    CHECK(field_as<bool>(resumed, "only_local"));
+
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK_FALSE(outcome.error);
+    CHECK(outcome.terminal_count == 1);
+    REQUIRE((*outcome.result)["items"].size() == 1);
+    CHECK((*outcome.result)["items"][0]["id"] == 98);
+    const auto cursor =
+        tgcli::daemon::decode_read_cursor((*outcome.result)["next"].get<std::string>());
+    REQUIRE(cursor);
+    CHECK(cursor->from_message_id == 98);
+    CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe,
+                                              tgcli::core::TdFunctionKind::GetChat,
+                                              tgcli::core::TdFunctionKind::GetChatHistory,
+                                              tgcli::core::TdFunctionKind::GetChatHistory});
 }
 
 TEST_CASE("read preserves before plus until ordering and terminates only on exact since anchor",
@@ -473,6 +533,199 @@ TEST_CASE("read dispatches every non-thread topic seam and enforces Saved owners
     }
 }
 
+TEST_CASE("read Saved ownership reuses resolver materialization and closes failure mapping",
+          "[read][saved][integrity][fake-boundary]") {
+    SECTION("Saved link cache avoids a second ownership call") {
+        FakeRead fake;
+        auto input = request("t.me/saved", 1);
+        input.args["topic"] = "saved:9";
+        auto pending = fake.dispatch(std::move(input));
+        fake.respond_me();
+        fake.respond(
+            tgcli::core::TdFunctionKind::GetInternalLinkType,
+            tgcli::core::TdInternalLink{.kind = tgcli::core::TdInternalLinkKind::SavedMessages,
+                                        .username = {},
+                                        .url = "t.me/saved",
+                                        .tdlib_type_id = 1});
+        fake.respond(tgcli::core::TdFunctionKind::CreatePrivateChat,
+                     tgcli::core::TdChat{.id = -1001,
+                                         .title = "Saved Messages",
+                                         .kind = tgcli::core::TdChatKind::Private,
+                                         .related_id = 42,
+                                         .tdlib_type_id = 1,
+                                         .positions = {},
+                                         .chat_lists = {},
+                                         .is_marked_unread = false,
+                                         .unread_count = 0,
+                                         .unread_mention_count = 0,
+                                         .unread_reaction_count = 0,
+                                         .unread_poll_vote_count = 0,
+                                         .last_message = std::nullopt});
+        fake.respond(tgcli::core::TdFunctionKind::GetUser,
+                     tgcli::core::TdUserSummary{.id = 42,
+                                                .first_name = "Ada",
+                                                .last_name = "",
+                                                .usernames = {"ada"},
+                                                .phone_number = "12025550123",
+                                                .is_bot = false,
+                                                .is_premium = false});
+        fake.respond(
+            tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory,
+            tgcli::core::TdMessages{
+                .total_count = 1,
+                .messages = {message(
+                    -1001, 100, 20, tgcli::core::TdTopic{tgcli::core::TdTopicKind::Saved, 9, 1})}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::CreatePrivateChat) == 1);
+        CHECK(fake.command_calls() ==
+              std::vector{tgcli::core::TdFunctionKind::GetMe,
+                          tgcli::core::TdFunctionKind::GetInternalLinkType,
+                          tgcli::core::TdFunctionKind::CreatePrivateChat,
+                          tgcli::core::TdFunctionKind::GetUser,
+                          tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory});
+    }
+
+    SECTION("wrong ownership chat is refused without history") {
+        FakeRead fake;
+        auto input = request("-1001", 1);
+        input.args["topic"] = "saved:9";
+        auto pending = fake.dispatch(std::move(input));
+        fake.respond_me();
+        fake.respond_chat(-1001, tgcli::core::TdChatKind::Private, 42);
+        fake.respond(tgcli::core::TdFunctionKind::CreatePrivateChat,
+                     tgcli::core::TdChat{.id = -2001,
+                                         .title = "Saved Messages",
+                                         .kind = tgcli::core::TdChatKind::Private,
+                                         .related_id = 42,
+                                         .tdlib_type_id = 1,
+                                         .positions = {},
+                                         .chat_lists = {},
+                                         .is_marked_unread = false,
+                                         .unread_count = 0,
+                                         .unread_mention_count = 0,
+                                         .unread_reaction_count = 0,
+                                         .unread_poll_vote_count = 0,
+                                         .last_message = std::nullopt});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "USAGE");
+        CHECK((*outcome.error)["error"]["details"] ==
+              json{{"argument", "--topic"}, {"reason", "invalid_argument"}});
+        CHECK_FALSE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory) == 0);
+        CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe,
+                                                  tgcli::core::TdFunctionKind::GetChat,
+                                                  tgcli::core::TdFunctionKind::GetUser,
+                                                  tgcli::core::TdFunctionKind::CreatePrivateChat});
+    }
+
+    SECTION("malformed ownership response is internal") {
+        FakeRead fake;
+        auto input = request("-1001", 1);
+        input.args["topic"] = "saved:9";
+        auto pending = fake.dispatch(std::move(input));
+        fake.respond_me();
+        fake.respond_chat(-1001, tgcli::core::TdChatKind::Private, 42);
+        fake.respond_value(tgcli::core::TdFunctionKind::CreatePrivateChat,
+                           tgcli::core::TdValue::from(tgcli::core::TdMessages{}));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK((*outcome.error)["error"]["details"] ==
+              json{{"operation", "read"}, {"reason", "internal_error"}});
+        CHECK_FALSE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory) == 0);
+        CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe,
+                                                  tgcli::core::TdFunctionKind::GetChat,
+                                                  tgcli::core::TdFunctionKind::GetUser,
+                                                  tgcli::core::TdFunctionKind::CreatePrivateChat});
+    }
+
+    SECTION("ownership TD error keeps read attribution") {
+        FakeRead fake;
+        auto input = request("-1001", 1);
+        input.args["topic"] = "saved:9";
+        auto pending = fake.dispatch(std::move(input));
+        fake.respond_me();
+        fake.respond_chat(-1001, tgcli::core::TdChatKind::Private, 42);
+        fake.respond(tgcli::core::TdFunctionKind::CreatePrivateChat,
+                     tgcli::core::TdError{400, "bad request"});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TDLIB_ERROR");
+        CHECK((*outcome.error)["error"]["details"] ==
+              json{{"operation", "read"}, {"tdlib_code", 400}});
+        CHECK_FALSE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory) == 0);
+        CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe,
+                                                  tgcli::core::TdFunctionKind::GetChat,
+                                                  tgcli::core::TdFunctionKind::GetUser,
+                                                  tgcli::core::TdFunctionKind::CreatePrivateChat});
+    }
+
+    SECTION("Saved cursor repeats ownership validation") {
+        FakeRead fake;
+        const tgcli::daemon::ReadCursor cursor{
+            .version = 1,
+            .operation = "read",
+            .account = "main",
+            .user_id = 42,
+            .limit = 1,
+            .chat_id = -1001,
+            .history_chat_id = -1001,
+            .topic = tgcli::daemon::TopicRef{tgcli::daemon::TopicKind::Saved, 9},
+            .local = false,
+            .since = std::nullopt,
+            .until = std::nullopt,
+            .since_cutoff_message_id = std::nullopt,
+            .from_message_id = 100};
+        auto pending = fake.dispatch(cursor_request(cursor));
+        fake.respond_me();
+        fake.respond_chat(-1001, tgcli::core::TdChatKind::Private, 42);
+        fake.respond(tgcli::core::TdFunctionKind::CreatePrivateChat,
+                     tgcli::core::TdChat{.id = -1001,
+                                         .title = "Saved Messages",
+                                         .kind = tgcli::core::TdChatKind::Private,
+                                         .related_id = 42,
+                                         .tdlib_type_id = 1,
+                                         .positions = {},
+                                         .chat_lists = {},
+                                         .is_marked_unread = false,
+                                         .unread_count = 0,
+                                         .unread_mention_count = 0,
+                                         .unread_reaction_count = 0,
+                                         .unread_poll_vote_count = 0,
+                                         .last_message = std::nullopt});
+        const auto history = fake.respond(
+            tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory,
+            tgcli::core::TdMessages{
+                .total_count = 2,
+                .messages = {
+                    message(-1001, 100),
+                    message(-1001, 99, 20,
+                            tgcli::core::TdTopic{tgcli::core::TdTopicKind::Saved, 9, 1})}});
+        CHECK(field_as<std::int64_t>(history, "from_message_id") == 100);
+        CHECK(field_as<std::int64_t>(history, "limit") == 2);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::CreatePrivateChat) == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetChatMessageByDate) == 0);
+        CHECK(fake.command_calls() ==
+              std::vector{tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdFunctionKind::GetChat,
+                          tgcli::core::TdFunctionKind::GetUser,
+                          tgcli::core::TdFunctionKind::CreatePrivateChat,
+                          tgcli::core::TdFunctionKind::GetSavedMessagesTopicHistory});
+    }
+}
+
 TEST_CASE("read local admission makes no link call and refuses channel thread mapping",
           "[read][local][fake-boundary]") {
     SECTION("invalid URL-like syntax stops before Ready") {
@@ -516,6 +769,118 @@ TEST_CASE("read local admission makes no link call and refuses channel thread ma
         CHECK((*outcome.result)["items"].empty());
         CHECK((*outcome.result)["next"].is_string());
     }
+}
+
+TEST_CASE("read local supergroup threads use same-chat local history without metadata",
+          "[read][local][thread][fake-boundary]") {
+    FakeRead fake;
+    auto input = request("-1001", 1, true);
+    input.args["topic"] = "thread:500";
+    auto pending = fake.dispatch(std::move(input));
+    fake.respond_me();
+    fake.respond_chat(-1001, tgcli::core::TdChatKind::Supergroup, 77);
+    const auto history = fake.respond(
+        tgcli::core::TdFunctionKind::GetChatHistory,
+        tgcli::core::TdMessages{
+            .total_count = 1,
+            .messages = {message(-1001, 100, 20,
+                                 tgcli::core::TdTopic{tgcli::core::TdTopicKind::Thread, 500, 1})}});
+    CHECK(field_as<std::int64_t>(history, "chat_id") == -1001);
+    CHECK(field_as<bool>(history, "only_local"));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK_FALSE(outcome.error);
+    CHECK(outcome.terminal_count == 1);
+    CHECK((*outcome.result)["items"][0]["topic"] == json{{"kind", "thread"}, {"id", 500}});
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetMessageThread) == 0);
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetMessageThreadHistory) == 0);
+    CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe,
+                                              tgcli::core::TdFunctionKind::GetChat,
+                                              tgcli::core::TdFunctionKind::GetSupergroup,
+                                              tgcli::core::TdFunctionKind::GetChatHistory});
+}
+
+TEST_CASE("read continues live short pages until the output limit",
+          "[read][pagination][fake-boundary]") {
+    FakeRead fake;
+    auto pending = fake.dispatch(request("-1001", 3));
+    resolve_basic(fake);
+    const auto first =
+        fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                     tgcli::core::TdMessages{.total_count = 1, .messages = {message(-1001, 100)}});
+    CHECK(field_as<std::int64_t>(first, "from_message_id") == 0);
+    CHECK(field_as<std::int64_t>(first, "limit") == 3);
+    const auto second =
+        fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                     tgcli::core::TdMessages{
+                         .total_count = 2, .messages = {message(-1001, 100), message(-1001, 99)}});
+    CHECK(field_as<std::int64_t>(second, "from_message_id") == 100);
+    CHECK(field_as<std::int64_t>(second, "limit") == 3);
+    const auto third =
+        fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                     tgcli::core::TdMessages{.total_count = 2,
+                                             .messages = {message(-1001, 99), message(-1001, 98)}});
+    CHECK(field_as<std::int64_t>(third, "from_message_id") == 99);
+    CHECK(field_as<std::int64_t>(third, "limit") == 2);
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK_FALSE(outcome.error);
+    CHECK(outcome.terminal_count == 1);
+    REQUIRE((*outcome.result)["items"].size() == 3);
+    CHECK((*outcome.result)["items"][0]["id"] == 100);
+    CHECK((*outcome.result)["items"][1]["id"] == 99);
+    CHECK((*outcome.result)["items"][2]["id"] == 98);
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetChatHistory) == 3);
+    CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe,
+                                              tgcli::core::TdFunctionKind::GetChat,
+                                              tgcli::core::TdFunctionKind::GetChatHistory,
+                                              tgcli::core::TdFunctionKind::GetChatHistory,
+                                              tgcli::core::TdFunctionKind::GetChatHistory});
+}
+
+TEST_CASE("read continuation exposes a terminal boundary after an empty filtered page",
+          "[read][pagination][filter][cursor][fake-boundary]") {
+    FakeRead fake;
+    auto input = request("-1001", 1, true);
+    input.args["since"] = "1970-01-01T00:00:10Z";
+    auto first_pending = fake.dispatch(std::move(input));
+    resolve_basic(fake);
+    fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                 tgcli::core::TdMessages{.total_count = 1, .messages = {message(-1001, 100, 1)}});
+    fake.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                 tgcli::core::TdMessages{.total_count = 0, .messages = {}});
+    const auto first = first_pending.get();
+    REQUIRE(first.result);
+    CHECK_FALSE(first.error);
+    CHECK(first.terminal_count == 1);
+    CHECK((*first.result)["items"].empty());
+    CHECK((*first.result)["boundary"] == "page");
+    const auto cursor =
+        tgcli::daemon::decode_read_cursor((*first.result)["next"].get<std::string>());
+    REQUIRE(cursor);
+    CHECK(cursor->from_message_id == 100);
+
+    auto second_pending = fake.dispatch(cursor_request(*cursor));
+    resolve_basic(fake);
+    const auto boundary = fake.respond(
+        tgcli::core::TdFunctionKind::GetChatHistory,
+        tgcli::core::TdMessages{.total_count = 1, .messages = {message(-1001, 100, 1)}});
+    CHECK(field_as<std::int64_t>(boundary, "from_message_id") == 100);
+    CHECK(field_as<bool>(boundary, "only_local"));
+    const auto second = second_pending.get();
+    REQUIRE(second.result);
+    CHECK_FALSE(second.error);
+    CHECK(second.terminal_count == 1);
+    CHECK((*second.result) ==
+          json{{"items", json::array()}, {"next", nullptr}, {"boundary", "local_boundary"}});
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetChatMessageByDate) == 0);
+    CHECK(fake.count(tgcli::core::TdFunctionKind::GetChatHistory) == 3);
+    CHECK(fake.command_calls() ==
+          std::vector{tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdFunctionKind::GetChat,
+                      tgcli::core::TdFunctionKind::GetChatHistory,
+                      tgcli::core::TdFunctionKind::GetChatHistory,
+                      tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdFunctionKind::GetChat,
+                      tgcli::core::TdFunctionKind::GetChatHistory});
 }
 
 TEST_CASE("read bot preflight and cursor continuation preserve call exclusions and scope",
@@ -578,6 +943,35 @@ TEST_CASE("read bot preflight and cursor continuation preserve call exclusions a
         CHECK((*outcome.error)["error"]["details"]["reason"] == "cursor_scope_mismatch");
         CHECK(fake.count(tgcli::core::TdFunctionKind::GetChat) == 0);
     }
+    SECTION("operation and user mismatches stop before target resolution") {
+        for (const auto& [operation, user_id] :
+             std::vector<std::pair<std::string, std::int64_t>>{{"history", 42}, {"read", 43}}) {
+            FakeRead fake;
+            const tgcli::daemon::ReadCursor cursor{.version = 1,
+                                                   .operation = operation,
+                                                   .account = "main",
+                                                   .user_id = user_id,
+                                                   .limit = 20,
+                                                   .chat_id = -1001,
+                                                   .history_chat_id = -1001,
+                                                   .topic = std::nullopt,
+                                                   .local = false,
+                                                   .since = std::nullopt,
+                                                   .until = std::nullopt,
+                                                   .since_cutoff_message_id = std::nullopt,
+                                                   .from_message_id = 100};
+            auto pending = fake.dispatch(cursor_request(cursor));
+            fake.respond_me();
+            const auto outcome = pending.get();
+            INFO(operation << " " << user_id);
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["details"]["reason"] == "cursor_scope_mismatch");
+            CHECK_FALSE(outcome.result);
+            CHECK(outcome.terminal_count == 1);
+            CHECK(fake.count(tgcli::core::TdFunctionKind::GetChat) == 0);
+            CHECK(fake.command_calls() == std::vector{tgcli::core::TdFunctionKind::GetMe});
+        }
+    }
     SECTION("thread metadata mismatch is a cursor scope failure") {
         FakeRead fake;
         const tgcli::daemon::ReadCursor cursor{
@@ -606,6 +1000,57 @@ TEST_CASE("read bot preflight and cursor continuation preserve call exclusions a
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["details"]["reason"] == "cursor_scope_mismatch");
         CHECK(fake.count(tgcli::core::TdFunctionKind::GetMessageThreadHistory) == 0);
+    }
+    SECTION("thread continuation revalidates matching cross-chat metadata") {
+        FakeRead fake;
+        const tgcli::daemon::ReadCursor cursor{
+            .version = 1,
+            .operation = "read",
+            .account = "main",
+            .user_id = 42,
+            .limit = 1,
+            .chat_id = -1001,
+            .history_chat_id = -2001,
+            .topic = tgcli::daemon::TopicRef{tgcli::daemon::TopicKind::Thread, 500},
+            .local = false,
+            .since = std::nullopt,
+            .until = std::nullopt,
+            .since_cutoff_message_id = std::nullopt,
+            .from_message_id = 100};
+        auto pending = fake.dispatch(cursor_request(cursor));
+        fake.respond_me();
+        fake.respond_chat(-1001, tgcli::core::TdChatKind::Channel, 77);
+        fake.respond(tgcli::core::TdFunctionKind::GetMessageThread,
+                     tgcli::core::TdMessageThreadInfo{
+                         .history_chat_id = -2001,
+                         .history_thread_id = 150,
+                         .starting_messages = {message(-2001, 200), message(-2001, 150)}});
+        const auto history = fake.respond(
+            tgcli::core::TdFunctionKind::GetMessageThreadHistory,
+            tgcli::core::TdMessages{.total_count = 2,
+                                    .messages = {message(-2001, 100), message(-2001, 99)}});
+        CHECK(field_as<std::int64_t>(history, "chat_id") == -1001);
+        CHECK(field_as<std::int64_t>(history, "message_id") == 500);
+        CHECK(field_as<std::int64_t>(history, "from_message_id") == 100);
+        CHECK(field_as<std::int64_t>(history, "limit") == 2);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 1);
+        CHECK((*outcome.result)["items"][0]["chat_id"] == -2001);
+        const auto next =
+            tgcli::daemon::decode_read_cursor((*outcome.result)["next"].get<std::string>());
+        REQUIRE(next);
+        CHECK(next->operation == "read");
+        CHECK(next->history_chat_id == -2001);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetMessageThread) == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetMessageThreadHistory) == 1);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetChatMessageByDate) == 0);
+        CHECK(fake.command_calls() ==
+              std::vector{tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdFunctionKind::GetChat,
+                          tgcli::core::TdFunctionKind::GetSupergroup,
+                          tgcli::core::TdFunctionKind::GetMessageThread,
+                          tgcli::core::TdFunctionKind::GetMessageThreadHistory});
     }
 }
 

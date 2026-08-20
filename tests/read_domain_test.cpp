@@ -160,6 +160,35 @@ TEST_CASE("read scanner advances raw anchors independently of filters and stops 
     CHECK_FALSE(filtered.reached_time_anchor);
 }
 
+TEST_CASE("read scanner caps raw consumption when an exclusive anchor vanished",
+          "[read][domain][scanner][anchor]") {
+    const tgcli::core::TdTopic forum{
+        .kind = tgcli::core::TdTopicKind::Forum, .id = 7, .tdlib_type_id = 1};
+    const tgcli::daemon::ReadScanInput input{
+        .history_chat_id = -1001,
+        .topic = tgcli::daemon::TopicRef{tgcli::daemon::TopicKind::Forum, 7},
+        .since = std::nullopt,
+        .until = std::nullopt,
+        .since_cutoff_message_id = std::nullopt,
+        .exclusive_anchor = 100,
+        .remaining = 1};
+
+    const auto missing = tgcli::daemon::scan_read_page(
+        {.total_count = 2, .messages = {message(99, 20), message(98, 20, -1001, forum)}}, input);
+    CHECK(missing.error == tgcli::daemon::ReadScanError::None);
+    CHECK(missing.items.empty());
+    CHECK(missing.last_consumed_message_id == 99);
+
+    auto anchored_input = input;
+    anchored_input.exclusive_anchor = 99;
+    const auto anchored = tgcli::daemon::scan_read_page(
+        {.total_count = 2, .messages = {message(99, 20), message(98, 20, -1001, forum)}},
+        anchored_input);
+    REQUIRE(anchored.items.size() == 1);
+    CHECK(anchored.items[0].id == 98);
+    CHECK(anchored.last_consumed_message_id == 98);
+}
+
 TEST_CASE("read scanner distinguishes structural failures from non-advancing pagination",
           "[read][domain][scanner][error]") {
     const tgcli::daemon::ReadScanInput input{.history_chat_id = -1001,

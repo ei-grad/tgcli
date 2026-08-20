@@ -498,6 +498,7 @@ ReadScanResult scan_read_page(const core::TdMessages& page, const ReadScanInput&
     }
 
     std::optional<std::int64_t> previous = input.exclusive_anchor;
+    std::int32_t consumed = 0;
     for (std::size_t index = begin; index < page.messages.size(); ++index) {
         const auto& raw = *page.messages[index];
         const auto message = materialize_message_summary(raw);
@@ -510,9 +511,10 @@ ReadScanResult scan_read_page(const core::TdMessages& page, const ReadScanInput&
             return result;
         }
         previous = message->id;
-        if (static_cast<std::int32_t>(result.items.size()) >= input.remaining) {
+        if (consumed >= input.remaining) {
             continue;
         }
+        ++consumed;
         result.last_consumed_message_id = message->id;
         if (input.since_cutoff_message_id && message->id == *input.since_cutoff_message_id) {
             result.reached_time_anchor = true;

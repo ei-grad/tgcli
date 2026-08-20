@@ -15,6 +15,7 @@
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
 #include "proto/frame.hpp"
@@ -430,6 +431,7 @@ struct ChildDaemonOptions {
     bool malformed_identity = false;
     bool ignore_control_token = false;
     bool require_no_dispatch = false;
+    bool read_alias_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
     std::string binary_version = "old-test-binary";
@@ -722,6 +724,38 @@ class ChildProtocolDaemon {
                               dispatcher);
         context.request_shutdown = [&server] { server.request_stop(); };
         daemon::register_commands(dispatcher, context);
+        if (options.read_alias_fixture) {
+            dispatcher.register_command(
+                "read",
+                {daemon::Tier::Read,
+                 [](const proto::Request& request, daemon::RequestSession& session) {
+                     const json expected_args{{"chat", "-1001"},  {"before", nullptr},
+                                              {"since", nullptr}, {"until", nullptr},
+                                              {"topic", nullptr}, {"local", false},
+                                              {"limit", 1},       {"cursor", nullptr}};
+                     if (request.command != std::vector<std::string>{"read"} ||
+                         request.args != expected_args || !request.context.json) {
+                         session.error("INTERNAL", "history alias frame mismatch", {}, kGeneric);
+                         return;
+                     }
+                     const daemon::ReadCursor cursor{.version = 1,
+                                                     .operation = "read",
+                                                     .account = "main",
+                                                     .user_id = 42,
+                                                     .limit = 1,
+                                                     .chat_id = -1001,
+                                                     .history_chat_id = -1001,
+                                                     .topic = std::nullopt,
+                                                     .local = false,
+                                                     .since = std::nullopt,
+                                                     .until = std::nullopt,
+                                                     .since_cutoff_message_id = std::nullopt,
+                                                     .from_message_id = 123};
+                     session.result({{"items", json::array()},
+                                     {"next", daemon::encode_read_cursor(cursor)},
+                                     {"boundary", "page"}});
+                 }});
+        }
         if (!server.start(error)) {
             if (!ready_reported) {
                 exit_child_startup_failure(ready_fd, 4);
@@ -742,9 +776,9 @@ class ChildProtocolDaemon {
             std::this_thread::sleep_for(options.shutdown_gap);
             ::close(lock_fd);
         }
-        ::_exit(!options.require_no_dispatch || dispatches.load(std::memory_order_relaxed) == 0
-                    ? 0
-                    : 5);
+        const bool dispatch_valid =
+            !options.require_no_dispatch || dispatches.load(std::memory_order_relaxed) == 0;
+        ::_exit(dispatch_valid ? 0 : 5);
     }
 
     void terminate() {
@@ -2490,6 +2524,30 @@ TEST_CASE("read parser exposes history and rejects closed grammar failures local
     CHECK(combined.out.empty());
     CHECK(json::parse(combined.err)["error"]["details"]["reason"] == "mutually_exclusive");
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("history emits a canonical read frame schema result and cursor identity",
+          "[cli][read][history][frame][schema][cursor]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.read_alias_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    const auto outcome =
+        run_binary_captured({"--json", "history", "-1001", "-n", "1"}, env, "history-valid");
+    INFO(outcome.err);
+    CHECK(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    const auto result = json::parse(outcome.out, nullptr, false);
+    REQUIRE_FALSE(result.is_discarded());
+    CHECK_THAT(result, test::matches_json_schema("read.result.schema.json"));
+    REQUIRE(result["next"].is_string());
+    const auto cursor = daemon::decode_read_cursor(result["next"].get<std::string>());
+    REQUIRE(cursor);
+    CHECK(cursor->operation == "read");
+    CHECK(cursor->account == "main");
+    CHECK(cursor->user_id == 42);
+    CHECK(fixture.running());
 }
 
 TEST_CASE("read no-daemon fake boundary preserves canonical JSON discipline",
