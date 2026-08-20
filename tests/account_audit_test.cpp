@@ -623,7 +623,7 @@ void create_spool_object(const AuditTree& tree, std::string_view invocation) {
 
 bool append_intent(daemon::AccountAuditLog& log, const daemon::AccountAuditIntent& intent,
                    const daemon::AccountAuditPinSource& pins,
-                   const daemon::AccountAuditCoordinator::Guard& guard,
+                   daemon::AccountAuditCoordinator::Guard& guard,
                    daemon::AccountAuditAppendReceipt& receipt,
                    daemon::AccountAuditFailure& failure) {
     daemon::AccountAuditAppendPermit permit;

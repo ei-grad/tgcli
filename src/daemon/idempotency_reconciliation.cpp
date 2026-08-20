@@ -315,6 +315,19 @@ void consume_completed_view(const AccountAuditCompletedGroupView& view,
     }
 }
 
+void consume_absent_by_policy_completed_view(const AccountAuditCompletedGroupView& view,
+                                             CompletedRelationState& state) {
+    if (!view.idempotency_key_hash) {
+        consume_completed_view(view, state);
+        return;
+    }
+    if (!state.contradiction.empty() || !view.spool) {
+        return;
+    }
+    state.spools.push_back(
+        {view.audit_generation, view.invocation_id, *view.spool, view.idempotency_key_hash, true});
+}
+
 std::optional<SpoolRef> open_group_spool(const AccountAuditOpenGroup& group) {
     const auto found = std::ranges::find_if(
         group.checkpoints.rbegin(), group.checkpoints.rend(),
@@ -1076,9 +1089,7 @@ IdempotencyCoreGateResult IdempotencyFoundation::run_absent_by_policy_gate(
     const auto absent = AccountAuditPinSource{AbsentAccountAuditPinsByPolicy{}};
     auto audit_inspection = audit_.prepare_recovery(
         absent, guard, permit, [&](const AccountAuditCompletedGroupView& view) {
-            if (!view.idempotency_key_hash) {
-                consume_completed_view(view, relations);
-            }
+            consume_absent_by_policy_completed_view(view, relations);
         });
     if (audit_inspection.status != AccountAuditInspectionStatus::Clean &&
         audit_inspection.status != AccountAuditInspectionStatus::Open) {

@@ -128,6 +128,14 @@ struct IdempotencyInsertResult {
     IdempotencyFailure failure;
 };
 
+enum class IdempotencySpoolPreflightStatus { Ready, Failed };
+
+struct IdempotencySpoolPreflightResult {
+    IdempotencySpoolPreflightStatus status = IdempotencySpoolPreflightStatus::Failed;
+    IdempotencySnapshot prospective_snapshot;
+    IdempotencyFailure failure;
+};
+
 enum class IdempotencyWriteStatus { Applied, Unchanged, IncumbentPreserved, Failed };
 
 struct IdempotencyWriteResult {
@@ -216,6 +224,10 @@ class IdempotencyStore final {
     [[nodiscard]] IdempotencyInsertResult
     insert_if_absent(const IdempotencyEntry& entry,
                      const AccountAuditCoordinator::Guard& guard) const;
+    [[nodiscard]] IdempotencySpoolPreflightResult
+    preflight_spool_update(const IdempotencyKeyHash& key_hash, std::string_view invocation_id,
+                           const SpoolRef& spool,
+                           const AccountAuditCoordinator::Guard& guard) const;
     [[nodiscard]] IdempotencyWriteResult
     update_spool(const IdempotencyKeyHash& key_hash, std::string_view invocation_id,
                  const SpoolRef& spool, const AccountAuditCoordinator::Guard& guard) const;

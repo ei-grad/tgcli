@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <type_traits>
 #include <unistd.h>
 #include <variant>
@@ -386,6 +387,19 @@ daemon::AccountAuditAppendReceipt append_intent(StoreTree& tree,
         tree.audit().append_intent(intent, std::move(permit), guard, receipt, failure);
     REQUIRE(appended);
     return receipt;
+}
+
+daemon::AccountAuditCoordinator::Guard
+cancellable_guard(StoreTree& tree, std::atomic<bool>& cancelled,
+                  std::optional<RequestDeadline> deadline = std::nullopt) {
+    daemon::AccountAuditScanControl control;
+    if (deadline) {
+        control.deadline = *deadline;
+    }
+    control.cancelled = [&cancelled] { return cancelled.load(std::memory_order_relaxed); };
+    auto epoch = tree.foundation().acquire_epoch(std::move(control));
+    REQUIRE(std::holds_alternative<daemon::AccountAuditCoordinator::Guard>(epoch));
+    return std::get<daemon::AccountAuditCoordinator::Guard>(std::move(epoch));
 }
 
 void append_checkpoint_for(StoreTree& tree, daemon::AccountAuditCoordinator::Guard& guard,
@@ -772,6 +786,201 @@ TEST_CASE("idempotency unexpected incumbent closure emits nothing when outcome s
     CHECK(closure.audit_failure.reason == daemon::AccountAuditDurabilityReason::SyncFailed);
 }
 
+TEST_CASE("post-intent durability ignores request interruption through mandatory persistence",
+          "[idempotency-store][post-intent][deadline][cancellation][durability]") {
+    SECTION("deadline equality after intent does not interrupt insertion") {
+        StoreTree tree;
+        std::atomic<bool> cancelled = false;
+        const auto expires_at = RequestClock::now() + 100ms;
+        auto guard = cancellable_guard(tree, cancelled, RequestDeadline{expires_at});
+        constexpr std::string_view invocation = "0123456789abcdef0123456789abcdef";
+        const auto receipt =
+            append_intent(tree, guard, audit_intent('b', 'a', std::string(invocation)));
+        std::this_thread::sleep_until(expires_at);
+        auto entry_result = daemon::make_idempotency_pending_entry(
+            {key_hash('b'), fingerprint('a'), daemon::AccountAuditOperation::ChatArchive,
+             std::string(invocation), receipt.audit_generation, 1'700'000'000, archive_plan()},
+            "main", tree.final_path());
+        REQUIRE(std::holds_alternative<daemon::IdempotencyEntry>(entry_result));
+        const auto inserted =
+            tree.store().insert_if_absent(std::get<daemon::IdempotencyEntry>(entry_result), guard);
+        CHECK(inserted.status == daemon::IdempotencyInsertStatus::Inserted);
+    }
+
+    SECTION("cancellation after spool checkpoint does not interrupt matching store update") {
+        StoreTree tree;
+        std::atomic<bool> cancelled = false;
+        auto guard = cancellable_guard(tree, cancelled);
+        constexpr std::string_view invocation = "0123456789abcdef0123456789abcdef";
+        tree.write_source();
+        auto prepared_result = daemon::prepare_spool_source(tree.source_path(), "/");
+        REQUIRE(std::holds_alternative<daemon::PreparedSource>(prepared_result));
+        auto prepared = std::get<daemon::PreparedSource>(std::move(prepared_result));
+        const auto source_snapshot = prepared.snapshot();
+        const auto receipt =
+            append_intent(tree, guard, saved_intent(source_snapshot, std::string(invocation)));
+        auto entry_result = daemon::make_idempotency_pending_entry(
+            {key_hash('b'), fingerprint('a'), daemon::AccountAuditOperation::SavedAttach,
+             std::string(invocation), receipt.audit_generation, 1'700'000'000,
+             saved_plan(source_snapshot)},
+            "main", tree.final_path());
+        REQUIRE(std::holds_alternative<daemon::IdempotencyEntry>(entry_result));
+        const auto entry = std::get<daemon::IdempotencyEntry>(std::move(entry_result));
+        REQUIRE(tree.store().insert_if_absent(entry, guard).status ==
+                daemon::IdempotencyInsertStatus::Inserted);
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::SavedAttach, invocation,
+                              1, daemon::AccountAuditStage::IdempotencyPending,
+                              {{"key_hash", entry.key_hash.value()},
+                               {"request_fingerprint", entry.request_fingerprint.value()},
+                               {"expires_at", entry.expires_at},
+                               {"reserved_terminal_bytes", entry.reserved_terminal_bytes}});
+        auto spool_result =
+            daemon::create_spool_file(prepared, tree.state(), invocation, ::getuid());
+        REQUIRE(std::holds_alternative<daemon::CreatedSpool>(spool_result));
+        const auto spool = std::get<daemon::CreatedSpool>(std::move(spool_result)).reference;
+        append_checkpoint_for(
+            tree, guard, daemon::AccountAuditOperation::SavedAttach, invocation, 2,
+            daemon::AccountAuditStage::SpoolReady,
+            {{"file", file_snapshot_json(spool.file)}, {"relative_path", spool.relative_path}});
+        cancelled.store(true, std::memory_order_relaxed);
+        CHECK(tree.store().update_spool(entry.key_hash, invocation, spool, guard).status ==
+              daemon::IdempotencyWriteStatus::Applied);
+    }
+
+    SECTION("cancellation after outcome does not interrupt store completion") {
+        StoreTree tree;
+        std::atomic<bool> cancelled = false;
+        auto guard = cancellable_guard(tree, cancelled);
+        constexpr std::string_view invocation = "0123456789abcdef0123456789abcdef";
+        const auto receipt =
+            append_intent(tree, guard, audit_intent('b', 'a', std::string(invocation)));
+        auto entry_result = daemon::make_idempotency_pending_entry(
+            {key_hash('b'), fingerprint('a'), daemon::AccountAuditOperation::ChatArchive,
+             std::string(invocation), receipt.audit_generation, 1'700'000'000, archive_plan()},
+            "main", tree.final_path());
+        REQUIRE(std::holds_alternative<daemon::IdempotencyEntry>(entry_result));
+        const auto entry = std::get<daemon::IdempotencyEntry>(std::move(entry_result));
+        REQUIRE(tree.store().insert_if_absent(entry, guard).status ==
+                daemon::IdempotencyInsertStatus::Inserted);
+        append_checkpoint(tree, guard, invocation, 1, daemon::AccountAuditStage::IdempotencyPending,
+                          {{"key_hash", entry.key_hash.value()},
+                           {"request_fingerprint", entry.request_fingerprint.value()},
+                           {"expires_at", entry.expires_at},
+                           {"reserved_terminal_bytes", entry.reserved_terminal_bytes}});
+        append_checkpoint(tree, guard, invocation, 2, daemon::AccountAuditStage::DispatchStarted,
+                          {{"tdlib_function", "addChatToList"},
+                           {"dispatch_token", "11111111111111111111111111111111"},
+                           {"client_generation", std::uint64_t{1}}});
+        append_checkpoint(tree, guard, invocation, 3, daemon::AccountAuditStage::MutationConfirmed,
+                          {{"terminal", archive_terminal()}});
+        append_outcome(tree, guard, invocation,
+                       {daemon::AccountAuditStage::IdempotencyPending,
+                        daemon::AccountAuditStage::DispatchStarted,
+                        daemon::AccountAuditStage::MutationConfirmed},
+                       daemon::AccountAuditMutationState::Confirmed, archive_terminal());
+        cancelled.store(true, std::memory_order_relaxed);
+        CHECK(tree.store().complete(entry.key_hash, invocation, archive_terminal(), guard).status ==
+              daemon::IdempotencyWriteStatus::Applied);
+    }
+
+    SECTION("cancellation observed during the store read cannot split outcome from completion") {
+        std::atomic<bool> cancelled = false;
+        std::atomic<bool> arm = false;
+        auto store_hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+        store_hooks->at_stage = [&](daemon::IdempotencyStoreStage stage) {
+            if (arm.load(std::memory_order_relaxed) &&
+                stage == daemon::IdempotencyStoreStage::AfterStateOpen) {
+                cancelled.store(true, std::memory_order_relaxed);
+            }
+        };
+        StoreTree tree(store_hooks);
+        auto guard = cancellable_guard(tree, cancelled);
+        constexpr std::string_view invocation = "0123456789abcdef0123456789abcdef";
+        const auto receipt =
+            append_intent(tree, guard, audit_intent('b', 'a', std::string(invocation)));
+        auto entry_result = daemon::make_idempotency_pending_entry(
+            {key_hash('b'), fingerprint('a'), daemon::AccountAuditOperation::ChatArchive,
+             std::string(invocation), receipt.audit_generation, 1'700'000'000, archive_plan()},
+            "main", tree.final_path());
+        REQUIRE(std::holds_alternative<daemon::IdempotencyEntry>(entry_result));
+        const auto entry = std::get<daemon::IdempotencyEntry>(std::move(entry_result));
+        REQUIRE(tree.store().insert_if_absent(entry, guard).status ==
+                daemon::IdempotencyInsertStatus::Inserted);
+        append_checkpoint(tree, guard, invocation, 1, daemon::AccountAuditStage::IdempotencyPending,
+                          {{"key_hash", entry.key_hash.value()},
+                           {"request_fingerprint", entry.request_fingerprint.value()},
+                           {"expires_at", entry.expires_at},
+                           {"reserved_terminal_bytes", entry.reserved_terminal_bytes}});
+        append_checkpoint(tree, guard, invocation, 2, daemon::AccountAuditStage::DispatchStarted,
+                          {{"tdlib_function", "addChatToList"},
+                           {"dispatch_token", "11111111111111111111111111111111"},
+                           {"client_generation", std::uint64_t{1}}});
+        append_checkpoint(tree, guard, invocation, 3, daemon::AccountAuditStage::MutationConfirmed,
+                          {{"terminal", archive_terminal()}});
+        append_outcome(tree, guard, invocation,
+                       {daemon::AccountAuditStage::IdempotencyPending,
+                        daemon::AccountAuditStage::DispatchStarted,
+                        daemon::AccountAuditStage::MutationConfirmed},
+                       daemon::AccountAuditMutationState::Confirmed, archive_terminal());
+        arm.store(true, std::memory_order_relaxed);
+        CHECK(tree.store().complete(entry.key_hash, invocation, archive_terminal(), guard).status ==
+              daemon::IdempotencyWriteStatus::Applied);
+        CHECK(cancelled.load(std::memory_order_relaxed));
+    }
+
+    SECTION("cancellation observed at cleanup cannot split store completion from root fsync") {
+        std::atomic<bool> cancelled = false;
+        StoreTree tree;
+        auto guard = cancellable_guard(tree, cancelled);
+        const auto state = create_saved_open(tree, guard);
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::SavedAttach,
+                              state.entry.invocation_id, 3,
+                              daemon::AccountAuditStage::DispatchStarted,
+                              {{"tdlib_function", "sendMessage"},
+                               {"dispatch_token", "11111111111111111111111111111111"},
+                               {"client_generation", std::uint64_t{1}}});
+        append_checkpoint_for(
+            tree, guard, daemon::AccountAuditOperation::SavedAttach, state.entry.invocation_id, 4,
+            daemon::AccountAuditStage::MutationConfirmed, {{"terminal", saved_terminal()}});
+        append_outcome_for(
+            tree, guard, daemon::AccountAuditOperation::SavedAttach, state.entry.invocation_id,
+            {daemon::AccountAuditStage::IdempotencyPending, daemon::AccountAuditStage::SpoolReady,
+             daemon::AccountAuditStage::DispatchStarted,
+             daemon::AccountAuditStage::MutationConfirmed},
+            daemon::AccountAuditMutationState::Confirmed, saved_terminal());
+        REQUIRE(
+            tree.store()
+                .complete(state.entry.key_hash, state.entry.invocation_id, saved_terminal(), guard)
+                .status == daemon::IdempotencyWriteStatus::Applied);
+        auto spool_hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        spool_hooks->at_stage = [&](daemon::FileSpoolStage stage) {
+            if (stage == daemon::FileSpoolStage::BeforeCleanupOpen) {
+                cancelled.store(true, std::memory_order_relaxed);
+            }
+        };
+        const auto result = tree.foundation().run_core_gate(
+            guard, 1'700'000'001, [] { return "2026-08-20T12:00:03Z"; }, {}, spool_hooks);
+        REQUIRE(result.status == daemon::IdempotencyCoreGateStatus::Clean);
+        CHECK(cancelled.load(std::memory_order_relaxed));
+        CHECK_FALSE(std::filesystem::exists(tree.state() + "/" + state.spool.relative_path));
+    }
+}
+
+TEST_CASE("unexpected incumbent closure ignores cancellation after its durable intent",
+          "[idempotency-store][post-intent][unexpected-incumbent][cancellation]") {
+    StoreTree tree;
+    std::atomic<bool> cancelled = false;
+    auto guard = cancellable_guard(tree, cancelled);
+    const auto receipt =
+        append_intent(tree, guard, audit_intent('b', 'a', "0123456789abcdef0123456789abcdef"));
+    cancelled.store(true, std::memory_order_relaxed);
+    const auto closure = tree.foundation().close_unexpected_incumbent(
+        receipt, guard, [] { return "2026-08-20T12:00:03Z"; });
+    CHECK(closure.status == daemon::IdempotencyUnexpectedIncumbentClosureStatus::DurableFatal);
+    CHECK(closure.terminal == daemon::unexpected_idempotency_incumbent_terminal(
+                                  daemon::AccountAuditOperation::ChatArchive));
+}
+
 TEST_CASE("idempotency completion clears mutable progress and expiry is equality exact",
           "[idempotency-store][completion][expiry]") {
     StoreTree tree;
@@ -1117,6 +1326,64 @@ TEST_CASE("AbsentByPolicy core gate invokes no idempotency store hook or file IO
     CHECK_FALSE(std::filesystem::exists(tree.final_path()));
 }
 
+TEST_CASE("AbsentByPolicy retains keyed completed spool facts without store IO",
+          "[idempotency-store][absent-by-policy][spool][completed-hold][zero-io]") {
+    enum class SpoolState { Present, Missing, Mismatched };
+    for (const auto state_kind :
+         {SpoolState::Present, SpoolState::Missing, SpoolState::Mismatched}) {
+        auto store_hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+        std::atomic<int> store_stages = 0;
+        store_hooks->at_stage = [&](daemon::IdempotencyStoreStage) {
+            store_stages.fetch_add(1, std::memory_order_relaxed);
+        };
+        StoreTree tree(store_hooks);
+        auto guard = tree.guard();
+        const auto state = create_saved_open(tree, guard);
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::SavedAttach,
+                              state.entry.invocation_id, 3,
+                              daemon::AccountAuditStage::DispatchStarted,
+                              {{"tdlib_function", "sendMessage"},
+                               {"dispatch_token", "11111111111111111111111111111111"},
+                               {"client_generation", std::uint64_t{1}}});
+        append_checkpoint_for(
+            tree, guard, daemon::AccountAuditOperation::SavedAttach, state.entry.invocation_id, 4,
+            daemon::AccountAuditStage::MutationConfirmed, {{"terminal", saved_terminal()}});
+        append_outcome_for(
+            tree, guard, daemon::AccountAuditOperation::SavedAttach, state.entry.invocation_id,
+            {daemon::AccountAuditStage::IdempotencyPending, daemon::AccountAuditStage::SpoolReady,
+             daemon::AccountAuditStage::DispatchStarted,
+             daemon::AccountAuditStage::MutationConfirmed},
+            daemon::AccountAuditMutationState::Confirmed, saved_terminal());
+        REQUIRE(
+            tree.store()
+                .complete(state.entry.key_hash, state.entry.invocation_id, saved_terminal(), guard)
+                .status == daemon::IdempotencyWriteStatus::Applied);
+        tree.write_temp("must remain untouched");
+        store_stages.store(0, std::memory_order_relaxed);
+
+        const auto spool_path = tree.state() + "/" + state.spool.relative_path;
+        if (state_kind == SpoolState::Missing) {
+            REQUIRE(std::filesystem::remove(spool_path));
+        } else if (state_kind == SpoolState::Mismatched) {
+            std::filesystem::rename(spool_path, std::filesystem::path(spool_path).parent_path() /
+                                                    "different.bin");
+        }
+
+        const auto result = tree.foundation().run_absent_by_policy_gate(
+            guard, 1'700'000'001, [] { return "2026-08-20T12:00:03Z"; });
+        INFO(static_cast<int>(state_kind));
+        if (state_kind == SpoolState::Present) {
+            CHECK(result.status == daemon::IdempotencyCoreGateStatus::Clean);
+            CHECK(std::filesystem::exists(spool_path));
+        } else {
+            CHECK(result.status == daemon::IdempotencyCoreGateStatus::AuditIncomplete);
+        }
+        CHECK(store_stages.load(std::memory_order_relaxed) == 0);
+        CHECK(std::filesystem::exists(tree.final_path()));
+        CHECK(std::filesystem::exists(tree.temp_path()));
+    }
+}
+
 TEST_CASE("open unexpected-insert group closes none without removing the incumbent",
           "[idempotency-store][reconciliation][unexpected-incumbent]") {
     StoreTree tree;
@@ -1327,6 +1594,43 @@ TEST_CASE("idempotency atomic rewrite exposes every exact durable failure bounda
             CHECK(std::filesystem::exists(tree.temp_path()));
             CHECK_FALSE(std::filesystem::exists(tree.final_path()));
         }
+    }
+}
+
+TEST_CASE("idempotency rewrite rejects temp and final name replacement at revalidation",
+          "[idempotency-store][metadata][replacement][revalidation][fault]") {
+    SECTION("temp name no longer identifies the synced descriptor") {
+        auto hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+        hooks->mutate_metadata = [](daemon::IdempotencyStoreMetadata target,
+                                    struct stat& metadata) {
+            if (target == daemon::IdempotencyStoreMetadata::TempEntry) {
+                ++metadata.st_ino;
+            }
+        };
+        StoreTree tree(hooks);
+        auto guard = tree.guard();
+        const auto result = tree.store().insert_if_absent(pending(), guard);
+        REQUIRE(result.status == daemon::IdempotencyInsertStatus::Failed);
+        CHECK(result.failure.reason == daemon::AccountAuditDurabilityReason::PathInvalid);
+        CHECK(std::filesystem::exists(tree.temp_path()));
+        CHECK_FALSE(std::filesystem::exists(tree.final_path()));
+    }
+
+    SECTION("renamed final no longer identifies the synced temp descriptor") {
+        auto hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+        hooks->mutate_metadata = [](daemon::IdempotencyStoreMetadata target,
+                                    struct stat& metadata) {
+            if (target == daemon::IdempotencyStoreMetadata::FinalEntry) {
+                ++metadata.st_ino;
+            }
+        };
+        StoreTree tree(hooks);
+        auto guard = tree.guard();
+        const auto result = tree.store().insert_if_absent(pending(), guard);
+        REQUIRE(result.status == daemon::IdempotencyInsertStatus::Failed);
+        CHECK(result.failure.reason == daemon::AccountAuditDurabilityReason::PathInvalid);
+        CHECK_FALSE(std::filesystem::exists(tree.temp_path()));
+        CHECK(std::filesystem::exists(tree.final_path()));
     }
 }
 
@@ -1617,6 +1921,104 @@ TEST_CASE("idempotency insertion enforces exact count and mutable-headroom capac
         const auto released = tree.store().insert_if_absent(indexed_entry(first_rejected), guard);
         CHECK(released.status == daemon::IdempotencyInsertStatus::Inserted);
     }
+}
+
+TEST_CASE("spool growth is capacity-preflighted before durable spool_ready",
+          "[idempotency-store][spool][quota][capacity][preflight][ordering]") {
+    StoreTree tree;
+    auto guard = tree.guard();
+    constexpr std::string_view invocation = "0123456789abcdef0123456789abcdef";
+    const daemon::FileSnapshot file{
+        .path = "/" + std::string(3'000, 'a') + "/attachment.bin",
+        .name = "attachment.bin",
+        .size = 1,
+        .sha256 = digest('c'),
+        .device = 1,
+        .inode = 2,
+        .mtime_ns = 3,
+        .ctime_ns = 4,
+    };
+    const auto receipt = append_intent(tree, guard, saved_intent(file, std::string(invocation)));
+    auto entry_result = daemon::make_idempotency_pending_entry(
+        {key_hash('b'), fingerprint('a'), daemon::AccountAuditOperation::SavedAttach,
+         std::string(invocation), receipt.audit_generation, 1'700'000'000, saved_plan(file)},
+        "main", tree.final_path());
+    REQUIRE(std::holds_alternative<daemon::IdempotencyEntry>(entry_result));
+    const auto entry = std::get<daemon::IdempotencyEntry>(std::move(entry_result));
+
+    daemon::IdempotencySnapshot snapshot;
+    snapshot.entries.push_back(entry);
+    std::string last_valid;
+    std::size_t first_rejected = 0;
+    for (std::size_t index = 1; index <= 700; ++index) {
+        snapshot.entries.push_back(indexed_entry(index));
+        std::ranges::sort(snapshot.entries, {}, [](const daemon::IdempotencyEntry& candidate) {
+            return candidate.key_hash.value();
+        });
+        const auto candidate = daemon::serialize_idempotency_snapshot(
+            snapshot, "main", "/tmp/accounts/main/idempotency.db");
+        if (const auto* bytes = std::get_if<std::string>(&candidate)) {
+            last_valid = *bytes;
+            continue;
+        }
+        first_rejected = index;
+        const auto rejected =
+            std::ranges::find_if(snapshot.entries, [&](const auto& candidate_entry) {
+                return candidate_entry.invocation_id == indexed_invocation(index);
+            });
+        REQUIRE(rejected != snapshot.entries.end());
+        snapshot.entries.erase(rejected);
+        break;
+    }
+    REQUIRE(first_rejected > 1);
+    REQUIRE_FALSE(last_valid.empty());
+    bool completed_rejected = false;
+    for (std::size_t index = 1'000; index <= 3'000; ++index) {
+        snapshot.entries.push_back(indexed_entry(index, true));
+        std::ranges::sort(snapshot.entries, {}, [](const daemon::IdempotencyEntry& candidate) {
+            return candidate.key_hash.value();
+        });
+        const auto candidate = daemon::serialize_idempotency_snapshot(
+            snapshot, "main", "/tmp/accounts/main/idempotency.db");
+        if (const auto* bytes = std::get_if<std::string>(&candidate)) {
+            last_valid = *bytes;
+            continue;
+        }
+        const auto rejected =
+            std::ranges::find_if(snapshot.entries, [&](const auto& candidate_entry) {
+                return candidate_entry.invocation_id == indexed_invocation(index);
+            });
+        REQUIRE(rejected != snapshot.entries.end());
+        snapshot.entries.erase(rejected);
+        completed_rejected = true;
+        break;
+    }
+    REQUIRE(completed_rejected);
+    tree.write_final(last_valid);
+    append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::SavedAttach, invocation, 1,
+                          daemon::AccountAuditStage::IdempotencyPending,
+                          {{"key_hash", entry.key_hash.value()},
+                           {"request_fingerprint", entry.request_fingerprint.value()},
+                           {"expires_at", entry.expires_at},
+                           {"reserved_terminal_bytes", entry.reserved_terminal_bytes}});
+
+    const daemon::SpoolRef spool{
+        .relative_path = "spool/0123456789abcdef0123456789abcdef/attachment.bin", .file = file};
+    const auto preflight =
+        tree.store().preflight_spool_update(entry.key_hash, invocation, spool, guard);
+    CHECK(preflight.status == daemon::IdempotencySpoolPreflightStatus::Failed);
+    CHECK(preflight.failure.reason == daemon::AccountAuditDurabilityReason::CapacityExhausted);
+    CHECK_FALSE(std::filesystem::exists(tree.temp_path()));
+    std::ifstream persisted(tree.final_path(), std::ios::binary);
+    REQUIRE(persisted.good());
+    const std::string persisted_bytes{std::istreambuf_iterator<char>(persisted),
+                                      std::istreambuf_iterator<char>()};
+    CHECK(persisted_bytes == last_valid);
+    const auto audit = tree.audit().inspect(guard);
+    REQUIRE(audit.status == daemon::AccountAuditInspectionStatus::Open);
+    REQUIRE(audit.oldest_open);
+    CHECK(audit.oldest_open->completed_stages ==
+          std::vector{daemon::AccountAuditStage::IdempotencyPending});
 }
 
 TEST_CASE("idempotency forward progress consumes one reservation and completion clears it",
@@ -2080,6 +2482,19 @@ TEST_CASE("idempotency classifies owner open read root and lease failures exactl
         CHECK(tree.store().inspect(guard).failure.reason ==
               daemon::AccountAuditDurabilityReason::WrongOwner);
     }
+    SECTION("root entry and opened descriptor identity mismatch") {
+        auto hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+        hooks->mutate_metadata = [](daemon::IdempotencyStoreMetadata target,
+                                    struct stat& metadata) {
+            if (target == daemon::IdempotencyStoreMetadata::StateDescriptor) {
+                ++metadata.st_ino;
+            }
+        };
+        StoreTree tree(hooks);
+        auto guard = tree.guard();
+        CHECK(tree.store().inspect(guard).failure.reason ==
+              daemon::AccountAuditDurabilityReason::PathInvalid);
+    }
     SECTION("final owner") {
         auto hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
         hooks->mutate_metadata = [](daemon::IdempotencyStoreMetadata target,
@@ -2161,6 +2576,29 @@ TEST_CASE("idempotency classifies owner open read root and lease failures exactl
         auto guard = tree.guard();
         CHECK(tree.store().inspect(guard).failure.reason ==
               daemon::AccountAuditDurabilityReason::ReadFailed);
+    }
+    SECTION("stable opened descriptor with an atomically replaced final name") {
+        auto hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+        std::string final_path;
+        std::atomic<bool> replaced = false;
+        hooks->at_stage = [&](daemon::IdempotencyStoreStage stage) {
+            if (stage != daemon::IdempotencyStoreStage::AfterFinalOpen ||
+                replaced.exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
+            std::filesystem::rename(final_path, final_path + ".opened");
+            std::ofstream replacement(final_path, std::ios::binary | std::ios::trunc);
+            REQUIRE(replacement.good());
+            replacement << R"({"entries":[],"schema_version":1})";
+            replacement.close();
+            REQUIRE(::chmod(final_path.c_str(), 0600) == 0);
+        };
+        StoreTree tree(hooks);
+        final_path = tree.final_path();
+        tree.write_final(R"({"entries":[],"schema_version":1})");
+        auto guard = tree.guard();
+        CHECK(tree.store().inspect(guard).failure.reason ==
+              daemon::AccountAuditDurabilityReason::PathInvalid);
     }
     SECTION("temp symlink") {
         StoreTree tree;

@@ -3120,8 +3120,9 @@ struct AccountAuditSpoolHoldAccess {
             error.durability_reason = DurabilityReason::LockFailed;
             return error;
         }
+        const auto effective_control = guard.constrain_file_spool_control(control);
         auto cleanup = cleanup_spool_file(hold.state_directory_, hold.spool_, hold.expected_uid_,
-                                          control, hooks);
+                                          effective_control, hooks);
         if (auto* error = std::get_if<FileSpoolError>(&cleanup)) {
             return *error;
         }
@@ -3614,10 +3615,16 @@ bool AccountAuditCoordinator::Guard::validate_lease(std::string_view state_direc
     return owner_->validate_lease(error);
 }
 bool AccountAuditCoordinator::Guard::interrupted(AccountAuditFailure& failure) const {
+    if (post_intent_durability_) {
+        return false;
+    }
     return scan_interrupted(scan_control_, failure);
 }
 FileSpoolControl
 AccountAuditCoordinator::Guard::constrain_file_spool_control(FileSpoolControl control) const {
+    if (post_intent_durability_) {
+        return {};
+    }
     if (scan_control_.deadline.expires_at &&
         (!control.deadline || *scan_control_.deadline.expires_at < *control.deadline)) {
         control.deadline = scan_control_.deadline.expires_at;
@@ -3628,6 +3635,25 @@ AccountAuditCoordinator::Guard::constrain_file_spool_control(FileSpoolControl co
         return (caller_cancelled && caller_cancelled()) || (epoch_cancelled && epoch_cancelled());
     };
     return control;
+}
+
+bool AccountAuditCoordinator::Guard::enter_post_intent_durability(
+    const AccountAuditAppendReceipt& receipt, AccountAuditFailure& failure) {
+    if (!valid() || receipt.coordinator_ != owner_ || receipt.audit_generation == 0 ||
+        receipt.invocation_id.empty() || receipt.request_fingerprint.empty()) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "post-intent receipt is invalid or bound to another account epoch"};
+        return false;
+    }
+    std::string lease_error;
+    if (!validate_lease(lease_error)) {
+        failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
+        return false;
+    }
+    post_intent_durability_ = true;
+    scan_control_ = {};
+    failure = {};
+    return true;
 }
 
 AccountAuditCoordinator::AccountAuditCoordinator(
@@ -4243,7 +4269,7 @@ bool append_document(const std::string& state_directory, uid_t uid, const json& 
 
 bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
                                     AccountAuditAppendPermit permit,
-                                    const AccountAuditCoordinator::Guard& guard,
+                                    AccountAuditCoordinator::Guard& guard,
                                     AccountAuditAppendReceipt& receipt,
                                     AccountAuditFailure& failure) const {
     std::string lease_error;
@@ -4306,7 +4332,8 @@ bool AccountAuditLog::append_intent(const AccountAuditIntent& intent,
     receipt.invocation_id = intent.document()["invocation_id"].get<std::string>();
     receipt.request_fingerprint = intent.document()["request_fingerprint"].get<std::string>();
     receipt.operation = *operation;
-    return true;
+    receipt.coordinator_ = guard.owner_;
+    return guard.enter_post_intent_durability(receipt, failure);
 }
 
 bool AccountAuditLog::append_checkpoint(const AccountAuditCheckpoint& checkpoint,

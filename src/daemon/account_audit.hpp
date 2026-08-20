@@ -220,6 +220,7 @@ struct AccountAuditScanControl {
 };
 
 class AccountAuditAppendPermit;
+struct AccountAuditAppendReceipt;
 class AccountAuditLog;
 class AccountAuditRecoveryPermit;
 struct AccountAuditSpoolHoldAccess;
@@ -247,12 +248,15 @@ class AccountAuditCoordinator final : public std::enable_shared_from_this<Accoun
         friend class AccountAuditLog;
         friend class AccountAuditRecoveryPermit;
         friend struct AccountAuditSpoolHoldAccess;
+        [[nodiscard]] bool enter_post_intent_durability(const AccountAuditAppendReceipt& receipt,
+                                                        AccountAuditFailure& failure);
         Guard(std::unique_lock<std::timed_mutex> lock,
               std::shared_ptr<const AccountAuditCoordinator> owner,
               AccountAuditScanControl scan_control);
         std::unique_lock<std::timed_mutex> lock_;
         std::shared_ptr<const AccountAuditCoordinator> owner_;
         AccountAuditScanControl scan_control_;
+        bool post_intent_durability_ = false;
     };
 
     static std::shared_ptr<AccountAuditCoordinator>
@@ -279,6 +283,11 @@ struct AccountAuditAppendReceipt {
     std::string invocation_id;
     std::string request_fingerprint;
     AccountAuditOperation operation = AccountAuditOperation::Send;
+
+  private:
+    std::shared_ptr<const AccountAuditCoordinator> coordinator_;
+    friend class AccountAuditCoordinator::Guard;
+    friend class AccountAuditLog;
 };
 
 struct AccountAuditOpenGroup {
@@ -519,7 +528,7 @@ class AccountAuditLog final {
                      const AccountAuditCompletedGroupVisitor& completed_visitor = {}) const;
     [[nodiscard]] bool append_intent(const AccountAuditIntent& intent,
                                      AccountAuditAppendPermit permit,
-                                     const AccountAuditCoordinator::Guard& guard,
+                                     AccountAuditCoordinator::Guard& guard,
                                      AccountAuditAppendReceipt& receipt,
                                      AccountAuditFailure& failure) const;
     [[nodiscard]] bool append_checkpoint(const AccountAuditCheckpoint& checkpoint,

@@ -676,15 +676,21 @@ read_stable_file(int directory_fd, const char* name, const struct stat& named_me
     }
     struct stat final_descriptor {};
     struct stat final_named {};
-    if (::fstat(file.get(), &final_descriptor) != 0 ||
-        ::fstatat(directory_fd, name, &final_named, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (::fstat(file.get(), &final_descriptor) != 0) {
         return make_failure(account, store_path, AccountAuditDurabilityReason::ReadFailed);
+    }
+    if (::fstatat(directory_fd, name, &final_named, AT_SYMLINK_NOFOLLOW) != 0) {
+        return make_failure(account, store_path,
+                            errno == ENOENT ? AccountAuditDurabilityReason::PathInvalid
+                                            : AccountAuditDurabilityReason::ReadFailed);
     }
     mutate_metadata(hooks, IdempotencyStoreMetadata::FinalDescriptor, final_descriptor);
     mutate_metadata(hooks, IdempotencyStoreMetadata::FinalEntry, final_named);
-    if (!same_identity(descriptor_metadata, final_descriptor) ||
-        !same_identity(descriptor_metadata, final_named)) {
+    if (!same_identity(descriptor_metadata, final_descriptor)) {
         return make_failure(account, store_path, AccountAuditDurabilityReason::ReadFailed);
+    }
+    if (!same_identity(final_descriptor, final_named)) {
+        return make_failure(account, store_path, AccountAuditDurabilityReason::PathInvalid);
     }
     return bytes;
 }
@@ -1133,24 +1139,90 @@ IdempotencyFailure schema_transition_failure(std::string detail) {
     return make_failure({}, {}, AccountAuditDurabilityReason::SchemaError, std::move(detail));
 }
 
+bool apply_spool_transition(IdempotencyEntry& entry, const SpoolRef& spool,
+                            std::string_view account, IdempotencyFailure& failure) {
+    const json file{{"path", spool.file.path},         {"name", spool.file.name},
+                    {"size", spool.file.size},         {"sha256", spool.file.sha256},
+                    {"device", spool.file.device},     {"inode", spool.file.inode},
+                    {"mtime_ns", spool.file.mtime_ns}, {"ctime_ns", spool.file.ctime_ns}};
+    if (entry.state != IdempotencyEntryState::Pending ||
+        entry.operation != AccountAuditOperation::SavedAttach ||
+        !validate_account_audit_persisted_spool(spool, entry.invocation_id) ||
+        !entry.plan.is_object() || !entry.plan.contains("file") || entry.plan["file"] != file ||
+        (entry.spool && *entry.spool != spool)) {
+        failure = schema_transition_failure("invalid spool transition");
+        return false;
+    }
+    entry.spool = spool;
+    if (!valid_entry(entry, account)) {
+        failure = schema_transition_failure("invalid spool transition");
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+IdempotencySpoolPreflightResult
+IdempotencyStore::preflight_spool_update(const IdempotencyKeyHash& key_hash,
+                                         std::string_view invocation_id, const SpoolRef& spool,
+                                         const AccountAuditCoordinator::Guard& guard) const {
+    auto image_result =
+        inspect_image(state_directory_, account_, store_path_, expected_uid_, guard, hooks_, true);
+    if (auto* failure = std::get_if<IdempotencyFailure>(&image_result)) {
+        return {IdempotencySpoolPreflightStatus::Failed, {}, std::move(*failure)};
+    }
+    auto image = std::move(std::get<StoreImage>(image_result));
+    if (image.temp_present) {
+        return {IdempotencySpoolPreflightStatus::Failed, std::move(image.snapshot),
+                make_failure(account_, store_path_, AccountAuditDurabilityReason::Contradiction,
+                             "stale temp was not reconciled before spool preflight")};
+    }
+    const auto found = std::ranges::lower_bound(
+        image.snapshot.entries, key_hash.value(), {},
+        [](const IdempotencyEntry& entry) { return entry.key_hash.value(); });
+    if (found == image.snapshot.entries.end() || found->key_hash != key_hash ||
+        found->invocation_id != invocation_id) {
+        return {IdempotencySpoolPreflightStatus::Failed, std::move(image.snapshot),
+                make_failure(account_, store_path_, AccountAuditDurabilityReason::Contradiction,
+                             "spool preflight has no matching owned entry")};
+    }
+    IdempotencySnapshot desired = image.snapshot;
+    auto desired_entry = std::ranges::lower_bound(
+        desired.entries, key_hash.value(), {},
+        [](const IdempotencyEntry& entry) { return entry.key_hash.value(); });
+    IdempotencyFailure transition_failure;
+    if (!apply_spool_transition(*desired_entry, spool, account_, transition_failure)) {
+        transition_failure.account = account_;
+        transition_failure.path = store_path_;
+        return {IdempotencySpoolPreflightStatus::Failed, std::move(image.snapshot),
+                std::move(transition_failure)};
+    }
+    auto prospective = canonicalize_snapshot(std::move(desired.entries), account_);
+    if (std::holds_alternative<AccountAuditDurabilityReason>(prospective)) {
+        return {
+            IdempotencySpoolPreflightStatus::Failed, std::move(image.snapshot),
+            make_failure(account_, store_path_, AccountAuditDurabilityReason::CapacityExhausted)};
+    }
+    return {IdempotencySpoolPreflightStatus::Ready,
+            std::get<IdempotencySnapshot>(std::move(prospective)),
+            {}};
+}
 
 IdempotencyWriteResult
 IdempotencyStore::update_spool(const IdempotencyKeyHash& key_hash, std::string_view invocation_id,
                                const SpoolRef& spool,
                                const AccountAuditCoordinator::Guard& guard) const {
+    auto preflight = preflight_spool_update(key_hash, invocation_id, spool, guard);
+    if (preflight.status != IdempotencySpoolPreflightStatus::Ready) {
+        return {IdempotencyWriteStatus::Failed, std::move(preflight.prospective_snapshot),
+                std::move(preflight.failure)};
+    }
     return mutate_owned_entry(
         state_directory_, account_, store_path_, expected_uid_, key_hash, invocation_id, guard,
         hooks_,
-        [&spool](IdempotencyEntry& entry, IdempotencyFailure& failure) {
-            if (entry.state != IdempotencyEntryState::Pending ||
-                !validate_account_audit_persisted_spool(spool, entry.invocation_id) ||
-                (entry.spool && *entry.spool != spool)) {
-                failure = schema_transition_failure("invalid spool transition");
-                return false;
-            }
-            entry.spool = spool;
-            return true;
+        [&spool, account = account_](IdempotencyEntry& entry, IdempotencyFailure& failure) {
+            return apply_spool_transition(entry, spool, account, failure);
         },
         false);
 }
