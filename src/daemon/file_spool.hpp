@@ -11,6 +11,7 @@
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -86,8 +87,15 @@ struct FileSpoolError {
 };
 
 struct FileSpoolControl {
+    FileSpoolControl() = default;
+    FileSpoolControl(const std::optional<std::chrono::steady_clock::time_point>& deadline_value,
+                     std::stop_token stop_token_value, std::function<bool()> cancelled_value = {})
+        : deadline(deadline_value), stop_token(std::move(stop_token_value)),
+          cancelled(std::move(cancelled_value)) {}
+
     std::optional<std::chrono::steady_clock::time_point> deadline;
     std::stop_token stop_token;
+    std::function<bool()> cancelled;
 };
 
 enum class FileSpoolStage {
@@ -295,5 +303,7 @@ cleanup_spool_file(std::string_view account_state, const SpoolRef& reference, ui
 encode_filesystem_diagnostic_path(std::string_view absolute_path_bytes);
 
 [[nodiscard]] bool valid_filesystem_diagnostic_path(const FilesystemDiagnosticPath& value);
+[[nodiscard]] bool valid_spool_reference(const SpoolRef& reference,
+                                         std::string_view invocation_id = {});
 
 } // namespace tgcli::daemon

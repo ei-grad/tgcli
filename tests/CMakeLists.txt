@@ -31,6 +31,7 @@ add_executable(tgcli_unit_tests
     removal_recovery_test.cpp
     frame_test.cpp
     hash_canonical_test.cpp
+    idempotency_store_test.cpp
     paths_test.cpp
     query_registry_test.cpp
     update_bus_test.cpp

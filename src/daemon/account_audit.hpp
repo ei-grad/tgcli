@@ -168,6 +168,20 @@ bool validate_account_audit_outcome(const nlohmann::json& document, std::string&
 bool validate_account_audit_stage_history(AccountAuditOperation operation,
                                           const std::vector<AccountAuditCheckpointInput>& history,
                                           std::string& error);
+bool validate_account_audit_persisted_plan(AccountAuditOperation operation,
+                                           const nlohmann::json& plan, std::string_view account);
+bool validate_account_audit_persisted_terminal(AccountAuditOperation operation,
+                                               const nlohmann::json& terminal,
+                                               const nlohmann::json& plan,
+                                               std::string_view account);
+bool validate_account_audit_persisted_temporary_ids(AccountAuditOperation operation,
+                                                    const nlohmann::json& temporary_ids,
+                                                    const nlohmann::json& plan);
+bool validate_account_audit_persisted_forward_progress(AccountAuditOperation operation,
+                                                       const nlohmann::json& items,
+                                                       const nlohmann::json& plan);
+bool validate_account_audit_persisted_spool(const SpoolRef& spool, std::string_view invocation_id);
+std::uint32_t account_audit_terminal_reservation(AccountAuditOperation operation);
 std::string serialize_account_audit_record(const nlohmann::json& document);
 
 struct AccountAuditPin {
@@ -224,6 +238,8 @@ class AccountAuditCoordinator final : public std::enable_shared_from_this<Accoun
         [[nodiscard]] bool validate_lease(std::string_view state_directory,
                                           std::string_view account, uid_t expected_uid,
                                           std::string& error) const;
+        [[nodiscard]] bool interrupted(AccountAuditFailure& failure) const;
+        [[nodiscard]] FileSpoolControl constrain_file_spool_control(FileSpoolControl control) const;
 
       private:
         friend class AccountAuditAppendPermit;

@@ -141,7 +141,7 @@ std::optional<FileSpoolError> control_error(const FileSpoolControl& control) {
     if (control.deadline && std::chrono::steady_clock::now() >= *control.deadline) {
         return simple_error(FileSpoolErrorKind::TimedOut);
     }
-    if (control.stop_token.stop_requested()) {
+    if (control.stop_token.stop_requested() || (control.cancelled && control.cancelled())) {
         return simple_error(FileSpoolErrorKind::Cancelled);
     }
     return std::nullopt;
@@ -1882,6 +1882,11 @@ bool valid_filesystem_diagnostic_path(const FilesystemDiagnosticPath& value) {
         }
     }
     return true;
+}
+
+bool valid_spool_reference(const SpoolRef& reference, std::string_view invocation_id) {
+    const auto parsed = parse_spool_path(reference);
+    return parsed && (invocation_id.empty() || parsed->first == invocation_id);
 }
 
 } // namespace tgcli::daemon

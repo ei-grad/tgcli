@@ -3447,6 +3447,70 @@ bool validate_account_audit_stage_history(AccountAuditOperation operation,
     return transition_history(operation, history, error);
 }
 
+bool validate_account_audit_persisted_plan(AccountAuditOperation operation, const json& plan,
+                                           std::string_view account) {
+    return operation != AccountAuditOperation::SessionTerminate &&
+           valid_plan(operation, plan, account);
+}
+
+bool validate_account_audit_persisted_terminal(AccountAuditOperation operation,
+                                               const json& terminal, const json& plan,
+                                               std::string_view account) {
+    if (!validate_account_audit_persisted_plan(operation, plan, account) ||
+        !valid_terminal(operation, terminal)) {
+        return false;
+    }
+    const json intent{{"account", account}, {"plan", plan}};
+    return terminal_matches_plan(operation, terminal, intent);
+}
+
+bool validate_account_audit_persisted_temporary_ids(AccountAuditOperation operation,
+                                                    const json& temporary_ids, const json& plan) {
+    if (!temporary_ids.is_array() || temporary_ids.empty()) {
+        return temporary_ids.is_array();
+    }
+    if (operation != AccountAuditOperation::Send &&
+        operation != AccountAuditOperation::SavedAttach &&
+        operation != AccountAuditOperation::MsgForward) {
+        return false;
+    }
+    const auto maximum = operation == AccountAuditOperation::MsgForward
+                             ? plan.value("message_ids", json::array()).size()
+                             : std::size_t{1};
+    return valid_message_id_array(temporary_ids, 1, maximum) &&
+           (operation == AccountAuditOperation::MsgForward || temporary_ids.size() == 1);
+}
+
+bool validate_account_audit_persisted_forward_progress(AccountAuditOperation operation,
+                                                       const json& items, const json& plan) {
+    if (!items.is_array() || items.empty()) {
+        return items.is_array();
+    }
+    if (operation != AccountAuditOperation::MsgForward || !plan.is_object() ||
+        !plan.contains("message_ids") || !plan["message_ids"].is_array() ||
+        !valid_forward_items(items, false, false) || items.size() != plan["message_ids"].size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        if (items.at(index)["source_id"] != plan["message_ids"].at(index)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validate_account_audit_persisted_spool(const SpoolRef& spool, std::string_view invocation_id) {
+    const json file{{"path", spool.file.path},         {"name", spool.file.name},
+                    {"size", spool.file.size},         {"sha256", spool.file.sha256},
+                    {"device", spool.file.device},     {"inode", spool.file.inode},
+                    {"mtime_ns", spool.file.mtime_ns}, {"ctime_ns", spool.file.ctime_ns}};
+    return valid_spool_reference(spool, invocation_id) && valid_file_snapshot(file);
+}
+
+std::uint32_t account_audit_terminal_reservation(AccountAuditOperation operation) {
+    return static_cast<std::uint32_t>(terminal_byte_ceiling(operation));
+}
+
 std::string serialize_account_audit_record(const json& document) {
     return document.dump();
 }
@@ -3548,6 +3612,22 @@ bool AccountAuditCoordinator::Guard::validate_lease(std::string_view state_direc
         return false;
     }
     return owner_->validate_lease(error);
+}
+bool AccountAuditCoordinator::Guard::interrupted(AccountAuditFailure& failure) const {
+    return scan_interrupted(scan_control_, failure);
+}
+FileSpoolControl
+AccountAuditCoordinator::Guard::constrain_file_spool_control(FileSpoolControl control) const {
+    if (scan_control_.deadline.expires_at &&
+        (!control.deadline || *scan_control_.deadline.expires_at < *control.deadline)) {
+        control.deadline = scan_control_.deadline.expires_at;
+    }
+    const auto caller_cancelled = std::move(control.cancelled);
+    const auto epoch_cancelled = scan_control_.cancelled;
+    control.cancelled = [caller_cancelled, epoch_cancelled] {
+        return (caller_cancelled && caller_cancelled()) || (epoch_cancelled && epoch_cancelled());
+    };
+    return control;
 }
 
 AccountAuditCoordinator::AccountAuditCoordinator(
@@ -3869,7 +3949,9 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
                     std::string record_error;
                     if (!consume_v2(document, state, record_error,
                                     static_cast<std::uint64_t>(descriptor_metadata.st_ino),
-                                    completed_visitor, permit != nullptr ? &hold_seeds : nullptr)) {
+                                    completed_visitor,
+                                    permit != nullptr || recovery_permit != nullptr ? &hold_seeds
+                                                                                    : nullptr)) {
                         return contradiction(state, account_, audit_path_, std::move(record_error));
                     }
                 } else if (state.positive_v2) {
@@ -3955,23 +4037,32 @@ AccountAuditLog::inspect_unfinalized( // NOLINT(readability-function-cognitive-c
     if (!all_pins_matched(*pin_index, pin_error)) {
         return contradiction(state, account_, audit_path_, std::move(pin_error));
     }
-    if (state.open) {
-        result.status = AccountAuditInspectionStatus::Open;
-        if (recovery_permit != nullptr && state.open->has_spool) {
+    if (recovery_permit != nullptr) {
+        if (state.open && state.open->has_spool) {
             const auto seed = make_spool_hold_seed(*state.open);
             if (!seed) {
                 return contradiction(state, account_, audit_path_,
                                      "spool-ready group lost its recovery reference");
             }
+            hold_seeds.push_back(*seed);
+        }
+        if (!hold_seeds.empty()) {
             auto implementation = std::make_unique<AccountAuditRecoveryPermit::Impl>();
             implementation->permit_id = next_spool_permit_id();
             implementation->state_directory = state_directory_;
             implementation->account = account_;
             implementation->expected_uid = expected_uid_;
             implementation->coordinator = guard.owner_;
-            implementation->holds.push_back({1, *seed, false});
+            implementation->holds.reserve(hold_seeds.size());
+            std::uint64_t hold_id = 1;
+            for (auto& seed : hold_seeds) {
+                implementation->holds.push_back({hold_id++, std::move(seed), false});
+            }
             *recovery_permit = AccountAuditRecoveryPermit(std::move(implementation));
         }
+    }
+    if (state.open) {
+        result.status = AccountAuditInspectionStatus::Open;
         result.oldest_open = std::move(state.open);
         return result;
     }
@@ -4089,7 +4180,8 @@ AccountAuditInspection AccountAuditLog::prepare_recovery(
         result.status = AccountAuditInspectionStatus::Interrupted;
         result.failure = std::move(interruption);
     }
-    if (result.status != AccountAuditInspectionStatus::Open) {
+    if (result.status != AccountAuditInspectionStatus::Open &&
+        result.status != AccountAuditInspectionStatus::Clean) {
         permit = AccountAuditRecoveryPermit{};
     }
     return result;
