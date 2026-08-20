@@ -26,6 +26,7 @@ add_executable(tgcli_unit_tests
     removal_planner_test.cpp
     removal_recovery_test.cpp
     frame_test.cpp
+    hash_canonical_test.cpp
     paths_test.cpp
     query_registry_test.cpp
     update_bus_test.cpp
@@ -35,6 +36,7 @@ add_executable(tgcli_unit_tests
     read_domain_test.cpp
     read_commands_test.cpp
     read_td_runtime_conversion_test.cpp
+    request_fingerprint_test.cpp
     resolver_test.cpp
     resolver_consumer_test.cpp
     chats_commands_test.cpp

@@ -191,12 +191,14 @@ target_link_libraries(tgcli_proto
     PUBLIC tgcli_common nlohmann_json::nlohmann_json)
 
 add_library(tgcli_util STATIC
+    src/common/canonical_json.cpp
     src/common/config.cpp
     src/common/daemon_lock.cpp
     src/common/paths.cpp
+    src/common/sha256.cpp
     src/common/secret_hook.cpp)
 target_link_libraries(tgcli_util
-    PUBLIC tgcli_common
+    PUBLIC tgcli_common nlohmann_json::nlohmann_json
     PRIVATE tomlplusplus::tomlplusplus)
 target_link_libraries(tgcli_proto PRIVATE tgcli_util)
 
@@ -241,6 +243,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/message_commands.cpp
     src/daemon/chats_commands.cpp
     src/daemon/ready_read.cpp
+    src/daemon/request_fingerprint.cpp
     src/daemon/resolver.cpp
     src/daemon/saved_commands.cpp
     src/daemon/commands.cpp

@@ -1,10 +1,10 @@
 #include "daemon/file_spool.hpp"
 
+#include "common/sha256.hpp"
 #include "common/utf8.hpp"
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -307,107 +307,15 @@ bool same_snapshot_identity(const FileSnapshot& snapshot, const struct stat& sta
 class Sha256 final {
   public:
     void update(const unsigned char* bytes, std::size_t size) {
-        total_size_ += size;
-        while (size > 0) {
-            const auto copied = std::min(size, block_.size() - block_size_);
-            std::copy_n(bytes, copied, block_.begin() + static_cast<std::ptrdiff_t>(block_size_));
-            block_size_ += copied;
-            bytes += copied;
-            size -= copied;
-            if (block_size_ == block_.size()) {
-                transform(block_);
-                block_size_ = 0;
-            }
-        }
+        digest_.update(std::span(bytes, size));
     }
 
     [[nodiscard]] std::string finish() {
-        const auto bit_length = static_cast<std::uint64_t>(total_size_) * 8U;
-        block_.at(block_size_++) = 0x80U;
-        if (block_size_ > 56) {
-            std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.end(), 0);
-            transform(block_);
-            block_size_ = 0;
-        }
-        std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.begin() + 56,
-                  0);
-        for (std::size_t index = 0; index < 8; ++index) {
-            block_.at(56 + index) =
-                static_cast<unsigned char>(bit_length >> static_cast<unsigned>((7 - index) * 8));
-        }
-        transform(block_);
-        constexpr std::string_view hex = "0123456789abcdef";
-        std::string output(64, '0');
-        std::size_t offset = 0;
-        for (const auto word : digest_) {
-            for (int shift = 28; shift >= 0; shift -= 4) {
-                output.at(offset++) = hex.at((word >> static_cast<unsigned>(shift)) & 0x0fU);
-            }
-        }
-        return output;
+        return digest_.finish_hex();
     }
 
   private:
-    void transform(const std::array<unsigned char, 64>& block) {
-        constexpr std::array<std::uint32_t, 64> constants = {
-            0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U,
-            0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
-            0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U,
-            0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
-            0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U,
-            0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U,
-            0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U, 0xa2bfe8a1U, 0xa81a664bU,
-            0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
-            0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU,
-            0x5b9cca4fU, 0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
-            0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U};
-        std::array<std::uint32_t, 64> words{};
-        for (std::size_t index = 0; index < 16; ++index) {
-            const auto offset = index * 4;
-            words.at(index) = (static_cast<std::uint32_t>(block.at(offset)) << 24U) |
-                              (static_cast<std::uint32_t>(block.at(offset + 1)) << 16U) |
-                              (static_cast<std::uint32_t>(block.at(offset + 2)) << 8U) |
-                              static_cast<std::uint32_t>(block.at(offset + 3));
-        }
-        for (std::size_t index = 16; index < words.size(); ++index) {
-            const auto first = words.at(index - 15);
-            const auto second = words.at(index - 2);
-            const auto sigma0 = std::rotr(first, 7) ^ std::rotr(first, 18) ^ (first >> 3U);
-            const auto sigma1 = std::rotr(second, 17) ^ std::rotr(second, 19) ^ (second >> 10U);
-            words.at(index) = words.at(index - 16) + sigma0 + words.at(index - 7) + sigma1;
-        }
-        auto [a, b, c, d, e, f, g, h] = digest_;
-        for (std::size_t index = 0; index < words.size(); ++index) {
-            const auto sum1 = std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
-            const auto choose = (e & f) ^ (~e & g);
-            const auto temporary1 = h + sum1 + choose + constants.at(index) + words.at(index);
-            const auto sum0 = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
-            const auto majority = (a & b) ^ (a & c) ^ (b & c);
-            const auto temporary2 = sum0 + majority;
-            h = g;
-            g = f;
-            f = e;
-            e = d + temporary1;
-            d = c;
-            c = b;
-            b = a;
-            a = temporary1 + temporary2;
-        }
-        digest_[0] += a;
-        digest_[1] += b;
-        digest_[2] += c;
-        digest_[3] += d;
-        digest_[4] += e;
-        digest_[5] += f;
-        digest_[6] += g;
-        digest_[7] += h;
-    }
-
-    std::array<std::uint32_t, 8> digest_{0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-                                         0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
-    std::array<unsigned char, 64> block_{};
-    std::size_t block_size_{0};
-    std::size_t total_size_{0};
+    common::Sha256 digest_;
 };
 
 std::optional<std::string> canonical_display(std::string_view caller_path,

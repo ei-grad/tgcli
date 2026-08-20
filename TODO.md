@@ -238,7 +238,7 @@ before the milestone is closed.
 - [ ] Align session/M3 AUDIT_UNAVAILABLE schemas with the complete accepted
       durability_reason enum; reject rotate_failed in v2 while retaining the
       separate v1 audit_reason, and generator-check every runtime audit record.
-- [ ] Add canonical JSON, domain-separated hashes and complete per-operation
+- [x] Add canonical JSON, domain-separated hashes and complete per-operation
       fingerprints with exact canonical byte/golden vectors and raw-key/invite
       sentinel gates.
 - [ ] Extend the accepted audit API with open-group generation, the exact
