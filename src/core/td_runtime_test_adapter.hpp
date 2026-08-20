@@ -99,7 +99,7 @@ bool production_get_unix_time_matches_for_test(const TdValue& function);
 bool production_parse_text_entities_matches_for_test(const TdValue& function, std::string_view text,
                                                      TdTextParseMode mode);
 bool production_send_message_matches_for_test(const TdValue& function,
-                                              const TdSendMessageRequest& request);
+                                              const TdSendMessageRequest& expected);
 bool production_direct_request_matches_for_test(const TdValue& function,
                                                 const TdDirectRequest& request);
 

@@ -1289,44 +1289,56 @@ bool is_internal_link_type(std::int32_t type_id) {
     }
 }
 
+TdValue convert_message_send_succeeded(const td_api::updateMessageSendSucceeded& update,
+                                       std::uint64_t client_generation) {
+    std::optional<TdWriteMessage> message;
+    if (update.message_ != nullptr) {
+        message = convert_write_message_details(*update.message_);
+    }
+    return TdValue::from(TdUpdateMessageSendSucceeded{.client_generation = client_generation,
+                                                      .old_message_id = update.old_message_id_,
+                                                      .message = std::move(message)});
+}
+
+TdValue convert_message_send_failed(const td_api::updateMessageSendFailed& update,
+                                    std::uint64_t client_generation) {
+    std::optional<TdWriteMessage> message;
+    std::optional<TdError> error;
+    if (update.message_ != nullptr) {
+        message = convert_write_message_details(*update.message_);
+    }
+    if (update.error_ != nullptr) {
+        error = TdError{.code = update.error_->code_, .message = update.error_->message_};
+    }
+    return TdValue::from(TdUpdateMessageSendFailed{.client_generation = client_generation,
+                                                   .old_message_id = update.old_message_id_,
+                                                   .message = std::move(message),
+                                                   .error = std::move(error)});
+}
+
+TdValue convert_delete_messages_update(td_api::updateDeleteMessages& update,
+                                       std::uint64_t client_generation) {
+    return TdValue::from(TdUpdateDeleteMessages{.client_generation = client_generation,
+                                                .chat_id = update.chat_id_,
+                                                .message_ids = std::move(update.message_ids_),
+                                                .is_permanent = update.is_permanent_,
+                                                .from_cache = update.from_cache_});
+}
+
 TdValue convert_response(NativeObjectPtr object, std::uint64_t client_generation = 0) {
     if (object == nullptr) {
         return {};
     }
     switch (object->get_id()) {
-    case td_api::updateMessageSendSucceeded::ID: {
-        const auto& update = static_cast<const td_api::updateMessageSendSucceeded&>(*object);
-        std::optional<TdWriteMessage> message;
-        if (update.message_ != nullptr) {
-            message = convert_write_message_details(*update.message_);
-        }
-        return TdValue::from(TdUpdateMessageSendSucceeded{.client_generation = client_generation,
-                                                          .old_message_id = update.old_message_id_,
-                                                          .message = std::move(message)});
-    }
-    case td_api::updateMessageSendFailed::ID: {
-        const auto& update = static_cast<const td_api::updateMessageSendFailed&>(*object);
-        std::optional<TdWriteMessage> message;
-        std::optional<TdError> error;
-        if (update.message_ != nullptr) {
-            message = convert_write_message_details(*update.message_);
-        }
-        if (update.error_ != nullptr) {
-            error = TdError{.code = update.error_->code_, .message = update.error_->message_};
-        }
-        return TdValue::from(TdUpdateMessageSendFailed{.client_generation = client_generation,
-                                                       .old_message_id = update.old_message_id_,
-                                                       .message = std::move(message),
-                                                       .error = std::move(error)});
-    }
-    case td_api::updateDeleteMessages::ID: {
-        auto& update = static_cast<td_api::updateDeleteMessages&>(*object);
-        return TdValue::from(TdUpdateDeleteMessages{.client_generation = client_generation,
-                                                    .chat_id = update.chat_id_,
-                                                    .message_ids = std::move(update.message_ids_),
-                                                    .is_permanent = update.is_permanent_,
-                                                    .from_cache = update.from_cache_});
-    }
+    case td_api::updateMessageSendSucceeded::ID:
+        return convert_message_send_succeeded(
+            static_cast<const td_api::updateMessageSendSucceeded&>(*object), client_generation);
+    case td_api::updateMessageSendFailed::ID:
+        return convert_message_send_failed(
+            static_cast<const td_api::updateMessageSendFailed&>(*object), client_generation);
+    case td_api::updateDeleteMessages::ID:
+        return convert_delete_messages_update(static_cast<td_api::updateDeleteMessages&>(*object),
+                                              client_generation);
     case td_api::ok::ID:
         return TdValue::from(TdOk{});
     case td_api::error::ID: {
