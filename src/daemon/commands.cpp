@@ -11,6 +11,7 @@
 #include "daemon/request_session.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
+#include "daemon/write_commands.hpp"
 
 #include <array>
 #include <cstdint>
@@ -51,15 +52,15 @@ bool uses_account_removal_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
-           command == "fetch" || command == "daemon status" || command == "daemon stop" ||
-           command == "daemon restart";
+           command == "fetch" || command == "send" || command == "msg delete" ||
+           command == "daemon status" || command == "daemon stop" || command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
-           command == "fetch";
+           command == "fetch" || command == "send" || command == "msg delete";
 }
 
 void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& context) {
@@ -80,7 +81,11 @@ void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& co
                     if (command == "logout" && session.request().context.dry_run) {
                         continue;
                     }
-                    if (context.logout != nullptr && !context.logout->preflight(session)) {
+                    const bool persistence_free_m3 = session.request().context.dry_run &&
+                                                     (command == "send" || command == "msg delete");
+                    if (context.logout != nullptr &&
+                        !(persistence_free_m3 ? context.logout->preflight_read_only(session)
+                                              : context.logout->preflight(session))) {
                         return false;
                     }
                 }
@@ -131,6 +136,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.resolver != nullptr) {
         register_resolve_command(dispatcher, *context.resolver);
+    }
+    if (context.writes != nullptr) {
+        register_write_commands(dispatcher, *context.writes);
     }
     configure_request_preflight(dispatcher, context);
     dispatcher.register_command(

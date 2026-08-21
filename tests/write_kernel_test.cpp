@@ -784,8 +784,20 @@ TEST_CASE("write kernel expiry equality and post-intent cancellation preserve or
         };
         auto request = archive_request("00000000000000000000000000000033", 1'700'000'000);
         request.cancelled = [&] { return cancelled.load(); };
-        CHECK(kernel.run(request, hooks).status == daemon::WriteKernelStatus::Completed);
-        CHECK(dispatches == 1);
+        const auto result = kernel.run(request, hooks);
+        CHECK(result.status == daemon::WriteKernelStatus::Rejected);
+        CHECK_FALSE(result.terminal);
+        CHECK(dispatches == 0);
+
+        auto guard = tree.foundation()->acquire_epoch();
+        const auto audit = tree.foundation()->audit().inspect(guard);
+        CHECK(audit.status == daemon::AccountAuditInspectionStatus::Open);
+        REQUIRE(audit.oldest_open);
+        CHECK(audit.oldest_open->dispatch_started);
+        const auto store = tree.foundation()->store().inspect(guard);
+        REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+        REQUIRE(store.snapshot.entries.size() == 1);
+        CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
     }
 
     SECTION("deadline after intent") {

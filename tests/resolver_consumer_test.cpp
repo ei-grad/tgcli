@@ -95,9 +95,9 @@ tgcli::core::TdUserSummary user() {
             .is_premium = false};
 }
 
-tgcli::core::TdChat chat() {
+tgcli::core::TdChat chat(std::string title = "Project") {
     return {.id = -1001,
-            .title = "Project",
+            .title = std::move(title),
             .kind = tgcli::core::TdChatKind::BasicGroup,
             .related_id = 0,
             .tdlib_type_id = 1,
@@ -116,34 +116,42 @@ tgcli::core::TdChat chat() {
 
 TEST_CASE("ResolverConsumer returns title-like write targets as non-retargeting ambiguity",
           "[resolver][consumer][m3-foundation][fake-boundary]") {
-    ConsumerFixture fixture;
-    const auto sent_before = fixture.sent_count();
-    const auto outcome = fixture.consumer().resolve_exact_chat("Project Team");
-    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(outcome));
-    const auto& error = std::get<tgcli::daemon::ResolverError>(outcome);
-    const auto* ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&error);
-    REQUIRE(ambiguous != nullptr);
-    CHECK(ambiguous->selector == "Project Team");
-    CHECK(ambiguous->scope == tgcli::daemon::ResolverScope::ActiveDialogs);
-    CHECK(ambiguous->candidates.empty());
-    CHECK_FALSE(ambiguous->truncated);
-    CHECK(ambiguous->argument == "chat");
-    CHECK(fixture.sent_count() == sent_before);
+    for (const auto* argument : {"chat", "from", "to"}) {
+        ConsumerFixture fixture;
+        auto bound = std::async(std::launch::async, [&] {
+            return fixture.consumer().bind_principal(tgcli::proto::M3Operation::Send);
+        });
+        fixture.respond(tgcli::core::TdFunctionKind::GetMe, user());
+        REQUIRE(std::holds_alternative<tgcli::daemon::ResolverPrincipal>(bound.get()));
 
-    const auto from_outcome = fixture.consumer().resolve_exact_chat("Project Team", "from");
-    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(from_outcome));
-    const auto& from_error = std::get<tgcli::daemon::ResolverError>(from_outcome);
-    const auto* from_ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&from_error);
-    REQUIRE(from_ambiguous != nullptr);
-    CHECK(from_ambiguous->argument == "from");
+        auto pending = std::async(std::launch::async, [&] {
+            return fixture.consumer().resolve_exact_chat("Project Team", argument);
+        });
+        fixture.respond(tgcli::core::TdFunctionKind::GetChats,
+                        tgcli::core::TdChats{.chat_ids = {-1001}});
+        fixture.respond(tgcli::core::TdFunctionKind::LoadChats,
+                        tgcli::core::TdError{404, "Not Found"});
+        fixture.respond(tgcli::core::TdFunctionKind::GetChats,
+                        tgcli::core::TdChats{.chat_ids = {}});
+        fixture.respond(tgcli::core::TdFunctionKind::LoadChats,
+                        tgcli::core::TdError{404, "Not Found"});
+        fixture.respond(tgcli::core::TdFunctionKind::GetChat, chat("Project Team"));
 
-    const auto to_outcome = fixture.consumer().resolve_exact_chat("Project Team", "to");
-    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(to_outcome));
-    const auto& to_error = std::get<tgcli::daemon::ResolverError>(to_outcome);
-    const auto* to_ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&to_error);
-    REQUIRE(to_ambiguous != nullptr);
-    CHECK(to_ambiguous->argument == "to");
-    CHECK(fixture.sent_count() == sent_before);
+        const auto outcome = pending.get();
+        REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(outcome));
+        const auto& error = std::get<tgcli::daemon::ResolverError>(outcome);
+        const auto* ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&error);
+        REQUIRE(ambiguous != nullptr);
+        CHECK(ambiguous->selector == "Project Team");
+        CHECK(ambiguous->scope == tgcli::daemon::ResolverScope::ActiveDialogs);
+        REQUIRE(ambiguous->candidates.size() == 1);
+        CHECK(ambiguous->candidates.front().id == -1001);
+        CHECK(ambiguous->candidates.front().is_bot == false);
+        CHECK(ambiguous->candidates.front().usernames.empty());
+        CHECK_FALSE(ambiguous->truncated);
+        CHECK(ambiguous->argument == argument);
+        CHECK(fixture.terminals() == 0);
+    }
 }
 
 TEST_CASE("ResolverConsumer returns immutable context without emitting a terminal",

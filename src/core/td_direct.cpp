@@ -14,7 +14,7 @@ namespace {
 bool valid_message_ids(const std::vector<std::int64_t>& values, std::size_t maximum,
                        bool strictly_increasing) {
     if (values.empty() || values.size() > maximum ||
-        !std::ranges::all_of(values, valid_td_message_id)) {
+        !std::ranges::all_of(values, valid_td_nonzero_int53)) {
         return false;
     }
     return !strictly_increasing ||
@@ -138,7 +138,7 @@ bool valid_td_formatted_text_facts(const TdFormattedText& formatted) noexcept {
 }
 
 bool valid_td_message_locator(std::int64_t chat_id, std::int64_t message_id) noexcept {
-    return valid_td_chat_id(chat_id) && valid_td_message_id(message_id);
+    return valid_td_chat_id(chat_id) && valid_td_nonzero_int53(message_id);
 }
 
 bool valid_td_direct_request(const TdEditMessageTextRequest& request) noexcept {
@@ -202,7 +202,7 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
     const auto& formatted = request.content.formatted_text;
     if (!valid_td_chat_id(request.chat_id) || !valid_send_topic(request.topic) ||
         (request.reply_to_message_id &&
-         !valid_td_message_id(request.reply_to_message_id.value_or(0))) ||
+         !valid_td_nonzero_int53(request.reply_to_message_id.value_or(0))) ||
         request.options.sending_id == 0 || !valid_send_text(formatted.text)) {
         return false;
     }

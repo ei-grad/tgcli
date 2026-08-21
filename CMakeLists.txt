@@ -258,6 +258,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/request_fingerprint.cpp
     src/daemon/resolver.cpp
     src/daemon/write_contract.cpp
+    src/daemon/write_domain.cpp
+    src/daemon/write_commands.cpp
     src/daemon/write_kernel.cpp
     src/daemon/saved_commands.cpp
     src/daemon/single_send.cpp

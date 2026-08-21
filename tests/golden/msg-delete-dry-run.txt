@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"effective_for_all":true,"message_ids":[-5,7],"operation":"msg_delete","requested_for_all":true,"tdlib_request":"deleteMessages"}

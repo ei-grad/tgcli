@@ -619,6 +619,8 @@ struct TdError {
     bool operator==(const TdError&) const = default;
 };
 
+enum class TdUserPresence { Online, Offline, Hidden };
+
 struct TdUserSummary {
     std::int64_t id = 0;
     std::string first_name;
@@ -627,6 +629,7 @@ struct TdUserSummary {
     std::string phone_number;
     bool is_bot = false;
     bool is_premium = false;
+    TdUserPresence presence = TdUserPresence::Hidden;
 };
 
 enum class TdReactionKind { Emoji, CustomEmoji, Paid, Unknown };
@@ -869,6 +872,10 @@ inline constexpr std::int64_t kTdInt53Max = 9'007'199'254'740'991LL;
 
 constexpr bool valid_td_chat_id(std::int64_t value) noexcept {
     return value != 0 && value >= -kTdInt53Max && value <= kTdInt53Max;
+}
+
+constexpr bool valid_td_nonzero_int53(std::int64_t value) noexcept {
+    return valid_td_chat_id(value);
 }
 
 constexpr bool valid_td_message_id(std::int64_t value) noexcept {

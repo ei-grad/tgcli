@@ -1473,6 +1473,14 @@ TdValue convert_response(NativeObjectPtr object, std::uint64_t client_generation
     }
     case td_api::user::ID: {
         auto& user = static_cast<td_api::user&>(*object);
+        TdUserPresence presence = TdUserPresence::Hidden;
+        if (user.status_ != nullptr) {
+            if (user.status_->get_id() == td_api::userStatusOnline::ID) {
+                presence = TdUserPresence::Online;
+            } else if (user.status_->get_id() == td_api::userStatusOffline::ID) {
+                presence = TdUserPresence::Offline;
+            }
+        }
         TdUserSummary summary{.id = user.id_,
                               .first_name = std::move(user.first_name_),
                               .last_name = std::move(user.last_name_),
@@ -1480,7 +1488,8 @@ TdValue convert_response(NativeObjectPtr object, std::uint64_t client_generation
                               .phone_number = std::move(user.phone_number_),
                               .is_bot = user.type_ != nullptr &&
                                         user.type_->get_id() == td_api::userTypeBot::ID,
-                              .is_premium = user.is_premium_};
+                              .is_premium = user.is_premium_,
+                              .presence = presence};
         if (user.usernames_ != nullptr) {
             summary.usernames = std::move(user.usernames_->active_usernames_);
         }

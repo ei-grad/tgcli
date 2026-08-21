@@ -82,12 +82,9 @@ bool valid_message_text(std::string_view text) {
 }
 
 bool valid_message_summary(const core::TdMessageSummary& message, std::int64_t chat_id,
-                           bool stable) {
-    const bool valid_id = stable ? core::valid_td_message_id(message.id)
-                                 : message.id != 0 && message.id >= -core::kTdInt53Max &&
-                                       message.id <= core::kTdInt53Max;
-    return valid_id && message.chat_id == chat_id && message.date >= 0 &&
-           valid_sender(message.sender) && valid_topic(message.topic) &&
+                           [[maybe_unused]] bool stable) {
+    return core::valid_td_nonzero_int53(message.id) && message.chat_id == chat_id &&
+           message.date >= 0 && valid_sender(message.sender) && valid_topic(message.topic) &&
            valid_message_text(message.text);
 }
 

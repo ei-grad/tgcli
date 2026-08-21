@@ -62,7 +62,7 @@ bool valid_write_message(const core::TdMessageWriteResult& message) {
         }
         return true;
     };
-    return core::valid_td_message_id(message.id) && core::valid_td_chat_id(message.chat_id) &&
+    return core::valid_td_nonzero_int53(message.id) && core::valid_td_chat_id(message.chat_id) &&
            message.scheduled == !message.date.has_value() &&
            (!message.date || *message.date >= 0) && valid_sender(message.sender) &&
            valid_topic(message.topic) && valid_text();

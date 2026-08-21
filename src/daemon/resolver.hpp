@@ -117,6 +117,8 @@ struct ResolvedChatTarget {
     std::optional<TopicRef> contextual_topic;
     std::optional<ResolvedLinkType> link_type;
     std::optional<bool> is_public;
+    std::optional<std::int64_t> private_user_id;
+    std::optional<core::TdUserPresence> private_user_presence;
 };
 
 using ResolverPrincipalOutcome = std::variant<ResolverPrincipal, ResolverError, ResolverStop>;
@@ -148,6 +150,9 @@ class ResolverConsumer {
 
 void emit_resolver_error(const ResolverError& error, RequestSession& session,
                          M2Operation owning_operation = M2Operation::Resolve);
+[[nodiscard]] nlohmann::json
+resolver_error_terminal(const ResolverError& error,
+                        M2Operation owning_operation = M2Operation::Resolve);
 
 bool valid_resolve_selector(std::string_view selector);
 

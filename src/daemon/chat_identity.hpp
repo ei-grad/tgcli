@@ -28,6 +28,8 @@ struct ChatIdentityResult {
     ChatIdentityStatus status = ChatIdentityStatus::Invalid;
     std::optional<ChatIdentity> identity;
     std::optional<core::TdError> error;
+    std::optional<std::int64_t> private_user_id;
+    std::optional<core::TdUserPresence> private_user_presence;
 };
 
 using ChatIdentityRead = std::function<std::optional<ReadyReadResult>(const ReadyReadStart& start)>;

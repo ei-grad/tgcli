@@ -43,6 +43,9 @@
     "me": {
       "result": "me.result.schema.json"
     },
+    "msg delete": {
+      "result": "msg-delete.result.schema.json"
+    },
     "msg get": {
       "result": "msg-get.result.schema.json"
     },
@@ -60,6 +63,9 @@
     },
     "saved tags": {
       "result": "saved-tags.result.schema.json"
+    },
+    "send": {
+      "result": "send.result.schema.json"
     },
     "session list": {
       "result": "session-list.result.schema.json"

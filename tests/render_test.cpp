@@ -311,6 +311,57 @@ TEST_CASE("message read human renderers match their reviewed exact TSV goldens",
                                                 {"is_public", true}}) == golden("msg-link.txt"));
 }
 
+TEST_CASE("public M3 write renderers preserve complete results and plans", "[m3][render][golden]") {
+    const json chat{{"id", -1001},
+                    {"title", "Project"},
+                    {"type", "supergroup"},
+                    {"is_bot", false},
+                    {"usernames", json::array({"project"})}};
+    const json send_result{{"id", 321},
+                           {"chat_id", -1001},
+                           {"date", "2026-08-05T10:00:00Z"},
+                           {"sender", {{"type", "user"}, {"id", 42}}},
+                           {"is_outgoing", true},
+                           {"topic", {{"kind", "forum"}, {"id", 7}}},
+                           {"type", "text"},
+                           {"text", "hello"},
+                           {"scheduled", false}};
+    CHECK_THAT(send_result, tgcli::test::matches_json_schema("send.result.schema.json"));
+    CHECK(tgcli::cli::render_human("send", send_result) == golden("send.txt"));
+    const json send_plan{{"operation", "send"},
+                         {"account", "main"},
+                         {"tdlib_request", "sendMessage"},
+                         {"chat", chat},
+                         {"text", "hello"},
+                         {"parse_mode", "markdown_v2"},
+                         {"reply_to", 123},
+                         {"requested_topic", {{"kind", "forum"}, {"id", 7}}},
+                         {"effective_topic", {{"kind", "forum"}, {"id", 7}}},
+                         {"silent", true},
+                         {"schedule", {{"kind", "at"}, {"send_date", 1785924000}}},
+                         {"observed_server_unix_time", 1785923900}};
+    const json send_dry{{"dry_run", true}, {"plan", send_plan}};
+    CHECK_THAT(send_dry, tgcli::test::matches_json_schema("send.result.schema.json"));
+    CHECK(tgcli::cli::render_human("send", send_dry) == golden("send-dry-run.txt"));
+
+    const json delete_result{{"chat_id", -1001},
+                             {"message_ids", json::array({-5, 7})},
+                             {"for_all", true},
+                             {"deleted", true}};
+    CHECK_THAT(delete_result, tgcli::test::matches_json_schema("msg-delete.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg delete", delete_result) == golden("msg-delete.txt"));
+    const json delete_plan{{"operation", "msg_delete"},
+                           {"account", "main"},
+                           {"tdlib_request", "deleteMessages"},
+                           {"chat", chat},
+                           {"message_ids", json::array({-5, 7})},
+                           {"requested_for_all", true},
+                           {"effective_for_all", true}};
+    const json delete_dry{{"dry_run", true}, {"plan", delete_plan}};
+    CHECK_THAT(delete_dry, tgcli::test::matches_json_schema("msg-delete.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg delete", delete_dry) == golden("msg-delete-dry-run.txt"));
+}
+
 TEST_CASE("read human renderer matches its reviewed exact TSV golden", "[read][render][golden]") {
     const json message{{"id", 123},
                        {"chat_id", -1001},

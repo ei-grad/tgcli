@@ -53,6 +53,36 @@ struct ResolveResult {
     std::optional<bool> is_public;
 };
 
+std::optional<ChatIdentity> shallow_candidate_identity(const core::TdChat& chat) {
+    std::string type;
+    switch (chat.kind) {
+    case core::TdChatKind::Private:
+        type = "private";
+        break;
+    case core::TdChatKind::BasicGroup:
+        type = "basic_group";
+        break;
+    case core::TdChatKind::Supergroup:
+        type = "supergroup";
+        break;
+    case core::TdChatKind::Channel:
+        type = "channel";
+        break;
+    case core::TdChatKind::Secret:
+    case core::TdChatKind::Unknown:
+        return std::nullopt;
+    }
+    if (chat.id == 0 || chat.id < -kMaximumInt53 || chat.id > kMaximumInt53 ||
+        !common::valid_utf8(chat.title)) {
+        return std::nullopt;
+    }
+    return ChatIdentity{.id = chat.id,
+                        .title = chat.title,
+                        .type = std::move(type),
+                        .is_bot = false,
+                        .usernames = {}};
+}
+
 bool exact_fields(const json& value, const std::set<std::string>& expected) {
     if (!value.is_object() || value.size() != expected.size()) {
         return false;
@@ -247,7 +277,9 @@ class ResolverRun {
                                   .contextual_message_id = result.message_id,
                                   .contextual_topic = topic,
                                   .link_type = result.link_type,
-                                  .is_public = result.is_public};
+                                  .is_public = result.is_public,
+                                  .private_user_id = last_private_user_id_,
+                                  .private_user_presence = last_private_user_presence_};
     }
 
     ReadyReadResult read_target(const ReadyReadStart& start) {
@@ -426,10 +458,14 @@ class ResolverRun {
     }
 
     std::optional<ChatIdentity> identity(const core::TdChat& chat, bool reject_secret = true) {
+        last_private_user_id_.reset();
+        last_private_user_presence_.reset();
         const auto materialized = materialize_chat_identity(
             client_, chat, [&](const auto& start) { return read(start); });
         switch (materialized.status) {
         case ChatIdentityStatus::Success:
+            last_private_user_id_ = materialized.private_user_id;
+            last_private_user_presence_ = materialized.private_user_presence;
             return materialized.identity;
         case ChatIdentityStatus::Secret:
             if (reject_secret) {
@@ -621,6 +657,49 @@ class ResolverRun {
             scope);
     }
 
+  public:
+    ResolverOutcome reject_write_title(std::string selector, std::string argument) {
+        caller_ = M2Operation::Resolve;
+        error_.reset();
+        selector_ = std::move(selector);
+        if (!principal_) {
+            internal_error();
+            return take_resolve_error_or_stop();
+        }
+        const auto ids = active_dialog_ids(ResolverScope::ActiveDialogs);
+        if (!ids) {
+            return take_resolve_error_or_stop();
+        }
+        std::vector<ChatIdentity> candidates;
+        std::size_t matches = 0;
+        for (const auto id : *ids) {
+            const auto chat = get_chat(id, true);
+            if (!chat) {
+                return take_resolve_error_or_stop();
+            }
+            if (chat->kind == core::TdChatKind::Secret ||
+                chat->title.find(selector_) == std::string::npos) {
+                continue;
+            }
+            ++matches;
+            if (candidates.size() < kMaximumAmbiguousCandidates) {
+                auto candidate = shallow_candidate_identity(*chat);
+                if (!candidate) {
+                    internal_error();
+                    return take_resolve_error_or_stop();
+                }
+                candidates.push_back(std::move(*candidate));
+            }
+        }
+        return ResolverError{
+            ResolverAmbiguousError{.selector = std::move(selector_),
+                                   .scope = ResolverScope::ActiveDialogs,
+                                   .candidates = std::move(candidates),
+                                   .truncated = matches > kMaximumAmbiguousCandidates,
+                                   .argument = std::move(argument)}};
+    }
+
+  private:
     std::optional<ResolveResult>
     resolve_local_username(const std::string& username,
                            std::optional<ResolvedLinkType> link_type = std::nullopt,
@@ -871,6 +950,8 @@ class ResolverRun {
     std::optional<ResolverPrincipal> principal_;
     std::optional<core::TdChat> saved_messages_chat_;
     std::optional<ResolverError> error_;
+    std::optional<std::int64_t> last_private_user_id_;
+    std::optional<core::TdUserPresence> last_private_user_presence_;
     bool bound_ = false;
 };
 
@@ -896,11 +977,7 @@ class ResolverConsumer::Impl {
                 .argument = std::move(argument), .reason = ResolverUsageReason::InvalidArgument}};
         }
         if (classification == ExactWriteSelectorStatus::Title) {
-            return ResolverError{ResolverAmbiguousError{.selector = std::move(selector),
-                                                        .scope = ResolverScope::ActiveDialogs,
-                                                        .candidates = {},
-                                                        .truncated = false,
-                                                        .argument = std::move(argument)}};
+            return run_.reject_write_title(std::move(selector), std::move(argument));
         }
         if (classification != ExactWriteSelectorStatus::Exact) {
             const auto reason = classification == ExactWriteSelectorStatus::UnsupportedLink
@@ -996,8 +1073,16 @@ std::string_view resolver_error_subject(const ResolverCaller& caller) {
     return name == "resolve" ? std::string_view("resolver") : name;
 }
 
-struct ResolverErrorEmitter {
-    void operator()(const ResolverUsageError& error) const {
+json terminal(std::string code, std::string message, json details, int exit_code) {
+    return {{"kind", "error"},
+            {"code", std::move(code)},
+            {"message", std::move(message)},
+            {"details", std::move(details)},
+            {"exit_code", exit_code}};
+}
+
+struct ResolverErrorMapper {
+    json operator()(const ResolverUsageError& error) const {
         std::string_view reason = "invalid_argument";
         std::string_view message = "resolve selector must be non-empty valid UTF-8";
         if (error.reason == ResolverUsageReason::UnsupportedChatType) {
@@ -1007,43 +1092,43 @@ struct ResolverErrorEmitter {
             reason = "unsupported_link_type";
             message = "unsupported t.me link type";
         }
-        session->error("USAGE", std::string(message),
-                       {{"argument", error.argument}, {"reason", reason}}, kUsage);
+        return terminal("USAGE", std::string(message),
+                        {{"argument", error.argument}, {"reason", reason}}, kUsage);
     }
 
-    void operator()(const ResolverNotAuthenticatedError& error) const {
+    json operator()(const ResolverNotAuthenticatedError& error) const {
         const std::string_view reason = error.reason == ResolverNotAuthedReason::AuthorizationLost
                                             ? "authorization_lost"
                                             : "not_ready";
-        session->error("NOT_AUTHED",
-                       std::string(m2_operation_name(owning_operation)) +
-                           " requires an authenticated account",
-                       {{"account", error.account},
-                        {"state", core::auth_state_name(error.state)},
-                        {"reason", reason}},
-                       kNotAuthed);
+        return terminal("NOT_AUTHED",
+                        std::string(m2_operation_name(owning_operation)) +
+                            " requires an authenticated account",
+                        {{"account", error.account},
+                         {"state", core::auth_state_name(error.state)},
+                         {"reason", reason}},
+                        kNotAuthed);
     }
 
-    void operator()(const ResolverBotUnsupportedError& error) const {
-        session->error("BOT_UNSUPPORTED", "this resolver branch requires a user account",
-                       {{"operation", resolver_caller_name(error.operation)}}, kUsage);
+    json operator()(const ResolverBotUnsupportedError& error) const {
+        return terminal("BOT_UNSUPPORTED", "this resolver branch requires a user account",
+                        {{"operation", resolver_caller_name(error.operation)}}, kUsage);
     }
 
-    void operator()(const ResolverNotFoundError& error) const {
+    json operator()(const ResolverNotFoundError& error) const {
         json details{{"selector", error.selector}};
         if (error.scope == ResolverScope::LocalMaterialized) {
             details["scope"] = "local_materialized";
         }
-        session->error("NOT_FOUND", "no chat or link target matches the selector",
-                       std::move(details), kNotFound);
+        return terminal("NOT_FOUND", "no chat or link target matches the selector",
+                        std::move(details), kNotFound);
     }
 
-    void operator()(const ResolverAmbiguousError& error) const {
+    json operator()(const ResolverAmbiguousError& error) const {
         json candidates = json::array();
         for (const auto& candidate : error.candidates) {
             candidates.push_back(chat_identity_json(candidate));
         }
-        session->error(
+        return terminal(
             "AMBIGUOUS", "multiple chats match the selector",
             {{"selector", error.selector},
              {"scope", error.scope == ResolverScope::ActiveDialogs ? "active_dialogs"
@@ -1053,40 +1138,39 @@ struct ResolverErrorEmitter {
             kUsage);
     }
 
-    void operator()(const ResolverRateLimitedError& error) const {
-        session->error("RATE_LIMITED", "Telegram rate limit",
-                       {{"operation", resolver_caller_name(error.operation)},
-                        {"tdlib_code", 429},
-                        {"retry_after", error.retry_after}},
-                       kRateLimited);
+    json operator()(const ResolverRateLimitedError& error) const {
+        return terminal("RATE_LIMITED", "Telegram rate limit",
+                        {{"operation", resolver_caller_name(error.operation)},
+                         {"tdlib_code", 429},
+                         {"retry_after", error.retry_after}},
+                        kRateLimited);
     }
 
-    void operator()(const ResolverTdlibError& error) const {
-        session->error("TDLIB_ERROR",
-                       std::string(resolver_error_subject(error.operation)) +
-                           " TDLib request failed",
-                       {{"operation", resolver_caller_name(error.operation)},
-                        {"tdlib_code", error.tdlib_code}},
-                       kGeneric);
+    json operator()(const ResolverTdlibError& error) const {
+        return terminal("TDLIB_ERROR",
+                        std::string(resolver_error_subject(error.operation)) +
+                            " TDLib request failed",
+                        {{"operation", resolver_caller_name(error.operation)},
+                         {"tdlib_code", error.tdlib_code}},
+                        kGeneric);
     }
 
-    void operator()(const ResolverTimeoutError& error) const {
-        session->error(
+    json operator()(const ResolverTimeoutError& error) const {
+        return terminal(
             "TIMEOUT", std::string(resolver_error_subject(error.operation)) + " request timed out",
             {{"operation", resolver_caller_name(error.operation)},
              {"state", error.state ? json(core::auth_state_name(*error.state)) : json(nullptr)}},
             kTimeout);
     }
 
-    void operator()(const ResolverInternalError& error) const {
-        session->error(
+    json operator()(const ResolverInternalError& error) const {
+        return terminal(
             "INTERNAL",
             std::string(resolver_error_subject(error.operation)) + " returned an unexpected object",
             {{"operation", resolver_caller_name(error.operation)}, {"reason", "internal_error"}},
             kGeneric);
     }
 
-    RequestSession* session;
     M2Operation owning_operation;
 };
 
@@ -1094,7 +1178,13 @@ struct ResolverErrorEmitter {
 
 void emit_resolver_error(const ResolverError& error, RequestSession& session,
                          M2Operation owning_operation) {
-    std::visit(ResolverErrorEmitter{&session, owning_operation}, error);
+    auto mapped = resolver_error_terminal(error, owning_operation);
+    session.error(mapped["code"].get<std::string>(), mapped["message"].get<std::string>(),
+                  std::move(mapped["details"]), mapped["exit_code"].get<int>());
+}
+
+json resolver_error_terminal(const ResolverError& error, M2Operation owning_operation) {
+    return std::visit(ResolverErrorMapper{owning_operation}, error);
 }
 
 bool valid_resolve_selector(std::string_view selector) {

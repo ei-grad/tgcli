@@ -1,0 +1,4 @@
+chat_id	-1001
+message_ids	[-5,7]
+for_all	true
+deleted	true

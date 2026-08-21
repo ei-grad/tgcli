@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"effective_topic":{"id":7,"kind":"forum"},"observed_server_unix_time":1785923900,"operation":"send","parse_mode":"markdown_v2","reply_to":123,"requested_topic":{"id":7,"kind":"forum"},"schedule":{"kind":"at","send_date":1785924000},"silent":true,"tdlib_request":"sendMessage","text":"hello"}

@@ -419,6 +419,27 @@ std::string render_msg_get(const nlohmann::json& data) {
     return out;
 }
 
+std::string render_message_write(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("id\t{}\nchat_id\t{}\ndate\t{}\nsender\t{}\nis_outgoing\t{}\ntopic\t{}\n"
+                       "type\t{}\ntext\t{}\nscheduled\t{}\n",
+                       data.at("id").get<std::int64_t>(), data.at("chat_id").get<std::int64_t>(),
+                       data.at("date").dump(), data.at("sender").dump(),
+                       data.at("is_outgoing").dump(), data.at("topic").dump(),
+                       data.at("type").dump(), data.at("text").dump(), data.at("scheduled").dump());
+}
+
+std::string render_message_delete(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\nmessage_ids\t{}\nfor_all\t{}\ndeleted\t{}\n",
+                       data.at("chat_id").get<std::int64_t>(), data.at("message_ids").dump(),
+                       data.at("for_all").dump(), data.at("deleted").dump());
+}
+
 std::string render_msg_link(const nlohmann::json& data) {
     return fmt::format("chat_id\t{}\nmessage_id\t{}\nlink\t{}\nis_public\t{}\n",
                        data.at("chat_id").get<std::int64_t>(),
@@ -532,6 +553,12 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "msg link") {
         return render_msg_link(data);
+    }
+    if (command_key == "send") {
+        return render_message_write(data);
+    }
+    if (command_key == "msg delete") {
+        return render_message_delete(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

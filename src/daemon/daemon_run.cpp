@@ -24,6 +24,7 @@
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "daemon/server.hpp"
+#include "daemon/write_commands.hpp"
 
 #include <array>
 #include <cerrno>
@@ -270,6 +271,8 @@ int run_daemon(const std::string& account) {
     ReadCoordinator read(td, account);
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
+    WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency,
+                            stop_server);
 
     DaemonContext context;
     context.account = account;
@@ -286,6 +289,7 @@ int run_daemon(const std::string& account) {
     context.read = &read;
     context.fetch = &fetch;
     context.resolver = &resolver;
+    context.writes = &writes;
     context.idempotency = idempotency;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
@@ -437,6 +441,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     ReadCoordinator read(td, account);
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
+    WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency);
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -452,6 +457,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.read = &read;
     context.fetch = &fetch;
     context.resolver = &resolver;
+    context.writes = &writes;
     context.idempotency = idempotency;
     context.auth_state = [&td] {
         const auto state = td.auth_state();

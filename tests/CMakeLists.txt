@@ -37,6 +37,7 @@ add_executable(tgcli_unit_tests
     hash_canonical_test.cpp
     idempotency_store_test.cpp
     write_kernel_test.cpp
+    write_commands_test.cpp
     paths_test.cpp
     query_registry_test.cpp
     update_bus_test.cpp

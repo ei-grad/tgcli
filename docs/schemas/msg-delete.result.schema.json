@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli msg delete result",
+  "$defs": {
+    "int53Nonzero": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    },
+    "ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/int53Nonzero" }
+    },
+    "chatIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "type", "is_bot", "usernames"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53Nonzero" },
+        "title": { "type": "string" },
+        "type": { "enum": ["private", "basic_group", "supergroup", "channel"] },
+        "is_bot": { "type": "boolean" },
+        "usernames": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$" }
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "account", "tdlib_request", "chat", "message_ids", "requested_for_all", "effective_for_all"],
+      "properties": {
+        "operation": { "const": "msg_delete" },
+        "account": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$" },
+        "tdlib_request": { "const": "deleteMessages" },
+        "chat": { "$ref": "#/$defs/chatIdentity" },
+        "message_ids": { "$ref": "#/$defs/ids" },
+        "requested_for_all": { "type": "boolean" },
+        "effective_for_all": { "type": "boolean" }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chat_id", "message_ids", "for_all", "deleted"],
+      "properties": {
+        "chat_id": { "$ref": "#/$defs/int53Nonzero" },
+        "message_ids": { "$ref": "#/$defs/ids" },
+        "for_all": { "type": "boolean" },
+        "deleted": { "const": true }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dry_run", "plan"],
+      "properties": {
+        "dry_run": { "const": true },
+        "plan": { "$ref": "#/$defs/plan" }
+      }
+    }
+  ]
+}

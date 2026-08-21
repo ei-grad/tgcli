@@ -10,11 +10,13 @@
 #include "daemon/read_domain.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
+#include "daemon/write_domain.hpp"
 #include "proto/frame.hpp"
 #include "proto/operation.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -478,6 +480,24 @@ struct MessageCliArguments {
     std::vector<std::int64_t> get_ids;
     std::string link_chat;
     std::int64_t link_id = 0;
+    std::string delete_chat;
+    std::vector<std::int64_t> delete_ids;
+    bool delete_for_all = false;
+    bool delete_has_duplicate = false;
+};
+
+struct SendCliArguments {
+    std::string chat;
+    std::string text;
+    std::int64_t reply_to = 0;
+    std::string topic;
+    std::string schedule;
+    bool markdown = false;
+    bool html = false;
+    bool silent = false;
+    CLI::Option* reply_option = nullptr;
+    CLI::Option* topic_option = nullptr;
+    CLI::Option* schedule_option = nullptr;
 };
 
 struct ReadCliArguments {
@@ -563,8 +583,8 @@ std::optional<int> validate_chats_arguments(const std::vector<std::string>& comm
 std::optional<int>
 validate_command_arguments(const std::vector<std::string>& command, const SavedCliArguments& saved,
                            const ChatsCliArguments& chats, const MessageCliArguments& messages,
-                           const ReadCliArguments& read, const FetchCliArguments& fetch,
-                           std::string_view resolve_selector) {
+                           const SendCliArguments& send, const ReadCliArguments& read,
+                           const FetchCliArguments& fetch, std::string_view resolve_selector) {
     if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
         return saved_exit;
     }
@@ -681,6 +701,42 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
             return report_usage("message id must be a nonzero int53 value", "id");
         }
     }
+    if (command == std::vector<std::string>{"send"}) {
+        if (tgcli::daemon::classify_exact_write_selector(send.chat) ==
+            tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+            return report_usage("send chat selector is invalid", "chat");
+        }
+        if (!tgcli::daemon::valid_send_text(send.text)) {
+            return report_usage("send text must contain between 1 and 4096 Unicode scalars",
+                                "TEXT");
+        }
+        if (send.reply_option->count() != 0 && !valid_message_id(send.reply_to)) {
+            return report_usage("--reply-to must be a nonzero int53 message id", "--reply-to");
+        }
+        if (send.topic_option->count() != 0 && !tgcli::daemon::parse_send_topic(send.topic)) {
+            const auto reason =
+                send.topic.find(':') != std::string::npos && !send.topic.starts_with("forum:")
+                    ? "unsupported_topic_kind"
+                    : "invalid_argument";
+            return report_usage("invalid send topic", "--topic", reason);
+        }
+        if (send.schedule_option->count() != 0 &&
+            !tgcli::daemon::parse_send_schedule(send.schedule)) {
+            return report_usage("invalid send schedule", "--schedule");
+        }
+    }
+    if (command == std::vector<std::string>{"msg", "delete"}) {
+        if (tgcli::daemon::classify_exact_write_selector(messages.delete_chat) ==
+            tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+            return report_usage("msg delete chat selector is invalid", "chat");
+        }
+        if (messages.delete_ids.empty() || messages.delete_ids.size() > 100 ||
+            messages.delete_has_duplicate ||
+            !std::ranges::all_of(messages.delete_ids, valid_message_id)) {
+            return report_usage("msg delete requires 1 to 100 unique nonzero int53 message ids",
+                                "id");
+        }
+    }
     return std::nullopt;
 }
 // NOLINTEND(readability-function-cognitive-complexity)
@@ -774,7 +830,8 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                                     bool login_bot, std::string_view resolve_selector,
                                     const ChatsCliArguments& chats, const SavedCliArguments& saved,
                                     const MessageCliArguments& messages,
-                                    const ReadCliArguments& read, const FetchCliArguments& fetch) {
+                                    const SendCliArguments& send, const ReadCliArguments& read,
+                                    const FetchCliArguments& fetch) {
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -804,7 +861,65 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     if (command == std::vector<std::string>{"msg", "link"}) {
         return {{"chat", messages.link_chat}, {"message_id", messages.link_id}};
     }
+    if (command == std::vector<std::string>{"send"}) {
+        const auto topic = send.topic_option->count() != 0
+                               ? tgcli::daemon::parse_send_topic(send.topic)
+                               : std::nullopt;
+        const auto schedule = send.schedule_option->count() != 0
+                                  ? tgcli::daemon::parse_send_schedule(send.schedule)
+                                  : std::nullopt;
+        nlohmann::json schedule_value = nullptr;
+        if (schedule) {
+            schedule_value =
+                schedule->kind == tgcli::daemon::SendScheduleKind::Online
+                    ? nlohmann::json{{"kind", "online"}}
+                    : nlohmann::json{{"kind", "at"}, {"send_date", schedule->send_date}};
+        }
+        return {{"chat", send.chat},
+                {"text", send.text},
+                {"parse_mode", send.markdown ? "markdown_v2"
+                               : send.html   ? "html"
+                                             : "plain"},
+                {"reply_to", send.reply_option->count() != 0 ? nlohmann::json(send.reply_to)
+                                                             : nlohmann::json(nullptr)},
+                {"topic", topic ? tgcli::daemon::topic_ref_json(*topic) : nlohmann::json(nullptr)},
+                {"silent", send.silent},
+                {"schedule", std::move(schedule_value)}};
+    }
+    if (command == std::vector<std::string>{"msg", "delete"}) {
+        return {{"chat", messages.delete_chat},
+                {"message_ids", messages.delete_ids},
+                {"for_all", messages.delete_for_all}};
+    }
     return nlohmann::json::object();
+}
+
+std::optional<int> read_send_stdin(SendCliArguments& send) {
+    if (send.text != "-") {
+        return std::nullopt;
+    }
+    constexpr std::size_t maximum = 1024 * 1024;
+    std::string value;
+    std::array<char, 65'536> buffer{};
+    for (;;) {
+        const auto count = ::read(STDIN_FILENO, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0) {
+            return report_usage("cannot read send text from stdin", "TEXT");
+        }
+        if (count == 0) {
+            break;
+        }
+        const auto added = static_cast<std::size_t>(count);
+        if (added > maximum - value.size()) {
+            return report_usage("send stdin exceeds 1 MiB", "TEXT");
+        }
+        value.append(buffer.data(), added);
+    }
+    send.text = std::move(value);
+    return std::nullopt;
 }
 
 int run(int argc, char** argv) {
@@ -836,6 +951,7 @@ int run(int argc, char** argv) {
     SavedCliArguments saved;
     ChatsCliArguments chats;
     MessageCliArguments messages;
+    SendCliArguments send;
     ReadCliArguments read;
     ReadCliArguments history;
     FetchCliArguments fetch;
@@ -916,6 +1032,18 @@ int run(int argc, char** argv) {
     CLI::App* history_cmd = app.add_subcommand("history", "alias for read");
     add_read_options(*history_cmd, history);
     app.add_subcommand("unread", "list chats with unread activity");
+    CLI::App* send_cmd = app.add_subcommand("send", "send a text message");
+    send_cmd->add_option("chat", send.chat, "exact chat selector")->required();
+    send_cmd->add_option("TEXT", send.text, "message text or - for stdin")->required();
+    auto* markdown_option = send_cmd->add_flag("--md", send.markdown, "parse as Markdown v2");
+    auto* html_option = send_cmd->add_flag("--html", send.html, "parse as HTML");
+    markdown_option->excludes(html_option);
+    html_option->excludes(markdown_option);
+    send.reply_option = send_cmd->add_option("--reply-to", send.reply_to, "message id to reply to");
+    send.topic_option = send_cmd->add_option("--topic", send.topic, "bare forum id or forum:<id>");
+    send_cmd->add_flag("--silent", send.silent, "disable recipient notification");
+    send.schedule_option =
+        send_cmd->add_option("--schedule", send.schedule, "RFC3339 instant or online");
     CLI::App* fetch_cmd = app.add_subcommand("fetch", "warm local history for one chat");
     fetch_cmd->add_option("chat", fetch.chat, "chat selector")->required();
     fetch.limit_option =
@@ -931,6 +1059,10 @@ int run(int argc, char** argv) {
     CLI::App* msg_link_cmd = msg_cmd->add_subcommand("link", "get a message link");
     msg_link_cmd->add_option("chat", messages.link_chat)->required();
     msg_link_cmd->add_option("id", messages.link_id)->required();
+    CLI::App* msg_delete_cmd = msg_cmd->add_subcommand("delete", "delete messages");
+    msg_delete_cmd->add_option("chat", messages.delete_chat)->required();
+    msg_delete_cmd->add_option("id", messages.delete_ids)->required()->expected(1, 100);
+    msg_delete_cmd->add_flag("--for-all", messages.delete_for_all, "delete for all participants");
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -988,6 +1120,17 @@ int run(int argc, char** argv) {
     }
 
     auto command = selected_command(app);
+    if (command == std::vector<std::string>{"send"}) {
+        if (const auto stdin_exit = read_send_stdin(send); stdin_exit) {
+            return *stdin_exit;
+        }
+    }
+    if (command == std::vector<std::string>{"msg", "delete"}) {
+        std::ranges::sort(messages.delete_ids);
+        messages.delete_has_duplicate =
+            std::adjacent_find(messages.delete_ids.begin(), messages.delete_ids.end()) !=
+            messages.delete_ids.end();
+    }
     const ReadCliArguments* selected_read = &read;
     if (command == std::vector<std::string>{"history"}) {
         command = {"read"};
@@ -1005,7 +1148,7 @@ int run(int argc, char** argv) {
         return report_missing_command();
     }
     if (const auto argument_exit = validate_command_arguments(
-            command, saved, chats, messages, *selected_read, fetch, resolve_selector);
+            command, saved, chats, messages, send, *selected_read, fetch, resolve_selector);
         argument_exit) {
         return *argument_exit;
     }
@@ -1052,7 +1195,7 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
-                             *selected_read, fetch);
+                             send, *selected_read, fetch);
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);

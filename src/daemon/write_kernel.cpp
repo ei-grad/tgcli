@@ -800,6 +800,9 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             return true;
         });
         const bool cancellation_preceded_dispatch = cancelled(request);
+        if (cancellation_preceded_dispatch) {
+            return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
+        }
         std::optional<WriteDispatchOutcome> dispatch;
         try {
             dispatch.emplace(hooks.dispatch(proposed_plan, dispatch_preparation, observations));
@@ -809,7 +812,7 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         if (!observations.durable()) {
             return audit_fatal();
         }
-        if (!cancellation_preceded_dispatch && cancelled(request)) {
+        if (cancelled(request)) {
             return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
         }
         if (dispatch->terminal.operation() != request.operation ||

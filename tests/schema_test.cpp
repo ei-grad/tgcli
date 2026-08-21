@@ -354,19 +354,21 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"login", {{"result", "login.result.schema.json"}}},
           {"logout", {{"result", "logout.result.schema.json"}}},
           {"me", {{"result", "me.result.schema.json"}}},
+          {"msg delete", {{"result", "msg-delete.result.schema.json"}}},
           {"msg get", {{"result", "msg-get.result.schema.json"}}},
           {"msg link", {{"result", "msg-link.result.schema.json"}}},
           {"read", {{"result", "read.result.schema.json"}}},
           {"resolve", {{"result", "resolve.result.schema.json"}}},
           {"saved search", {{"result", "saved-search.result.schema.json"}}},
           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
+          {"send", {{"result", "send.result.schema.json"}}},
           {"session list", {{"result", "session-list.result.schema.json"}}},
           {"session terminate", {{"result", "session-terminate.result.schema.json"}}},
           {"unread", {{"result", "unread.result.schema.json"}}},
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 25);
+    CHECK(manifest["commands"].size() == 27);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -419,6 +421,8 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
     check_schema_node(session_error);
     const auto resolve_error = tgcli::test::load_schema_document("resolve.error.schema.json");
     check_schema_node(resolve_error);
+    const auto m3_write_error = tgcli::test::load_schema_document("m3-write.error.schema.json");
+    check_schema_node(m3_write_error);
     for (const auto* filename : {"logout.error.schema.json", "account-remove.error.schema.json",
                                  "audit-intent.schema.json", "audit-checkpoint.schema.json",
                                  "audit-outcome.schema.json", "removal-tombstone.schema.json"}) {

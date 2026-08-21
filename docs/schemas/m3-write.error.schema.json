@@ -1,0 +1,488 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli public M3 write error",
+  "$defs": {
+    "account": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$" },
+    "int53": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": { "const": 0 }
+    },
+    "positiveInt53": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "hex32": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "operation": { "enum": ["send", "msg_delete", "resolve"] },
+    "state": {
+      "enum": ["unknown", "wait_tdlib_parameters", "wait_phone_number", "wait_premium_purchase", "wait_email_address", "wait_email_code", "wait_code", "wait_other_device_confirmation", "wait_registration", "wait_password", "ready", "logging_out", "closing", "closed"]
+    },
+    "durabilityReason": {
+      "enum": ["path_invalid", "wrong_owner", "wrong_type", "wrong_mode", "wrong_link_count", "too_large", "capacity_exhausted", "open_failed", "lock_failed", "read_failed", "write_failed", "sync_failed", "rename_failed", "directory_sync_failed", "parse_error", "schema_error", "contradiction"]
+    },
+    "chatIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "type", "is_bot", "usernames"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53" },
+        "title": { "type": "string" },
+        "type": { "enum": ["private", "basic_group", "supergroup", "channel"] },
+        "is_bot": { "type": "boolean" },
+        "usernames": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$" }
+        }
+      }
+    },
+    "forumTopic": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "const": "forum" },
+            "id": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+          }
+        }
+      ]
+    },
+    "schedule": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "online" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "send_date"],
+          "properties": {
+            "kind": { "const": "at" },
+            "send_date": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+          }
+        }
+      ]
+    },
+    "ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/int53" }
+    },
+    "sendPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "account", "tdlib_request", "chat", "text", "parse_mode", "reply_to", "requested_topic", "effective_topic", "silent", "schedule", "observed_server_unix_time"],
+      "properties": {
+        "operation": { "const": "send" },
+        "account": { "$ref": "#/$defs/account" },
+        "tdlib_request": { "const": "sendMessage" },
+        "chat": { "$ref": "#/$defs/chatIdentity" },
+        "text": { "type": "string", "minLength": 1 },
+        "parse_mode": { "enum": ["plain", "markdown_v2", "html"] },
+        "reply_to": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
+        "requested_topic": { "$ref": "#/$defs/forumTopic" },
+        "effective_topic": { "$ref": "#/$defs/forumTopic" },
+        "silent": { "type": "boolean" },
+        "schedule": { "$ref": "#/$defs/schedule" },
+        "observed_server_unix_time": { "type": ["integer", "null"] }
+      }
+    },
+    "deletePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "account", "tdlib_request", "chat", "message_ids", "requested_for_all", "effective_for_all"],
+      "properties": {
+        "operation": { "const": "msg_delete" },
+        "account": { "$ref": "#/$defs/account" },
+        "tdlib_request": { "const": "deleteMessages" },
+        "chat": { "$ref": "#/$defs/chatIdentity" },
+        "message_ids": { "$ref": "#/$defs/ids" },
+        "requested_for_all": { "type": "boolean" },
+        "effective_for_all": { "type": "boolean" }
+      }
+    },
+    "errorBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "details": {}
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "allOf": [
+        { "$ref": "#/$defs/errorBase" },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "USAGE" },
+                "details": {
+                  "oneOf": [
+                    { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["argument", "reason"],
+                      "properties": {
+                        "argument": { "type": ["string", "null"] },
+                        "reason": { "enum": ["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "invalid_environment", "unsupported_mode", "unsupported_topic_kind", "unsupported_link_type", "unsupported_chat_type"] }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "ACCOUNT_NOT_FOUND" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account"],
+                  "properties": { "account": { "$ref": "#/$defs/account" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "ACCOUNT_MISMATCH" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["requested_account", "daemon_account"],
+                  "properties": {
+                    "requested_account": { "$ref": "#/$defs/account" },
+                    "daemon_account": { "$ref": "#/$defs/account" }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "CONFIG_INVALID" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["path", "reason"],
+                  "properties": { "path": { "type": "string" }, "reason": { "type": "string" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "CONFIG_CONFLICT" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["path", "expected", "current"],
+                  "properties": { "path": { "type": "string" }, "expected": { "type": "string" }, "current": { "type": "string" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "WRITE_DENIED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account", "reason"],
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "reason": { "enum": ["explicit_deny", "no_grant", "invalid_config_grant"] } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "BOT_UNSUPPORTED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation"],
+                  "properties": { "operation": { "enum": ["send", "msg_delete"] } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "NOT_AUTHED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account", "state", "reason"],
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "state": { "$ref": "#/$defs/state" }, "reason": { "enum": ["not_ready", "authorization_lost", "login_required"] } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "NOT_FOUND" },
+                "details": {
+                  "oneOf": [
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["selector"],
+                      "properties": { "selector": { "type": "string" } }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["chat_id", "message_id"],
+                      "properties": { "chat_id": { "$ref": "#/$defs/int53" }, "message_id": { "$ref": "#/$defs/int53" } }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "AMBIGUOUS" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["selector", "scope", "candidates", "truncated"],
+                  "properties": {
+                    "selector": { "type": "string" },
+                    "scope": { "const": "active_dialogs" },
+                    "candidates": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/chatIdentity" } },
+                    "truncated": { "type": "boolean" }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "enum": ["RATE_LIMITED", "TDLIB_ERROR"] },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "tdlib_code"],
+                  "properties": {
+                    "operation": { "$ref": "#/$defs/operation" },
+                    "tdlib_code": { "type": "integer" },
+                    "retry_after": { "type": "integer", "minimum": 0 }
+                  },
+                  "dependentRequired": { "retry_after": ["tdlib_code"] }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "INTERNAL" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "reason"],
+                  "properties": { "operation": { "$ref": "#/$defs/operation" }, "reason": { "const": "internal_error" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "PRECONDITION_FAILED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "chat_id", "message_id", "reason"],
+                  "properties": {
+                    "operation": { "enum": ["send", "msg_delete"] },
+                    "chat_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
+                    "message_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
+                    "reason": { "enum": ["not_replyable", "wrong_topic", "online_schedule_unsupported", "schedule_window_elapsed", "schedule_too_far", "not_deletable_for_self", "not_deletable_for_all"] }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "IDEMPOTENCY_CONFLICT" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "key_hash", "expected_fingerprint", "actual_fingerprint"],
+                  "properties": { "operation": { "enum": ["send", "msg_delete"] }, "key_hash": { "$ref": "#/$defs/hash" }, "expected_fingerprint": { "$ref": "#/$defs/hash" }, "actual_fingerprint": { "$ref": "#/$defs/hash" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "IDEMPOTENCY_PENDING" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "key_hash", "fingerprint", "invocation_id", "temporary_message_ids"],
+                  "properties": { "operation": { "enum": ["send", "msg_delete"] }, "key_hash": { "$ref": "#/$defs/hash" }, "fingerprint": { "$ref": "#/$defs/hash" }, "invocation_id": { "$ref": "#/$defs/hex32" }, "temporary_message_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/int53" } } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "enum": ["IDEMPOTENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE"] },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account", "path", "reason"],
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "path": { "type": "string" }, "reason": { "type": "string" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "AUDIT_INCOMPLETE" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account", "path", "mutation_state", "completed_stages"],
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "path": { "type": "string" }, "mutation_state": { "enum": ["none", "possible", "confirmed"] }, "completed_stages": { "type": "array", "items": { "type": "string" } } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "SPOOL_UNAVAILABLE" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "path", "reason"],
+                  "properties": { "operation": { "enum": ["send", "msg_delete"] }, "path": { "const": "spool/" }, "reason": { "$ref": "#/$defs/durabilityReason" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "TIMEOUT" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "phase", "state", "outcome", "idempotency"],
+                  "properties": {
+                    "operation": { "enum": ["send", "msg_delete"] },
+                    "phase": { "enum": ["preflight", "confirmation", "dispatch", "replay_confirmation"] },
+                    "state": { "type": ["string", "null"] },
+                    "outcome": { "enum": ["not_started", "unknown"] },
+                    "idempotency": { "enum": ["not_requested", "not_created", "removed", "pending", "completed_unchanged"] },
+                    "temporary_message_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "SEND_FAILED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "chat_id", "temporary_message_id", "reason"],
+                  "properties": { "operation": { "const": "send" }, "chat_id": { "$ref": "#/$defs/int53" }, "temporary_message_id": { "$ref": "#/$defs/int53" }, "reason": { "const": "deleted_before_confirmation" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "CONFIRMATION_REQUIRED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account", "action", "target"],
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "action": { "const": "msg_delete" }, "target": { "$ref": "#/$defs/deletePlan" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "DAEMON_SHUTDOWN" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["reason"],
+                  "properties": { "reason": { "const": "daemon_shutdown" } }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

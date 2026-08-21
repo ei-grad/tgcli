@@ -547,6 +547,23 @@ bool LogoutCoordinator::preflight(RequestSession& session) {
     }
 }
 
+bool LogoutCoordinator::preflight_read_only(RequestSession& session) {
+    const auto inspection = audit_.inspect();
+    publish_audit_snapshot(inspection);
+    if (inspection.status == LogoutAuditInspectionStatus::Clean) {
+        return true;
+    }
+    if (inspection.status == LogoutAuditInspectionStatus::Invalid || !inspection.incomplete) {
+        report_audit_unavailable(session, inspection.failure.reason.empty()
+                                              ? "path_invalid"
+                                              : inspection.failure.reason);
+        return false;
+    }
+    report_audit_incomplete(session, *inspection.incomplete,
+                            "logout audit reconciliation is required");
+    return false;
+}
+
 // The operation mutex is account-local. It keeps two independently confirmed logout
 // invocations from creating competing lifecycle waiters for one TDLib generation.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)

@@ -60,6 +60,7 @@ class LogoutCoordinator final {
 
     void logout(const proto::Request& request, RequestSession& session);
     bool preflight(RequestSession& session);
+    bool preflight_read_only(RequestSession& session);
 
   private:
     enum class PreflightStep : std::uint8_t { Retry, Complete, Failed };

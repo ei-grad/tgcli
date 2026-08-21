@@ -46,16 +46,27 @@ std::optional<std::string_view> chat_type_name(core::TdChatKind kind) {
 }
 
 ChatIdentityResult stopped() {
-    return {
-        .status = ChatIdentityStatus::ReadStopped, .identity = std::nullopt, .error = std::nullopt};
+    return {.status = ChatIdentityStatus::ReadStopped,
+            .identity = std::nullopt,
+            .error = std::nullopt,
+            .private_user_id = std::nullopt,
+            .private_user_presence = std::nullopt};
 }
 
 ChatIdentityResult invalid() {
-    return {.status = ChatIdentityStatus::Invalid, .identity = std::nullopt, .error = std::nullopt};
+    return {.status = ChatIdentityStatus::Invalid,
+            .identity = std::nullopt,
+            .error = std::nullopt,
+            .private_user_id = std::nullopt,
+            .private_user_presence = std::nullopt};
 }
 
 ChatIdentityResult td_error(const core::TdError& error) {
-    return {.status = ChatIdentityStatus::TdError, .identity = std::nullopt, .error = error};
+    return {.status = ChatIdentityStatus::TdError,
+            .identity = std::nullopt,
+            .error = error,
+            .private_user_id = std::nullopt,
+            .private_user_presence = std::nullopt};
 }
 
 } // namespace
@@ -66,8 +77,11 @@ ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core:
         return invalid();
     }
     if (chat.kind == core::TdChatKind::Secret) {
-        return {
-            .status = ChatIdentityStatus::Secret, .identity = std::nullopt, .error = std::nullopt};
+        return {.status = ChatIdentityStatus::Secret,
+                .identity = std::nullopt,
+                .error = std::nullopt,
+                .private_user_id = std::nullopt,
+                .private_user_presence = std::nullopt};
     }
     const auto type = chat_type_name(chat.kind);
     if (!type) {
@@ -81,7 +95,9 @@ ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core:
     if (chat.kind == core::TdChatKind::BasicGroup) {
         return {.status = ChatIdentityStatus::Success,
                 .identity = std::move(identity),
-                .error = std::nullopt};
+                .error = std::nullopt,
+                .private_user_id = std::nullopt,
+                .private_user_presence = std::nullopt};
     }
     if (!valid_user_id(chat.related_id)) {
         return invalid();
@@ -103,7 +119,9 @@ ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core:
         identity.usernames = user->usernames;
         return {.status = ChatIdentityStatus::Success,
                 .identity = std::move(identity),
-                .error = std::nullopt};
+                .error = std::nullopt,
+                .private_user_id = chat.related_id,
+                .private_user_presence = user->presence};
     }
     auto response =
         read([&](const auto& current) { return client.get_supergroup(current, chat.related_id); });
@@ -122,7 +140,9 @@ ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core:
     identity.usernames = supergroup->usernames;
     return {.status = ChatIdentityStatus::Success,
             .identity = std::move(identity),
-            .error = std::nullopt};
+            .error = std::nullopt,
+            .private_user_id = std::nullopt,
+            .private_user_presence = std::nullopt};
 }
 
 nlohmann::json chat_identity_json(const ChatIdentity& identity) {

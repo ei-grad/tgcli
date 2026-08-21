@@ -34,6 +34,9 @@
     "me": {
       "error": "auth.error.schema.json"
     },
+    "msg delete": {
+      "error": "m3-write.error.schema.json"
+    },
     "resolve": {
       "error": "resolve.error.schema.json"
     },
@@ -42,6 +45,9 @@
     },
     "saved tags": {
       "error": "saved.error.schema.json"
+    },
+    "send": {
+      "error": "m3-write.error.schema.json"
     },
     "session list": {
       "error": "session.error.schema.json"

@@ -128,9 +128,11 @@ TEST_CASE("non-stream error manifest is the exact accepted command authority",
                           {"login", {{"error", "auth.error.schema.json"}}},
                           {"logout", {{"error", "logout.error.schema.json"}}},
                           {"me", {{"error", "auth.error.schema.json"}}},
+                          {"msg delete", {{"error", "m3-write.error.schema.json"}}},
                           {"resolve", {{"error", "resolve.error.schema.json"}}},
                           {"saved search", {{"error", "saved.error.schema.json"}}},
                           {"saved tags", {{"error", "saved.error.schema.json"}}},
+                          {"send", {{"error", "m3-write.error.schema.json"}}},
                           {"session list", {{"error", "session.error.schema.json"}}},
                           {"session terminate", {{"error", "session.error.schema.json"}}}}}};
     CHECK(tgcli::test::load_schema_document("error-manifest.json") == expected);

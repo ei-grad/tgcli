@@ -487,9 +487,8 @@ TEST_CASE("dispatcher independently rejects invalid or out-of-scope raw idempote
 
     dry_run.context.dry_run = false;
     outcome = dispatch_frozen_request(m3, dry_run);
-    CHECK(outcome.error_code == "DENIED");
-    CHECK(outcome.exit_code == kDenied);
-    CHECK_FALSE(handler_ran);
+    CHECK(outcome.result == json::object());
+    CHECK(handler_ran);
 }
 
 TEST_CASE("M3 descriptors must match the closed registry and remain fail closed",
@@ -516,13 +515,13 @@ TEST_CASE("M3 descriptors must match the closed registry and remain fail closed"
                     std::invalid_argument);
 
     daemon::Dispatcher dispatcher;
-    bool handler_ran = false;
+    std::size_t handler_runs = 0;
     for (const auto& policy : daemon::m3_operation_policies()) {
         dispatcher.register_command(
             std::string(policy.command_path),
             {policy.tier,
-             [&handler_ran](const proto::Request&, daemon::RequestSession& sink) {
-                 handler_ran = true;
+             [&handler_runs](const proto::Request&, daemon::RequestSession& sink) {
+                 ++handler_runs;
                  sink.result(json::object());
              },
              false, policy.operation});
@@ -532,10 +531,15 @@ TEST_CASE("M3 descriptors must match the closed registry and remain fail closed"
         request.id = 1;
         request.command = command_parts(policy.command_path);
         const auto outcome = dispatch_frozen_request(dispatcher, request);
-        CHECK(outcome.error_code == "DENIED");
-        CHECK(outcome.exit_code == kDenied);
+        if (policy.operation == daemon::M3Operation::Send ||
+            policy.operation == daemon::M3Operation::MsgDelete) {
+            CHECK(outcome.result == json::object());
+        } else {
+            CHECK(outcome.error_code == "DENIED");
+            CHECK(outcome.exit_code == kDenied);
+        }
     }
-    CHECK_FALSE(handler_ran);
+    CHECK(handler_runs == 2);
 }
 
 TEST_CASE("daemon stop triggers the shutdown hook and confirms", "[dispatch]") {
