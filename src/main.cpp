@@ -808,7 +808,7 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
             return report_usage("message id must be a nonzero int53 value", "id");
         }
     }
-    const auto chat_target = [&]() -> const std::string* {
+    const auto* const chat_target = [&]() -> const std::string* {
         if (command == std::vector<std::string>{"chat", "mark-read"}) {
             return &chat.mark_read;
         }
@@ -1033,7 +1033,8 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     if (command == std::vector<std::string>{"chat", "mute"}) {
         const auto duration = chat.mute_for_option->count() != 0
-                                  ? *tgcli::daemon::parse_mute_duration(chat.mute_for)
+                                  ? tgcli::daemon::parse_mute_duration(chat.mute_for)
+                                        .value_or(std::numeric_limits<std::int32_t>::max())
                                   : std::numeric_limits<std::int32_t>::max();
         return {{"chat", chat.mute}, {"duration_seconds", duration}};
     }
