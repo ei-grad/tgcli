@@ -1,5 +1,6 @@
 #include "daemon/chat_summary.hpp"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -99,6 +100,28 @@ TEST_CASE("shared chat summary preserves chats JSON bytes and semantics", "[chat
     CHECK(
         rendered.dump() ==
         R"({"folder_ids":[2,3],"id":-1001,"is_archived":true,"is_bot":false,"is_marked_unread":true,"last_message":{"chat_id":-1001,"date":"2026-08-05T10:00:00Z","id":123,"is_outgoing":false,"sender":{"id":42,"type":"user"},"text":"experiment result","topic":{"id":7,"kind":"forum"},"type":"text"},"title":"Project","type":"supergroup","unread_count":3,"unread_mention_count":1,"unread_poll_vote_count":4,"unread_reaction_count":2,"usernames":["project"]})");
+}
+
+TEST_CASE("shared chat summary enforces the exact signed int53 id domain", "[chats][dto]") {
+    constexpr std::int64_t maximum_int53 = 9'007'199'254'740'991LL;
+    auto chat = project_chat();
+    auto identity = project_identity();
+    chat.last_message.reset();
+
+    for (const auto valid_id : std::array<std::int64_t, 2>{-maximum_int53, maximum_int53}) {
+        chat.id = valid_id;
+        identity.id = valid_id;
+        const auto summary = tgcli::daemon::materialize_chat_summary(chat, identity);
+        REQUIRE(summary);
+        CHECK(summary->identity.id == valid_id);
+    }
+
+    for (const auto invalid_id :
+         std::array<std::int64_t, 3>{-maximum_int53 - 1, 0, maximum_int53 + 1}) {
+        chat.id = invalid_id;
+        identity.id = invalid_id;
+        CHECK_FALSE(tgcli::daemon::materialize_chat_summary(chat, identity));
+    }
 }
 
 TEST_CASE("shared chat summary rejects malformed TD projections", "[chats][dto]") {

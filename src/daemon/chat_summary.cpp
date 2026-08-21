@@ -10,6 +10,12 @@ namespace tgcli::daemon {
 
 namespace {
 
+constexpr std::int64_t kMaximumInt53 = 9'007'199'254'740'991LL;
+
+bool valid_int53(std::int64_t value) {
+    return value != 0 && value >= -kMaximumInt53 && value <= kMaximumInt53;
+}
+
 bool valid_list(const core::TdChatList& list) {
     switch (list.kind) {
     case core::TdChatListKind::Main:
@@ -42,7 +48,8 @@ std::optional<std::string_view> chat_type_name(core::TdChatKind kind) {
 
 bool valid_identity(const core::TdChat& chat, const ChatIdentity& identity,
                     std::string_view expected_type) {
-    if (identity.id != chat.id || identity.title != chat.title || identity.type != expected_type ||
+    if (!valid_int53(chat.id) || !valid_int53(identity.id) || identity.id != chat.id ||
+        identity.title != chat.title || identity.type != expected_type ||
         !common::valid_utf8(identity.title) || (identity.type != "private" && identity.is_bot)) {
         return false;
     }

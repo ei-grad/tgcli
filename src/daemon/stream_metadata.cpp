@@ -360,9 +360,13 @@ class StreamGenerationState::Impl {
         if (barrier == 0) {
             return fail_malformed();
         }
+        if (!std::ranges::all_of(current_state, [](const StreamMetadataDelta& delta) {
+                return valid_delta(delta);
+            })) {
+            return fail_malformed();
+        }
         for (auto& delta : current_state) {
-            if (!valid_delta(delta) ||
-                !apply_delta(std::move(delta), false, StreamMetadataPhase::Bootstrap, barrier)) {
+            if (!apply_delta(std::move(delta), false, StreamMetadataPhase::Bootstrap, barrier)) {
                 return failed_result();
             }
         }

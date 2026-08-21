@@ -221,6 +221,70 @@ TEST_CASE("metadata bootstrap accepts either entity/chat order and rejects misma
     }
 }
 
+TEST_CASE("invalid current-state deltas atomically fail the generation",
+          "[stream][metadata][bootstrap]") {
+    SECTION("invalid first delta") {
+        StreamGenerationState state;
+        REQUIRE(state.reset(1));
+        const auto result = state.complete_bootstrap(
+            1, 1,
+            {StreamEntityDelta{user(0)}, StreamNewChatDelta{chat(-1001, 42, "must not apply")}});
+        CHECK(result.status == StreamMetadataStatus::Malformed);
+        CHECK(state.failed());
+        CHECK_FALSE(state.bootstrapping());
+        CHECK_FALSE(state.snapshot());
+    }
+
+    SECTION("invalid middle delta after one applied half") {
+        StreamGenerationState state;
+        REQUIRE(state.reset(1));
+        const auto result =
+            state.complete_bootstrap(1, 1,
+                                     {StreamEntityDelta{user(42, {"partial"})},
+                                      StreamTitleDelta{.chat_id = 0, .title = "invalid"},
+                                      StreamNewChatDelta{chat(-1001, 42, "must not apply")}});
+        CHECK(result.status == StreamMetadataStatus::Malformed);
+        CHECK(state.failed());
+        CHECK_FALSE(state.ready_for_admission());
+        CHECK_FALSE(state.snapshot());
+    }
+
+    SECTION("invalid trailing delta blocks retry until a new generation reset") {
+        StreamGenerationState state;
+        REQUIRE(state.reset(1));
+        const auto failed = state.complete_bootstrap(
+            1, 1,
+            {StreamEntityDelta{user(42, {"old"})},
+             StreamNewChatDelta{chat(-1001, 42, "Old generation")},
+             StreamUnreadMentionDelta{.chat_id = -1001, .unread_mention_count = -1}});
+        CHECK(failed.status == StreamMetadataStatus::Malformed);
+        CHECK(state.failed());
+        CHECK_FALSE(state.snapshot());
+
+        const auto retry =
+            state.complete_bootstrap(1, 2,
+                                     {StreamEntityDelta{user(43, {"retry"})},
+                                      StreamNewChatDelta{chat(-1002, 43, "Retry must fail")}});
+        CHECK(retry.status == StreamMetadataStatus::Malformed);
+        CHECK(state.failed());
+        CHECK_FALSE(state.snapshot());
+
+        REQUIRE(state.reset(2));
+        const auto recovered =
+            state.complete_bootstrap(2, 1,
+                                     {StreamEntityDelta{user(44, {"new"})},
+                                      StreamNewChatDelta{chat(-1003, 44, "New generation")}});
+        REQUIRE(recovered.status == StreamMetadataStatus::Accepted);
+        const auto snapshot = state.snapshot();
+        REQUIRE(snapshot);
+        CHECK(snapshot->generation == 2);
+        REQUIRE(snapshot->chats.size() == 1);
+        CHECK(snapshot->chats.front().identity.id == -1003);
+        CHECK(snapshot->chats.front().identity.title == "New generation");
+        CHECK(snapshot->chats.front().identity.usernames == std::vector<std::string>{"new"});
+    }
+}
+
 TEST_CASE("chat-before-entity freezes new and retains every later candidate",
           "[stream][metadata][ordering]") {
     StreamGenerationState state;
