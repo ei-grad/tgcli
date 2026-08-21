@@ -62,6 +62,8 @@ struct SendState {
     std::optional<ResolvedChatTarget> target;
     std::optional<core::TdFormattedText> formatted_text;
     std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
+    std::unique_ptr<SingleSendCoordinator> coordinator;
+    WriteDurableObservationSink* observations = nullptr;
 };
 
 struct DeleteState {
@@ -69,6 +71,7 @@ struct DeleteState {
     ResolverPrincipal principal;
     std::optional<ResolvedChatTarget> target;
     std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
+    std::unique_ptr<DirectRpcCoordinator> coordinator;
 };
 
 bool exact_fields(const json& value, const std::set<std::string>& expected) {
@@ -683,7 +686,9 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                                                        .principal = principal,
                                                        .target = std::nullopt,
                                                        .formatted_text = std::nullopt,
-                                                       .dispatch_authorization = nullptr});
+                                                       .dispatch_authorization = nullptr,
+                                                       .coordinator = nullptr,
+                                                       .observations = nullptr});
     auto invocation = request.context.dry_run ? std::string{} : random_hex32();
     if (!request.context.dry_run && invocation.empty()) {
         session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
@@ -955,20 +960,8 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                         request.context.idempotency_key ? "removed" : "not_requested"));
         }
         state->dispatch_authorization = std::move(current);
-        const auto token = random_hex32();
-        if (token.empty()) {
-            throw std::runtime_error("cannot create dispatch token");
-        }
-        return WriteDispatchPreparation{
-            .proof = {{"tdlib_function", "sendMessage"},
-                      {"dispatch_token", token},
-                      {"client_generation", state->dispatch_authorization->client_generation}}};
-    };
-    hooks.dispatch = [state, &session, &request,
-                      this](const write_contract::Plan& plan, const WriteDispatchPreparation&,
-                            WriteDurableObservationSink& observations) -> WriteDispatchOutcome {
-        if (!state->target || !state->formatted_text || !state->dispatch_authorization) {
-            throw std::logic_error("send dispatch state is incomplete");
+        if (!state->target || !state->formatted_text) {
+            throw std::logic_error("send preparation state is incomplete");
         }
         const auto sending_id = random_sending_id();
         if (sending_id == 0) {
@@ -998,14 +991,57 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
             .content = {.formatted_text = std::move(*state->formatted_text),
                         .parsed = state->input.parse_mode != FingerprintParseMode::Plain}};
         SingleSendHooks send_hooks = hooks_ ? hooks_->single_send : SingleSendHooks{};
-        send_hooks.on_temporary_id = [&](const SingleSendTemporaryId& temporary) {
-            if (!observations.temporary_message_ids(
+        auto* state_pointer = state.get();
+        send_hooks.on_temporary_id = [state_pointer](const SingleSendTemporaryId& temporary) {
+            if (state_pointer->observations == nullptr ||
+                !state_pointer->observations->temporary_message_ids(
                     json::array({temporary.temporary_message_id}))) {
                 throw std::runtime_error("temporary id was not durable");
             }
         };
-        SingleSendCoordinator coordinator(client_.get(), session, std::move(send_hooks));
-        auto selected = coordinator.execute(std::move(td_request), state->dispatch_authorization);
+        state->coordinator =
+            std::make_unique<SingleSendCoordinator>(client_.get(), session, std::move(send_hooks));
+        auto preparation =
+            state->coordinator->prepare(std::move(td_request), state->dispatch_authorization);
+        if (std::holds_alternative<SingleSendTimedOut>(preparation)) {
+            return stored_from_terminal(
+                proto::M3Operation::Send,
+                timeout(proto::M3Operation::Send, "preflight",
+                        request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (std::holds_alternative<SingleSendCancelled>(preparation)) {
+            return WriteDispatchStopped{};
+        }
+        if (const auto* lost = std::get_if<SingleSendAuthorizationLost>(&preparation)) {
+            return stored_from_terminal(proto::M3Operation::Send,
+                                        not_authed_terminal(account_, lost->state));
+        }
+        if (std::holds_alternative<SingleSendGenerationClosed>(preparation)) {
+            return stored_from_terminal(proto::M3Operation::Send,
+                                        not_authed_terminal(account_, core::AuthState::Closed));
+        }
+        if (std::holds_alternative<SingleSendRejected>(preparation)) {
+            return stored_from_terminal(proto::M3Operation::Send,
+                                        internal(proto::M3Operation::Send));
+        }
+        const auto token = random_hex32();
+        if (token.empty()) {
+            throw std::runtime_error("cannot create dispatch token");
+        }
+        return WriteDispatchPreparation{
+            .proof = {{"tdlib_function", "sendMessage"},
+                      {"dispatch_token", token},
+                      {"client_generation", state->dispatch_authorization->client_generation}}};
+    };
+    hooks.dispatch = [state, &request,
+                      this](const write_contract::Plan&, const WriteDispatchPreparation&,
+                            WriteDurableObservationSink& observations) -> WriteDispatchOutcome {
+        if (!state->target || !state->dispatch_authorization || !state->coordinator) {
+            throw std::logic_error("send dispatch state is incomplete");
+        }
+        state->observations = &observations;
+        auto selected = state->coordinator->execute_prepared();
+        state->observations = nullptr;
         return std::visit(
             [&](auto&& outcome) -> WriteDispatchOutcome {
                 using Outcome = std::decay_t<decltype(outcome)>;
@@ -1050,18 +1086,12 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                             .mutation_state = AccountAuditMutationState::Possible,
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendTimedOut>) {
-                    const bool not_started =
-                        outcome.mutation_state == SingleSendMutationState::None;
-                    auto value =
-                        not_started
-                            ? timeout(proto::M3Operation::Send, "preflight",
-                                      request.context.idempotency_key ? "removed" : "not_requested")
-                            : timeout(proto::M3Operation::Send, "confirmation",
-                                      post_intent_idempotency(request), "unknown",
-                                      outcome.temporary
-                                          ? std::optional<std::int64_t>{outcome.temporary
-                                                                            ->temporary_message_id}
-                                          : std::nullopt);
+                    auto value = timeout(
+                        proto::M3Operation::Send, "confirmation", post_intent_idempotency(request),
+                        "unknown",
+                        outcome.temporary
+                            ? std::optional<std::int64_t>{outcome.temporary->temporary_message_id}
+                            : std::nullopt);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
@@ -1153,7 +1183,8 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
     auto state = std::make_shared<DeleteState>(DeleteState{.input = std::move(*input),
                                                            .principal = principal,
                                                            .target = std::nullopt,
-                                                           .dispatch_authorization = nullptr});
+                                                           .dispatch_authorization = nullptr,
+                                                           .coordinator = nullptr});
     auto invocation = request.context.dry_run ? std::string{} : random_hex32();
     if (!request.context.dry_run && invocation.empty()) {
         session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
@@ -1275,7 +1306,7 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
     };
     hooks.revalidate_auth_and_schedule =
         [state, &session, &request,
-         this](const write_contract::Plan&) -> WriteDispatchAdmissionOutcome {
+         this](const write_contract::Plan& plan) -> WriteDispatchAdmissionOutcome {
         if (deadline_expired(session.deadline())) {
             return stored_from_terminal(
                 proto::M3Operation::MsgDelete,
@@ -1302,6 +1333,37 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
         if (session.cancellation_requested()) {
             return WriteDispatchStopped{};
         }
+        if (!state->target) {
+            throw std::logic_error("delete preparation state is incomplete");
+        }
+        const core::TdDeleteMessagesRequest td_request{
+            .chat_id = state->target->chat.id,
+            .message_ids = state->input.message_ids,
+            .revoke = plan.value()["effective_for_all"].get<bool>()};
+        auto direct_hooks = hooks_ ? hooks_->direct_rpc : DirectRpcHooks{};
+        state->coordinator =
+            std::make_unique<DirectRpcCoordinator>(client_.get(), session, std::move(direct_hooks));
+        auto preparation = state->coordinator->prepare(core::TdDirectRequest{td_request},
+                                                       state->dispatch_authorization);
+        if (std::holds_alternative<DirectTimedOut>(preparation)) {
+            return stored_from_terminal(
+                proto::M3Operation::MsgDelete,
+                timeout(proto::M3Operation::MsgDelete, "preflight",
+                        request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (std::holds_alternative<DirectCancelled>(preparation)) {
+            return WriteDispatchStopped{};
+        }
+        if (const auto* lost = std::get_if<DirectAuthorizationLost>(&preparation)) {
+            return stored_from_terminal(
+                proto::M3Operation::MsgDelete,
+                not_authed_terminal(account_, lost->snapshot ? lost->snapshot->data.state
+                                                             : core::AuthState::Unknown));
+        }
+        if (std::holds_alternative<DirectRejected>(preparation)) {
+            return stored_from_terminal(proto::M3Operation::MsgDelete,
+                                        internal(proto::M3Operation::MsgDelete));
+        }
         const auto token = random_hex32();
         if (token.empty()) {
             throw std::runtime_error("cannot create dispatch token");
@@ -1311,20 +1373,13 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                       {"dispatch_token", token},
                       {"client_generation", state->dispatch_authorization->client_generation}}};
     };
-    hooks.dispatch = [state, &session, &request,
-                      this](const write_contract::Plan& plan, const WriteDispatchPreparation&,
-                            WriteDurableObservationSink&) -> WriteDispatchOutcome {
-        if (!state->target || !state->dispatch_authorization) {
+    hooks.dispatch = [state, &request, this](const write_contract::Plan& plan,
+                                             const WriteDispatchPreparation&,
+                                             WriteDurableObservationSink&) -> WriteDispatchOutcome {
+        if (!state->target || !state->dispatch_authorization || !state->coordinator) {
             throw std::logic_error("delete dispatch state is incomplete");
         }
-        const core::TdDeleteMessagesRequest td_request{
-            .chat_id = state->target->chat.id,
-            .message_ids = state->input.message_ids,
-            .revoke = plan.value()["effective_for_all"].get<bool>()};
-        auto direct_hooks = hooks_ ? hooks_->direct_rpc : DirectRpcHooks{};
-        DirectRpcCoordinator coordinator(client_.get(), session, std::move(direct_hooks));
-        auto selected =
-            coordinator.execute(core::TdDirectRequest{td_request}, state->dispatch_authorization);
+        auto selected = state->coordinator->execute_prepared();
         return std::visit(
             [&](auto&& outcome) -> WriteDispatchOutcome {
                 using Outcome = std::decay_t<decltype(outcome)>;
@@ -1361,16 +1416,10 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, DirectTimedOut>) {
-                    const bool not_started = outcome.mutation_state == DirectMutationState::None;
-                    std::string_view idempotency = post_intent_idempotency(request);
-                    if (not_started) {
-                        idempotency = request.context.idempotency_key ? "removed" : "not_requested";
-                    }
                     return {.terminal = stored_from_terminal(
                                 proto::M3Operation::MsgDelete,
-                                timeout(proto::M3Operation::MsgDelete,
-                                        not_started ? "preflight" : "dispatch", idempotency,
-                                        not_started ? "not_started" : "unknown")),
+                                timeout(proto::M3Operation::MsgDelete, "dispatch",
+                                        post_intent_idempotency(request), "unknown")),
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, DirectCancelled>) {

@@ -68,6 +68,26 @@ class TdSendLease {
     friend class TdClient;
 };
 
+class TdPreparedWrite {
+  public:
+    TdPreparedWrite();
+    ~TdPreparedWrite();
+    TdPreparedWrite(const TdPreparedWrite&) = delete;
+    TdPreparedWrite& operator=(const TdPreparedWrite&) = delete;
+    TdPreparedWrite(TdPreparedWrite&&) noexcept;
+    TdPreparedWrite& operator=(TdPreparedWrite&& other) noexcept;
+
+    explicit operator bool() const noexcept;
+    [[nodiscard]] std::optional<TdAuthorizationFailure> authorization_failure() const noexcept;
+
+  private:
+    struct State;
+    explicit TdPreparedWrite(std::shared_ptr<State> state);
+
+    std::shared_ptr<State> state_;
+    friend class TdClient;
+};
+
 // Pins a matching client generation at authorizationStateClosed until the
 // destructive coordinator has durably settled its one-shot lifecycle result.
 enum class TdLifecycleClaimStatus { Active, Disconnected, Shutdown, TimedOut, Rejected };
@@ -244,6 +264,13 @@ class TdClient {
 
     std::future<TdValue> send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                       TdSendMessageRequest request);
+    [[nodiscard]] TdPreparedWrite
+    prepare_send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         TdSendMessageRequest request);
+    [[nodiscard]] TdPreparedWrite
+    prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            TdDirectRequest request);
+    std::future<TdValue> send(TdPreparedWrite&& prepared);
 
     std::future<TdValue>
     edit_message_text(const std::shared_ptr<const AuthStateSnapshot>& authorization,

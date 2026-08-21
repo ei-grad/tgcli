@@ -393,6 +393,7 @@ TEST_CASE("direct RPC gives deadline equality to timeout", "[daemon][direct][arb
         tgcli::daemon::DirectRpcHooks{.now = [&] { return harness.clock().now(); },
                                       .wait = {},
                                       .before_request = {},
+                                      .before_submit = {},
                                       .before_event_arbitration = [&] { barrier.wait(); },
                                       .before_wait = {}});
     const auto sent = harness.await_direct_send();

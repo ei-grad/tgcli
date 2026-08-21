@@ -68,39 +68,6 @@ bool valid_write_message(const core::TdMessageWriteResult& message) {
            valid_topic(message.topic) && valid_text();
 }
 
-std::future<core::TdValue>
-start_request(core::TdClient& client, const core::TdDirectRequest& request,
-              const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
-    return std::visit(
-        [&](const auto& value) {
-            using Request = std::decay_t<decltype(value)>;
-            if constexpr (std::is_same_v<Request, core::TdEditMessageTextRequest>) {
-                return client.edit_message_text(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdDeleteMessagesRequest>) {
-                return client.delete_messages(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdMessageReactionRequest>) {
-                return client.set_message_reaction(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdPinMessageRequest>) {
-                return client.set_message_pinned(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdViewMessagesRequest>) {
-                return client.view_messages(authorization, value);
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdSetChatNotificationSettingsRequest>) {
-                return client.set_chat_notification_settings(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdToggleChatIsPinnedRequest>) {
-                return client.toggle_chat_is_pinned(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdAddChatToListRequest>) {
-                return client.add_chat_to_list(authorization, value);
-            } else if constexpr (std::is_same_v<Request, core::TdJoinChatRequest>) {
-                return client.join_chat(authorization, value);
-            } else {
-                static_assert(std::is_same_v<Request, core::TdLeaveChatRequest>);
-                return client.leave_chat(authorization, value);
-            }
-        },
-        request);
-}
-
 bool is_ok_response(const core::TdValue& value) {
     return value.get_if<core::TdOk>() != nullptr;
 }
@@ -243,6 +210,7 @@ class DirectRpcCoordinator::Impl {
         : client_(client), session_(session),
           now_(hooks.now ? std::move(hooks.now) : [] { return core::TdEventClock::now(); }),
           wait_(std::move(hooks.wait)), before_request_(std::move(hooks.before_request)),
+          before_submit_(std::move(hooks.before_submit)),
           before_event_arbitration_(std::move(hooks.before_event_arbitration)),
           before_wait_(std::move(hooks.before_wait)) {
         response_subscription_ =
@@ -255,6 +223,7 @@ class DirectRpcCoordinator::Impl {
     }
 
     ~Impl() {
+        settle_in_flight();
         client_.unsubscribe_response_completions(response_subscription_);
         client_.unsubscribe_auth_states(auth_subscription_);
     }
@@ -265,6 +234,22 @@ class DirectRpcCoordinator::Impl {
 
     DirectOutcome execute(const core::TdDirectRequest& request,
                           const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
+        auto preparation = prepare(core::TdDirectRequest{request}, authorization);
+        return std::visit(
+            [this](auto&& outcome) -> DirectOutcome {
+                using Outcome = std::decay_t<decltype(outcome)>;
+                if constexpr (std::is_same_v<Outcome, DirectPrepared>) {
+                    return execute_prepared();
+                } else {
+                    return std::forward<decltype(outcome)>(outcome);
+                }
+            },
+            std::move(preparation));
+    }
+
+    DirectPreparationOutcome
+    prepare(core::TdDirectRequest request,
+            const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
         if (executed_ || !authorization || authorization->data.state != core::AuthState::Ready ||
             !core::valid_td_direct_request(request)) {
             return DirectRejected{};
@@ -280,22 +265,90 @@ class DirectRpcCoordinator::Impl {
         } catch (const std::exception&) {
             return DirectRejected{};
         }
+        if (deadline_expired(session_.deadline(), now_())) {
+            return DirectTimedOut{.mutation_state = DirectMutationState::None};
+        }
+        if (session_.cancellation_requested()) {
+            return DirectCancelled{.mutation_state = DirectMutationState::None};
+        }
         if (!session_.reserve_direct_in_flight()) {
             return DirectCancelled{.mutation_state = DirectMutationState::None};
         }
+        in_flight_ = true;
+        request_ = request;
+        authorization_ = authorization;
+        prepared_write_ = client_.prepare_direct_mutation(authorization, std::move(request));
+        if (!prepared_write_) {
+            const auto failure = prepared_write_.authorization_failure();
+            const auto auth = first_auth_competitor(*authorization);
+            settle_in_flight();
+            if (auth.kind == AuthCompetitionKind::Lost) {
+                return DirectAuthorizationLost{.snapshot = auth.snapshot,
+                                               .mutation_state = DirectMutationState::None};
+            }
+            return DirectRejected{.authorization_failure = failure,
+                                  .mutation_state = DirectMutationState::None};
+        }
+        if (deadline_expired(session_.deadline(), now_())) {
+            prepared_write_ = {};
+            settle_in_flight();
+            return DirectTimedOut{.mutation_state = DirectMutationState::None};
+        }
+        if (session_.cancellation_requested()) {
+            prepared_write_ = {};
+            settle_in_flight();
+            return DirectCancelled{.mutation_state = DirectMutationState::None};
+        }
+        prepared_ = true;
+        return DirectPrepared{};
+    }
+
+    DirectOutcome execute_prepared() {
+        if (!prepared_ || !prepared_write_ || !request_ || !authorization_) {
+            return DirectRejected{.authorization_failure = std::nullopt,
+                                  .mutation_state = DirectMutationState::Possible};
+        }
+        prepared_ = false;
+        try {
+            if (before_submit_) {
+                before_submit_();
+            }
+        } catch (const std::exception&) {
+            prepared_write_ = {};
+            return finish(DirectRejected{.authorization_failure = std::nullopt,
+                                         .mutation_state = DirectMutationState::Possible});
+        }
+        if (deadline_expired(session_.deadline(), now_())) {
+            prepared_write_ = {};
+            return finish(DirectTimedOut{.mutation_state = DirectMutationState::Possible});
+        }
+        if (session_.cancellation_requested()) {
+            prepared_write_ = {};
+            return finish(DirectCancelled{.mutation_state = DirectMutationState::Possible});
+        }
         std::future<core::TdValue> response;
         try {
-            response = start_request(client_, request, authorization);
+            response = client_.send(std::move(prepared_write_));
         } catch (const std::exception&) {
-            session_.settle_in_flight();
-            return DirectRejected{};
+            return finish(DirectRejected{.authorization_failure = std::nullopt,
+                                         .mutation_state = DirectMutationState::Possible});
         }
-        auto outcome = wait_for_response(request, response, *authorization);
-        session_.settle_in_flight();
-        return outcome;
+        return finish(wait_for_response(*request_, response, *authorization_));
     }
 
   private:
+    void settle_in_flight() {
+        if (in_flight_) {
+            session_.settle_in_flight();
+            in_flight_ = false;
+        }
+    }
+
+    DirectOutcome finish(DirectOutcome outcome) {
+        settle_in_flight();
+        return outcome;
+    }
+
     enum class AuthCompetitionKind { None, Lost };
 
     struct AuthCompetition {
@@ -437,9 +490,15 @@ class DirectRpcCoordinator::Impl {
     std::function<core::TdEventClock::time_point()> now_;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait_;
     std::function<void()> before_request_;
+    std::function<void()> before_submit_;
     std::function<void()> before_event_arbitration_;
     std::function<void()> before_wait_;
     bool executed_ = false;
+    bool prepared_ = false;
+    bool in_flight_ = false;
+    core::TdPreparedWrite prepared_write_;
+    std::optional<core::TdDirectRequest> request_;
+    std::shared_ptr<const core::AuthStateSnapshot> authorization_;
     std::mutex wait_mutex_;
     std::condition_variable_any wait_condition_;
     std::uint64_t wake_sequence_ = 0;
@@ -460,6 +519,16 @@ DirectOutcome
 DirectRpcCoordinator::execute(const core::TdDirectRequest& request,
                               const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
     return impl_->execute(request, authorization);
+}
+
+DirectPreparationOutcome
+DirectRpcCoordinator::prepare(core::TdDirectRequest request,
+                              const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
+    return impl_->prepare(std::move(request), authorization);
+}
+
+DirectOutcome DirectRpcCoordinator::execute_prepared() {
+    return impl_->execute_prepared();
 }
 
 } // namespace tgcli::daemon

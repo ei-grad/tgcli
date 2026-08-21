@@ -111,10 +111,16 @@ using SingleSendOutcome =
                  SingleSendAuthorizationLost, SingleSendGenerationClosed, SingleSendCancelled,
                  SingleSendRejected, SingleSendMalformed>;
 
+struct SingleSendPrepared {};
+using SingleSendPreparationOutcome =
+    std::variant<SingleSendPrepared, SingleSendAuthorizationLost, SingleSendGenerationClosed,
+                 SingleSendTimedOut, SingleSendCancelled, SingleSendRejected>;
+
 struct SingleSendHooks {
     std::function<core::TdEventClock::time_point()> now;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
     std::function<void()> before_request;
+    std::function<void()> before_submit;
     std::function<void()> before_event_arbitration;
     std::function<void()> before_wait;
     std::function<void(const SingleSendTemporaryId&)> on_temporary_id;
@@ -132,6 +138,10 @@ class SingleSendCoordinator {
 
     SingleSendOutcome execute(core::TdSendMessageRequest request,
                               const std::shared_ptr<const core::AuthStateSnapshot>& authorization);
+    SingleSendPreparationOutcome
+    prepare(core::TdSendMessageRequest request,
+            const std::shared_ptr<const core::AuthStateSnapshot>& authorization);
+    SingleSendOutcome execute_prepared();
 
   private:
     class Impl;

@@ -863,7 +863,7 @@ TEST_CASE("account audit checkpoint and outcome factories enforce exact envelope
     CHECK_FALSE(daemon::validate_account_audit_outcome(wrong, error));
 }
 
-TEST_CASE("public write dispatch proofs accept only explicit mutation-free terminals",
+TEST_CASE("public write dispatch proofs reject nonauthoritative mutation-free terminals",
           "[account-audit][contract][schema][write]") {
     using O = daemon::AccountAuditOperation;
     using S = daemon::AccountAuditStage;
@@ -893,7 +893,7 @@ TEST_CASE("public write dispatch proofs accept only explicit mutation-free termi
         };
         for (const auto& terminal : terminals) {
             std::string error;
-            auto outcome = daemon::make_account_audit_outcome(
+            CHECK_FALSE(daemon::make_account_audit_outcome(
                 {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
                  "main",
                  operation,
@@ -901,36 +901,14 @@ TEST_CASE("public write dispatch proofs accept only explicit mutation-free termi
                  daemon::AccountAuditMutationState::None,
                  {S::DispatchStarted},
                  terminal},
-                error);
-            INFO(error);
-            REQUIRE(outcome);
-            CHECK_THAT(outcome->document(),
-                       tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+                error));
+            auto schema_invalid = outcome_record(operation, "fedcba9876543210fedcba9876543210",
+                                                 daemon::AccountAuditMutationState::Possible,
+                                                 {S::DispatchStarted}, terminal);
+            schema_invalid["mutation_state"] = "none";
+            CHECK_FALSE(tgcli::test::matches_json_schema("audit-outcome.schema.json")
+                            .match(schema_invalid));
         }
-
-        auto ambiguous_timeout = error_terminal(operation);
-        ambiguous_timeout["details"]["phase"] = operation == O::Send ? "confirmation" : "dispatch";
-        ambiguous_timeout["details"]["outcome"] = "unknown";
-        ambiguous_timeout["details"]["idempotency"] = "pending";
-        if (operation == O::Send) {
-            ambiguous_timeout["details"]["temporary_message_id"] = nullptr;
-        }
-        std::string error;
-        CHECK_FALSE(daemon::make_account_audit_outcome(
-            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
-             "main",
-             operation,
-             false,
-             daemon::AccountAuditMutationState::None,
-             {S::DispatchStarted},
-             ambiguous_timeout},
-            error));
-        auto schema_invalid = outcome_record(operation, "fedcba9876543210fedcba9876543210",
-                                             daemon::AccountAuditMutationState::Possible,
-                                             {S::DispatchStarted}, ambiguous_timeout);
-        schema_invalid["mutation_state"] = "none";
-        CHECK_FALSE(
-            tgcli::test::matches_json_schema("audit-outcome.schema.json").match(schema_invalid));
     }
 }
 

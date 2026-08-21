@@ -80,10 +80,47 @@ std::optional<DescriptorKind> direct_mutation_tier(TdFunctionKind function) {
     }
 }
 
+TdFunctionKind direct_request_kind(const TdDirectRequest& request) {
+    return std::visit(
+        [](const auto& value) {
+            using Request = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<Request, TdEditMessageTextRequest>) {
+                return TdFunctionKind::EditMessageText;
+            } else if constexpr (std::is_same_v<Request, TdDeleteMessagesRequest>) {
+                return TdFunctionKind::DeleteMessages;
+            } else if constexpr (std::is_same_v<Request, TdMessageReactionRequest>) {
+                return value.remove ? TdFunctionKind::RemoveMessageReaction
+                                    : TdFunctionKind::AddMessageReaction;
+            } else if constexpr (std::is_same_v<Request, TdPinMessageRequest>) {
+                return value.pinned ? TdFunctionKind::PinChatMessage
+                                    : TdFunctionKind::UnpinChatMessage;
+            } else if constexpr (std::is_same_v<Request, TdViewMessagesRequest>) {
+                return TdFunctionKind::ViewMessages;
+            } else if constexpr (std::is_same_v<Request, TdSetChatNotificationSettingsRequest>) {
+                return TdFunctionKind::SetChatNotificationSettings;
+            } else if constexpr (std::is_same_v<Request, TdToggleChatIsPinnedRequest>) {
+                return TdFunctionKind::ToggleChatIsPinned;
+            } else if constexpr (std::is_same_v<Request, TdAddChatToListRequest>) {
+                return TdFunctionKind::AddChatToList;
+            } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
+                return value.invite_link ? TdFunctionKind::JoinChatByInviteLink
+                                         : TdFunctionKind::JoinChat;
+            } else {
+                static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
+                return TdFunctionKind::LeaveChat;
+            }
+        },
+        request);
+}
 } // namespace
 
 struct TdSendLease::State {
     std::function<std::future<TdValue>(TdlibParameters)> submit;
+};
+
+struct TdPreparedWrite::State {
+    std::function<std::future<TdValue>()> submit;
+    std::optional<TdAuthorizationFailure> authorization_failure;
 };
 
 struct TdOwnerLease::State {
@@ -457,6 +494,154 @@ class TdClient::Impl {
                     return failed_future(error.what());
                 }
             });
+    }
+
+    TdPreparedWrite prepare_write(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  TdFunctionKind function, DescriptorKind tier,
+                                  TdValue request_value) {
+        const auto& function_data = request_value.function_data();
+        if (!authorization || !function_data || function_data->kind() != function) {
+            return {};
+        }
+        auto owner = std::make_shared<TdOwnerLease>(issue_owner(TdOwnerKind::Request));
+        if (!*owner) {
+            return {};
+        }
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard<std::mutex> lock(state_mutex_);
+            generation = current_;
+        }
+        if (!generation) {
+            return {};
+        }
+        const TdSendDescriptor descriptor{.function = function,
+                                          .tier = tier,
+                                          .owner = owner->owner(),
+                                          .client_generation = authorization->client_generation,
+                                          .auth_sequence = authorization->auth_sequence,
+                                          .auth_state = authorization->data.state};
+        TdPreparedWrite prepared;
+        std::optional<TdAuthorizationFailure> rejection;
+        const bool admitted = generation->lifecycle.admit([&] {
+            auto held = std::make_shared<LeaseLocks>();
+            held->auth_commit = std::unique_lock<std::mutex>(generation->auth_commit_mutex);
+            held->outbound = std::unique_lock<std::mutex>(generation->outbound_mutex);
+            if (!generation->initial_state_installed) {
+                rejection = TdAuthorizationFailure::AuthStateMismatch;
+                return;
+            }
+            if (const auto failure = authorization_failure_locked(
+                    generation, descriptor, TdFunctionData{descriptor.function})) {
+                rejection = failure;
+                return;
+            }
+            auto request = std::make_shared<std::optional<TdValue>>(std::move(request_value));
+            auto resources = std::make_shared<PreparedWriteResources>();
+            resources->owner = std::move(owner);
+            resources->held = std::move(held);
+            auto state = std::make_shared<TdPreparedWrite::State>();
+            state->submit = [this, generation, descriptor, resources = std::move(resources),
+                             request = std::move(request)]() mutable {
+                if (!request || !request->has_value()) {
+                    return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+                }
+                auto value = std::move(request->value());
+                request->reset();
+                auto submission = submit_admitted_locked(generation, descriptor, std::move(value));
+                resources->held.reset();
+                resources->owner.reset();
+                return std::move(submission.future);
+            };
+            prepared = TdPreparedWrite(std::move(state));
+        });
+        if (prepared) {
+            return prepared;
+        }
+        auto state = std::make_shared<TdPreparedWrite::State>();
+        state->authorization_failure =
+            admitted && rejection ? rejection
+                                  : std::optional{TdAuthorizationFailure::GenerationClosed};
+        return TdPreparedWrite(std::move(state));
+    }
+
+    TdPreparedWrite
+    prepare_send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         TdSendMessageRequest request) {
+        if (!authorization || !valid_td_send_message_request(request) ||
+            (request.content.parsed && !request.content.formatted_text.capability.valid_for(
+                                           authorization->client_generation))) {
+            return {};
+        }
+        try {
+            return prepare_write(
+                authorization, TdFunctionKind::SendMessage, DescriptorKind::Write,
+                runtime_->make_send_message(std::move(request), authorization->client_generation));
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
+    TdPreparedWrite
+    prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            TdDirectRequest request) {
+        if (!authorization || !valid_td_direct_request(request)) {
+            return {};
+        }
+        const auto function = direct_request_kind(request);
+        const auto tier = direct_mutation_tier(function);
+        if (!tier) {
+            return {};
+        }
+        try {
+            auto value = std::visit(
+                [this](auto&& input) -> TdValue {
+                    using Request = std::decay_t<decltype(input)>;
+                    if constexpr (std::is_same_v<Request, TdEditMessageTextRequest>) {
+                        return runtime_->make_edit_message_text(
+                            std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request, TdDeleteMessagesRequest>) {
+                        return runtime_->make_delete_messages(std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request, TdMessageReactionRequest>) {
+                        return runtime_->make_message_reaction(
+                            std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request, TdPinMessageRequest>) {
+                        return runtime_->make_pin_message(input);
+                    } else if constexpr (std::is_same_v<Request, TdViewMessagesRequest>) {
+                        return runtime_->make_view_messages(std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request,
+                                                        TdSetChatNotificationSettingsRequest>) {
+                        return runtime_->make_set_chat_notification_settings(
+                            std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request, TdToggleChatIsPinnedRequest>) {
+                        return runtime_->make_toggle_chat_is_pinned(input);
+                    } else if constexpr (std::is_same_v<Request, TdAddChatToListRequest>) {
+                        return runtime_->make_add_chat_to_list(input);
+                    } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
+                        return runtime_->make_join_chat(std::forward<decltype(input)>(input));
+                    } else {
+                        static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
+                        return runtime_->make_leave_chat(input);
+                    }
+                },
+                std::move(request));
+            return prepare_write(authorization, function, *tier, std::move(value));
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
+    static std::future<TdValue> send(TdPreparedWrite prepared) {
+        if (!prepared.state_) {
+            return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+        }
+        if (!prepared.state_->submit) {
+            return failed_future(prepared.state_->authorization_failure.value_or(
+                TdAuthorizationFailure::AuthStateMismatch));
+        }
+        auto state = std::move(prepared.state_);
+        auto submit = std::move(state->submit);
+        return submit();
     }
 
     std::future<TdValue>
@@ -909,6 +1094,11 @@ class TdClient::Impl {
     struct LeaseLocks {
         std::unique_lock<std::mutex> auth_commit;
         std::unique_lock<std::mutex> outbound;
+    };
+
+    struct PreparedWriteResources {
+        std::shared_ptr<TdOwnerLease> owner;
+        std::shared_ptr<LeaseLocks> held;
     };
 
     struct Generation {
@@ -1435,6 +1625,20 @@ TdSendLease::operator bool() const noexcept {
     return state_ != nullptr;
 }
 
+TdPreparedWrite::TdPreparedWrite() = default;
+TdPreparedWrite::~TdPreparedWrite() = default;
+TdPreparedWrite::TdPreparedWrite(std::shared_ptr<State> state) : state_(std::move(state)) {}
+TdPreparedWrite::TdPreparedWrite(TdPreparedWrite&&) noexcept = default;
+TdPreparedWrite& TdPreparedWrite::operator=(TdPreparedWrite&& other) noexcept = default;
+
+TdPreparedWrite::operator bool() const noexcept {
+    return state_ != nullptr && static_cast<bool>(state_->submit);
+}
+
+std::optional<TdAuthorizationFailure> TdPreparedWrite::authorization_failure() const noexcept {
+    return state_ ? state_->authorization_failure : std::nullopt;
+}
+
 TdClosedDecision::TdClosedDecision() = default;
 TdClosedDecision::~TdClosedDecision() {
     if (state_) {
@@ -1777,6 +1981,22 @@ std::future<TdValue>
 TdClient::send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                        TdSendMessageRequest request) {
     return impl_->send_message(authorization, std::move(request));
+}
+
+TdPreparedWrite
+TdClient::prepare_send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                               TdSendMessageRequest request) {
+    return impl_->prepare_send_message(authorization, std::move(request));
+}
+
+TdPreparedWrite
+TdClient::prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  TdDirectRequest request) {
+    return impl_->prepare_direct_mutation(authorization, std::move(request));
+}
+
+std::future<TdValue> TdClient::send(TdPreparedWrite&& prepared) {
+    return impl_->send(std::move(prepared));
 }
 
 std::future<TdValue>

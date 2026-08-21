@@ -247,6 +247,7 @@ class SingleSendCoordinator::Impl {
         : client_(client), session_(session),
           now_(hooks.now ? std::move(hooks.now) : [] { return core::TdEventClock::now(); }),
           wait_(std::move(hooks.wait)), before_request_(std::move(hooks.before_request)),
+          before_submit_(std::move(hooks.before_submit)),
           before_event_arbitration_(std::move(hooks.before_event_arbitration)),
           before_wait_(std::move(hooks.before_wait)),
           on_temporary_id_(std::move(hooks.on_temporary_id)) {
@@ -262,6 +263,7 @@ class SingleSendCoordinator::Impl {
     }
 
     ~Impl() {
+        settle_in_flight();
         client_.unsubscribe_send_updates(update_subscription_);
         client_.unsubscribe_response_completions(response_subscription_);
         client_.unsubscribe_auth_states(auth_subscription_);
@@ -274,6 +276,22 @@ class SingleSendCoordinator::Impl {
 
     SingleSendOutcome execute(core::TdSendMessageRequest request,
                               const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
+        auto preparation = prepare(std::move(request), authorization);
+        return std::visit(
+            [this](auto&& outcome) -> SingleSendOutcome {
+                using Outcome = std::decay_t<decltype(outcome)>;
+                if constexpr (std::is_same_v<Outcome, SingleSendPrepared>) {
+                    return execute_prepared();
+                } else {
+                    return std::forward<decltype(outcome)>(outcome);
+                }
+            },
+            preparation);
+    }
+
+    SingleSendPreparationOutcome
+    prepare(core::TdSendMessageRequest request,
+            const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
         if (executed_ || !authorization || authorization->data.state != core::AuthState::Ready ||
             !core::valid_td_send_message_request(request) ||
             (request.content.parsed && !request.content.formatted_text.capability.valid_for(
@@ -292,25 +310,107 @@ class SingleSendCoordinator::Impl {
         } catch (const std::exception&) {
             return SingleSendRejected{};
         }
+        if (deadline_expired(session_.deadline(), now_())) {
+            return SingleSendTimedOut{.temporary = std::nullopt,
+                                      .mutation_state = SingleSendMutationState::None};
+        }
+        if (session_.cancellation_requested()) {
+            return SingleSendCancelled{.temporary = std::nullopt,
+                                       .mutation_state = SingleSendMutationState::None};
+        }
         if (!session_.reserve_direct_in_flight()) {
             return SingleSendCancelled{.temporary = std::nullopt,
                                        .mutation_state = SingleSendMutationState::None};
         }
-        const auto chat_id = request.chat_id;
-        const auto sending_id = request.options.sending_id;
+        in_flight_ = true;
+        chat_id_ = request.chat_id;
+        sending_id_ = request.options.sending_id;
+        authorization_ = authorization;
+        prepared_write_ = client_.prepare_send_message(authorization, std::move(request));
+        if (!prepared_write_) {
+            const auto failure = prepared_write_.authorization_failure();
+            auto auth = auth_terminal(*authorization);
+            settle_in_flight();
+            if (auth) {
+                return std::visit(
+                    [](auto&& outcome) -> SingleSendPreparationOutcome {
+                        using Outcome = std::decay_t<decltype(outcome)>;
+                        if constexpr (std::is_same_v<Outcome, SingleSendAuthorizationLost> ||
+                                      std::is_same_v<Outcome, SingleSendGenerationClosed>) {
+                            outcome.mutation_state = SingleSendMutationState::None;
+                            return std::forward<decltype(outcome)>(outcome);
+                        }
+                        return SingleSendRejected{};
+                    },
+                    std::move(auth->outcome));
+            }
+            return SingleSendRejected{.authorization_failure = failure,
+                                      .mutation_state = SingleSendMutationState::None};
+        }
+        if (deadline_expired(session_.deadline(), now_())) {
+            prepared_write_ = {};
+            settle_in_flight();
+            return SingleSendTimedOut{.temporary = std::nullopt,
+                                      .mutation_state = SingleSendMutationState::None};
+        }
+        if (session_.cancellation_requested()) {
+            prepared_write_ = {};
+            settle_in_flight();
+            return SingleSendCancelled{.temporary = std::nullopt,
+                                       .mutation_state = SingleSendMutationState::None};
+        }
+        prepared_ = true;
+        return SingleSendPrepared{};
+    }
+
+    SingleSendOutcome execute_prepared() {
+        if (!prepared_ || !prepared_write_ || !authorization_) {
+            return SingleSendRejected{.authorization_failure = std::nullopt,
+                                      .mutation_state = SingleSendMutationState::Possible};
+        }
+        prepared_ = false;
+        try {
+            if (before_submit_) {
+                before_submit_();
+            }
+        } catch (const std::exception&) {
+            prepared_write_ = {};
+            return finish(SingleSendRejected{.authorization_failure = std::nullopt,
+                                             .mutation_state = SingleSendMutationState::Possible});
+        }
+        if (deadline_expired(session_.deadline(), now_())) {
+            prepared_write_ = {};
+            return finish(SingleSendTimedOut{.temporary = std::nullopt,
+                                             .mutation_state = SingleSendMutationState::Possible});
+        }
+        if (session_.cancellation_requested()) {
+            prepared_write_ = {};
+            return finish(SingleSendCancelled{.temporary = std::nullopt,
+                                              .mutation_state = SingleSendMutationState::Possible});
+        }
         std::future<core::TdValue> response;
         try {
-            response = client_.send_message(authorization, std::move(request));
+            response = client_.send(std::move(prepared_write_));
         } catch (const std::exception&) {
-            session_.settle_in_flight();
-            return SingleSendRejected{};
+            return finish(SingleSendRejected{.authorization_failure = std::nullopt,
+                                             .mutation_state = SingleSendMutationState::Possible});
         }
-        auto outcome = wait_for_terminal(response, *authorization, chat_id, sending_id);
-        session_.settle_in_flight();
-        return outcome;
+        return finish(wait_for_terminal(response, *authorization_, chat_id_, sending_id_));
     }
 
   private:
+    void settle_in_flight() {
+        if (in_flight_) {
+            session_.settle_in_flight();
+            in_flight_ = false;
+        }
+    }
+
+    SingleSendOutcome finish(SingleSendOutcome outcome) {
+        settle_in_flight();
+        return outcome;
+    }
+
     void record_update(const core::TdValue& value) {
         std::optional<SendUpdate> update;
         if (const auto* succeeded = value.get_if<core::TdUpdateMessageSendSucceeded>()) {
@@ -629,10 +729,17 @@ class SingleSendCoordinator::Impl {
     std::function<core::TdEventClock::time_point()> now_;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait_;
     std::function<void()> before_request_;
+    std::function<void()> before_submit_;
     std::function<void()> before_event_arbitration_;
     std::function<void()> before_wait_;
     std::function<void(const SingleSendTemporaryId&)> on_temporary_id_;
     bool executed_ = false;
+    bool prepared_ = false;
+    bool in_flight_ = false;
+    std::int64_t chat_id_ = 0;
+    std::int32_t sending_id_ = 0;
+    core::TdPreparedWrite prepared_write_;
+    std::shared_ptr<const core::AuthStateSnapshot> authorization_;
     bool response_consumed_ = false;
     bool temporary_notified_ = false;
     std::optional<SingleSendTemporaryId> temporary_;
@@ -658,6 +765,16 @@ SingleSendOutcome SingleSendCoordinator::execute(
     core::TdSendMessageRequest request,
     const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
     return impl_->execute(std::move(request), authorization);
+}
+
+SingleSendPreparationOutcome SingleSendCoordinator::prepare(
+    core::TdSendMessageRequest request,
+    const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
+    return impl_->prepare(std::move(request), authorization);
+}
+
+SingleSendOutcome SingleSendCoordinator::execute_prepared() {
+    return impl_->execute_prepared();
 }
 
 } // namespace tgcli::daemon

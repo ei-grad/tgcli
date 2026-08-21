@@ -158,10 +158,15 @@ using DirectOutcome = std::variant<DirectSuccess, DirectTdError, DirectAuthoriza
                                    DirectTimedOut, DirectCancelled, DirectRejected, DirectMalformed,
                                    DirectJoinGuardRequired, DirectJoinDeclined>;
 
+struct DirectPrepared {};
+using DirectPreparationOutcome = std::variant<DirectPrepared, DirectAuthorizationLost,
+                                              DirectTimedOut, DirectCancelled, DirectRejected>;
+
 struct DirectRpcHooks {
     std::function<core::TdEventClock::time_point()> now;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
     std::function<void()> before_request;
+    std::function<void()> before_submit;
     std::function<void()> before_event_arbitration;
     std::function<void()> before_wait;
 };
@@ -178,6 +183,10 @@ class DirectRpcCoordinator {
 
     DirectOutcome execute(const core::TdDirectRequest& request,
                           const std::shared_ptr<const core::AuthStateSnapshot>& authorization);
+    DirectPreparationOutcome
+    prepare(core::TdDirectRequest request,
+            const std::shared_ptr<const core::AuthStateSnapshot>& authorization);
+    DirectOutcome execute_prepared();
 
   private:
     class Impl;

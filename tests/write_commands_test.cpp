@@ -376,6 +376,15 @@ class FakeWrites final {
         coordinator_hooks_->direct_rpc.now = [] { return core::TdEventClock::time_point::max(); };
     }
 
+    void expire_direct_before_submit() {
+        auto expired = std::make_shared<std::atomic<bool>>(false);
+        coordinator_hooks_->direct_rpc.now = [expired] {
+            return expired->load() ? core::TdEventClock::time_point::max()
+                                   : core::TdEventClock::now();
+        };
+        coordinator_hooks_->direct_rpc.before_submit = [expired] { expired->store(true); };
+    }
+
     void cancel_before_request(core::TdFunctionKind kind,
                                std::shared_ptr<daemon::RequestSession>* session) {
         auto disconnect = [session] { (*session)->disconnect(); };
@@ -383,6 +392,16 @@ class FakeWrites final {
             coordinator_hooks_->single_send.before_request = std::move(disconnect);
         } else {
             coordinator_hooks_->direct_rpc.before_request = std::move(disconnect);
+        }
+    }
+
+    void cancel_before_submit(core::TdFunctionKind kind,
+                              std::shared_ptr<daemon::RequestSession>* session) {
+        auto disconnect = [session] { (*session)->disconnect(); };
+        if (kind == core::TdFunctionKind::SendMessage) {
+            coordinator_hooks_->single_send.before_submit = std::move(disconnect);
+        } else {
+            coordinator_hooks_->direct_rpc.before_submit = std::move(disconnect);
         }
     }
 
@@ -459,6 +478,40 @@ void check_closed_without_pending(FakeWrites& fake) {
     CHECK(store.snapshot.entries.empty());
     CHECK(fake.foundation()->run_core_gate(guard, 1'800'000'000).status ==
           daemon::IdempotencyCoreGateStatus::Clean);
+}
+
+void check_completed_possible_with_pending(FakeWrites& fake) {
+    auto guard = fake.foundation()->acquire_epoch();
+    CHECK(fake.foundation()->audit().inspect(guard).status ==
+          daemon::AccountAuditInspectionStatus::Clean);
+    const auto store = fake.foundation()->store().inspect(guard);
+    REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+    REQUIRE(store.snapshot.entries.size() == 1);
+    CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
+    CHECK(fake.foundation()->run_core_gate(guard, 1'800'000'000).status ==
+          daemon::IdempotencyCoreGateStatus::Clean);
+}
+
+void check_open_dispatch_with_pending(FakeWrites& fake, bool exercise_next_gate = true) {
+    auto guard = fake.foundation()->acquire_epoch();
+    const auto audit = fake.foundation()->audit().inspect(guard);
+    CHECK(audit.status == daemon::AccountAuditInspectionStatus::Open);
+    REQUIRE(audit.oldest_open);
+    CHECK(audit.oldest_open->dispatch_started);
+    const auto store = fake.foundation()->store().inspect(guard);
+    REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+    REQUIRE(store.snapshot.entries.size() == 1);
+    CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
+    if (!exercise_next_gate) {
+        return;
+    }
+    const auto gate = fake.foundation()->run_core_gate(guard, 1'800'000'000);
+    CHECK(gate.status == daemon::IdempotencyCoreGateStatus::AuditIncomplete);
+    REQUIRE(gate.terminal);
+    CHECK((*gate.terminal)["code"] == "AUDIT_INCOMPLETE");
+    CHECK((*gate.terminal)["details"]["mutation_state"] == "possible");
+    CHECK((*gate.terminal)["details"]["completed_stages"] ==
+          json::array({"idempotency_pending", "dispatch_started"}));
 }
 
 } // namespace
@@ -864,12 +917,12 @@ TEST_CASE("pre-send coordinator rejection preserves no-mutation durability",
     }
 }
 
-TEST_CASE("coordinator no-mutation deadline and cancellation close keyed writes",
+TEST_CASE("prepared coordinator readiness failures close before a dispatch proof",
           "[write-command][send][delete][deadline][cancel][idempotency][fake-boundary]") {
     SECTION("delete deadline") {
         FakeWrites fake;
         fake.expire_direct_before_request();
-        auto pending = fake.dispatch(delete_request(101, "delete-direct-deadline-key"));
+        auto pending = fake.dispatch(delete_request(101, "delete-prepared-deadline-key"));
         resolve_basic(fake);
         fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
         core::TdMessageProperties properties;
@@ -885,10 +938,57 @@ TEST_CASE("coordinator no-mutation deadline and cancellation close keyed writes"
         check_closed_without_pending(fake);
     }
 
+    for (const auto kind :
+         {core::TdFunctionKind::SendMessage, core::TdFunctionKind::DeleteMessages}) {
+        CAPTURE(core::td_function_name(kind));
+        FakeWrites fake;
+        std::shared_ptr<daemon::RequestSession> session;
+        fake.cancel_before_request(kind, &session);
+        auto pending =
+            kind == core::TdFunctionKind::SendMessage
+                ? fake.dispatch(send_request("hello", false, "prepared-cancel-key"), &session)
+                : fake.dispatch(delete_request(101, "prepared-cancel-key"), &session);
+        resolve_basic(fake);
+        if (kind == core::TdFunctionKind::DeleteMessages) {
+            fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+            core::TdMessageProperties properties;
+            properties.can_be_deleted_only_for_self = true;
+            fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        }
+        const auto outcome = pending.get();
+        CHECK_FALSE(outcome.error);
+        CHECK_FALSE(outcome.result);
+        CHECK(outcome.terminal_count == 0);
+        CHECK(fake.count(kind) == 0);
+        check_closed_without_pending(fake);
+    }
+}
+
+TEST_CASE("post-proof coordinator deadline and cancellation retain unknown keyed writes",
+          "[write-command][send][delete][deadline][cancel][idempotency][fake-boundary]") {
+    SECTION("delete deadline") {
+        FakeWrites fake;
+        fake.expire_direct_before_submit();
+        auto pending = fake.dispatch(delete_request(101, "delete-direct-deadline-key"));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_deleted_only_for_self = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "dispatch");
+        CHECK((*outcome.error)["error"]["details"]["outcome"] == "unknown");
+        CHECK((*outcome.error)["error"]["details"]["idempotency"] == "pending");
+        CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
+        check_completed_possible_with_pending(fake);
+    }
+
     SECTION("send cancellation") {
         FakeWrites fake;
         std::shared_ptr<daemon::RequestSession> session;
-        fake.cancel_before_request(core::TdFunctionKind::SendMessage, &session);
+        fake.cancel_before_submit(core::TdFunctionKind::SendMessage, &session);
         auto pending =
             fake.dispatch(send_request("hello", false, "send-direct-cancel-key"), &session);
         resolve_basic(fake);
@@ -897,13 +997,22 @@ TEST_CASE("coordinator no-mutation deadline and cancellation close keyed writes"
         CHECK_FALSE(outcome.result);
         CHECK(outcome.terminal_count == 0);
         CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
-        check_closed_without_pending(fake);
+        check_open_dispatch_with_pending(fake, false);
+
+        auto retry = fake.dispatch(send_request("hello", false, "send-direct-cancel-key"));
+        bind_principal(fake);
+        const auto retry_outcome = retry.get();
+        REQUIRE(retry_outcome.error);
+        REQUIRE((*retry_outcome.error)["error"]["code"] == "AUDIT_INCOMPLETE");
+        CHECK((*retry_outcome.error)["error"]["details"]["mutation_state"] == "possible");
+        CHECK((*retry_outcome.error)["error"]["details"]["completed_stages"] ==
+              json::array({"idempotency_pending", "dispatch_started"}));
     }
 
     SECTION("delete cancellation") {
         FakeWrites fake;
         std::shared_ptr<daemon::RequestSession> session;
-        fake.cancel_before_request(core::TdFunctionKind::DeleteMessages, &session);
+        fake.cancel_before_submit(core::TdFunctionKind::DeleteMessages, &session);
         auto pending = fake.dispatch(delete_request(101, "delete-direct-cancel-key"), &session);
         resolve_basic(fake);
         fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
@@ -915,7 +1024,7 @@ TEST_CASE("coordinator no-mutation deadline and cancellation close keyed writes"
         CHECK_FALSE(outcome.result);
         CHECK(outcome.terminal_count == 0);
         CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
-        check_closed_without_pending(fake);
+        check_open_dispatch_with_pending(fake);
     }
 }
 
