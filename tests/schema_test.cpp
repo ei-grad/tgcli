@@ -622,6 +622,14 @@ TEST_CASE("public M3 write errors close resolver durability and timeout branches
                         {"mutation_state", "possible"},
                         {"completed_stages", json::array({"idempotency_pending", "dispatch_started",
                                                           "temporary_ids_observed"})}}),
+        json{{"error",
+              {{"code", "AUDIT_INCOMPLETE"},
+               {"message", "attachment spool recovery is incomplete"},
+               {"details",
+                {{"account", "main"},
+                 {"path", {{"kind", "bytes_hex"}, {"value", "2f73746174652fff"}}},
+                 {"mutation_state", "none"},
+                 {"completed_stages", json::array()}}}}}},
         terminal_error("TIMEOUT", {{"operation", "send"},
                                    {"phase", "preflight"},
                                    {"state", "ready"},
@@ -651,14 +659,17 @@ TEST_CASE("public M3 write errors close resolver durability and timeout branches
     invalid = errors[5];
     invalid["error"]["details"]["retry_after"] = 1;
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
-    invalid = errors[11];
+    invalid = errors[12];
     invalid["error"]["details"]["outcome"] = "unknown";
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
-    invalid = errors[12];
+    invalid = errors[13];
     invalid["error"]["details"].erase("temporary_message_id");
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     invalid = errors[10];
     invalid["error"]["details"]["completed_stages"].push_back("forward_progress");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[11];
+    invalid["error"]["details"]["path"]["value"] = "2f00";
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     invalid = errors[6];
     invalid["error"]["details"]["reason"] = "not_deletable_for_self";

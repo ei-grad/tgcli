@@ -894,6 +894,63 @@ class HarnessInvariantTests(unittest.TestCase):
         self.assertIn("--yes", calls[0][1])
         self.assertEqual(calls[0][1][-4:], ["msg", "delete", "42", "101"])
 
+    def test_m3_key_scan_covers_every_private_artifact_class_and_earlier_daemon_capture(
+        self,
+    ) -> None:
+        run_root = self.tree.directory("m3-private-artifacts")
+        captures = acceptance.Captures(run_root / "captures")
+        daemon_stdout, daemon_stderr = captures.allocate("daemon-before-m3")
+        command_stdout, command_stderr = captures.allocate("m3-command")
+        artifacts = [daemon_stdout, daemon_stderr, command_stdout, command_stderr]
+        for relative in (
+            "state/tgcli-test/accounts/test-user/audit.log",
+            "state/tgcli-test/accounts/test-user/audit.log.1",
+            "state/tgcli-test/accounts/test-user/idempotency.db",
+            "state/tgcli-test/accounts/test-user/.idempotency.db.tmp",
+            "state/tgcli-test/accounts/test-user/tdlib.log",
+            "state/tgcli-test/accounts/test-user/tdlib.log.1",
+            "state/tgcli-test/accounts/test-user/crash-diagnostic.json",
+            "data/tgcli-test/accounts/test-user/td.binlog",
+            "config/tgcli-test/config.toml",
+            "runtime/tgcli-test/core-disabled.artifact",
+        ):
+            artifact = run_root / relative
+            artifact.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            artifact.write_bytes(b"safe\n")
+            artifact.chmod(0o600)
+            artifacts.append(artifact)
+
+        sentinel = b"raw-m3-key-sentinel"
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact.relative_to(run_root)):
+                artifact.write_bytes(b"prefix-" + sentinel + b"-suffix")
+                with self.assertRaises(acceptance.AcceptanceError) as raised:
+                    acceptance._scan_m3_key_artifacts(
+                        run_root, captures, [sentinel]
+                    )
+                self.assertNotIn(sentinel.decode(), str(raised.exception))
+                artifact.write_bytes(b"safe\n")
+
+    def test_m3_key_scan_accepts_a_complete_clean_private_tree(self) -> None:
+        run_root = self.tree.directory("m3-clean-artifacts")
+        captures = acceptance.Captures(run_root / "captures")
+        stdout, stderr = captures.allocate("daemon-before-m3")
+        stdout.write_bytes(b"safe stdout\n")
+        stderr.write_bytes(b"safe stderr\n")
+        for relative in (
+            "state/tgcli-test/accounts/test-user/audit.log",
+            "state/tgcli-test/accounts/test-user/idempotency.db",
+            "state/tgcli-test/accounts/test-user/tdlib.log",
+            "data/tgcli-test/accounts/test-user/td.binlog",
+        ):
+            artifact = run_root / relative
+            artifact.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            artifact.write_bytes(b"safe\n")
+            artifact.chmod(0o600)
+        acceptance._scan_m3_key_artifacts(
+            run_root, captures, [b"raw-m3-key-sentinel"]
+        )
+
     def test_selector_registration_failure_reaps_the_interactive_child(self) -> None:
         pid_file = self.tree.root / "child.pid"
         binary = self.tree.file(

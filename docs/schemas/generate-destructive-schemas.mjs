@@ -1105,6 +1105,21 @@ const v2StoredErrorTerminal = (operation, allowedCodes, excludedCodes = []) => (
 const v2StoredTerminal = (operation) => ({
   oneOf: [v2ResultTerminal(operation), ...v2StoredErrorTerminal(operation).oneOf],
 });
+const v2ExplicitNoMutationTerminal = (operation) => ({
+  oneOf: [
+    ...v2StoredErrorTerminal(operation, ['DAEMON_SHUTDOWN', 'NOT_AUTHED', 'INTERNAL']).oneOf,
+    storedError('TIMEOUT', operationDetails(
+      operation,
+      ['phase', 'state', 'outcome', 'idempotency'],
+      {
+        phase: { const: 'preflight' },
+        state: reference('nullableState'),
+        outcome: { const: 'not_started' },
+        idempotency: { enum: ['not_requested', 'not_created', 'removed'] },
+      },
+    ), 7).schema,
+  ],
+});
 const v2MutationTerminal = (operation) => {
   const allowed = operation === 'msg_forward'
     ? ['FORWARD_PARTIAL', 'INTERNAL']
@@ -1837,6 +1852,15 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
       'none',
       ambiguous,
       v2StoredErrorTerminal(operation, ['TDLIB_ERROR', 'RATE_LIMITED']),
+    ));
+  }
+  if (['send', 'msg_delete'].includes(operation)) {
+    branches.push(v2OutcomeBranch(
+      operation,
+      false,
+      'none',
+      ambiguous,
+      v2ExplicitNoMutationTerminal(operation),
     ));
   }
   branches.push(

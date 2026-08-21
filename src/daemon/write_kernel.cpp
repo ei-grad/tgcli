@@ -83,6 +83,17 @@ std::string_view pre_intent_idempotency(const WriteKernelRequest& request) {
     return request.idempotency_key_hash ? "not_created" : "not_requested";
 }
 
+std::string_view post_intent_idempotency(const WriteKernelRequest& request) {
+    return request.idempotency_key_hash ? "removed" : "not_requested";
+}
+
+std::optional<write_contract::StoredTerminal> cancellation_terminal(proto::M3Operation operation) {
+    std::string error;
+    return write_contract::make_error_terminal(operation, "DAEMON_SHUTDOWN",
+                                               "daemon is shutting down",
+                                               {{"reason", "daemon_shutdown"}}, kGeneric, error);
+}
+
 bool cancelled(const WriteKernelRequest& request) {
     return request.cancellation_token.stop_requested() ||
            (request.cancelled && request.cancelled());
@@ -729,7 +740,8 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
         };
 
-        const auto finish_without_dispatch = [&](const write_contract::StoredTerminal& terminal) {
+        const auto finish_without_dispatch = [&](const write_contract::StoredTerminal& terminal,
+                                                 bool deliver_terminal = true) {
             if (!write_contract::terminal_matches_plan(terminal, proposed_plan) ||
                 !append_outcome(*foundation_, epoch, request, hooks, *operation, terminal,
                                 AccountAuditMutationState::None, completed)) {
@@ -743,7 +755,10 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                 }
             }
             static_cast<void>(cleanup_current_spool(false));
-            return WriteKernelResult{WriteKernelStatus::Completed, terminal.value(), proposed_plan};
+            return WriteKernelResult{
+                deliver_terminal ? WriteKernelStatus::Completed : WriteKernelStatus::Rejected,
+                deliver_terminal ? std::optional<json>{terminal.value()} : std::nullopt,
+                proposed_plan};
         };
 
         if (post_intent.terminal_without_dispatch) {
@@ -752,6 +767,21 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
 
         if (!hooks.revalidate_auth_and_schedule || !hooks.dispatch) {
             return audit_fatal();
+        }
+        if (deadline_expired(request.deadline)) {
+            auto terminal = write_contract::make_error_terminal(
+                request.operation, "TIMEOUT", "request timed out",
+                {{"operation", operation_name(request.operation)},
+                 {"phase", "preflight"},
+                 {"state", "ready"},
+                 {"outcome", "not_started"},
+                 {"idempotency", post_intent_idempotency(request)}},
+                kTimeout, contract_error);
+            return terminal ? finish_without_dispatch(*terminal) : audit_fatal();
+        }
+        if (cancelled(request)) {
+            const auto terminal = cancellation_terminal(request.operation);
+            return terminal ? finish_without_dispatch(*terminal, false) : audit_fatal();
         }
         std::optional<WriteDispatchAdmissionOutcome> dispatch_admission;
         try {
@@ -763,10 +793,26 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             return finish_without_dispatch(*terminal);
         }
         if (std::holds_alternative<WriteDispatchStopped>(*dispatch_admission)) {
-            return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
+            const auto terminal = cancellation_terminal(request.operation);
+            return terminal ? finish_without_dispatch(*terminal, false) : audit_fatal();
         }
         auto dispatch_preparation =
             std::get<WriteDispatchPreparation>(std::move(*dispatch_admission));
+        if (deadline_expired(request.deadline)) {
+            auto terminal = write_contract::make_error_terminal(
+                request.operation, "TIMEOUT", "request timed out",
+                {{"operation", operation_name(request.operation)},
+                 {"phase", "preflight"},
+                 {"state", "ready"},
+                 {"outcome", "not_started"},
+                 {"idempotency", post_intent_idempotency(request)}},
+                kTimeout, contract_error);
+            return terminal ? finish_without_dispatch(*terminal) : audit_fatal();
+        }
+        if (cancelled(request)) {
+            const auto terminal = cancellation_terminal(request.operation);
+            return terminal ? finish_without_dispatch(*terminal, false) : audit_fatal();
+        }
         if (!append_checkpoint(*foundation_, epoch, request, hooks, *operation,
                                ++checkpoint_sequence, AccountAuditStage::DispatchStarted,
                                dispatch_preparation.proof, completed)) {
@@ -802,10 +848,6 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
             return true;
         });
-        const bool cancellation_preceded_dispatch = cancelled(request);
-        if (cancellation_preceded_dispatch) {
-            return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
-        }
         std::optional<WriteDispatchOutcome> dispatch;
         try {
             dispatch.emplace(hooks.dispatch(proposed_plan, dispatch_preparation, observations));
@@ -815,12 +857,13 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         if (!observations.durable()) {
             return audit_fatal();
         }
-        if (cancelled(request)) {
-            return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
-        }
         if (dispatch->terminal.operation() != request.operation ||
             !write_contract::terminal_matches_plan(dispatch->terminal, proposed_plan)) {
             return audit_fatal();
+        }
+        const bool suppress_terminal = cancelled(request);
+        if (suppress_terminal && dispatch->mutation_state != AccountAuditMutationState::None) {
+            return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
         }
         if (dispatch->mutation_confirmed &&
             !append_checkpoint(*foundation_, epoch, request, hooks, *operation,
@@ -861,7 +904,10 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
             static_cast<void>(cleanup_completed);
         }
-        return {WriteKernelStatus::Completed, dispatch->terminal.value(), std::move(proposed_plan)};
+        return {suppress_terminal ? WriteKernelStatus::Rejected : WriteKernelStatus::Completed,
+                suppress_terminal ? std::optional<json>{}
+                                  : std::optional<json>{dispatch->terminal.value()},
+                std::move(proposed_plan)};
     } catch (...) {
         return intent_may_be_durable
                    ? audit_fatal()

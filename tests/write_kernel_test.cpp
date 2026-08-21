@@ -791,13 +791,12 @@ TEST_CASE("write kernel expiry equality and post-intent cancellation preserve or
 
         auto guard = tree.foundation()->acquire_epoch();
         const auto audit = tree.foundation()->audit().inspect(guard);
-        CHECK(audit.status == daemon::AccountAuditInspectionStatus::Open);
-        REQUIRE(audit.oldest_open);
-        CHECK(audit.oldest_open->dispatch_started);
+        CHECK(audit.status == daemon::AccountAuditInspectionStatus::Clean);
         const auto store = tree.foundation()->store().inspect(guard);
         REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
-        REQUIRE(store.snapshot.entries.size() == 1);
-        CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
+        CHECK(store.snapshot.entries.empty());
+        CHECK(tree.foundation()->run_core_gate(guard, 1'700'000'001).status ==
+              daemon::IdempotencyCoreGateStatus::Clean);
     }
 
     SECTION("deadline after intent") {
@@ -814,11 +813,24 @@ TEST_CASE("write kernel expiry equality and post-intent cancellation preserve or
         };
         auto request = archive_request("00000000000000000000000000000034", 1'700'000'000);
         request.deadline = tgcli::RequestClock::now() + std::chrono::milliseconds(5);
-        CHECK(kernel.run(request, hooks).status == daemon::WriteKernelStatus::Completed);
-        CHECK(dispatches == 1);
+        const auto result = kernel.run(request, hooks);
+        CHECK(result.status == daemon::WriteKernelStatus::Completed);
+        REQUIRE(result.terminal);
+        REQUIRE(result.terminal->contains("code"));
+        CHECK((*result.terminal)["code"] == "TIMEOUT");
+        CHECK((*result.terminal)["details"]["phase"] == "preflight");
+        CHECK((*result.terminal)["details"]["outcome"] == "not_started");
+        CHECK((*result.terminal)["details"]["idempotency"] == "removed");
+        CHECK(dispatches == 0);
+        auto guard = tree.foundation()->acquire_epoch();
+        CHECK(tree.foundation()->audit().inspect(guard).status ==
+              daemon::AccountAuditInspectionStatus::Clean);
+        const auto store = tree.foundation()->store().inspect(guard);
+        REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+        CHECK(store.snapshot.entries.empty());
     }
 
-    SECTION("cancelled revalidation retains an intent for no-dispatch recovery") {
+    SECTION("cancelled revalidation closes the no-dispatch intent") {
         const KernelTree tree;
         const daemon::WriteKernel kernel(tree.foundation());
         std::atomic<int> dispatches{0};
@@ -834,13 +846,12 @@ TEST_CASE("write kernel expiry equality and post-intent cancellation preserve or
 
         auto guard = tree.foundation()->acquire_epoch();
         const auto audit = tree.foundation()->audit().inspect(guard);
-        CHECK(audit.status == daemon::AccountAuditInspectionStatus::Open);
-        REQUIRE(audit.oldest_open);
-        CHECK_FALSE(audit.oldest_open->dispatch_started);
+        CHECK(audit.status == daemon::AccountAuditInspectionStatus::Clean);
         const auto store = tree.foundation()->store().inspect(guard);
         REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
-        REQUIRE(store.snapshot.entries.size() == 1);
-        CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
+        CHECK(store.snapshot.entries.empty());
+        CHECK(tree.foundation()->run_core_gate(guard, 1'700'000'001).status ==
+              daemon::IdempotencyCoreGateStatus::Clean);
     }
 }
 

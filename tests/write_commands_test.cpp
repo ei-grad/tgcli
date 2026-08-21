@@ -214,15 +214,18 @@ const T& function_field(const core::TdFunctionData& function, std::string_view n
 
 class FakeWrites final {
   public:
-    explicit FakeWrites(bool allow_write = true)
-        : tree_(allow_write), config_(tree_.config_path(), {}, ::getuid()) {
+    explicit FakeWrites(
+        bool allow_write = true,
+        std::shared_ptr<const daemon::testing::IdempotencyStoreHooks> store_hooks = {})
+        : tree_(allow_write), config_(tree_.config_path(), {}, ::getuid()),
+          coordinator_hooks_(std::make_shared<daemon::testing::WriteCoordinatorHooks>()) {
         std::string error;
         lease_ =
             daemon_lock::acquire_lifetime(tree_.account_state() + "/daemon.lock", identity_, error);
         INFO(error);
         REQUIRE(lease_);
-        auto created = daemon::IdempotencyFoundation::create(tree_.account_state(), "main",
-                                                             ::getuid(), lease_);
+        auto created = daemon::IdempotencyFoundation::create(
+            tree_.account_state(), "main", ::getuid(), lease_, {}, std::move(store_hooks));
         REQUIRE(std::holds_alternative<daemon::IdempotencyFoundation>(created));
         foundation_ = std::make_shared<daemon::IdempotencyFoundation>(
             std::get<daemon::IdempotencyFoundation>(std::move(created)));
@@ -241,7 +244,8 @@ class FakeWrites final {
         REQUIRE(client_->auth_state()->data.state == core::AuthState::Ready);
 
         coordinator_ = std::make_unique<daemon::WriteCoordinator>(
-            *client_, "main", tree_.config_path(), ::getuid(), foundation_);
+            *client_, "main", tree_.config_path(), ::getuid(), foundation_, std::function<void()>{},
+            coordinator_hooks_);
         daemon::register_write_commands(dispatcher_, *coordinator_);
 
         const auto admitted_result = config_.admit("main", std::chrono::steady_clock::now() + 2s);
@@ -266,7 +270,9 @@ class FakeWrites final {
     FakeWrites(FakeWrites&&) = delete;
     FakeWrites& operator=(FakeWrites&&) = delete;
 
-    std::future<Outcome> dispatch(const proto::Request& request) {
+    std::future<Outcome>
+    dispatch(const proto::Request& request,
+             std::shared_ptr<daemon::RequestSession>* exposed_session = nullptr) {
         std::string error;
         auto frozen = proto::admit_request_source(request, error);
         INFO(error);
@@ -291,6 +297,9 @@ class FakeWrites final {
             std::move(*frozen), sink, 0, daemon::RequestSession::NonceGenerator{},
             daemon::ActivityTracker::Token{}, admitted_, std::nullopt,
             daemon::ConfigAdmissionMode::FrozenRuntime);
+        if (exposed_session != nullptr) {
+            *exposed_session = session;
+        }
         return std::async(std::launch::async, [this, outcome, session] {
             dispatcher_.dispatch(*session);
             return *outcome;
@@ -306,6 +315,18 @@ class FakeWrites final {
         auto function = sent.back().function;
         runtime_->push_response(client_id_, sent.back().query_id,
                                 core::TdValue::from(std::move(value)));
+        ++sent_count_;
+        return function;
+    }
+
+    core::TdFunctionData respond_value(core::TdFunctionKind expected, core::TdValue value) {
+        CAPTURE(core::td_function_name(expected), sent_count_);
+        REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
+        const auto sent = runtime_->sent_functions();
+        REQUIRE(sent.size() == sent_count_ + 1);
+        CHECK(sent.back().function.kind() == expected);
+        auto function = sent.back().function;
+        runtime_->push_response(client_id_, sent.back().query_id, std::move(value));
         ++sent_count_;
         return function;
     }
@@ -330,6 +351,41 @@ class FakeWrites final {
         return tree_;
     }
 
+    [[nodiscard]] const std::shared_ptr<daemon::IdempotencyFoundation>& foundation() const {
+        return foundation_;
+    }
+
+    void reject_before_request(core::TdFunctionKind kind) {
+        auto advance_authorization = [this] {
+            const auto sequence = client_->auth_state()->auth_sequence;
+            runtime_->push_update(client_id_, {}, core::AuthStateData{core::AuthState::Ready});
+            const auto deadline = std::chrono::steady_clock::now() + 2s;
+            while (client_->auth_state()->auth_sequence == sequence &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(1ms);
+            }
+        };
+        if (kind == core::TdFunctionKind::SendMessage) {
+            coordinator_hooks_->single_send.before_request = std::move(advance_authorization);
+        } else {
+            coordinator_hooks_->direct_rpc.before_request = std::move(advance_authorization);
+        }
+    }
+
+    void expire_direct_before_request() {
+        coordinator_hooks_->direct_rpc.now = [] { return core::TdEventClock::time_point::max(); };
+    }
+
+    void cancel_before_request(core::TdFunctionKind kind,
+                               std::shared_ptr<daemon::RequestSession>* session) {
+        auto disconnect = [session] { (*session)->disconnect(); };
+        if (kind == core::TdFunctionKind::SendMessage) {
+            coordinator_hooks_->single_send.before_request = std::move(disconnect);
+        } else {
+            coordinator_hooks_->direct_rpc.before_request = std::move(disconnect);
+        }
+    }
+
     [[nodiscard]] core::TdFormattedText parsed_text(std::string text) const {
         return test::ScriptedTdRuntime::parsed_formatted_text(client_id_, std::move(text));
     }
@@ -343,6 +399,7 @@ class FakeWrites final {
     test::ScriptedTdRuntime* runtime_ = nullptr;
     test::ScriptedClient client_id_{};
     std::unique_ptr<core::TdClient> client_;
+    std::shared_ptr<daemon::testing::WriteCoordinatorHooks> coordinator_hooks_;
     std::unique_ptr<daemon::WriteCoordinator> coordinator_;
     daemon::Dispatcher dispatcher_;
     std::shared_ptr<const daemon::AdmittedAccountConfig> admitted_;
@@ -391,6 +448,17 @@ void resolve_basic(FakeWrites& fake) {
 
 void bind_principal(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
+}
+
+void check_closed_without_pending(FakeWrites& fake) {
+    auto guard = fake.foundation()->acquire_epoch();
+    CHECK(fake.foundation()->audit().inspect(guard).status ==
+          daemon::AccountAuditInspectionStatus::Clean);
+    const auto store = fake.foundation()->store().inspect(guard);
+    REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+    CHECK(store.snapshot.entries.empty());
+    CHECK(fake.foundation()->run_core_gate(guard, 1'800'000'000).status ==
+          daemon::IdempotencyCoreGateStatus::Clean);
 }
 
 } // namespace
@@ -542,6 +610,53 @@ TEST_CASE("public send enforces the +10/+11 schedule boundary again before dispa
         CHECK((*outcome.error)["error"]["code"] == "PRECONDITION_FAILED");
         CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
         CHECK(std::filesystem::exists(fake.tree().audit_path()));
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("commit recheck handles the complete signed server-time domain") {
+        for (const auto& [server_time, reason] :
+             std::vector<std::pair<std::int64_t, std::string_view>>{
+                 {std::numeric_limits<std::int64_t>::min(), "schedule_too_far"},
+                 {std::numeric_limits<std::int64_t>::max(), "schedule_window_elapsed"}}) {
+            CAPTURE(server_time, reason);
+            FakeWrites fake;
+            auto pending =
+                fake.dispatch(send_request("hello", false, "schedule-extreme-key", send_date));
+            resolve_basic(fake);
+            fake.respond(core::TdFunctionKind::GetOption,
+                         core::TdOptionInteger{.value = send_date - 11});
+            fake.respond(core::TdFunctionKind::GetOption,
+                         core::TdOptionInteger{.value = server_time});
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "PRECONDITION_FAILED");
+            CHECK((*outcome.error)["error"]["details"]["reason"] == reason);
+            CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+            check_closed_without_pending(fake);
+        }
+    }
+
+    SECTION("commit recheck closes malformed and null unix-time responses") {
+        for (const bool null_response : {false, true}) {
+            CAPTURE(null_response);
+            FakeWrites fake;
+            auto pending =
+                fake.dispatch(send_request("hello", false, "schedule-malformed-key", send_date));
+            resolve_basic(fake);
+            fake.respond(core::TdFunctionKind::GetOption,
+                         core::TdOptionInteger{.value = send_date - 11});
+            if (null_response) {
+                fake.respond_value(core::TdFunctionKind::GetOption, {});
+            } else {
+                fake.respond(core::TdFunctionKind::GetOption,
+                             core::TdDirectConversionError{.tdlib_type_id = 999});
+            }
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+            CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+            check_closed_without_pending(fake);
+        }
     }
 
     SECTION("eleven seconds at both reads dispatches a scheduled message") {
@@ -558,6 +673,45 @@ TEST_CASE("public send enforces the +10/+11 schedule boundary again before dispa
         CHECK((*outcome.result)["scheduled"] == true);
         CHECK((*outcome.result)["date"] == nullptr);
         CHECK_THAT(*outcome.result, tgcli::test::matches_json_schema("send.result.schema.json"));
+    }
+}
+
+TEST_CASE("pre-send deadline and cancellation close keyed schedule intents without mutation",
+          "[write-command][send][schedule][deadline][cancellation][fake-boundary]") {
+    constexpr std::int32_t send_date = 2'000'000'000;
+    SECTION("deadline") {
+        FakeWrites fake;
+        auto request = send_request("hello", false, "schedule-deadline-key", send_date);
+        request.context.timeout_seconds = 0.5;
+        auto pending = fake.dispatch(request);
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetOption,
+                     core::TdOptionInteger{.value = send_date - 11});
+        fake.observe(core::TdFunctionKind::GetOption);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "preflight");
+        CHECK((*outcome.error)["error"]["details"]["idempotency"] == "removed");
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("disconnect cancellation") {
+        FakeWrites fake;
+        auto request = send_request("hello", false, "schedule-cancel-key", send_date);
+        std::shared_ptr<daemon::RequestSession> session;
+        auto pending = fake.dispatch(request, &session);
+        REQUIRE(session);
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetOption,
+                     core::TdOptionInteger{.value = send_date - 11});
+        fake.observe(core::TdFunctionKind::GetOption);
+        session->disconnect();
+        const auto outcome = pending.get();
+        CHECK(outcome.terminal_count == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        check_closed_without_pending(fake);
     }
 }
 
@@ -661,6 +815,171 @@ TEST_CASE("Markdown send dispatches only the generation-bound parsed formatted t
     CHECK((*outcome.result)["text"] == "hello");
     CHECK(function_field<bool>(descriptor, "parsed"));
     CHECK(function_field<std::string>(descriptor, "text") == "hello");
+}
+
+TEST_CASE("parsed send text is validated before an intent or TD mutation",
+          "[write-command][send][format][validation][fake-boundary]") {
+    FakeWrites fake;
+    auto request = send_request("**empty**", false, "parsed-empty-key");
+    request.args["parse_mode"] = "markdown_v2";
+    auto pending = fake.dispatch(request);
+    resolve_basic(fake);
+    fake.respond(core::TdFunctionKind::ParseTextEntities, fake.parsed_text(""));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+    CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+    CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+}
+
+TEST_CASE("pre-send coordinator rejection preserves no-mutation durability",
+          "[write-command][send][delete][rejection][idempotency][fake-boundary]") {
+    SECTION("send") {
+        FakeWrites fake;
+        fake.reject_before_request(core::TdFunctionKind::SendMessage);
+        auto pending = fake.dispatch(send_request("hello", false, "send-rejected-key"));
+        resolve_basic(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("delete") {
+        FakeWrites fake;
+        fake.reject_before_request(core::TdFunctionKind::DeleteMessages);
+        auto pending = fake.dispatch(delete_request(101, "delete-rejected-key"));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_deleted_only_for_self = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
+        check_closed_without_pending(fake);
+    }
+}
+
+TEST_CASE("coordinator no-mutation deadline and cancellation close keyed writes",
+          "[write-command][send][delete][deadline][cancel][idempotency][fake-boundary]") {
+    SECTION("delete deadline") {
+        FakeWrites fake;
+        fake.expire_direct_before_request();
+        auto pending = fake.dispatch(delete_request(101, "delete-direct-deadline-key"));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_deleted_only_for_self = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "preflight");
+        CHECK((*outcome.error)["error"]["details"]["outcome"] == "not_started");
+        CHECK((*outcome.error)["error"]["details"]["idempotency"] == "removed");
+        CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("send cancellation") {
+        FakeWrites fake;
+        std::shared_ptr<daemon::RequestSession> session;
+        fake.cancel_before_request(core::TdFunctionKind::SendMessage, &session);
+        auto pending =
+            fake.dispatch(send_request("hello", false, "send-direct-cancel-key"), &session);
+        resolve_basic(fake);
+        const auto outcome = pending.get();
+        CHECK_FALSE(outcome.error);
+        CHECK_FALSE(outcome.result);
+        CHECK(outcome.terminal_count == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("delete cancellation") {
+        FakeWrites fake;
+        std::shared_ptr<daemon::RequestSession> session;
+        fake.cancel_before_request(core::TdFunctionKind::DeleteMessages, &session);
+        auto pending = fake.dispatch(delete_request(101, "delete-direct-cancel-key"), &session);
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_deleted_only_for_self = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        CHECK_FALSE(outcome.error);
+        CHECK_FALSE(outcome.result);
+        CHECK(outcome.terminal_count == 0);
+        CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
+        check_closed_without_pending(fake);
+    }
+}
+
+TEST_CASE("msg delete rechecks deadline after its keyed pending entry is durable",
+          "[write-command][delete][deadline][idempotency][fake-boundary]") {
+    auto store_hooks = std::make_shared<daemon::testing::IdempotencyStoreHooks>();
+    std::atomic<bool> delayed{false};
+    store_hooks->at_stage = [&](daemon::IdempotencyStoreStage stage) {
+        if (stage == daemon::IdempotencyStoreStage::BeforeDirectorySync &&
+            !delayed.exchange(true)) {
+            std::this_thread::sleep_for(600ms);
+        }
+    };
+    FakeWrites fake(true, store_hooks);
+    auto request = delete_request(101, "delete-deadline-key");
+    request.context.timeout_seconds = 0.5;
+    auto pending = fake.dispatch(request);
+    resolve_basic(fake);
+    fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+    core::TdMessageProperties properties;
+    properties.can_be_deleted_only_for_self = true;
+    fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+    CHECK((*outcome.error)["error"]["details"]["phase"] == "preflight");
+    CHECK((*outcome.error)["error"]["details"]["outcome"] == "not_started");
+    CHECK((*outcome.error)["error"]["details"]["idempotency"] == "removed");
+    CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
+    check_closed_without_pending(fake);
+}
+
+TEST_CASE("public writes preserve the exact retained spool contradiction path",
+          "[write-command][send][delete][spool][schema][fake-boundary]") {
+    for (const bool deleting : {false, true}) {
+        CAPTURE(deleting);
+        FakeWrites fake;
+        const auto spool = fake.tree().account_state() + "/spool";
+        const auto contradiction = spool + "/not-an-invocation";
+        REQUIRE(std::filesystem::create_directory(spool));
+        REQUIRE(::chmod(spool.c_str(), 0700) == 0);
+        REQUIRE(std::filesystem::create_directory(contradiction));
+        REQUIRE(::chmod(contradiction.c_str(), 0700) == 0);
+        auto pending = deleting ? fake.dispatch(delete_request(101, "spool-delete-key"))
+                                : fake.dispatch(send_request("hello", false, "spool-send-key"));
+        bind_principal(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        const auto diagnostic = daemon::encode_filesystem_diagnostic_path(contradiction);
+        REQUIRE(diagnostic);
+        CHECK(*outcome.error ==
+              json{{"error",
+                    {{"code", "AUDIT_INCOMPLETE"},
+                     {"message", "attachment spool recovery is incomplete"},
+                     {"details",
+                      {{"account", "main"},
+                       {"path", {{"kind", "bytes_hex"}, {"value", diagnostic->bytes_hex}}},
+                       {"mutation_state", "none"},
+                       {"completed_stages", json::array()}}}}}});
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 0);
+    }
 }
 
 TEST_CASE("public send stores one mutation and replays before conflict without leaking the key",

@@ -242,7 +242,7 @@ class DirectRpcCoordinator::Impl {
     Impl(core::TdClient& client, RequestSession& session, DirectRpcHooks hooks)
         : client_(client), session_(session),
           now_(hooks.now ? std::move(hooks.now) : [] { return core::TdEventClock::now(); }),
-          wait_(std::move(hooks.wait)),
+          wait_(std::move(hooks.wait)), before_request_(std::move(hooks.before_request)),
           before_event_arbitration_(std::move(hooks.before_event_arbitration)),
           before_wait_(std::move(hooks.before_wait)) {
         response_subscription_ =
@@ -272,6 +272,13 @@ class DirectRpcCoordinator::Impl {
         executed_ = true;
         if (deadline_expired(session_.deadline(), now_())) {
             return DirectTimedOut{.mutation_state = DirectMutationState::None};
+        }
+        try {
+            if (before_request_) {
+                before_request_();
+            }
+        } catch (const std::exception&) {
+            return DirectRejected{};
         }
         if (!session_.reserve_direct_in_flight()) {
             return DirectCancelled{.mutation_state = DirectMutationState::None};
@@ -429,6 +436,7 @@ class DirectRpcCoordinator::Impl {
     RequestSession& session_;
     std::function<core::TdEventClock::time_point()> now_;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait_;
+    std::function<void()> before_request_;
     std::function<void()> before_event_arbitration_;
     std::function<void()> before_wait_;
     bool executed_ = false;

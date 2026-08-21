@@ -1478,7 +1478,19 @@ TEST_CASE("spool contradiction precedes store and retains a safe stale temp",
         guard, daemon::kIdempotencyMaximumUnixSeconds + 1, [] { return "2026-08-20T12:00:03Z"; });
     CHECK(result.status == daemon::IdempotencyCoreGateStatus::AuditIncomplete);
     REQUIRE(result.terminal);
-    CHECK((*result.terminal)["code"] == "AUDIT_INCOMPLETE");
+    const auto expected_path =
+        daemon::encode_filesystem_diagnostic_path(tree.state() + "/spool/not-an-invocation");
+    REQUIRE(expected_path);
+    CHECK(*result.terminal ==
+          json{{"kind", "error"},
+               {"code", "AUDIT_INCOMPLETE"},
+               {"message", "attachment spool recovery is incomplete"},
+               {"details",
+                {{"account", "main"},
+                 {"path", {{"kind", "bytes_hex"}, {"value", expected_path->bytes_hex}}},
+                 {"mutation_state", "none"},
+                 {"completed_stages", json::array()}}},
+               {"exit_code", 1}});
     CHECK(std::filesystem::exists(tree.temp_path()));
 }
 

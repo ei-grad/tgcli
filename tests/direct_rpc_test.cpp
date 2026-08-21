@@ -392,6 +392,7 @@ TEST_CASE("direct RPC gives deadline equality to timeout", "[daemon][direct][arb
         edit_request(),
         tgcli::daemon::DirectRpcHooks{.now = [&] { return harness.clock().now(); },
                                       .wait = {},
+                                      .before_request = {},
                                       .before_event_arbitration = [&] { barrier.wait(); },
                                       .before_wait = {}});
     const auto sent = harness.await_direct_send();
@@ -483,6 +484,7 @@ TEST_CASE("direct RPC never retries a pre-boundary authorization rejection",
     REQUIRE(rejected != nullptr);
     CHECK(rejected->authorization_failure ==
           tgcli::core::TdAuthorizationFailure::AuthSequenceMismatch);
+    CHECK(rejected->mutation_state == tgcli::daemon::DirectMutationState::None);
     CHECK(harness.runtime().sent_functions().size() == 1);
 }
 

@@ -1069,20 +1069,41 @@ def _assert_error(document: object, code: str) -> None:
         raise AcceptanceError(f"command did not return {code}")
 
 
-def _scan_m3_key(captures: Captures, first_capture: int, raw_key: str) -> None:
-    sentinel = raw_key.encode()
-    files = captures.stdout_files[first_capture:] + captures.stderr_files[first_capture:]
-    for source in files:
-        try:
-            if sentinel in source.read_bytes():
-                raise AcceptanceError("raw M3 idempotency key leaked into command artifacts")
-        except OSError as error:
-            raise AcceptanceError("cannot scan M3 command artifacts") from error
+def _scan_m3_key_artifacts(
+    run_root: Path, captures: Captures, sentinels: Sequence[bytes]
+) -> None:
+    if not sentinels or any(not sentinel for sentinel in sentinels):
+        raise AcceptanceError("M3 idempotency scan inputs are incomplete")
+    sources = set(captures.stdout_files + captures.stderr_files)
+    try:
+        for source in run_root.rglob("*"):
+            status = source.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                raise AcceptanceError("M3 private artifact scan encountered a symlink")
+            if stat.S_ISREG(status.st_mode):
+                sources.add(source)
+        maximum = max(len(sentinel) for sentinel in sentinels)
+        for source in sorted(sources, key=lambda item: os.fsencode(item)):
+            status = source.lstat()
+            if not stat.S_ISREG(status.st_mode) or stat.S_ISLNK(status.st_mode):
+                raise AcceptanceError("M3 private artifact scan source is unsafe")
+            tail = b""
+            with source.open("rb") as stream:
+                while chunk := stream.read(64 * 1024):
+                    window = tail + chunk
+                    if any(sentinel in window for sentinel in sentinels):
+                        raise AcceptanceError(
+                            "raw M3 idempotency key leaked into private acceptance artifacts"
+                        )
+                    tail = window[-(maximum - 1) :] if maximum > 1 else b""
+    except OSError as error:
+        raise AcceptanceError("cannot scan M3 private acceptance artifacts") from error
 
 
-def _m3_write_flow(runner: Runner) -> None:
-    first_capture = len(runner.captures.stdout_files)
+def _m3_write_flow(runner: Runner, key_sentinels: list[bytes] | None = None) -> None:
     raw_key = f"tgcli-test-dc-{secrets.token_hex(16)}"
+    if key_sentinels is not None:
+        key_sentinels.append(raw_key.encode())
     text = f"tgcli M3 acceptance {secrets.token_hex(16)}"
     arguments = [
         "--json",
@@ -1131,15 +1152,8 @@ def _m3_write_flow(runner: Runner) -> None:
         runner.cleanup_message(cleanup)
     except (AcceptanceError, OSError, subprocess.SubprocessError) as error:
         cleanup_failure = error
-    scan_failure: BaseException | None = None
-    try:
-        _scan_m3_key(runner.captures, first_capture, raw_key)
-    except (AcceptanceError, OSError) as error:
-        scan_failure = error
     if cleanup_failure is not None:
         raise CleanupError("M3 cleanup failed") from cleanup_failure
-    if scan_failure is not None:
-        raise scan_failure
     if failure is not None:
         raise failure
 
@@ -1150,6 +1164,7 @@ def _smoke(
     fixtures: Mapping[str, bytes],
     sources: Mapping[str, Path],
     qr_approver: Path | None,
+    m3_key_sentinels: list[bytes],
 ) -> set[str]:
     executed: set[str] = set()
     accounts = [USER_ACCOUNT]
@@ -1252,7 +1267,7 @@ def _smoke(
     ):
         raise AcceptanceError("me after re-login differs from login identity")
 
-    _m3_write_flow(runner)
+    _m3_write_flow(runner, m3_key_sentinels)
 
     if QR_ACCOUNT in accounts:
         qr = runner.run_interactive(
@@ -1309,6 +1324,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     cleanup_failure: BaseException | None = None
     traps: dict[Path, bytes] = {}
     scan_inputs: tuple[list[FrozenSentinel], list[Path]] | None = None
+    run_root: Path | None = None
+    m3_key_sentinels: list[bytes] = []
     try:
         if arguments.timeout <= 0:
             raise AcceptanceError("timeout must be positive")
@@ -1355,6 +1372,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fixtures,
                 sources,
                 arguments.qr_approver,
+                m3_key_sentinels,
             )
             validate_m1_coverage(executed, entries)
     except (AcceptanceError, ContractError, OSError) as error:
@@ -1380,6 +1398,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sentinels, runner.captures.stderr_files, log_directories
                 )
             except ContractError as error:
+                failure = error
+        if runner is not None and run_root is not None and m3_key_sentinels:
+            try:
+                _scan_m3_key_artifacts(run_root, runner.captures, m3_key_sentinels)
+            except AcceptanceError as error:
                 failure = error
         if traps:
             try:

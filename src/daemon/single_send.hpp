@@ -114,6 +114,7 @@ using SingleSendOutcome =
 struct SingleSendHooks {
     std::function<core::TdEventClock::time_point()> now;
     std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
+    std::function<void()> before_request;
     std::function<void()> before_event_arbitration;
     std::function<void()> before_wait;
     std::function<void(const SingleSendTemporaryId&)> on_temporary_id;

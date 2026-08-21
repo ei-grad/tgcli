@@ -863,6 +863,77 @@ TEST_CASE("account audit checkpoint and outcome factories enforce exact envelope
     CHECK_FALSE(daemon::validate_account_audit_outcome(wrong, error));
 }
 
+TEST_CASE("public write dispatch proofs accept only explicit mutation-free terminals",
+          "[account-audit][contract][schema][write]") {
+    using O = daemon::AccountAuditOperation;
+    using S = daemon::AccountAuditStage;
+    for (const auto operation : {O::Send, O::MsgDelete}) {
+        CAPTURE(daemon::account_audit_operation_name(operation));
+        const std::vector<json> terminals{
+            error_terminal(operation),
+            json{{"kind", "error"},
+                 {"code", "DAEMON_SHUTDOWN"},
+                 {"message", "daemon is shutting down"},
+                 {"details", {{"reason", "daemon_shutdown"}}},
+                 {"exit_code", 1}},
+            json{
+                {"kind", "error"},
+                {"code", "NOT_AUTHED"},
+                {"message", "authorization was lost"},
+                {"details",
+                 {{"account", "main"}, {"state", "logging_out"}, {"reason", "authorization_lost"}}},
+                {"exit_code", 3}},
+            json{{"kind", "error"},
+                 {"code", "INTERNAL"},
+                 {"message", "internal error"},
+                 {"details",
+                  {{"operation", daemon::account_audit_operation_name(operation)},
+                   {"reason", "internal_error"}}},
+                 {"exit_code", 1}},
+        };
+        for (const auto& terminal : terminals) {
+            std::string error;
+            auto outcome = daemon::make_account_audit_outcome(
+                {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+                 "main",
+                 operation,
+                 false,
+                 daemon::AccountAuditMutationState::None,
+                 {S::DispatchStarted},
+                 terminal},
+                error);
+            INFO(error);
+            REQUIRE(outcome);
+            CHECK_THAT(outcome->document(),
+                       tgcli::test::matches_json_schema("audit-outcome.schema.json"));
+        }
+
+        auto ambiguous_timeout = error_terminal(operation);
+        ambiguous_timeout["details"]["phase"] = operation == O::Send ? "confirmation" : "dispatch";
+        ambiguous_timeout["details"]["outcome"] = "unknown";
+        ambiguous_timeout["details"]["idempotency"] = "pending";
+        if (operation == O::Send) {
+            ambiguous_timeout["details"]["temporary_message_id"] = nullptr;
+        }
+        std::string error;
+        CHECK_FALSE(daemon::make_account_audit_outcome(
+            {{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
+             "main",
+             operation,
+             false,
+             daemon::AccountAuditMutationState::None,
+             {S::DispatchStarted},
+             ambiguous_timeout},
+            error));
+        auto schema_invalid = outcome_record(operation, "fedcba9876543210fedcba9876543210",
+                                             daemon::AccountAuditMutationState::Possible,
+                                             {S::DispatchStarted}, ambiguous_timeout);
+        schema_invalid["mutation_state"] = "none";
+        CHECK_FALSE(
+            tgcli::test::matches_json_schema("audit-outcome.schema.json").match(schema_invalid));
+    }
+}
+
 TEST_CASE("account audit factories cover every legal record branch",
           "[account-audit][contract][matrix]") {
     using O = daemon::AccountAuditOperation;

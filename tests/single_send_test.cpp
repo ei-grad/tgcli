@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <ranges>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -514,6 +515,27 @@ TEST_CASE("single send distinguishes authorization loss generation close and can
         REQUIRE(cancelled != nullptr);
         REQUIRE(cancelled->temporary);
     }
+}
+
+TEST_CASE("single send preserves a pre-request authorization rejection as mutation-free",
+          "[daemon][send][authorization][fake-boundary]") {
+    SendHarness harness;
+    tgcli::daemon::SingleSendHooks hooks;
+    hooks.before_request = [&] {
+        harness.runtime().push_update(harness.first(), {},
+                                      tgcli::core::AuthStateData{tgcli::core::AuthState::Ready});
+        if (!eventually([&] { return harness.client().auth_state()->auth_sequence == 2; })) {
+            throw std::runtime_error("authorization update was not observed");
+        }
+    };
+    auto pending = harness.execute(std::move(hooks));
+    auto outcome = pending.get();
+    const auto* rejected = std::get_if<tgcli::daemon::SingleSendRejected>(&outcome);
+    REQUIRE(rejected != nullptr);
+    CHECK(rejected->authorization_failure ==
+          tgcli::core::TdAuthorizationFailure::AuthSequenceMismatch);
+    CHECK(rejected->mutation_state == tgcli::daemon::SingleSendMutationState::None);
+    CHECK(harness.send_count() == 0);
 }
 
 TEST_CASE("single send observes authorization loss without a response under unlimited wait",

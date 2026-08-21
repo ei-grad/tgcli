@@ -19,6 +19,18 @@
     "durabilityReason": {
       "enum": ["path_invalid", "wrong_owner", "wrong_type", "wrong_mode", "wrong_link_count", "too_large", "capacity_exhausted", "open_failed", "lock_failed", "read_failed", "write_failed", "sync_failed", "rename_failed", "directory_sync_failed", "parse_error", "schema_error", "contradiction"]
     },
+    "filesystemDiagnosticPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": { "const": "bytes_hex" },
+        "value": {
+          "type": "string",
+          "pattern": "^2f(?:0[1-9a-f]|[1-9a-f][0-9a-f])+$"
+        }
+      }
+    },
     "configReason": {
       "enum": ["path_invalid", "wrong_owner", "wrong_type", "wrong_mode", "wrong_link_count", "too_large", "parse_error", "type_error", "invalid_default", "conflicting_credentials", "io_error", "sync_error"]
     },
@@ -436,6 +448,20 @@
                   "type": "object", "additionalProperties": false,
                   "required": ["account", "path", "mutation_state", "completed_stages"],
                   "properties": { "account": { "$ref": "#/$defs/account" }, "path": { "type": "string", "pattern": "^/" }, "mutation_state": { "enum": ["none", "possible", "confirmed"] }, "completed_stages": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/v2Stage" } } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "const": "attachment spool recovery is incomplete" },
+                "code": { "const": "AUDIT_INCOMPLETE" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["account", "path", "mutation_state", "completed_stages"],
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "path": { "$ref": "#/$defs/filesystemDiagnosticPath" }, "mutation_state": { "const": "none" }, "completed_stages": { "const": [] } }
                 }
               }
             },

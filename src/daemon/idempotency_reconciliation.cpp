@@ -636,6 +636,24 @@ IdempotencyCoreGateResult spool_contradiction(std::string_view account,
     return result;
 }
 
+IdempotencyCoreGateResult spool_contradiction(std::string_view account,
+                                              const FilesystemDiagnosticPath& path) {
+    IdempotencyCoreGateResult result;
+    result.status = IdempotencyCoreGateStatus::AuditIncomplete;
+    result.terminal = json{{"kind", "error"},
+                           {"code", "AUDIT_INCOMPLETE"},
+                           {"message", "attachment spool recovery is incomplete"},
+                           {"details",
+                            {{"account", account},
+                             {"path", {{"kind", "bytes_hex"}, {"value", path.bytes_hex}}},
+                             {"mutation_state", "none"},
+                             {"completed_stages", json::array()}}},
+                           {"exit_code", 1}};
+    result.audit_failure = {AccountAuditDurabilityReason::Contradiction,
+                            "spool inventory contradicts durable audit/store facts"};
+    return result;
+}
+
 bool contains_string(const std::vector<std::string>& values, std::string_view value) {
     return std::ranges::find(values, value) != values.end();
 }
@@ -651,7 +669,7 @@ validate_spool_relation(const SpoolInventory& inventory, const CompletedRelation
     }
     const auto& reconciliation = std::get<SpoolReconciliation>(reconciliation_result);
     if (reconciliation.contradiction) {
-        return spool_contradiction(account, audit_path);
+        return spool_contradiction(account, *reconciliation.contradiction);
     }
     for (const auto& fact : relations.spools) {
         const bool missing =
@@ -967,7 +985,7 @@ IdempotencyCoreGateResult IdempotencyFoundation::run_core_gate(
     }
     auto inventory = std::move(std::get<SpoolInventory>(inventory_result));
     if (inventory.contradiction) {
-        return spool_contradiction(account_, audit_.path());
+        return spool_contradiction(account_, *inventory.contradiction);
     }
     auto inspection = store_.inspect(guard);
     if (inspection.status != IdempotencyInspectionStatus::Clean) {
@@ -1087,7 +1105,7 @@ IdempotencyCoreGateResult IdempotencyFoundation::run_absent_by_policy_gate(
     }
     auto inventory = std::move(std::get<SpoolInventory>(inventory_result));
     if (inventory.contradiction) {
-        return spool_contradiction(account_, audit_.path());
+        return spool_contradiction(account_, *inventory.contradiction);
     }
     CompletedRelationState relations;
     relations.sampled_now = sampled_now;

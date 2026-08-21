@@ -1530,13 +1530,23 @@ bool terminal_proves_mutation(AccountAuditOperation operation, const json& termi
 }
 
 bool terminal_proves_explicit_no_mutation(AccountAuditOperation operation, const json& terminal) {
-    if (!valid_terminal(operation, terminal) || terminal["kind"] != "error" ||
-        (operation != AccountAuditOperation::Send &&
-         operation != AccountAuditOperation::SavedAttach)) {
+    if (!valid_terminal(operation, terminal) || terminal["kind"] != "error") {
         return false;
     }
     const auto& code = terminal["code"].get_ref<const std::string&>();
-    return code == "TDLIB_ERROR" || code == "RATE_LIMITED";
+    if ((operation == AccountAuditOperation::Send ||
+         operation == AccountAuditOperation::SavedAttach) &&
+        (code == "TDLIB_ERROR" || code == "RATE_LIMITED")) {
+        return true;
+    }
+    if (operation != AccountAuditOperation::Send && operation != AccountAuditOperation::MsgDelete) {
+        return false;
+    }
+    if (code == "TIMEOUT") {
+        const auto& details = terminal["details"];
+        return details["phase"] == "preflight" && details["outcome"] == "not_started";
+    }
+    return code == "DAEMON_SHUTDOWN" || code == "NOT_AUTHED" || code == "INTERNAL";
 }
 
 std::uint64_t terminal_byte_ceiling(AccountAuditOperation operation) {

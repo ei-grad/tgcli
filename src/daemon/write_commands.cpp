@@ -38,6 +38,8 @@ using nlohmann::json;
 constexpr std::int64_t kMaximumInt53 = 9'007'199'254'740'991LL;
 constexpr std::int64_t kMaximumScheduleWindow = 367LL * 86'400LL;
 
+enum class ScheduleWindowStatus { Allowed, Elapsed, TooFar };
+
 struct SendInput {
     std::string chat;
     std::string text;
@@ -160,6 +162,11 @@ json not_authed_terminal(std::string_view account, core::AuthState state) {
                     kNotAuthed);
 }
 
+json shutdown_terminal() {
+    return terminal("DAEMON_SHUTDOWN", "daemon is shutting down", {{"reason", "daemon_shutdown"}},
+                    kGeneric);
+}
+
 json precondition(proto::M3Operation operation, std::optional<std::int64_t> chat_id,
                   std::optional<std::int64_t> message_id, std::string_view reason) {
     const auto* identity = proto::m3_operation_identity(operation);
@@ -213,6 +220,17 @@ fingerprint_schedule(const std::optional<SendSchedule>& schedule) {
         return FingerprintScheduleOnline{};
     }
     return FingerprintScheduleAt{schedule->send_date};
+}
+
+ScheduleWindowStatus schedule_window_status(std::int32_t send_date, std::int64_t server_time) {
+    const auto date = static_cast<std::int64_t>(send_date);
+    if (server_time >= date - 10) {
+        return ScheduleWindowStatus::Elapsed;
+    }
+    if (server_time < date - kMaximumScheduleWindow) {
+        return ScheduleWindowStatus::TooFar;
+    }
+    return ScheduleWindowStatus::Allowed;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed normalized send grammar.
@@ -493,6 +511,18 @@ AccountAuditMutationState audit_state(SingleSendMutationState state) {
     return AccountAuditMutationState::Possible;
 }
 
+AccountAuditMutationState audit_state(DirectMutationState state) {
+    switch (state) {
+    case DirectMutationState::None:
+        return AccountAuditMutationState::None;
+    case DirectMutationState::Possible:
+        return AccountAuditMutationState::Possible;
+    case DirectMutationState::Confirmed:
+        return AccountAuditMutationState::Confirmed;
+    }
+    return AccountAuditMutationState::Possible;
+}
+
 void emit_terminal(RequestSession& session, const json& value) {
     if (!value.is_object()) {
         return;
@@ -603,10 +633,11 @@ WriteKernelRequest kernel_request(const proto::Request& request, RequestSession&
 WriteCoordinator::WriteCoordinator(core::TdClient& client, std::string account,
                                    std::string config_path, uid_t expected_uid,
                                    std::shared_ptr<IdempotencyFoundation> foundation,
-                                   std::function<void()> audit_fatal_shutdown)
+                                   std::function<void()> audit_fatal_shutdown,
+                                   std::shared_ptr<const testing::WriteCoordinatorHooks> hooks)
     : client_(client), account_(std::move(account)),
       config_store_(std::move(config_path), expected_uid), foundation_(std::move(foundation)),
-      audit_fatal_shutdown_(std::move(audit_fatal_shutdown)) {}
+      audit_fatal_shutdown_(std::move(audit_fatal_shutdown)), hooks_(std::move(hooks)) {}
 
 // NOLINTBEGIN(readability-function-cognitive-complexity): exact two-epoch send transaction.
 void WriteCoordinator::send(const proto::Request& request, RequestSession& session) {
@@ -790,7 +821,8 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                 return td_error_terminal(proto::M3Operation::Send, *error);
             }
             auto* formatted = parsed_value.get_if<core::TdFormattedText>();
-            if (formatted == nullptr || !core::valid_td_formatted_text_facts(*formatted)) {
+            if (formatted == nullptr || !core::valid_td_formatted_text_facts(*formatted) ||
+                !valid_send_text(formatted->text)) {
                 return internal(proto::M3Operation::Send);
             }
             state->formatted_text = std::move(*formatted);
@@ -821,13 +853,13 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                 return internal(proto::M3Operation::Send);
             }
             observed_server_time = server->value;
-            const auto delta =
-                static_cast<std::int64_t>(state->input.schedule->send_date) - server->value;
-            if (delta <= 10) {
+            const auto status =
+                schedule_window_status(state->input.schedule->send_date, server->value);
+            if (status == ScheduleWindowStatus::Elapsed) {
                 return precondition(proto::M3Operation::Send, state->target->chat.id, std::nullopt,
                                     "schedule_window_elapsed");
             }
-            if (delta > kMaximumScheduleWindow) {
+            if (status == ScheduleWindowStatus::TooFar) {
                 return precondition(proto::M3Operation::Send, state->target->chat.id, std::nullopt,
                                     "schedule_too_far");
             }
@@ -880,6 +912,12 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                 if (!failure->is_object()) {
                     return WriteDispatchStopped{};
                 }
+                if (failure->value("code", std::string{}) == "TIMEOUT") {
+                    return stored_from_terminal(
+                        proto::M3Operation::Send,
+                        timeout(proto::M3Operation::Send, "preflight",
+                                request.context.idempotency_key ? "removed" : "not_requested"));
+                }
                 return stored_from_terminal(proto::M3Operation::Send, *failure);
             }
             auto& value = std::get<core::TdValue>(time_read);
@@ -889,13 +927,15 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
             }
             const auto* server = value.get_if<core::TdOptionInteger>();
             if (server == nullptr) {
-                throw std::runtime_error("malformed unix_time option during schedule recheck");
+                return stored_from_terminal(proto::M3Operation::Send,
+                                            internal(proto::M3Operation::Send));
             }
-            const auto delta =
-                static_cast<std::int64_t>(state->input.schedule->send_date) - server->value;
-            if (delta <= 10 || delta > kMaximumScheduleWindow) {
-                const char* const reason =
-                    delta <= 10 ? "schedule_window_elapsed" : "schedule_too_far";
+            const auto status =
+                schedule_window_status(state->input.schedule->send_date, server->value);
+            if (status != ScheduleWindowStatus::Allowed) {
+                const char* const reason = status == ScheduleWindowStatus::Elapsed
+                                               ? "schedule_window_elapsed"
+                                               : "schedule_too_far";
                 return stored_from_terminal(proto::M3Operation::Send,
                                             precondition(proto::M3Operation::Send,
                                                          plan.value()["chat"]["id"], std::nullopt,
@@ -957,7 +997,7 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                         .sending_id = sending_id},
             .content = {.formatted_text = std::move(*state->formatted_text),
                         .parsed = state->input.parse_mode != FingerprintParseMode::Plain}};
-        SingleSendHooks send_hooks{};
+        SingleSendHooks send_hooks = hooks_ ? hooks_->single_send : SingleSendHooks{};
         send_hooks.on_temporary_id = [&](const SingleSendTemporaryId& temporary) {
             if (!observations.temporary_message_ids(
                     json::array({temporary.temporary_message_id}))) {
@@ -1010,34 +1050,40 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                             .mutation_state = AccountAuditMutationState::Possible,
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendTimedOut>) {
-                    auto value = timeout(
-                        proto::M3Operation::Send, "confirmation", post_intent_idempotency(request),
-                        "unknown",
-                        outcome.temporary
-                            ? std::optional<std::int64_t>{outcome.temporary->temporary_message_id}
-                            : std::nullopt);
+                    const bool not_started =
+                        outcome.mutation_state == SingleSendMutationState::None;
+                    auto value =
+                        not_started
+                            ? timeout(proto::M3Operation::Send, "preflight",
+                                      request.context.idempotency_key ? "removed" : "not_requested")
+                            : timeout(proto::M3Operation::Send, "confirmation",
+                                      post_intent_idempotency(request), "unknown",
+                                      outcome.temporary
+                                          ? std::optional<std::int64_t>{outcome.temporary
+                                                                            ->temporary_message_id}
+                                          : std::nullopt);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendAuthorizationLost>) {
                     auto value = not_authed_terminal(account_, outcome.state);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendGenerationClosed>) {
                     auto value = not_authed_terminal(account_, core::AuthState::Closed);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendCancelled>) {
-                    auto value = not_authed_terminal(account_, core::AuthState::Ready);
+                    auto value = shutdown_terminal();
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendRejected>) {
-                    auto value = not_authed_terminal(account_, core::AuthState::Ready);
+                    auto value = internal(proto::M3Operation::Send);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else {
                     return {
@@ -1228,7 +1274,17 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
         return config_store_.verify_write_grant(expected, account, control);
     };
     hooks.revalidate_auth_and_schedule =
-        [state, this](const write_contract::Plan&) -> WriteDispatchAdmissionOutcome {
+        [state, &session, &request,
+         this](const write_contract::Plan&) -> WriteDispatchAdmissionOutcome {
+        if (deadline_expired(session.deadline())) {
+            return stored_from_terminal(
+                proto::M3Operation::MsgDelete,
+                timeout(proto::M3Operation::MsgDelete, "preflight",
+                        request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (session.cancellation_requested()) {
+            return WriteDispatchStopped{};
+        }
         auto current = client_.get().auth_state();
         if (!current || current->data.state != core::AuthState::Ready) {
             return stored_from_terminal(
@@ -1237,6 +1293,15 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                                     current ? current->data.state : core::AuthState::Unknown));
         }
         state->dispatch_authorization = std::move(current);
+        if (deadline_expired(session.deadline())) {
+            return stored_from_terminal(
+                proto::M3Operation::MsgDelete,
+                timeout(proto::M3Operation::MsgDelete, "preflight",
+                        request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (session.cancellation_requested()) {
+            return WriteDispatchStopped{};
+        }
         const auto token = random_hex32();
         if (token.empty()) {
             throw std::runtime_error("cannot create dispatch token");
@@ -1256,7 +1321,8 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
             .chat_id = state->target->chat.id,
             .message_ids = state->input.message_ids,
             .revoke = plan.value()["effective_for_all"].get<bool>()};
-        DirectRpcCoordinator coordinator(client_.get(), session);
+        auto direct_hooks = hooks_ ? hooks_->direct_rpc : DirectRpcHooks{};
+        DirectRpcCoordinator coordinator(client_.get(), session, std::move(direct_hooks));
         auto selected =
             coordinator.execute(core::TdDirectRequest{td_request}, state->dispatch_authorization);
         return std::visit(
@@ -1284,7 +1350,7 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                     return {.terminal = stored_from_terminal(
                                 proto::M3Operation::MsgDelete,
                                 td_error_terminal(proto::M3Operation::MsgDelete, outcome.error)),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, DirectAuthorizationLost>) {
                     const auto state_value =
@@ -1292,26 +1358,42 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                     return {.terminal =
                                 stored_from_terminal(proto::M3Operation::MsgDelete,
                                                      not_authed_terminal(account_, state_value)),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, DirectTimedOut>) {
+                    const bool not_started = outcome.mutation_state == DirectMutationState::None;
+                    std::string_view idempotency = post_intent_idempotency(request);
+                    if (not_started) {
+                        idempotency = request.context.idempotency_key ? "removed" : "not_requested";
+                    }
                     return {.terminal = stored_from_terminal(
                                 proto::M3Operation::MsgDelete,
-                                timeout(proto::M3Operation::MsgDelete, "dispatch",
-                                        post_intent_idempotency(request), "unknown")),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                                timeout(proto::M3Operation::MsgDelete,
+                                        not_started ? "preflight" : "dispatch", idempotency,
+                                        not_started ? "not_started" : "unknown")),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectCancelled>) {
+                    auto value = shutdown_terminal();
+                    return {.terminal = stored_from_terminal(proto::M3Operation::MsgDelete, value),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectRejected>) {
+                    auto value = internal(proto::M3Operation::MsgDelete);
+                    return {.terminal = stored_from_terminal(proto::M3Operation::MsgDelete, value),
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, DirectMalformed>) {
                     return {.terminal =
                                 stored_from_terminal(proto::M3Operation::MsgDelete,
                                                      internal(proto::M3Operation::MsgDelete)),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else {
                     return {.terminal = stored_from_terminal(
                                 proto::M3Operation::MsgDelete,
                                 not_authed_terminal(account_, core::AuthState::Ready)),
-                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 }
             },
