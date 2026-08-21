@@ -817,6 +817,31 @@ TEST_CASE("write kernel expiry equality and post-intent cancellation preserve or
         CHECK(kernel.run(request, hooks).status == daemon::WriteKernelStatus::Completed);
         CHECK(dispatches == 1);
     }
+
+    SECTION("cancelled revalidation retains an intent for no-dispatch recovery") {
+        const KernelTree tree;
+        const daemon::WriteKernel kernel(tree.foundation());
+        std::atomic<int> dispatches{0};
+        auto hooks = archive_hooks(archive_plan(), dispatches);
+        hooks.revalidate_auth_and_schedule = [](const daemon::write_contract::Plan&) {
+            return daemon::WriteDispatchAdmissionOutcome{daemon::WriteDispatchStopped{}};
+        };
+        auto request = archive_request("00000000000000000000000000000036", 1'700'000'000);
+        const auto result = kernel.run(request, hooks);
+        CHECK(result.status == daemon::WriteKernelStatus::Rejected);
+        CHECK_FALSE(result.terminal);
+        CHECK(dispatches == 0);
+
+        auto guard = tree.foundation()->acquire_epoch();
+        const auto audit = tree.foundation()->audit().inspect(guard);
+        CHECK(audit.status == daemon::AccountAuditInspectionStatus::Open);
+        REQUIRE(audit.oldest_open);
+        CHECK_FALSE(audit.oldest_open->dispatch_started);
+        const auto store = tree.foundation()->store().inspect(guard);
+        REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+        REQUIRE(store.snapshot.entries.size() == 1);
+        CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
+    }
 }
 
 TEST_CASE("cancellation observed after dispatch retains an open unknown invocation",

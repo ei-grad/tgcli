@@ -579,6 +579,92 @@ TEST_CASE("resolver errors have exact command-specific shapes", "[schema][resolv
     CHECK_THAT(unknown, !tgcli::test::matches_json_schema("resolve.error.schema.json"));
 }
 
+TEST_CASE("public M3 write errors close resolver durability and timeout branches",
+          "[schema][m3][send][delete][error]") {
+    const auto hash = std::string("sha256:") + std::string(64, 'a');
+    const auto other_hash = std::string("sha256:") + std::string(64, 'b');
+    const std::vector<json> errors{
+        terminal_error("USAGE", {{"argument", "--topic"}, {"reason", "unsupported_topic_kind"}}),
+        terminal_error("BOT_UNSUPPORTED", {{"operation", "send"}}),
+        terminal_error("NOT_FOUND", {{"chat_id", -1001}, {"message_id", -7}}),
+        terminal_error("AMBIGUOUS",
+                       {{"selector", "Project"},
+                        {"scope", "active_dialogs"},
+                        {"candidates", json::array({json{{"id", -1001},
+                                                         {"title", "Project"},
+                                                         {"type", "basic_group"},
+                                                         {"is_bot", false},
+                                                         {"usernames", json::array()}}})},
+                        {"truncated", false}}),
+        terminal_error("RATE_LIMITED",
+                       {{"operation", "resolve"}, {"tdlib_code", 429}, {"retry_after", 7}}),
+        terminal_error("TDLIB_ERROR", {{"operation", "send"}, {"tdlib_code", 400}}),
+        terminal_error("PRECONDITION_FAILED", {{"operation", "send"},
+                                               {"chat_id", -1001},
+                                               {"message_id", nullptr},
+                                               {"reason", "schedule_window_elapsed"}}),
+        terminal_error("IDEMPOTENCY_CONFLICT", {{"operation", "send"},
+                                                {"key_hash", hash},
+                                                {"expected_fingerprint", hash},
+                                                {"actual_fingerprint", other_hash}}),
+        terminal_error("IDEMPOTENCY_PENDING",
+                       {{"operation", "send"},
+                        {"key_hash", hash},
+                        {"fingerprint", other_hash},
+                        {"invocation_id", "0123456789abcdef0123456789abcdef"},
+                        {"temporary_message_ids", json::array({-7})}}),
+        terminal_error(
+            "AUDIT_UNAVAILABLE",
+            {{"account", "main"}, {"path", "/state/main/audit.log"}, {"reason", "sync_failed"}}),
+        terminal_error("AUDIT_INCOMPLETE",
+                       {{"account", "main"},
+                        {"path", "/state/main/audit.log"},
+                        {"mutation_state", "possible"},
+                        {"completed_stages", json::array({"idempotency_pending", "dispatch_started",
+                                                          "temporary_ids_observed"})}}),
+        terminal_error("TIMEOUT", {{"operation", "send"},
+                                   {"phase", "preflight"},
+                                   {"state", "ready"},
+                                   {"outcome", "not_started"},
+                                   {"idempotency", "removed"}}),
+        terminal_error("TIMEOUT", {{"operation", "send"},
+                                   {"phase", "confirmation"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"},
+                                   {"temporary_message_id", -7}}),
+        terminal_error("TIMEOUT", {{"operation", "msg_delete"},
+                                   {"phase", "dispatch"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "not_requested"}}),
+        terminal_error("TIMEOUT", {{"operation", "config_admission"}, {"state", nullptr}}),
+    };
+    for (const auto& error : errors) {
+        INFO(error.dump());
+        CHECK_THAT(error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
+
+    auto invalid = errors[4];
+    invalid["error"]["details"].erase("retry_after");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[5];
+    invalid["error"]["details"]["retry_after"] = 1;
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[11];
+    invalid["error"]["details"]["outcome"] = "unknown";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[12];
+    invalid["error"]["details"].erase("temporary_message_id");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[10];
+    invalid["error"]["details"]["completed_stages"].push_back("forward_progress");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[6];
+    invalid["error"]["details"]["reason"] = "not_deletable_for_self";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+}
+
 TEST_CASE("Saved Messages errors have exact command-specific shapes", "[schema][saved][error]") {
     const std::vector<json> errors{
         terminal_error("USAGE", {{"argument", "--tag"}, {"reason", "invalid_argument"}}),

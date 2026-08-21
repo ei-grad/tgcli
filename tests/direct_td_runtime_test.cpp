@@ -119,6 +119,7 @@ std::vector<TdDirectRequest> direct_requests() {
     return {
         TdEditMessageTextRequest{.chat_id = -1001, .message_id = 10, .text = "edit 🧪"},
         TdDeleteMessagesRequest{.chat_id = -1001, .message_ids = {1, 2}, .revoke = true},
+        TdDeleteMessagesRequest{.chat_id = -1001, .message_ids = {-2, -1, 1}, .revoke = false},
         TdMessageReactionRequest{
             .chat_id = -1001, .message_id = 10, .reaction = "👍🏽", .remove = false, .big = true},
         TdMessageReactionRequest{
@@ -209,7 +210,7 @@ TEST_CASE("direct native factories match the scripted descriptor boundary exactl
           "[core][tdlib][direct][factory]") {
     tgcli::test::ScriptedTdRuntime scripted;
     const auto requests = direct_requests();
-    REQUIRE(requests.size() == 15);
+    REQUIRE(requests.size() == 16);
     for (const auto& request : requests) {
         auto native = detail::make_production_direct_request_for_test(request);
         auto fake = make_scripted(scripted, request);

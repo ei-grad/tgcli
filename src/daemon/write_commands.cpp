@@ -641,8 +641,8 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                                                        .target = std::nullopt,
                                                        .formatted_text = std::nullopt,
                                                        .dispatch_authorization = nullptr});
-    auto invocation = random_hex32();
-    if (invocation.empty()) {
+    auto invocation = request.context.dry_run ? std::string{} : random_hex32();
+    if (!request.context.dry_run && invocation.empty()) {
         session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
                       {{"account", account_},
                        {"path", foundation_ ? foundation_->audit().path() : std::string{}},
@@ -871,7 +871,7 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                                         });
             if (auto* failure = std::get_if<json>(&time_read)) {
                 if (!failure->is_object()) {
-                    throw std::runtime_error("schedule recheck was cancelled");
+                    return WriteDispatchStopped{};
                 }
                 return stored_from_terminal(proto::M3Operation::Send, *failure);
             }
@@ -1009,17 +1009,17 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                             ? std::optional<std::int64_t>{outcome.temporary->temporary_message_id}
                             : std::nullopt);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_state = AccountAuditMutationState::Possible,
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendAuthorizationLost>) {
                     auto value = not_authed_terminal(account_, outcome.state);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_state = AccountAuditMutationState::Possible,
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendGenerationClosed>) {
                     auto value = not_authed_terminal(account_, core::AuthState::Closed);
                     return {.terminal = stored_from_terminal(proto::M3Operation::Send, value),
-                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_state = AccountAuditMutationState::Possible,
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, SingleSendCancelled>) {
                     auto value = not_authed_terminal(account_, core::AuthState::Ready);
@@ -1038,8 +1038,8 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                             internal(
                                 proto::M3Operation::Send,
                                 "TDLib returned data outside the supported persistence bounds")),
-                        .mutation_state = AccountAuditMutationState::Confirmed,
-                        .mutation_confirmed = true};
+                        .mutation_state = AccountAuditMutationState::Possible,
+                        .mutation_confirmed = false};
                 }
             },
             std::move(selected));
@@ -1098,8 +1098,8 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                                                            .principal = principal,
                                                            .target = std::nullopt,
                                                            .dispatch_authorization = nullptr});
-    auto invocation = random_hex32();
-    if (invocation.empty()) {
+    auto invocation = request.context.dry_run ? std::string{} : random_hex32();
+    if (!request.context.dry_run && invocation.empty()) {
         session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
                       {{"account", account_},
                        {"path", foundation_ ? foundation_->audit().path() : std::string{}},

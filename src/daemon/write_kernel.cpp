@@ -762,6 +762,9 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         if (auto* terminal = std::get_if<write_contract::StoredTerminal>(&*dispatch_admission)) {
             return finish_without_dispatch(*terminal);
         }
+        if (std::holds_alternative<WriteDispatchStopped>(*dispatch_admission)) {
+            return {WriteKernelStatus::Rejected, std::nullopt, std::move(proposed_plan)};
+        }
         auto dispatch_preparation =
             std::get<WriteDispatchPreparation>(std::move(*dispatch_admission));
         if (!append_checkpoint(*foundation_, epoch, request, hooks, *operation,

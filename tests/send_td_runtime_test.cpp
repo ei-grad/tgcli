@@ -368,6 +368,10 @@ TEST_CASE("typed sendMessage rejects validation stale auth and expired capabilit
     REQUIRE(eventually([&] { return client.auth_state()->auth_sequence == 1; }));
     const auto ready = client.auth_state();
 
+    auto signed_reply = plain_request();
+    signed_reply.reply_to_message_id = -77;
+    CHECK(valid_td_send_message_request(signed_reply));
+
     const auto reject = [&](TdSendMessageRequest request) {
         auto response = client.send_message(ready, std::move(request));
         CHECK_THROWS(response.get());

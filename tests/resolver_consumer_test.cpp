@@ -246,6 +246,31 @@ TEST_CASE("ResolverConsumer keeps outer and selector failure attribution distinc
     }
 }
 
+TEST_CASE("resolver error mapping is pure and preserves selector attribution",
+          "[resolver][consumer][mapper][attribution]") {
+    const tgcli::daemon::ResolverError ambiguous =
+        tgcli::daemon::ResolverAmbiguousError{.selector = "Project",
+                                              .scope = tgcli::daemon::ResolverScope::ActiveDialogs,
+                                              .candidates = {},
+                                              .truncated = false,
+                                              .argument = "chat"};
+    const auto mapped =
+        tgcli::daemon::resolver_error_terminal(ambiguous, tgcli::daemon::M2Operation::Resolve);
+    CHECK(mapped["kind"] == "error");
+    CHECK(mapped["code"] == "AMBIGUOUS");
+    CHECK(mapped["details"] == nlohmann::json{{"selector", "Project"},
+                                              {"scope", "active_dialogs"},
+                                              {"candidates", nlohmann::json::array()},
+                                              {"truncated", false}});
+
+    const tgcli::daemon::ResolverError rate = tgcli::daemon::ResolverRateLimitedError{
+        .operation = tgcli::proto::M3Operation::Send, .retry_after = 9};
+    const auto attributed =
+        tgcli::daemon::resolver_error_terminal(rate, tgcli::daemon::M2Operation::Resolve);
+    CHECK(attributed["details"] ==
+          nlohmann::json{{"operation", "send"}, {"tdlib_code", 429}, {"retry_after", 9}});
+}
+
 TEST_CASE("ResolverConsumer classifies local message links without a TD link request",
           "[resolver][consumer][local][fake-boundary]") {
     ConsumerFixture fixture;

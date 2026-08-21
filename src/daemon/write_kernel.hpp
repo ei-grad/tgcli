@@ -80,8 +80,10 @@ struct WriteDispatchPreparation {
     nlohmann::json proof;
 };
 
+struct WriteDispatchStopped {};
+
 using WriteDispatchAdmissionOutcome =
-    std::variant<WriteDispatchPreparation, write_contract::StoredTerminal>;
+    std::variant<WriteDispatchPreparation, write_contract::StoredTerminal, WriteDispatchStopped>;
 
 struct WriteDispatchOutcome {
     write_contract::StoredTerminal terminal;

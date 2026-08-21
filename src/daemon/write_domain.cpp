@@ -137,6 +137,9 @@ std::optional<TopicRef> parse_send_topic(std::string_view value) {
     } else if (value.find(':') != std::string_view::npos) {
         return std::nullopt;
     }
+    if (value.size() > 1 && value.front() == '0') {
+        return std::nullopt;
+    }
     const auto parsed = decimal(value);
     if (!parsed || *parsed <= 0) {
         return std::nullopt;

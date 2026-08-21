@@ -362,11 +362,15 @@ class MaterializerTests(unittest.TestCase):
 class HarnessPreflightTests(unittest.TestCase):
     VALID_HELP = """OPTIONS:
   -v, --verbose diagnostics
-      --allow-write grant writes
-      --yes confirm
+  --allow-write grant writes
+  --yes confirm
+  --idempotency-key TEXT key
 SUBCOMMANDS:
   logout log out
   chats list chats
+  send send text
+  msg message commands
+  delete delete messages
 """
 
     def setUp(self) -> None:
@@ -721,6 +725,174 @@ class HarnessInvariantTests(unittest.TestCase):
                 },
                 [acceptance.USER_ACCOUNT],
             )
+
+    def test_m3_flow_registers_cleanup_before_reads_and_runs_it_on_success(self) -> None:
+        sent = {
+            "id": 101,
+            "chat_id": 42,
+            "date": "2026-08-21T12:00:00Z",
+            "sender": {"type": "user", "id": 42},
+            "is_outgoing": True,
+            "topic": None,
+            "type": "text",
+            "text": "",
+            "scheduled": False,
+        }
+
+        class FlowRunner:
+            def __init__(self, captures: acceptance.Captures) -> None:
+                self.captures = captures
+                self.calls: list[str] = []
+
+            def run_json(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                self.calls.append(label)
+                if label in {"m3-send", "m3-send-replay"}:
+                    document = dict(sent)
+                    document["text"] = arguments[-1]
+                    if label == "m3-send-replay":
+                        document["text"] = sent["text"]
+                    else:
+                        sent["text"] = arguments[-1]
+                        document["text"] = arguments[-1]
+                    return acceptance.CommandResult(document, frozenset())
+                if label == "m3-get":
+                    return acceptance.CommandResult(
+                        {
+                            "items": [
+                                {name: value for name, value in sent.items() if name != "scheduled"}
+                            ],
+                            "next": None,
+                        },
+                        frozenset(),
+                    )
+                raise AssertionError(label)
+
+            def run_json_error(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                del arguments
+                self.calls.append(label)
+                return acceptance.CommandResult(
+                    {
+                        "error": {
+                            "code": "IDEMPOTENCY_CONFLICT",
+                            "message": "conflict",
+                            "details": {},
+                        }
+                    },
+                    frozenset(),
+                )
+
+            def register_message_cleanup(
+                self, chat_id: int, message_id: int
+            ) -> acceptance.MessageCleanup:
+                self.calls.append("register-cleanup")
+                return acceptance.MessageCleanup(
+                    acceptance.USER_ACCOUNT, chat_id, message_id
+                )
+
+            def cleanup_message(self, cleanup: acceptance.MessageCleanup) -> None:
+                self.calls.append("cleanup")
+                cleanup.completed = True
+
+        runner = FlowRunner(acceptance.Captures(self.tree.directory("m3-captures")))
+        acceptance._m3_write_flow(runner)
+        self.assertEqual(
+            runner.calls,
+            [
+                "m3-send",
+                "register-cleanup",
+                "m3-get",
+                "m3-send-replay",
+                "m3-send-conflict",
+                "cleanup",
+            ],
+        )
+
+    def test_m3_cleanup_failure_wins_over_an_earlier_flow_failure(self) -> None:
+        class FailedFlowRunner:
+            def __init__(self, captures: acceptance.Captures) -> None:
+                self.captures = captures
+                self.cleaned = False
+
+            def run_json(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                if label == "m3-send":
+                    return acceptance.CommandResult(
+                        {
+                            "id": 101,
+                            "chat_id": 42,
+                            "date": "2026-08-21T12:00:00Z",
+                            "sender": {"type": "user", "id": 42},
+                            "is_outgoing": True,
+                            "topic": None,
+                            "type": "text",
+                            "text": arguments[-1],
+                            "scheduled": False,
+                        },
+                        frozenset(),
+                    )
+                raise acceptance.AcceptanceError("earlier assertion")
+
+            def register_message_cleanup(
+                self, chat_id: int, message_id: int
+            ) -> acceptance.MessageCleanup:
+                return acceptance.MessageCleanup(
+                    acceptance.USER_ACCOUNT, chat_id, message_id
+                )
+
+            def cleanup_message(self, cleanup: acceptance.MessageCleanup) -> None:
+                del cleanup
+                self.cleaned = True
+                raise acceptance.AcceptanceError("delete failed")
+
+        runner = FailedFlowRunner(
+            acceptance.Captures(self.tree.directory("failed-m3-captures"))
+        )
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "M3 cleanup failed"):
+            acceptance._m3_write_flow(runner)
+        self.assertTrue(runner.cleaned)
+
+    def test_registered_cleanup_accepts_delete_success_and_verifies_absence(self) -> None:
+        runner = acceptance.Runner.__new__(acceptance.Runner)
+        calls: list[tuple[str, list[str]]] = []
+
+        def run_status(label: str, arguments: list[str]) -> acceptance.JsonExecution:
+            calls.append((label, arguments))
+            return acceptance.JsonExecution(
+                {
+                    "chat_id": 42,
+                    "message_ids": [101],
+                    "for_all": False,
+                    "deleted": True,
+                },
+                0,
+            )
+
+        def run_error(label: str, arguments: list[str]) -> acceptance.CommandResult:
+            calls.append((label, arguments))
+            return acceptance.CommandResult(
+                {
+                    "error": {
+                        "code": "NOT_FOUND",
+                        "message": "missing",
+                        "details": {"chat_id": 42, "missing_ids": [101]},
+                    }
+                },
+                frozenset(),
+            )
+
+        runner.run_json_status = run_status
+        runner.run_json_error = run_error
+        cleanup = acceptance.MessageCleanup(acceptance.USER_ACCOUNT, 42, 101)
+        acceptance.Runner.cleanup_message(runner, cleanup)
+        self.assertTrue(cleanup.completed)
+        self.assertEqual([label for label, _ in calls], ["m3-cleanup-delete-101", "m3-cleanup-absence-101"])
+        self.assertIn("--yes", calls[0][1])
+        self.assertEqual(calls[0][1][-4:], ["msg", "delete", "42", "101"])
 
     def test_selector_registration_failure_reaps_the_interactive_child(self) -> None:
         pid_file = self.tree.root / "child.pid"

@@ -677,6 +677,28 @@ TEST_CASE("production converter preserves nulls and unsupported generated type i
     }
 }
 
+TEST_CASE("production user conversion exposes only online offline or hidden presence",
+          "[core][tdlib][td-runtime-converter][presence]") {
+    const auto convert_user = [](td_api::object_ptr<td_api::UserStatus> status) {
+        auto user = td_api::make_object<td_api::user>();
+        user->id_ = 42;
+        user->first_name_ = "Ada";
+        user->status_ = std::move(status);
+        user->type_ = td_api::make_object<td_api::userTypeRegular>();
+        auto converted = convert_response(NativeObjectPtr{std::move(user)});
+        const auto* summary = converted.get_if<TdUserSummary>();
+        REQUIRE(summary != nullptr);
+        return summary->presence;
+    };
+
+    CHECK(convert_user(td_api::make_object<td_api::userStatusOnline>(1)) == TdUserPresence::Online);
+    CHECK(convert_user(td_api::make_object<td_api::userStatusOffline>(1)) ==
+          TdUserPresence::Offline);
+    CHECK(convert_user(td_api::make_object<td_api::userStatusRecently>(false)) ==
+          TdUserPresence::Hidden);
+    CHECK(convert_user(nullptr) == TdUserPresence::Hidden);
+}
+
 TEST_CASE("production converter preserves every Saved Messages reaction variant",
           "[core][tdlib][td-runtime-converter][saved]") {
     std::vector<td_api::object_ptr<td_api::savedMessagesTag>> values;

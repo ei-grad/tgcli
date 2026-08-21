@@ -260,15 +260,17 @@ before the milestone is closed.
 - [ ] Add shared direct and single-message coordinators with immutable plans,
       schedule ceiling/boundary rechecks, strict timeout oneOf, exact terminal
       ordering, and no post-dispatch cancellation claim
-- [ ] Implement `tgcli send` text/Markdown/HTML/reply/forum-topic/silent/
+- [x] Implement `tgcli send` text/Markdown/HTML/reply/forum-topic/silent/
       schedule paths, wait for authoritative final send state, and return the
       exact `MessageWriteResult`
 - [ ] Implement `tgcli msg edit|react|pin|unpin` with exact property
       validation, reaction availability, plan, audit, timeout and idempotency
       behavior
-- [ ] Implement destructive `tgcli msg delete` and `tgcli chat leave`,
-      including confirmation of the immutable plan on new invocation and
-      completed replay, plus `completed_unchanged` replay-confirmation timeout
+- [x] Implement destructive `tgcli msg delete`, including confirmation of the
+      immutable plan on new invocation and completed replay, plus
+      `completed_unchanged` replay-confirmation timeout
+- [ ] Implement destructive `tgcli chat leave` with the same immutable-plan,
+      confirmation, replay, timeout, audit, and idempotency guarantees
 - [ ] Implement the ordered `tgcli msg forward` vector coordinator with one
       strict `ForwardItem` across success/error/timeout/audit/store, partial
       outcomes, deleted-before-confirmation handling and 429 aggregation
@@ -296,6 +298,9 @@ before the milestone is closed.
       store lock; and proof M6 `AbsentByPolicy` opens neither
       canonical nor temp store. Retain the no-skip Saved text-send TestDC flow
       with immediately registered confirmed cleanup.
+- [x] Add the mandatory no-skip Saved text-send TestDC flow with authoritative
+      final-id validation, immediate cleanup registration, get/replay/conflict
+      verification, cleanup on every exit, and post-delete absence proof
 - [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
 
 ## M4 — Files & media

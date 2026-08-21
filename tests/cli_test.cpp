@@ -186,9 +186,18 @@ RunOutcome run_request_captured(const proto::Request& request, const cli::RunOpt
 }
 
 RunOutcome run_binary_captured(const std::vector<std::string>& arguments, const IsolatedEnv& env,
-                               const std::string& stem) {
+                               const std::string& stem,
+                               std::optional<std::string> stdin_data = std::nullopt) {
     const std::string output_path = env.root() + "/" + stem + ".out";
     const std::string error_path = env.root() + "/" + stem + ".err";
+    const std::string input_path = env.root() + "/" + stem + ".in";
+    if (stdin_data) {
+        std::ofstream input(input_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(input.good());
+        input.write(stdin_data->data(), static_cast<std::streamsize>(stdin_data->size()));
+        input.close();
+        REQUIRE(::chmod(input_path.c_str(), 0600) == 0);
+    }
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
     if (child == 0) {
@@ -201,6 +210,14 @@ RunOutcome run_binary_captured(const std::vector<std::string>& arguments, const 
         ::dup2(errors, STDERR_FILENO);
         ::close(output);
         ::close(errors);
+        if (stdin_data) {
+            const int input = ::open(input_path.c_str(), O_RDONLY);
+            if (input < 0) {
+                ::_exit(126);
+            }
+            ::dup2(input, STDIN_FILENO);
+            ::close(input);
+        }
         std::vector<std::string> argument_storage{"tgcli"};
         argument_storage.insert(argument_storage.end(), arguments.begin(), arguments.end());
         std::vector<char*> argv;
@@ -2492,6 +2509,71 @@ TEST_CASE("msg parser exposes get and link and rejects invalid ids locally",
     CHECK(json::parse(cursor.err)["error"]["details"] ==
           json{{"argument", "--cursor"}, {"reason", "unsupported_mode"}});
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
+TEST_CASE("public M3 parser exposes only flat send and msg delete with closed limits",
+          "[cli][m3][send][delete][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "m3-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("send") != std::string::npos);
+    CHECK((root_help.out + root_help.err).find("msg send") == std::string::npos);
+
+    const auto send_help = run_binary_captured({"send", "--help"}, env, "send-help");
+    REQUIRE(send_help.exit_code == kOk);
+    const auto send_surface = send_help.out + send_help.err;
+    for (const auto* token :
+         {"--md", "--html", "--reply-to", "--topic", "--silent", "--schedule"}) {
+        CHECK(send_surface.find(token) != std::string::npos);
+    }
+    const auto msg_help = run_binary_captured({"msg", "--help"}, env, "m3-msg-help");
+    REQUIRE(msg_help.exit_code == kOk);
+    CHECK((msg_help.out + msg_help.err).find("delete") != std::string::npos);
+
+    std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
+        {"send-format-exclusive", {"--json", "send", "-1001", "hello", "--md", "--html"}},
+        {"send-reply-zero", {"--json", "send", "-1001", "hello", "--reply-to", "0"}},
+        {"send-topic-kind", {"--json", "send", "-1001", "hello", "--topic", "thread:1"}},
+        {"send-topic-zero", {"--json", "send", "-1001", "hello", "--topic", "0"}},
+        {"send-topic-leading-zero", {"--json", "send", "-1001", "hello", "--topic", "01"}},
+        {"send-schedule-zone",
+         {"--json", "send", "-1001", "hello", "--schedule", "2026-08-21T12:00:00"}},
+        {"send-empty", {"--json", "send", "-1001", ""}},
+        {"send-key-dry-run",
+         {"--json", "--dry-run", "--idempotency-key", "key", "send", "-1001", "hello"}},
+        {"delete-zero", {"--json", "msg", "delete", "-1001", "0"}},
+        {"delete-duplicate", {"--json", "msg", "delete", "-1001", "2", "1", "2"}},
+        {"delete-over-int53", {"--json", "msg", "delete", "-1001", "9007199254740992"}},
+    };
+    std::vector<std::string> too_many{"--json", "msg", "delete", "-1001"};
+    for (int id = 1; id <= 101; ++id) {
+        too_many.push_back(std::to_string(id));
+    }
+    invalid.emplace_back("delete-too-many", std::move(too_many));
+    for (const auto& [stem, arguments] : invalid) {
+        const auto outcome = run_binary_captured(arguments, env, stem);
+        INFO(stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+
+    const auto empty_stdin =
+        run_binary_captured({"--json", "send", "-1001", "-"}, env, "send-stdin-empty", "");
+    CHECK(empty_stdin.exit_code == kUsage);
+    CHECK(empty_stdin.out.empty());
+    CHECK(json::parse(empty_stdin.err)["error"]["details"] ==
+          json{{"argument", "TEXT"}, {"reason", "invalid_argument"}});
+
+    const auto nul_stdin = run_binary_captured({"--json", "send", "-1001", "-"}, env,
+                                               "send-stdin-nul", std::string("a\0b", 3));
+    CHECK(nul_stdin.exit_code == kUsage);
+    CHECK(nul_stdin.out.empty());
+    const auto oversized_stdin =
+        run_binary_captured({"--json", "send", "-1001", "-"}, env, "send-stdin-oversized",
+                            std::string(1024 * 1024 + 1, 'x'));
+    CHECK(oversized_stdin.exit_code == kUsage);
+    CHECK(oversized_stdin.out.empty());
 }
 
 TEST_CASE("read parser exposes history and rejects closed grammar failures locally",

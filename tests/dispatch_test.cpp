@@ -443,6 +443,13 @@ TEST_CASE("fetch retains removal before logout recovery without broadening read 
     const auto daemon_status = daemon::recovery_preflight_order("daemon status");
     REQUIRE(daemon_status.size() == 1);
     CHECK(daemon_status.front() == daemon::RecoveryPreflight::Removal);
+
+    for (const auto* command : {"send", "msg delete"}) {
+        const auto write = daemon::recovery_preflight_order(command);
+        REQUIRE(write.size() == 2);
+        CHECK(write[0] == daemon::RecoveryPreflight::Removal);
+        CHECK(write[1] == daemon::RecoveryPreflight::Logout);
+    }
 }
 
 TEST_CASE("dispatcher independently rejects invalid or out-of-scope raw idempotency keys",

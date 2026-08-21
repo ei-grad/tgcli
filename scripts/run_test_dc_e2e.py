@@ -9,6 +9,7 @@ import os
 import pty
 import re
 import selectors
+import secrets
 import shlex
 import stat
 import subprocess
@@ -37,8 +38,14 @@ from test_dc_contract import (
 USER_ACCOUNT = "test-user"
 BOT_ACCOUNT = "test-bot"
 QR_ACCOUNT = "test-qr"
-REQUIRED_SUBCOMMANDS = ("logout", "chats")
-REQUIRED_OPTIONS = ("--allow-write", "--yes", "--verbose", "-v")
+REQUIRED_SUBCOMMANDS = ("logout", "chats", "send", "msg")
+REQUIRED_OPTIONS = (
+    "--allow-write",
+    "--yes",
+    "--idempotency-key",
+    "--verbose",
+    "-v",
+)
 USER_FIELDS = {
     "id",
     "first_name",
@@ -78,6 +85,10 @@ class AcceptanceError(RuntimeError):
     pass
 
 
+class CleanupError(AcceptanceError):
+    pass
+
+
 def _private_directory(directory: Path) -> None:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     status = directory.lstat()
@@ -101,6 +112,7 @@ class Captures:
     def __init__(self, directory: Path) -> None:
         _private_directory(directory)
         self.directory = directory
+        self.stdout_files: list[Path] = []
         self.stderr_files: list[Path] = []
         self._sequence = 0
         self._lock = threading.Lock()
@@ -111,6 +123,7 @@ class Captures:
             self._sequence += 1
             stdout = self.directory / f"{sequence:03d}-{label}.stdout"
             stderr = self.directory / f"{sequence:03d}-{label}.stderr"
+            self.stdout_files.append(stdout)
             self.stderr_files.append(stderr)
         return stdout, stderr
 
@@ -119,6 +132,20 @@ class Captures:
 class CommandResult:
     document: object
     observed_prompts: frozenset[str]
+
+
+@dataclass
+class JsonExecution:
+    document: object
+    returncode: int
+
+
+@dataclass
+class MessageCleanup:
+    account: str
+    chat_id: int
+    message_id: int
+    completed: bool = False
 
 
 @dataclass
@@ -175,12 +202,15 @@ class Runner:
         self.qr_approver = qr_approver
         self.timeout = timeout
         self.daemons: list[Daemon] = []
+        self.message_cleanups: list[MessageCleanup] = []
         self.qr_approvals = 0
 
     def _argv(self, arguments: Sequence[str]) -> list[str]:
         return [str(self.binary), *arguments]
 
-    def run_json(self, label: str, arguments: Sequence[str]) -> CommandResult:
+    def run_json_status(
+        self, label: str, arguments: Sequence[str]
+    ) -> JsonExecution:
         stdout_path, stderr_path = self.captures.allocate(label)
         try:
             with (
@@ -198,9 +228,82 @@ class Runner:
                 )
         except (OSError, subprocess.SubprocessError) as error:
             raise AcceptanceError(f"command execution failed: {label}") from error
+        source = stdout_path if completed.returncode == 0 else stderr_path
+        return JsonExecution(_load_json(source, label), completed.returncode)
+
+    def run_json(self, label: str, arguments: Sequence[str]) -> CommandResult:
+        completed = self.run_json_status(label, arguments)
         if completed.returncode != 0:
             raise AcceptanceError(f"command returned non-zero: {label}")
-        return CommandResult(_load_json(stdout_path, label), frozenset())
+        return CommandResult(completed.document, frozenset())
+
+    def run_json_error(self, label: str, arguments: Sequence[str]) -> CommandResult:
+        completed = self.run_json_status(label, arguments)
+        if completed.returncode == 0:
+            raise AcceptanceError(f"command unexpectedly succeeded: {label}")
+        return CommandResult(completed.document, frozenset())
+
+    def register_message_cleanup(self, chat_id: int, message_id: int) -> MessageCleanup:
+        cleanup = MessageCleanup(USER_ACCOUNT, chat_id, message_id)
+        self.message_cleanups.append(cleanup)
+        return cleanup
+
+    def cleanup_message(self, cleanup: MessageCleanup) -> None:
+        if cleanup.completed:
+            return
+        deleted = self.run_json_status(
+            f"m3-cleanup-delete-{cleanup.message_id}",
+            [
+                "--json",
+                "--allow-write",
+                "--yes",
+                "--account",
+                cleanup.account,
+                "msg",
+                "delete",
+                str(cleanup.chat_id),
+                str(cleanup.message_id),
+            ],
+        )
+        expected = {
+            "chat_id": cleanup.chat_id,
+            "message_ids": [cleanup.message_id],
+            "for_all": False,
+            "deleted": True,
+        }
+        if deleted.returncode == 0:
+            if deleted.document != expected:
+                raise AcceptanceError("M3 cleanup returned an invalid delete result")
+        elif _error_code(deleted.document) != "NOT_FOUND":
+            raise AcceptanceError("M3 cleanup delete failed")
+        absent = self.run_json_error(
+            f"m3-cleanup-absence-{cleanup.message_id}",
+            [
+                "--json",
+                "--account",
+                cleanup.account,
+                "msg",
+                "get",
+                str(cleanup.chat_id),
+                str(cleanup.message_id),
+            ],
+        ).document
+        if _error_code(absent) != "NOT_FOUND":
+            raise AcceptanceError("M3 cleanup did not make the message absent")
+        details = absent.get("error", {}).get("details", {}) if isinstance(absent, dict) else {}
+        if details != {"chat_id": cleanup.chat_id, "missing_ids": [cleanup.message_id]}:
+            raise AcceptanceError("M3 cleanup absence result is invalid")
+        cleanup.completed = True
+
+    def cleanup_messages(self) -> None:
+        failure: BaseException | None = None
+        for cleanup in reversed(self.message_cleanups):
+            try:
+                self.cleanup_message(cleanup)
+            except (AcceptanceError, OSError, subprocess.SubprocessError) as error:
+                failure = error
+        if failure is not None:
+            raise CleanupError("M3 message cleanup failed") from failure
 
     def run_interactive(
         self,
@@ -439,30 +542,17 @@ def _load_json(source: Path, label: str) -> object:
         ) from error
 
 
-def _surface_preflight(
-    binary: Path, environment: Mapping[str, str], timeout: float
-) -> None:
-    try:
-        status = binary.lstat()
-    except OSError as error:
-        raise AcceptanceError("tgcli binary is unavailable") from error
-    if not stat.S_ISREG(status.st_mode) or not os.access(binary, os.X_OK):
-        raise AcceptanceError("tgcli binary must be an executable regular file")
-    try:
-        completed = subprocess.run(
-            [str(binary), "--help"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            env=environment,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise AcceptanceError("cannot inspect the tgcli CLI surface") from error
-    try:
-        help_text = (completed.stdout + completed.stderr).decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise AcceptanceError("tgcli help is not valid UTF-8") from error
+def _error_code(document: object) -> str | None:
+    if not isinstance(document, dict) or set(document) != {"error"}:
+        return None
+    error = document["error"]
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+def _help_tokens(help_text: str) -> tuple[set[str], set[str]]:
     option_tokens: set[str] = set()
     subcommands: set[str] = set()
     section = ""
@@ -482,9 +572,45 @@ def _surface_preflight(
                 option_tokens.add(field)
         elif section == "subcommands" and fields:
             subcommands.add(fields[0])
+    return option_tokens, subcommands
+
+
+def _surface_preflight(
+    binary: Path, environment: Mapping[str, str], timeout: float
+) -> None:
+    try:
+        status = binary.lstat()
+    except OSError as error:
+        raise AcceptanceError("tgcli binary is unavailable") from error
+    if not stat.S_ISREG(status.st_mode) or not os.access(binary, os.X_OK):
+        raise AcceptanceError("tgcli binary must be an executable regular file")
+
+    def inspect(arguments: Sequence[str]) -> tuple[int, set[str], set[str]]:
+        try:
+            completed = subprocess.run(
+                [str(binary), *arguments],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                env=environment,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise AcceptanceError("cannot inspect the tgcli CLI surface") from error
+        try:
+            help_text = (completed.stdout + completed.stderr).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AcceptanceError("tgcli help is not valid UTF-8") from error
+        options, subcommands = _help_tokens(help_text)
+        return completed.returncode, options, subcommands
+
+    root_code, option_tokens, subcommands = inspect(["--help"])
+    msg_code, _, msg_subcommands = inspect(["msg", "--help"])
     missing = [token for token in REQUIRED_OPTIONS if token not in option_tokens]
     missing.extend(token for token in REQUIRED_SUBCOMMANDS if token not in subcommands)
-    if completed.returncode != 0 or missing:
+    if "delete" not in msg_subcommands:
+        missing.append("msg delete")
+    if root_code != 0 or msg_code != 0 or missing:
         raise AcceptanceError("tgcli is missing the test-DC runtime surface")
 
 
@@ -880,6 +1006,144 @@ def _state_log_directory(environment: Mapping[str, str], account: str) -> Path:
     return Path(environment["XDG_STATE_HOME"]) / "tgcli-test" / "accounts" / account
 
 
+def _authoritative_send_ids(document: object) -> tuple[int, int]:
+    if not isinstance(document, dict):
+        raise AcceptanceError("M3 send returned a non-object result")
+    message_id = document.get("id")
+    chat_id = document.get("chat_id")
+    if (
+        not _int(message_id, -9_007_199_254_740_991, 9_007_199_254_740_991)
+        or message_id == 0
+        or not _int(chat_id, -9_007_199_254_740_991, 9_007_199_254_740_991)
+        or chat_id == 0
+    ):
+        raise AcceptanceError("M3 send did not return authoritative final ids")
+    return chat_id, message_id
+
+
+def _assert_send_result(document: object, chat_id: int, message_id: int, text: str) -> None:
+    fields = {
+        "id",
+        "chat_id",
+        "date",
+        "sender",
+        "is_outgoing",
+        "topic",
+        "type",
+        "text",
+        "scheduled",
+    }
+    if not isinstance(document, dict) or set(document) != fields:
+        raise AcceptanceError("M3 send returned an invalid result")
+    sender = document["sender"]
+    if (
+        document["id"] != message_id
+        or document["chat_id"] != chat_id
+        or not isinstance(document["date"], str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            document["date"],
+        )
+        is None
+        or not isinstance(sender, dict)
+        or set(sender) != {"type", "id"}
+        or sender["type"] != "user"
+        or not _int(sender["id"], 1, 9_007_199_254_740_991)
+        or document["is_outgoing"] is not True
+        or document["topic"] is not None
+        or document["type"] != "text"
+        or document["text"] != text
+        or document["scheduled"] is not False
+    ):
+        raise AcceptanceError("M3 send returned invalid message facts")
+
+
+def _assert_get_matches_send(document: object, sent: Mapping[str, object]) -> None:
+    expected = {name: value for name, value in sent.items() if name != "scheduled"}
+    if document != {"items": [expected], "next": None}:
+        raise AcceptanceError("msg get did not return the authoritative sent message")
+
+
+def _assert_error(document: object, code: str) -> None:
+    if _error_code(document) != code:
+        raise AcceptanceError(f"command did not return {code}")
+
+
+def _scan_m3_key(captures: Captures, first_capture: int, raw_key: str) -> None:
+    sentinel = raw_key.encode()
+    files = captures.stdout_files[first_capture:] + captures.stderr_files[first_capture:]
+    for source in files:
+        try:
+            if sentinel in source.read_bytes():
+                raise AcceptanceError("raw M3 idempotency key leaked into command artifacts")
+        except OSError as error:
+            raise AcceptanceError("cannot scan M3 command artifacts") from error
+
+
+def _m3_write_flow(runner: Runner) -> None:
+    first_capture = len(runner.captures.stdout_files)
+    raw_key = f"tgcli-test-dc-{secrets.token_hex(16)}"
+    text = f"tgcli M3 acceptance {secrets.token_hex(16)}"
+    arguments = [
+        "--json",
+        "--allow-write",
+        "--account",
+        USER_ACCOUNT,
+        "--idempotency-key",
+        raw_key,
+        "send",
+        "t.me/saved",
+        text,
+    ]
+    sent = runner.run_json("m3-send", arguments).document
+    chat_id, message_id = _authoritative_send_ids(sent)
+    cleanup = runner.register_message_cleanup(chat_id, message_id)
+    failure: BaseException | None = None
+    try:
+        _assert_send_result(sent, chat_id, message_id, text)
+        fetched = runner.run_json(
+            "m3-get",
+            [
+                "--json",
+                "--account",
+                USER_ACCOUNT,
+                "msg",
+                "get",
+                str(chat_id),
+                str(message_id),
+            ],
+        ).document
+        _assert_get_matches_send(fetched, sent)
+        replayed = runner.run_json("m3-send-replay", arguments).document
+        if replayed != sent:
+            raise AcceptanceError("M3 send replay changed the stored result")
+        conflict_arguments = [*arguments]
+        conflict_arguments[-1] = text + " conflict"
+        conflict = runner.run_json_error(
+            "m3-send-conflict", conflict_arguments
+        ).document
+        _assert_error(conflict, "IDEMPOTENCY_CONFLICT")
+    except BaseException as error:
+        # Cleanup must run for assertion, command, cancellation, and interpreter exits.
+        failure = error
+    cleanup_failure: BaseException | None = None
+    try:
+        runner.cleanup_message(cleanup)
+    except (AcceptanceError, OSError, subprocess.SubprocessError) as error:
+        cleanup_failure = error
+    scan_failure: BaseException | None = None
+    try:
+        _scan_m3_key(runner.captures, first_capture, raw_key)
+    except (AcceptanceError, OSError) as error:
+        scan_failure = error
+    if cleanup_failure is not None:
+        raise CleanupError("M3 cleanup failed") from cleanup_failure
+    if scan_failure is not None:
+        raise scan_failure
+    if failure is not None:
+        raise failure
+
+
 def _smoke(
     runner: Runner,
     environment: Mapping[str, str],
@@ -988,6 +1252,8 @@ def _smoke(
     ):
         raise AcceptanceError("me after re-login differs from login identity")
 
+    _m3_write_flow(runner)
+
     if QR_ACCOUNT in accounts:
         qr = runner.run_interactive(
             "login-qr",
@@ -1021,7 +1287,7 @@ def _skip_entries(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the tgcli M1 authentication and M2 chats acceptance flow on test DC"
+        description="Run the tgcli M1/M2 and mandatory M3 send/delete acceptance flow on test DC"
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -1040,6 +1306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     entries: list[SkipEntry] = []
     failure: BaseException | None = None
     runner: Runner | None = None
+    cleanup_failure: BaseException | None = None
     traps: dict[Path, bytes] = {}
     scan_inputs: tuple[list[FrozenSentinel], list[Path]] | None = None
     try:
@@ -1091,8 +1358,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             validate_m1_coverage(executed, entries)
     except (AcceptanceError, ContractError, OSError) as error:
+        if isinstance(error, CleanupError):
+            cleanup_failure = error
         failure = error
     finally:
+        if runner is not None:
+            try:
+                runner.cleanup_messages()
+            except (AcceptanceError, OSError) as error:
+                cleanup_failure = error
+                failure = error
         if runner is not None:
             try:
                 runner.stop_daemons()
@@ -1115,6 +1390,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_skip_artifact(artifact, entries)
         except ContractError as error:
             failure = error
+        if cleanup_failure is not None:
+            failure = cleanup_failure
     if failure is not None:
         print(f"test-DC acceptance failure: {failure}", file=sys.stderr)
         return 1
