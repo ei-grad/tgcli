@@ -489,11 +489,25 @@ TEST_CASE("single send distinguishes authorization loss generation close and can
 
     SECTION("cancellation after dispatch") {
         SendHarness harness;
-        auto outcome = harness.execute();
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool temporary_observed = false;
+        tgcli::daemon::SingleSendHooks hooks;
+        hooks.on_temporary_id = [&](const auto&) {
+            {
+                const std::lock_guard lock(mutex);
+                temporary_observed = true;
+            }
+            condition.notify_all();
+        };
+        auto outcome = harness.execute(std::move(hooks));
         const auto sent = harness.await_send();
         harness.runtime().push_response(harness.first(), sent.query_id,
                                         tgcli::core::TdValue::from(pending_message()));
-        REQUIRE(harness.runtime().wait_for_received(2));
+        {
+            std::unique_lock lock(mutex);
+            REQUIRE(condition.wait_for(lock, 2s, [&] { return temporary_observed; }));
+        }
         harness.session().disconnect();
         auto result = outcome.get();
         const auto* cancelled = std::get_if<tgcli::daemon::SingleSendCancelled>(&result);
