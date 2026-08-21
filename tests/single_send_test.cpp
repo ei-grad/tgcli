@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -121,11 +122,7 @@ tgcli::core::TdSendMessageRequest send_request() {
                                           .id = 9,
                                           .tdlib_type_id = 0},
             .reply_to_message_id = std::nullopt,
-            .options = {.disable_notification = false,
-                        .protect_content = false,
-                        .update_order_of_installed_sticker_sets = false,
-                        .schedule = {},
-                        .sending_id = 12345},
+            .options = {.disable_notification = false, .schedule = {}, .sending_id = 12345},
             .content = {.formatted_text = {.text = "send", .entities = {}, .capability = {}},
                         .parsed = false}};
 }
@@ -134,7 +131,7 @@ class SendHarness {
   public:
     using Clock = tgcli::core::TdEventClock;
 
-    SendHarness()
+    explicit SendHarness(bool unlimited = false)
         : deadline_(Clock::time_point(100s)), clock_(deadline_ - 1s),
           runtime_owner_(std::make_unique<tgcli::test::ScriptedTdRuntime>()),
           runtime_(runtime_owner_.get()),
@@ -161,7 +158,8 @@ class SendHarness {
         request.context.cwd = "/";
         session_ = std::make_unique<tgcli::daemon::RequestSession>(
             std::move(request), *sink_, 0, tgcli::daemon::RequestSession::NonceGenerator{},
-            tgcli::daemon::ActivityTracker::Token{}, nullptr, tgcli::RequestDeadline{deadline_});
+            tgcli::daemon::ActivityTracker::Token{}, nullptr,
+            unlimited ? tgcli::RequestDeadline{} : tgcli::RequestDeadline{deadline_});
     }
 
     ~SendHarness() {
@@ -224,6 +222,10 @@ class SendHarness {
 
     tgcli::daemon::RequestSession& session() {
         return *session_;
+    }
+
+    tgcli::core::TdClient& client() {
+        return *client_;
     }
 
     ManualClock& clock() {
@@ -394,6 +396,34 @@ TEST_CASE("single send exposes explicit rate limit without mutation retry",
     CHECK(dispatch_rate->retry_after == 3);
     CHECK(dispatch_rate->mutation_state == tgcli::daemon::SingleSendMutationState::Possible);
     CHECK(dispatch_harness.send_count() == 1);
+
+    struct RateLimitCase {
+        std::string message;
+        std::int32_t expected;
+    };
+    const std::vector cases{
+        RateLimitCase{"Too Many Requests: ReTrY\tAfTeR   17 seconds", 17},
+        RateLimitCase{"DC5 flood_wait_19 trailing text", 19},
+        RateLimitCase{"retry after 7 trailing text", 7},
+        RateLimitCase{"retry after 21474836499999999999 seconds",
+                      std::numeric_limits<std::int32_t>::max()},
+        RateLimitCase{"notretry after 29 seconds", 0},
+        RateLimitCase{"prefix_FLOOD_WAIT_31", 0},
+    };
+    for (const auto& entry : cases) {
+        CAPTURE(entry.message);
+        SendHarness parser_harness;
+        auto parser_outcome = parser_harness.execute();
+        const auto parser_sent = parser_harness.await_send();
+        parser_harness.runtime().push_response(
+            parser_harness.first(), parser_sent.query_id,
+            tgcli::core::TdValue::from(tgcli::core::TdError{429, entry.message}));
+        auto parser_result = parser_outcome.get();
+        const auto* parser_rate = std::get_if<tgcli::daemon::SingleSendRateLimited>(&parser_result);
+        REQUIRE(parser_rate != nullptr);
+        CHECK(parser_rate->retry_after == entry.expected);
+        CHECK(parser_harness.send_count() == 1);
+    }
 }
 
 TEST_CASE("single send deadline equality retains the observed temporary ID",
@@ -470,6 +500,129 @@ TEST_CASE("single send distinguishes authorization loss generation close and can
         REQUIRE(cancelled != nullptr);
         REQUIRE(cancelled->temporary);
     }
+}
+
+TEST_CASE("single send observes authorization loss without a response under unlimited wait",
+          "[daemon][send][arbitration][auth][unlimited]") {
+    SendHarness harness(true);
+    auto outcome = harness.execute();
+    const auto sent = harness.await_send();
+    harness.runtime().push_update(harness.first(), {},
+                                  tgcli::core::AuthStateData{tgcli::core::AuthState::LoggingOut});
+    REQUIRE(eventually([&] { return harness.client().auth_state()->auth_sequence == 2; }));
+    const auto status = outcome.wait_for(100ms);
+    CHECK(status == std::future_status::ready);
+    if (status != std::future_status::ready) {
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(stable_message()));
+    }
+    auto result = outcome.get();
+    const auto* lost = std::get_if<tgcli::daemon::SingleSendAuthorizationLost>(&result);
+    REQUIRE(lost != nullptr);
+    CHECK_FALSE(lost->temporary);
+    CHECK(lost->state == tgcli::core::AuthState::LoggingOut);
+}
+
+TEST_CASE("single send refreshes committed auth while callback publication is blocked",
+          "[daemon][send][arbitration][auth][publication-race]") {
+    SendHarness harness(true);
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool callback_entered = false;
+    bool callback_release = false;
+    bool callback_finished = false;
+    const auto blocker = harness.client().subscribe_auth_states(
+        [&](const std::shared_ptr<const tgcli::core::AuthStateSnapshot>& snapshot) {
+            if (!snapshot || snapshot->auth_sequence != 2) {
+                return;
+            }
+            std::unique_lock lock(mutex);
+            callback_entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return callback_release; });
+            callback_finished = true;
+            condition.notify_all();
+        });
+    tgcli::daemon::SingleSendHooks hooks;
+    hooks.wait = [](const tgcli::RequestDeadline&, const std::stop_token&) {
+        std::this_thread::yield();
+    };
+    auto outcome = harness.execute(std::move(hooks));
+    const auto sent = harness.await_send();
+    harness.runtime().push_update(harness.first(), {},
+                                  tgcli::core::AuthStateData{tgcli::core::AuthState::LoggingOut});
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 2s, [&] { return callback_entered; }));
+    }
+    const auto status = outcome.wait_for(100ms);
+    CHECK(status == std::future_status::ready);
+    {
+        const std::lock_guard lock(mutex);
+        callback_release = true;
+    }
+    condition.notify_all();
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 2s, [&] { return callback_finished; }));
+    }
+    if (status != std::future_status::ready) {
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(stable_message()));
+    }
+    auto result = outcome.get();
+    CHECK(std::get_if<tgcli::daemon::SingleSendAuthorizationLost>(&result) != nullptr);
+    harness.client().unsubscribe_auth_states(blocker);
+}
+
+TEST_CASE("single send gives earlier auth priority over a response observed at deadline equality",
+          "[daemon][send][arbitration][auth][deadline]") {
+    SendHarness harness;
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool arbitration_entered = false;
+    bool arbitration_release = false;
+    bool blocked_once = false;
+    tgcli::daemon::SingleSendHooks hooks;
+    hooks.before_event_arbitration = [&] {
+        std::unique_lock lock(mutex);
+        if (blocked_once) {
+            return;
+        }
+        blocked_once = true;
+        arbitration_entered = true;
+        condition.notify_all();
+        condition.wait(lock, [&] { return arbitration_release; });
+    };
+    auto outcome = harness.execute(std::move(hooks));
+    const auto sent = harness.await_send();
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 2s, [&] { return arbitration_entered; }));
+    }
+    harness.runtime().push_update(harness.first(), {},
+                                  tgcli::core::AuthStateData{tgcli::core::AuthState::LoggingOut});
+    REQUIRE(eventually([&] { return harness.client().auth_state()->auth_sequence == 2; }));
+    bool response_completed = false;
+    const auto completion = harness.client().subscribe_response_completions([&](std::uint64_t) {
+        const std::lock_guard lock(mutex);
+        response_completed = true;
+        condition.notify_all();
+    });
+    harness.clock().set(harness.deadline());
+    harness.runtime().push_response(harness.first(), sent.query_id,
+                                    tgcli::core::TdValue::from(stable_message()));
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(condition.wait_for(lock, 2s, [&] { return response_completed; }));
+        arbitration_release = true;
+    }
+    condition.notify_all();
+    harness.client().unsubscribe_response_completions(completion);
+    auto result = outcome.get();
+    const auto* lost = std::get_if<tgcli::daemon::SingleSendAuthorizationLost>(&result);
+    REQUIRE(lost != nullptr);
+    CHECK(lost->state == tgcli::core::AuthState::LoggingOut);
 }
 
 TEST_CASE("single send fails closed on null unknown and malformed matching variants",

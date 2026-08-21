@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <type_traits>
 
 namespace tgcli::core {
@@ -31,6 +32,59 @@ bool valid_send_text(std::string_view text) {
         }
     }
     return true;
+}
+
+std::optional<std::size_t> utf16_code_units(std::string_view text) {
+    if (!common::valid_utf8(text)) {
+        return std::nullopt;
+    }
+    std::size_t units = 0;
+    for (std::size_t index = 0; index < text.size();) {
+        const auto first = static_cast<unsigned char>(text[index]);
+        std::size_t length = 1;
+        std::uint32_t codepoint = first;
+        if (first >= 0xC2U && first <= 0xDFU) {
+            length = 2;
+            codepoint = first & 0x1FU;
+        } else if (first >= 0xE0U && first <= 0xEFU) {
+            length = 3;
+            codepoint = first & 0x0FU;
+        } else if (first >= 0xF0U) {
+            length = 4;
+            codepoint = first & 0x07U;
+        }
+        for (std::size_t continuation = 1; continuation < length; ++continuation) {
+            const auto byte = static_cast<unsigned char>(text[index + continuation]);
+            codepoint = (codepoint << 6U) | (byte & 0x3FU);
+        }
+        units += codepoint > 0xFFFFU ? 2 : 1;
+        index += length;
+    }
+    return units;
+}
+
+bool is_utf16_boundary(std::string_view text, std::size_t target) {
+    if (target == 0) {
+        return true;
+    }
+    std::size_t units = 0;
+    for (std::size_t index = 0; index < text.size();) {
+        const auto first = static_cast<unsigned char>(text[index]);
+        std::size_t length = 1;
+        if (first >= 0xF0U) {
+            length = 4;
+        } else if (first >= 0xE0U) {
+            length = 3;
+        } else if (first >= 0xC2U) {
+            length = 2;
+        }
+        units += length == 4 ? 2 : 1;
+        if (units >= target) {
+            return units == target;
+        }
+        index += length;
+    }
+    return false;
 }
 
 bool valid_send_topic(const std::optional<TdTopic>& topic) {
@@ -63,6 +117,25 @@ std::string send_schedule_name(TdSendScheduleKind schedule) {
 }
 
 } // namespace
+
+bool valid_td_formatted_text_facts(const TdFormattedText& formatted) noexcept {
+    const auto units = utf16_code_units(formatted.text);
+    if (!units) {
+        return false;
+    }
+    return std::ranges::all_of(formatted.entities, [&](const TdTextEntity& entity) {
+        if (entity.kind == TdTextEntityKind::Unknown || entity.offset < 0 || entity.length <= 0) {
+            return false;
+        }
+        const auto offset = static_cast<std::size_t>(entity.offset);
+        const auto length = static_cast<std::size_t>(entity.length);
+        if (offset > *units || length > *units - offset) {
+            return false;
+        }
+        return is_utf16_boundary(formatted.text, offset) &&
+               is_utf16_boundary(formatted.text, offset + length);
+    });
+}
 
 bool valid_td_message_locator(std::int64_t chat_id, std::int64_t message_id) noexcept {
     return valid_td_chat_id(chat_id) && valid_td_message_id(message_id);
@@ -147,11 +220,7 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
         break;
     }
     if (request.content.parsed) {
-        return formatted.capability.has_value() &&
-               std::ranges::none_of(formatted.entities, [](const auto& entity) {
-                   return entity.kind == TdTextEntityKind::Unknown || entity.offset < 0 ||
-                          entity.length <= 0;
-               });
+        return formatted.capability.has_value() && valid_td_formatted_text_facts(formatted);
     }
     return formatted.entities.empty() && !formatted.capability.has_value();
 }
@@ -169,11 +238,10 @@ TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& requ
          {"suggested_post_info_is_null", true},
          {"disable_notification", request.options.disable_notification},
          {"from_background", false},
-         {"protect_content", request.options.protect_content},
+         {"protect_content", false},
          {"allow_paid_broadcast", false},
          {"paid_message_star_count", std::int64_t{0}},
-         {"update_order_of_installed_sticker_sets",
-          request.options.update_order_of_installed_sticker_sets},
+         {"update_order_of_installed_sticker_sets", false},
          {"schedule_kind", send_schedule_name(request.options.schedule.kind)},
          {"schedule_send_date", static_cast<std::int64_t>(request.options.schedule.send_date)},
          {"schedule_repeat_period", std::int64_t{0}},

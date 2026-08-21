@@ -41,13 +41,17 @@ TdSendMessageRequest plain_request(TdSendSchedule schedule = {}) {
     return {.chat_id = -1001,
             .topic = TdTopic{.kind = TdTopicKind::Forum, .id = 9, .tdlib_type_id = 0},
             .reply_to_message_id = 77,
-            .options = {.disable_notification = true,
-                        .protect_content = true,
-                        .update_order_of_installed_sticker_sets = true,
-                        .schedule = schedule,
-                        .sending_id = 12345},
+            .options = {.disable_notification = true, .schedule = schedule, .sending_id = 12345},
             .content = {.formatted_text = {.text = "send 🧪", .entities = {}, .capability = {}},
                         .parsed = false}};
+}
+
+const TdFieldValue* function_field(const TdFunctionData& function, std::string_view name) {
+    const auto found =
+        std::ranges::find_if(function.fields(), [&](const TdFunctionField& candidate) {
+            return candidate.has_name(name);
+        });
+    return found == function.fields().end() ? nullptr : &found->value();
 }
 
 td_api::object_ptr<td_api::message>
@@ -87,6 +91,16 @@ static_assert(!std::is_copy_constructible_v<TdFormattedTextCapability>);
 static_assert(!std::is_copy_assignable_v<TdFormattedTextCapability>);
 static_assert(std::is_move_constructible_v<TdFormattedTextCapability>);
 
+template <typename Options>
+concept HasProtectContent = requires(Options options) { options.protect_content; };
+
+template <typename Options>
+concept HasStickerSetUpdateOrder =
+    requires(Options options) { options.update_order_of_installed_sticker_sets; };
+
+static_assert(!HasProtectContent<TdMessageSendOptions>);
+static_assert(!HasStickerSetUpdateOrder<TdMessageSendOptions>);
+
 TEST_CASE("sendMessage native and scripted factories share every pinned default",
           "[core][tdlib][send][factory]") {
     tgcli::test::ScriptedTdRuntime scripted;
@@ -100,6 +114,13 @@ TEST_CASE("sendMessage native and scripted factories share every pinned default"
         REQUIRE(native.function_data());
         REQUIRE(fake.function_data());
         CHECK(*native.function_data() == *fake.function_data());
+        const auto* native_protect = function_field(*native.function_data(), "protect_content");
+        const auto* native_update_order =
+            function_field(*native.function_data(), "update_order_of_installed_sticker_sets");
+        REQUIRE(native_protect != nullptr);
+        REQUIRE(native_update_order != nullptr);
+        CHECK_FALSE(std::get<bool>(*native_protect));
+        CHECK_FALSE(std::get<bool>(*native_update_order));
         CHECK(detail::production_send_message_matches_for_test(native, expected));
         CHECK(detail::production_function_matches_for_test(native, TdFunctionKind::SendMessage));
     }
@@ -108,21 +129,18 @@ TEST_CASE("sendMessage native and scripted factories share every pinned default"
     saved.topic = TdTopic{.kind = TdTopicKind::Saved, .id = 91, .tdlib_type_id = 0};
     saved.reply_to_message_id.reset();
     saved.options.disable_notification = false;
-    saved.options.protect_content = false;
-    saved.options.update_order_of_installed_sticker_sets = false;
     auto expected = plain_request();
     expected.topic = TdTopic{.kind = TdTopicKind::Saved, .id = 91, .tdlib_type_id = 0};
     expected.reply_to_message_id.reset();
     expected.options.disable_notification = false;
-    expected.options.protect_content = false;
-    expected.options.update_order_of_installed_sticker_sets = false;
     auto native = detail::make_production_send_message_for_test(std::move(saved), 7);
     CHECK(detail::production_send_message_matches_for_test(native, expected));
 }
 
 TEST_CASE("parsed formattedText capability is exact generation-bound and one-shot",
           "[core][tdlib][send][capability]") {
-    auto capability = TdFormattedTextCapability::from(TdScriptedFormattedTextCapability{}, 7);
+    auto capability = TdFormattedTextCapability::from(
+        TdScriptedFormattedTextCapability{.text = "bound", .entities = {}}, 7);
     CHECK(capability.valid_for(7));
     CHECK_FALSE(capability.valid_for(8));
     CHECK_FALSE(capability.consume<TdScriptedFormattedTextCapability>(8));
@@ -144,21 +162,13 @@ TEST_CASE("parsed formattedText capability is exact generation-bound and one-sho
         .chat_id = -1001,
         .topic = std::nullopt,
         .reply_to_message_id = std::nullopt,
-        .options = {.disable_notification = false,
-                    .protect_content = false,
-                    .update_order_of_installed_sticker_sets = false,
-                    .schedule = {},
-                    .sending_id = 9},
+        .options = {.disable_notification = false, .schedule = {}, .sending_id = 9},
         .content = {.formatted_text = std::move(*formatted), .parsed = true}};
     const TdSendMessageRequest expected{
         .chat_id = -1001,
         .topic = std::nullopt,
         .reply_to_message_id = std::nullopt,
-        .options = {.disable_notification = false,
-                    .protect_content = false,
-                    .update_order_of_installed_sticker_sets = false,
-                    .schedule = {},
-                    .sending_id = 9},
+        .options = {.disable_notification = false, .schedule = {}, .sending_id = 9},
         .content = {
             .formatted_text = {.text = "bold",
                                .entities = {{.offset = 0,
@@ -172,6 +182,92 @@ TEST_CASE("parsed formattedText capability is exact generation-bound and one-sho
             .parsed = true}};
     auto native = detail::make_production_send_message_for_test(std::move(parsed), 1);
     CHECK(detail::production_send_message_matches_for_test(native, expected));
+
+    SECTION("scripted capability rejects changed text facts") {
+        tgcli::test::ScriptedTdRuntime scripted;
+        auto request = plain_request();
+        request.content.parsed = true;
+        request.content.formatted_text = tgcli::test::ScriptedTdRuntime::parsed_formatted_text(
+            {.client_id = 1, .client_generation = 7}, "bold",
+            {{.offset = 0,
+              .length = 4,
+              .kind = TdTextEntityKind::Bold,
+              .value = {},
+              .numeric_value = 0,
+              .tdlib_type_id = 1,
+              .date_time_formatting = std::nullopt}});
+        request.content.formatted_text.text = "changed";
+        CHECK_THROWS_AS(scripted.make_send_message(std::move(request), 7), std::invalid_argument);
+    }
+
+    SECTION("scripted capability rejects changed entity facts") {
+        tgcli::test::ScriptedTdRuntime scripted;
+        auto request = plain_request();
+        request.content.parsed = true;
+        request.content.formatted_text = tgcli::test::ScriptedTdRuntime::parsed_formatted_text(
+            {.client_id = 1, .client_generation = 7}, "bold",
+            {{.offset = 0,
+              .length = 4,
+              .kind = TdTextEntityKind::Bold,
+              .value = {},
+              .numeric_value = 0,
+              .tdlib_type_id = 1,
+              .date_time_formatting = std::nullopt}});
+        request.content.formatted_text.entities.front().length = 2;
+        CHECK_THROWS_AS(scripted.make_send_message(std::move(request), 7), std::invalid_argument);
+    }
+
+    SECTION("production and scripted facts reject an out-of-range UTF-16 entity") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> invalid_entities;
+        invalid_entities.push_back(td_api::make_object<td_api::textEntity>(
+            4, 1, td_api::make_object<td_api::textEntityTypeBold>()));
+        auto invalid_production = detail::convert_production_direct_response_for_test(
+            TdFunctionKind::ParseTextEntities,
+            TdValue::from(NativeObjectPtr{
+                td_api::make_object<td_api::formattedText>("bold", std::move(invalid_entities))}));
+        CHECK(invalid_production.get_if<TdDirectConversionError>() != nullptr);
+
+        tgcli::test::ScriptedTdRuntime scripted;
+        auto request = plain_request();
+        request.content.parsed = true;
+        request.content.formatted_text = tgcli::test::ScriptedTdRuntime::parsed_formatted_text(
+            {.client_id = 1, .client_generation = 7}, "bold",
+            {{.offset = 4,
+              .length = 1,
+              .kind = TdTextEntityKind::Bold,
+              .value = {},
+              .numeric_value = 0,
+              .tdlib_type_id = 1,
+              .date_time_formatting = std::nullopt}});
+        CHECK_FALSE(valid_td_send_message_request(request));
+        CHECK_THROWS_AS(scripted.make_send_message(std::move(request), 7), std::invalid_argument);
+    }
+
+    SECTION("production and scripted facts reject a split UTF-16 surrogate pair") {
+        std::vector<td_api::object_ptr<td_api::textEntity>> invalid_entities;
+        invalid_entities.push_back(td_api::make_object<td_api::textEntity>(
+            1, 1, td_api::make_object<td_api::textEntityTypeBold>()));
+        auto invalid_production = detail::convert_production_direct_response_for_test(
+            TdFunctionKind::ParseTextEntities,
+            TdValue::from(NativeObjectPtr{
+                td_api::make_object<td_api::formattedText>("🧪", std::move(invalid_entities))}));
+        CHECK(invalid_production.get_if<TdDirectConversionError>() != nullptr);
+
+        tgcli::test::ScriptedTdRuntime scripted;
+        auto request = plain_request();
+        request.content.parsed = true;
+        request.content.formatted_text = tgcli::test::ScriptedTdRuntime::parsed_formatted_text(
+            {.client_id = 1, .client_generation = 7}, "🧪",
+            {{.offset = 1,
+              .length = 1,
+              .kind = TdTextEntityKind::Bold,
+              .value = {},
+              .numeric_value = 0,
+              .tdlib_type_id = 1,
+              .date_time_formatting = std::nullopt}});
+        CHECK_FALSE(valid_td_send_message_request(request));
+        CHECK_THROWS_AS(scripted.make_send_message(std::move(request), 7), std::invalid_argument);
+    }
 }
 
 TEST_CASE("sendMessage conversion separates stable message facts from sending state",
@@ -310,7 +406,40 @@ TEST_CASE("typed sendMessage rejects validation stale auth and expired capabilit
     reject(std::move(invalid));
     invalid = plain_request();
     invalid.content.formatted_text.capability = TdFormattedTextCapability::from(
-        TdScriptedFormattedTextCapability{}, first.client_generation);
+        TdScriptedFormattedTextCapability{.text = invalid.content.formatted_text.text,
+                                          .entities = {}},
+        first.client_generation);
+    reject(std::move(invalid));
+    invalid = plain_request();
+    invalid.content.parsed = true;
+    invalid.content.formatted_text =
+        tgcli::test::ScriptedTdRuntime::parsed_formatted_text(first, "parsed");
+    invalid.content.formatted_text.text = "changed";
+    reject(std::move(invalid));
+    invalid = plain_request();
+    invalid.content.parsed = true;
+    invalid.content.formatted_text = tgcli::test::ScriptedTdRuntime::parsed_formatted_text(
+        first, "parsed",
+        {{.offset = 0,
+          .length = 6,
+          .kind = TdTextEntityKind::Bold,
+          .value = {},
+          .numeric_value = 0,
+          .tdlib_type_id = 1,
+          .date_time_formatting = std::nullopt}});
+    invalid.content.formatted_text.entities.front().length = 3;
+    reject(std::move(invalid));
+    invalid = plain_request();
+    invalid.content.parsed = true;
+    invalid.content.formatted_text = tgcli::test::ScriptedTdRuntime::parsed_formatted_text(
+        first, "parsed",
+        {{.offset = 6,
+          .length = 1,
+          .kind = TdTextEntityKind::Bold,
+          .value = {},
+          .numeric_value = 0,
+          .tdlib_type_id = 1,
+          .date_time_formatting = std::nullopt}});
     reject(std::move(invalid));
 
     auto expired = plain_request();
@@ -318,7 +447,9 @@ TEST_CASE("typed sendMessage rejects validation stale auth and expired capabilit
     expired.content.formatted_text =
         tgcli::test::ScriptedTdRuntime::parsed_formatted_text(first, "parsed");
     expired.content.formatted_text.capability = TdFormattedTextCapability::from(
-        TdScriptedFormattedTextCapability{}, first.client_generation + 1);
+        TdScriptedFormattedTextCapability{.text = expired.content.formatted_text.text,
+                                          .entities = expired.content.formatted_text.entities},
+        first.client_generation + 1);
     auto expired_response = client.send_message(ready, std::move(expired));
     CHECK_THROWS(expired_response.get());
     CHECK(runtime->sent_functions().size() == 1);

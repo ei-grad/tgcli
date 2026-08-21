@@ -407,6 +407,99 @@ TEST_CASE("direct mutation policies are closed Ready-only exact-tier request fun
     }
 }
 
+TEST_CASE("sendMessage policy is exact Write Ready request-owned and fake-boundary closed",
+          "[core][auth-bootstrap][safety][send][fake-boundary]") {
+    const core::AuthStateSnapshot ready{
+        .client_id = 1001,
+        .client_generation = 1,
+        .auth_sequence = 1,
+        .data = core::AuthStateData{core::AuthState::Ready},
+        .receive_observed_at = std::nullopt,
+    };
+    const core::TdFunctionData function{core::TdFunctionKind::SendMessage};
+    const auto descriptor =
+        descriptor_for(ready, core::TdFunctionKind::SendMessage, core::DescriptorKind::Write,
+                       {core::TdOwnerKind::Request, 1});
+    CHECK_FALSE(core::authorize_td_send(descriptor, &function, ready, false));
+
+    auto wrong_tier = descriptor;
+    wrong_tier.tier = core::DescriptorKind::Read;
+    CHECK(core::authorize_td_send(wrong_tier, &function, ready, false) ==
+          core::TdAuthorizationFailure::TierMismatch);
+    auto wrong_owner = descriptor;
+    wrong_owner.owner = {core::TdOwnerKind::Login, 1};
+    CHECK(core::authorize_td_send(wrong_owner, &function, ready, false) ==
+          core::TdAuthorizationFailure::OwnerMismatch);
+    auto wrong_generation = descriptor;
+    ++wrong_generation.client_generation;
+    CHECK(core::authorize_td_send(wrong_generation, &function, ready, false) ==
+          core::TdAuthorizationFailure::GenerationMismatch);
+    const core::TdFunctionData wrong_function{core::TdFunctionKind::EditMessageText};
+    CHECK(core::authorize_td_send(descriptor, &wrong_function, ready, false) ==
+          core::TdAuthorizationFailure::FunctionMismatch);
+
+    for (const auto state :
+         {core::AuthState::Unknown, core::AuthState::WaitTdlibParameters,
+          core::AuthState::WaitPhoneNumber, core::AuthState::WaitPremiumPurchase,
+          core::AuthState::WaitEmailAddress, core::AuthState::WaitEmailCode,
+          core::AuthState::WaitCode, core::AuthState::WaitOtherDeviceConfirmation,
+          core::AuthState::WaitRegistration, core::AuthState::WaitPassword,
+          core::AuthState::LoggingOut, core::AuthState::Closing}) {
+        INFO(core::auth_state_name(state));
+        auto not_ready = ready;
+        not_ready.data = core::AuthStateData{state};
+        auto non_ready_descriptor = descriptor;
+        non_ready_descriptor.auth_state = state;
+        CHECK(core::authorize_td_send(non_ready_descriptor, &function, not_ready, false) ==
+              core::TdAuthorizationFailure::FunctionDenied);
+    }
+
+    auto fake = make_fake_boundary(core::AuthState::Ready);
+    const auto snapshot = fake.client->auth_state();
+    const auto sent_before = fake.runtime->sent_functions().size();
+    const auto reject_before_fake = [&](core::TdSendDescriptor rejected,
+                                        core::TdFunctionKind actual_function,
+                                        core::TdAuthorizationFailure expected) {
+        auto response = fake.client->send(
+            std::move(rejected),
+            core::TdValue::scripted_function(core::TdFunctionData{actual_function}));
+        REQUIRE(response.wait_for(0ms) == std::future_status::ready);
+        try {
+            static_cast<void>(response.get());
+            FAIL("sendMessage descriptor unexpectedly reached the fake boundary");
+        } catch (const core::TdAuthorizationError& error) {
+            CHECK(error.failure() == expected);
+        }
+        CHECK(fake.runtime->sent_functions().size() == sent_before);
+    };
+    auto fake_descriptor =
+        descriptor_for(*snapshot, core::TdFunctionKind::SendMessage, core::DescriptorKind::Write,
+                       {core::TdOwnerKind::Request, 999});
+    auto fake_wrong_tier = fake_descriptor;
+    fake_wrong_tier.tier = core::DescriptorKind::Read;
+    reject_before_fake(std::move(fake_wrong_tier), core::TdFunctionKind::SendMessage,
+                       core::TdAuthorizationFailure::TierMismatch);
+    auto fake_wrong_owner = fake_descriptor;
+    fake_wrong_owner.owner = {core::TdOwnerKind::Login, 999};
+    reject_before_fake(std::move(fake_wrong_owner), core::TdFunctionKind::SendMessage,
+                       core::TdAuthorizationFailure::OwnerMismatch);
+    auto fake_wrong_generation = fake_descriptor;
+    ++fake_wrong_generation.client_generation;
+    reject_before_fake(std::move(fake_wrong_generation), core::TdFunctionKind::SendMessage,
+                       core::TdAuthorizationFailure::GenerationMismatch);
+    reject_before_fake(fake_descriptor, core::TdFunctionKind::EditMessageText,
+                       core::TdAuthorizationFailure::FunctionMismatch);
+
+    fake.runtime->push_update(fake.first, {}, core::AuthStateData{core::AuthState::WaitCode});
+    REQUIRE(eventually([&] { return fake.client->auth_state()->auth_sequence == 2; }));
+    const auto non_ready = fake.client->auth_state();
+    auto fake_non_ready =
+        descriptor_for(*non_ready, core::TdFunctionKind::SendMessage, core::DescriptorKind::Write,
+                       {core::TdOwnerKind::Request, 999});
+    reject_before_fake(std::move(fake_non_ready), core::TdFunctionKind::SendMessage,
+                       core::TdAuthorizationFailure::FunctionDenied);
+}
+
 TEST_CASE("dormant session termination policy is destructive Ready-only and request-owned",
           "[core][auth-bootstrap][safety][session]") {
     const core::AuthStateSnapshot ready{

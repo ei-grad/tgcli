@@ -426,9 +426,9 @@ TEST_CASE("formatted text conversion covers every pinned entity type",
         entities.push_back(td_api::make_object<td_api::textEntity>(static_cast<std::int32_t>(index),
                                                                    1, std::move(types[index])));
     }
-    auto converted =
-        convert(TdFunctionKind::ParseTextEntities,
-                td_api::make_object<td_api::formattedText>("entities", std::move(entities)));
+    auto converted = convert(
+        TdFunctionKind::ParseTextEntities,
+        td_api::make_object<td_api::formattedText>("abcdefghijklmnopqrstuvw", std::move(entities)));
     const auto* text = converted.get_if<TdFormattedText>();
     REQUIRE(text != nullptr);
     REQUIRE(text->entities.size() == expected.size());
@@ -641,7 +641,7 @@ TEST_CASE("available reactions option formatted text and join variants convert n
         10, 2, td_api::make_object<td_api::textEntityTypeCustomEmoji>(123)));
     auto formatted =
         convert(TdFunctionKind::ParseTextEntities,
-                td_api::make_object<td_api::formattedText>("bold link x", std::move(entities)));
+                td_api::make_object<td_api::formattedText>("bold link xx", std::move(entities)));
     const auto* text = formatted.get_if<TdFormattedText>();
     REQUIRE(text != nullptr);
     REQUIRE(text->entities.size() == 3);

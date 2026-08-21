@@ -1096,7 +1096,12 @@ class TdFormattedTextCapability {
     std::uint64_t client_generation_ = 0;
 };
 
-struct TdScriptedFormattedTextCapability {};
+struct TdScriptedFormattedTextCapability {
+    std::string text;
+    std::vector<TdTextEntity> entities;
+
+    bool operator==(const TdScriptedFormattedTextCapability&) const = default;
+};
 
 struct TdFormattedText {
     std::string text;
@@ -1107,6 +1112,8 @@ struct TdFormattedText {
         return text == other.text && entities == other.entities;
     }
 };
+
+[[nodiscard]] bool valid_td_formatted_text_facts(const TdFormattedText& formatted) noexcept;
 
 enum class TdSendScheduleKind { Immediate, AtDate, WhenOnline };
 
@@ -1119,8 +1126,6 @@ struct TdSendSchedule {
 
 struct TdMessageSendOptions {
     bool disable_notification = false;
-    bool protect_content = false;
-    bool update_order_of_installed_sticker_sets = false;
     TdSendSchedule schedule;
     std::int32_t sending_id = 0;
 

@@ -1,10 +1,10 @@
 #include "daemon/single_send.hpp"
 
 #include "common/utf8.hpp"
+#include "daemon/rate_limit.hpp"
 #include "daemon/request_session.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -161,28 +161,12 @@ success_from(const core::TdWriteMessage& message,
                    .scheduled = scheduled}};
 }
 
-std::int32_t retry_after_from_message(std::string_view message) {
-    constexpr std::string_view marker = "retry after ";
-    const auto marker_at = message.find(marker);
-    if (marker_at == std::string_view::npos) {
-        return 0;
-    }
-    const auto digits = message.substr(marker_at + marker.size());
-    std::int64_t parsed = 0;
-    const auto result = std::from_chars(digits.data(), digits.data() + digits.size(), parsed);
-    if (result.ec != std::errc{} || parsed < 0 ||
-        parsed > std::numeric_limits<std::int32_t>::max()) {
-        return 0;
-    }
-    return static_cast<std::int32_t>(parsed);
-}
-
 std::int32_t retry_after(const core::TdError& error, std::optional<double> precise) {
     if (precise && std::isfinite(*precise) && *precise > 0 &&
         *precise <= std::numeric_limits<std::int32_t>::max()) {
         return static_cast<std::int32_t>(std::ceil(*precise));
     }
-    return retry_after_from_message(error.message);
+    return parse_retry_after_seconds(error.message);
 }
 
 SingleSendOutcome failure_from(core::TdError error, std::optional<SingleSendTemporaryId> temporary,
@@ -372,9 +356,7 @@ class SingleSendCoordinator::Impl {
         event_condition_.notify_all();
     }
 
-    std::optional<StampedOutcome>
-    auth_terminal(const core::AuthStateSnapshot& sent,
-                  const std::optional<SingleSendTemporaryId>& temporary) {
+    std::optional<StampedOutcome> auth_terminal(const core::AuthStateSnapshot& sent) {
         const std::lock_guard lock(event_mutex_);
         std::optional<StampedOutcome> result;
         for (const auto& snapshot : auth_events_) {
@@ -386,6 +368,10 @@ class SingleSendCoordinator::Impl {
                 snapshot->data.state == core::AuthState::Ready) {
                 continue;
             }
+            const auto temporary = temporary_ && temporary_sequence_ &&
+                                           *temporary_sequence_ < snapshot->receive_event_sequence
+                                       ? temporary_
+                                       : std::nullopt;
             SingleSendOutcome outcome;
             if (snapshot->client_generation != sent.client_generation ||
                 snapshot->data.state == core::AuthState::Closed) {
@@ -449,28 +435,23 @@ class SingleSendCoordinator::Impl {
                                       .outcome = SingleSendMalformed{}};
             }
             if (!event_precedes_deadline(observed_at, session_.deadline())) {
-                return StampedOutcome{.sequence = sequence, .outcome = SingleSendTimedOut{}};
+                return StampedOutcome{.sequence = std::numeric_limits<std::uint64_t>::max(),
+                                      .outcome = SingleSendTimedOut{}};
             }
             if (const auto* error = value.get_if<core::TdError>()) {
-                return earliest(
-                    StampedOutcome{.sequence = sequence,
-                                   .outcome = failure_from(*error, std::nullopt,
-                                                           SingleSendMutationState::Possible)},
-                    auth_terminal(sent, std::nullopt));
+                return StampedOutcome{.sequence = sequence,
+                                      .outcome = failure_from(*error, std::nullopt,
+                                                              SingleSendMutationState::Possible)};
             }
             if (const auto* malformed = value.get_if<core::TdDirectConversionError>()) {
-                return earliest(
-                    StampedOutcome{
-                        .sequence = sequence,
-                        .outcome = SingleSendMalformed{.temporary = std::nullopt,
-                                                       .tdlib_type_id = malformed->tdlib_type_id}},
-                    auth_terminal(sent, std::nullopt));
+                return StampedOutcome{
+                    .sequence = sequence,
+                    .outcome = SingleSendMalformed{.temporary = std::nullopt,
+                                                   .tdlib_type_id = malformed->tdlib_type_id}};
             }
             const auto* message = value.get_if<core::TdWriteMessage>();
             if (message == nullptr) {
-                return earliest(
-                    StampedOutcome{.sequence = sequence, .outcome = SingleSendMalformed{}},
-                    auth_terminal(sent, std::nullopt));
+                return StampedOutcome{.sequence = sequence, .outcome = SingleSendMalformed{}};
             }
             switch (message->sending_state.kind) {
             case core::TdMessageSendingStateKind::Pending:
@@ -484,6 +465,7 @@ class SingleSendCoordinator::Impl {
                                                    .chat_id = chat_id,
                                                    .temporary_message_id = message->message.id,
                                                    .sending_id = sending_id};
+                temporary_sequence_ = sequence;
                 return std::nullopt;
             case core::TdMessageSendingStateKind::Failed: {
                 const auto* failure_error =
@@ -494,20 +476,17 @@ class SingleSendCoordinator::Impl {
                                               .temporary = std::nullopt,
                                               .tdlib_type_id = unsupported_type_id(*message)}};
                 }
-                return earliest(
-                    StampedOutcome{.sequence = sequence,
-                                   .outcome = failure_from(*failure_error, std::nullopt,
-                                                           SingleSendMutationState::None,
-                                                           message->sending_state.retry_after)},
-                    auth_terminal(sent, std::nullopt));
+                return StampedOutcome{.sequence = sequence,
+                                      .outcome = failure_from(*failure_error, std::nullopt,
+                                                              SingleSendMutationState::None,
+                                                              message->sending_state.retry_after)};
             }
             case core::TdMessageSendingStateKind::Stable: {
                 auto success = success_from(*message, std::nullopt, chat_id);
-                return earliest(
-                    StampedOutcome{.sequence = sequence,
-                                   .outcome = success ? SingleSendOutcome{std::move(*success)}
-                                                      : SingleSendOutcome{SingleSendMalformed{}}},
-                    auth_terminal(sent, std::nullopt));
+                return StampedOutcome{.sequence = sequence,
+                                      .outcome = success
+                                                     ? SingleSendOutcome{std::move(*success)}
+                                                     : SingleSendOutcome{SingleSendMalformed{}}};
             }
             case core::TdMessageSendingStateKind::Unknown:
                 return StampedOutcome{
@@ -518,17 +497,11 @@ class SingleSendCoordinator::Impl {
             }
         } catch (const core::TdAuthorizationError& error) {
             response_consumed_ = true;
-            if (auto auth = auth_terminal(sent, std::nullopt)) {
-                return auth;
-            }
             return StampedOutcome{.sequence = std::numeric_limits<std::uint64_t>::max(),
                                   .outcome =
                                       SingleSendRejected{.authorization_failure = error.failure()}};
         } catch (const std::exception&) {
             response_consumed_ = true;
-            if (auto auth = auth_terminal(sent, std::nullopt)) {
-                return auth;
-            }
             return StampedOutcome{.sequence = std::numeric_limits<std::uint64_t>::max(),
                                   .outcome = SingleSendMalformed{}};
         }
@@ -540,30 +513,38 @@ class SingleSendCoordinator::Impl {
         bool notify_temporary = false;
     };
 
+    static bool authorization_precedes_temporary(const StampedOutcome& selected) {
+        if (const auto* lost = std::get_if<SingleSendAuthorizationLost>(&selected.outcome)) {
+            return !lost->temporary;
+        }
+        if (const auto* closed = std::get_if<SingleSendGenerationClosed>(&selected.outcome)) {
+            return !closed->temporary;
+        }
+        return false;
+    }
+
     ArbitrationDecision arbitrate_visible(std::future<core::TdValue>& response,
                                           const core::AuthStateSnapshot& sent, std::int64_t chat_id,
                                           std::int32_t sending_id,
                                           core::TdEventClock::time_point decision_now) {
         ArbitrationDecision decision;
         const auto publication_lock = client_.lock_event_publication();
+        record_auth(client_.auth_state());
+        auto auth = auth_terminal(sent);
         if (!response_consumed_ && response.wait_for(0ms) == std::future_status::ready) {
             decision.selected = consume_response(response, sent, chat_id, sending_id);
+            auth = auth_terminal(sent);
         }
+        decision.selected = earliest(std::move(decision.selected), std::move(auth));
         const auto* temporary = temporary_ ? &*temporary_ : nullptr;
-        if (temporary != nullptr && !temporary_notified_) {
-            temporary_notified_ = true;
-            decision.notify_temporary = true;
-            decision.selected.reset();
-        } else if (temporary != nullptr) {
+        if (temporary != nullptr) {
             decision.selected = earliest(std::move(decision.selected), update_terminal(*temporary));
-            decision.selected =
-                earliest(std::move(decision.selected), auth_terminal(sent, temporary_));
-        } else if (!decision.selected && response_consumed_) {
-            decision.selected = auth_terminal(sent, std::nullopt);
-        }
-        if (!decision.selected && !response_consumed_ &&
-            deadline_expired(session_.deadline(), decision_now)) {
-            decision.selected = auth_terminal(sent, std::nullopt);
+            if (!temporary_notified_ &&
+                (!decision.selected || !authorization_precedes_temporary(*decision.selected))) {
+                temporary_notified_ = true;
+                decision.notify_temporary = true;
+                decision.selected.reset();
+            }
         }
         if (!decision.selected && deadline_expired(session_.deadline(), decision_now)) {
             decision.selected = StampedOutcome{
@@ -589,7 +570,12 @@ class SingleSendCoordinator::Impl {
         return std::nullopt;
     }
 
-    void wait_for_event() {
+    std::uint64_t wake_sequence() const {
+        const std::lock_guard lock(event_mutex_);
+        return wake_sequence_;
+    }
+
+    void wait_for_event(std::uint64_t wake_sequence) {
         if (before_wait_) {
             before_wait_();
         }
@@ -598,7 +584,6 @@ class SingleSendCoordinator::Impl {
             return;
         }
         std::unique_lock lock(event_mutex_);
-        const auto wake_sequence = wake_sequence_;
         const auto changed = [this, wake_sequence] { return wake_sequence_ != wake_sequence; };
         if (const auto expires_at = session_.deadline().expires_at) {
             static_cast<void>(event_condition_.wait_until(lock, session_.cancellation_token(),
@@ -612,6 +597,7 @@ class SingleSendCoordinator::Impl {
                                         const core::AuthStateSnapshot& sent, std::int64_t chat_id,
                                         std::int32_t sending_id) {
         for (;;) {
+            const auto observed_wake_sequence = wake_sequence();
             if (before_event_arbitration_) {
                 before_event_arbitration_();
             }
@@ -630,7 +616,7 @@ class SingleSendCoordinator::Impl {
                 return SingleSendCancelled{.temporary = temporary_,
                                            .mutation_state = SingleSendMutationState::Possible};
             }
-            wait_for_event();
+            wait_for_event(observed_wake_sequence);
         }
     }
 
@@ -645,7 +631,8 @@ class SingleSendCoordinator::Impl {
     bool response_consumed_ = false;
     bool temporary_notified_ = false;
     std::optional<SingleSendTemporaryId> temporary_;
-    std::mutex event_mutex_;
+    std::optional<std::uint64_t> temporary_sequence_;
+    mutable std::mutex event_mutex_;
     std::condition_variable_any event_condition_;
     std::uint64_t wake_sequence_ = 0;
     std::vector<StampedUpdate> updates_;

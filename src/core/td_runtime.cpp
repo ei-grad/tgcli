@@ -990,6 +990,9 @@ std::optional<TdFormattedText> neutral_formatted_text(const td_api::formattedTex
         }
         converted.entities.push_back(std::move(*converted_entity));
     }
+    if (!valid_td_formatted_text_facts(converted)) {
+        return std::nullopt;
+    }
     return converted;
 }
 
@@ -1830,9 +1833,8 @@ TdValue make_native_send_message(TdSendMessageRequest request, std::uint64_t cli
     }
     auto schedule = make_send_schedule(request.options.schedule);
     auto options = td_api::make_object<td_api::messageSendOptions>(
-        nullptr, request.options.disable_notification, false, request.options.protect_content,
-        false, 0, request.options.update_order_of_installed_sticker_sets, std::move(schedule), 0,
-        request.options.sending_id, false);
+        nullptr, request.options.disable_notification, false, false, false, 0, false,
+        std::move(schedule), 0, request.options.sending_id, false);
     auto content = td_api::make_object<td_api::inputMessageText>(std::move(text), nullptr, false);
     auto topic = make_send_topic(request.topic);
     auto reply = make_send_reply(request.reply_to_message_id);
@@ -3171,10 +3173,8 @@ bool production_send_message_matches_for_test(const TdValue& function,
     const auto& options = *actual.options_;
     if (options.suggested_post_info_ != nullptr ||
         options.disable_notification_ != expected.options.disable_notification ||
-        options.from_background_ || options.protect_content_ != expected.options.protect_content ||
-        options.allow_paid_broadcast_ || options.paid_message_star_count_ != 0 ||
-        options.update_order_of_installed_sticker_sets_ !=
-            expected.options.update_order_of_installed_sticker_sets ||
+        options.from_background_ || options.protect_content_ || options.allow_paid_broadcast_ ||
+        options.paid_message_star_count_ != 0 || options.update_order_of_installed_sticker_sets_ ||
         !native_send_schedule_matches(options.scheduling_state_.get(), expected.options.schedule) ||
         options.effect_id_ != 0 || options.sending_id_ != expected.options.sending_id ||
         options.only_preview_) {

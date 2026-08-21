@@ -3,6 +3,7 @@
 #include "common/exit_codes.hpp"
 #include "common/utf8.hpp"
 #include "daemon/local_selector.hpp"
+#include "daemon/rate_limit.hpp"
 #include "daemon/ready_read.hpp"
 #include "daemon/request_session.hpp"
 
@@ -11,7 +12,6 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
-#include <regex>
 #include <set>
 #include <string_view>
 #include <unordered_set>
@@ -118,23 +118,6 @@ std::optional<ClassifiedSelector> classify_selector(std::string_view selector) {
     }
     return ClassifiedSelector{
         .kind = SelectorKind::Title, .chat_id = 0, .value = std::string(selector)};
-}
-
-std::int32_t retry_after(std::string_view message) {
-    static const std::regex pattern(
-        R"((?:^|[^[:alnum:]_])(?:retry[[:space:]]+after[[:space:]]*|FLOOD_WAIT_)([0-9]+))",
-        std::regex::icase);
-    std::cmatch match;
-    if (!std::regex_search(message.begin(), message.end(), match, pattern) || match.size() != 2) {
-        return 0;
-    }
-    std::int32_t result = 0;
-    for (const char character : match[1].str()) {
-        const auto digit = static_cast<std::int32_t>(character - '0');
-        constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
-        result = result > (maximum - digit) / 10 ? maximum : result * 10 + digit;
-    }
-    return result;
 }
 
 std::string_view link_type_name(ResolvedLinkType type) {
@@ -392,8 +375,8 @@ class ResolverRun {
 
     void td_error(const core::TdError& error) {
         if (error.code == 429) {
-            error_ = ResolverRateLimitedError{.operation = caller_,
-                                              .retry_after = retry_after(error.message)};
+            error_ = ResolverRateLimitedError{
+                .operation = caller_, .retry_after = parse_retry_after_seconds(error.message)};
             return;
         }
         error_ = ResolverTdlibError{.operation = caller_, .tdlib_code = error.code};

@@ -386,8 +386,10 @@ core::TdValue ScriptedTdRuntime::make_send_message(core::TdSendMessageRequest re
         const auto capability =
             request.content.formatted_text.capability
                 .consume<core::TdScriptedFormattedTextCapability>(client_generation);
-        if (!capability) {
-            throw std::invalid_argument("scripted formattedText capability is unavailable");
+        if (!capability || capability->text != request.content.formatted_text.text ||
+            capability->entities != request.content.formatted_text.entities) {
+            throw std::invalid_argument(
+                "scripted formattedText capability does not match its facts");
         }
     }
     before_make(core::TdFunctionKind::SendMessage);
@@ -622,10 +624,12 @@ void ScriptedTdRuntime::push_delete_messages(ScriptedClient client, std::int64_t
 core::TdFormattedText
 ScriptedTdRuntime::parsed_formatted_text(ScriptedClient client, std::string text,
                                          std::vector<core::TdTextEntity> entities) {
+    auto capability = core::TdFormattedTextCapability::from(
+        core::TdScriptedFormattedTextCapability{.text = text, .entities = entities},
+        client.client_generation);
     return {.text = std::move(text),
             .entities = std::move(entities),
-            .capability = core::TdFormattedTextCapability::from(
-                core::TdScriptedFormattedTextCapability{}, client.client_generation)};
+            .capability = std::move(capability)};
 }
 
 bool ScriptedTdRuntime::wait_for_sent(std::size_t count, std::chrono::milliseconds timeout) const {
