@@ -1055,6 +1055,34 @@ TEST_CASE("account audit recovery freezes sent proof and cleanup ordering",
                       daemon::AccountAuditRecoveryBoundary::AppendOutcomeAndSync,
                       daemon::AccountAuditRecoveryBoundary::TransitionStoreAndSync});
 
+    daemon::AccountAuditOpenGroup empty_mark_read;
+    empty_mark_read.intent = make_intent(daemon::AccountAuditOperation::ChatMarkRead,
+                                         "1123456789abcdef0123456789abcdef", std::string(kKeyHash))
+                                 .document();
+    empty_mark_read.intent["plan"]["tdlib_request"] = nullptr;
+    empty_mark_read.intent["plan"]["last_message_id"] = nullptr;
+    empty_mark_read.keyed = true;
+    empty_mark_read.completed_stages = {daemon::AccountAuditStage::IdempotencyPending};
+    auto no_op = daemon::classify_account_audit_recovery(empty_mark_read, "main",
+                                                         "/state/audit.log", known, error);
+    REQUIRE(no_op);
+    CHECK(no_op->mutation_state == daemon::AccountAuditMutationState::None);
+    CHECK(no_op->complete_store);
+    CHECK(no_op->continue_current_request);
+    CHECK(no_op->terminal ==
+          json{{"kind", "result"},
+               {"data",
+                {{"chat_id", -1001}, {"last_read_message_id", nullptr}, {"marked_read", true}}}});
+    CHECK(no_op->boundaries ==
+          std::vector{daemon::AccountAuditRecoveryBoundary::AppendOutcomeAndSync,
+                      daemon::AccountAuditRecoveryBoundary::TransitionStoreAndSync});
+
+    empty_mark_read.completed_stages.clear();
+    no_op = daemon::classify_account_audit_recovery(empty_mark_read, "main", "/state/audit.log",
+                                                    known, error);
+    REQUIRE(no_op);
+    CHECK_FALSE(no_op->complete_store);
+
     group.dispatch_started = true;
     group.any_forward_sent = false;
     plan = daemon::classify_account_audit_recovery(group, "main", "/state/audit.log", known, error);

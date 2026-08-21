@@ -1,0 +1,3 @@
+chat_id	-1001
+muted	false
+duration_seconds	0

@@ -12,7 +12,7 @@
     "positiveInt53": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
     "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "hex32": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-    "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "resolve"] },
+    "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave", "resolve"] },
     "state": {
       "enum": ["unknown", "wait_tdlib_parameters", "wait_phone_number", "wait_premium_purchase", "wait_email_address", "wait_email_code", "wait_code", "wait_other_device_confirmation", "wait_registration", "wait_password", "ready", "logging_out", "closing", "closed"]
     },
@@ -45,6 +45,22 @@
         "id": { "$ref": "#/$defs/int53" },
         "title": { "type": "string" },
         "type": { "enum": ["private", "basic_group", "supergroup", "channel"] },
+        "is_bot": { "type": "boolean" },
+        "usernames": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$" }
+        }
+      }
+    },
+    "leaveChatIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "type", "is_bot", "usernames"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53" },
+        "title": { "type": "string" },
+        "type": { "enum": ["basic_group", "supergroup", "channel"] },
         "is_bot": { "type": "boolean" },
         "usernames": {
           "type": "array",
@@ -125,6 +141,17 @@
         "message_ids": { "$ref": "#/$defs/ids" },
         "requested_for_all": { "type": "boolean" },
         "effective_for_all": { "type": "boolean" }
+      }
+    },
+    "leavePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "account", "tdlib_request", "chat"],
+      "properties": {
+        "operation": { "const": "chat_leave" },
+        "account": { "$ref": "#/$defs/account" },
+        "tdlib_request": { "const": "leaveChat" },
+        "chat": { "$ref": "#/$defs/leaveChatIdentity" }
       }
     },
     "errorBase": {
@@ -253,7 +280,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation"],
-                  "properties": { "operation": { "enum": ["send", "msg_react"] } }
+                  "properties": { "operation": { "enum": ["send", "msg_react", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join"] } }
                 }
               }
             },
@@ -420,6 +447,36 @@
                         "message_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
                         "reason": { "const": "not_pinnable" }
                       }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "chat_id", "message_id", "reason"],
+                      "properties": {
+                        "operation": { "enum": ["chat_mute", "chat_unmute"] },
+                        "chat_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
+                        "message_id": { "type": "null" },
+                        "reason": { "const": "saved_notifications_unsupported" }
+                      }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "chat_id", "message_id", "reason"],
+                      "properties": {
+                        "operation": { "enum": ["chat_pin", "chat_unpin"] },
+                        "chat_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
+                        "message_id": { "type": "null" },
+                        "reason": { "const": "chat_not_listed" }
+                      }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "chat_id", "message_id", "reason"],
+                      "properties": {
+                        "operation": { "const": "chat_leave" },
+                        "chat_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
+                        "message_id": { "type": "null" },
+                        "reason": { "const": "wrong_chat_type" }
+                      }
                     }
                   ]
                 }
@@ -435,7 +492,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "key_hash", "expected_fingerprint", "actual_fingerprint"],
-                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin"] }, "key_hash": { "$ref": "#/$defs/hash" }, "expected_fingerprint": { "$ref": "#/$defs/hash" }, "actual_fingerprint": { "$ref": "#/$defs/hash" } }
+                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "key_hash": { "$ref": "#/$defs/hash" }, "expected_fingerprint": { "$ref": "#/$defs/hash" }, "actual_fingerprint": { "$ref": "#/$defs/hash" } }
                 }
               }
             },
@@ -449,7 +506,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "key_hash", "fingerprint", "invocation_id", "temporary_message_ids"],
-                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin"] }, "key_hash": { "$ref": "#/$defs/hash" }, "fingerprint": { "$ref": "#/$defs/hash" }, "invocation_id": { "$ref": "#/$defs/hex32" }, "temporary_message_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/int53" } } }
+                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "key_hash": { "$ref": "#/$defs/hash" }, "fingerprint": { "$ref": "#/$defs/hash" }, "invocation_id": { "$ref": "#/$defs/hex32" }, "temporary_message_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/int53" } } }
                 }
               }
             },
@@ -505,7 +562,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "path", "reason"],
-                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin"] }, "path": { "const": "spool/" }, "reason": { "$ref": "#/$defs/durabilityReason" } }
+                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "path": { "const": "spool/" }, "reason": { "$ref": "#/$defs/durabilityReason" } }
                 }
               }
             },
@@ -522,7 +579,7 @@
                       "type": "object", "additionalProperties": false,
                       "required": ["operation", "phase", "state", "outcome", "idempotency"],
                       "properties": {
-                        "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin"] },
+                        "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] },
                         "phase": { "const": "preflight" },
                         "state": { "const": "ready" },
                         "outcome": { "const": "not_started" },
@@ -545,7 +602,7 @@
                       "type": "object", "additionalProperties": false,
                       "required": ["operation", "phase", "state", "outcome", "idempotency"],
                       "properties": {
-                        "operation": { "const": "msg_delete" },
+                        "operation": { "enum": ["msg_delete", "chat_leave"] },
                         "phase": { "const": "dispatch" },
                         "state": { "const": "ready" },
                         "outcome": { "const": "unknown" },
@@ -556,7 +613,7 @@
                       "type": "object", "additionalProperties": false,
                       "required": ["operation", "phase", "state", "outcome", "idempotency"],
                       "properties": {
-                        "operation": { "enum": ["msg_edit", "msg_react", "msg_pin", "msg_unpin"] },
+                        "operation": { "enum": ["msg_edit", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join"] },
                         "phase": { "const": "dispatch" },
                         "state": { "const": "ready" },
                         "outcome": { "const": "unknown" },
@@ -567,7 +624,7 @@
                       "type": "object", "additionalProperties": false,
                       "required": ["operation", "phase", "state", "outcome", "idempotency"],
                       "properties": {
-                        "operation": { "const": "msg_delete" },
+                        "operation": { "enum": ["msg_delete", "chat_leave"] },
                         "phase": { "const": "replay_confirmation" },
                         "state": { "const": "ready" },
                         "outcome": { "const": "not_started" },
@@ -606,11 +663,40 @@
               "required": ["code", "message", "details"],
               "properties": {
                 "message": { "type": "string" },
-                "code": { "const": "CONFIRMATION_REQUIRED" },
+                "code": { "const": "JOIN_APPROVAL_REQUIRED" },
                 "details": {
                   "type": "object", "additionalProperties": false,
-                  "required": ["account", "action", "target"],
-                  "properties": { "account": { "$ref": "#/$defs/account" }, "action": { "const": "msg_delete" }, "target": { "$ref": "#/$defs/deletePlan" } }
+                  "required": ["operation", "bot_user_id", "query_id"],
+                  "properties": { "operation": { "const": "chat_join" }, "bot_user_id": { "$ref": "#/$defs/int53" }, "query_id": { "$ref": "#/$defs/int53" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "JOIN_DECLINED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation"],
+                  "properties": { "operation": { "const": "chat_join" } }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "CONFIRMATION_REQUIRED" },
+                "details": {
+                  "oneOf": [
+                    { "type": "object", "additionalProperties": false, "required": ["account", "action", "target"], "properties": { "account": { "$ref": "#/$defs/account" }, "action": { "const": "msg_delete" }, "target": { "$ref": "#/$defs/deletePlan" } } },
+                    { "type": "object", "additionalProperties": false, "required": ["account", "action", "target"], "properties": { "account": { "$ref": "#/$defs/account" }, "action": { "const": "chat_leave" }, "target": { "$ref": "#/$defs/leavePlan" } } }
+                  ]
                 }
               }
             },

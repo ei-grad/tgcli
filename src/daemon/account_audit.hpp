@@ -489,6 +489,7 @@ struct AccountAuditRecoveryPlan {
     std::vector<AccountAuditRecoveryBoundary> boundaries;
     bool continue_current_request = false;
     bool retain_store = false;
+    bool complete_store = false;
     bool retain_spool = false;
 };
 

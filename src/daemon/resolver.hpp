@@ -113,6 +113,7 @@ struct ResolverPrincipal {
 struct ResolvedChatTarget {
     ResolverPrincipal principal;
     ChatIdentity chat;
+    std::optional<core::TdChat> observed_chat;
     std::optional<std::int64_t> contextual_message_id;
     std::optional<TopicRef> contextual_topic;
     std::optional<ResolvedLinkType> link_type;

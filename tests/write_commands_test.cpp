@@ -3,6 +3,7 @@
 #include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/idempotency_reconciliation.hpp"
+#include "daemon/request_fingerprint.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/write_commands.hpp"
 #include "daemon/write_domain.hpp"
@@ -497,6 +498,42 @@ proto::Request message_pin_request(bool pinned, std::optional<std::string> key =
     request.context.cwd = "/";
     request.context.timeout_seconds = 2.0;
     request.context.idempotency_key = std::move(key);
+    return request;
+}
+
+proto::Request chat_target_request(std::string subcommand, std::string chat = "-1001",
+                                   std::optional<std::string> key = std::nullopt,
+                                   bool dry_run = false, bool yes = false) {
+    proto::Request request("main");
+    request.id = 46;
+    request.command = {"chat", std::move(subcommand)};
+    request.args = {{"chat", std::move(chat)}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    request.context.dry_run = dry_run;
+    request.context.yes = yes;
+    return request;
+}
+
+proto::Request chat_mute_request(bool muted, std::int32_t duration,
+                                 std::optional<std::string> key = std::nullopt,
+                                 bool dry_run = false) {
+    auto request = chat_target_request(muted ? "mute" : "unmute", "-1001", std::move(key), dry_run);
+    request.args["duration_seconds"] = duration;
+    return request;
+}
+
+proto::Request chat_join_request(std::string target, std::optional<std::string> key = std::nullopt,
+                                 bool dry_run = false) {
+    proto::Request request("main");
+    request.id = 47;
+    request.command = {"chat", "join"};
+    request.args = {{"target", std::move(target)}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    request.context.dry_run = dry_run;
     return request;
 }
 
@@ -1583,4 +1620,377 @@ TEST_CASE("completed msg delete replay reconfirms its stored plan before returni
     REQUIRE(conflict_outcome.error);
     CHECK((*conflict_outcome.error)["error"]["code"] == "IDEMPOTENCY_CONFLICT");
     CHECK(fake.count(core::TdFunctionKind::DeleteMessages) == 1);
+}
+
+TEST_CASE("chat duration grammar and empty mark-read are exact durable operations",
+          "[write-command][chat][mark-read][mute][domain][fake-boundary]") {
+    CHECK(daemon::parse_mute_duration("1s") == 1);
+    CHECK(daemon::parse_mute_duration("2m") == 120);
+    CHECK(daemon::parse_mute_duration("1w") == 604800);
+    CHECK(daemon::parse_mute_duration("366d") == 31'622'400);
+    for (const auto* invalid :
+         {"", "0s", "01s", "+1s", "1", "1M", "367d", "999999999999999999999w"}) {
+        INFO(invalid);
+        CHECK_FALSE(daemon::parse_mute_duration(invalid));
+    }
+
+    SECTION("nonempty chat dispatches the current last message exactly once") {
+        FakeWrites fake;
+        auto request = chat_target_request("mark-read");
+        auto pending = fake.dispatch(request);
+        bind_principal(fake);
+        auto chat = basic_chat();
+        chat.last_message = stable_message().message;
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        const auto descriptor = fake.respond(core::TdFunctionKind::ViewMessages, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result ==
+              json{{"chat_id", -1001}, {"last_read_message_id", 101}, {"marked_read", true}});
+        CHECK(function_field<std::vector<std::int64_t>>(descriptor, "message_ids") ==
+              std::vector<std::int64_t>{101});
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-mark-read.result.schema.json"));
+    }
+
+    SECTION("empty keyed chat completes without mutation and replays") {
+        FakeWrites fake;
+        const auto request = chat_target_request("mark-read", "-1001", "empty-read-key");
+        auto pending = fake.dispatch(request);
+        resolve_basic(fake);
+        const auto first = pending.get();
+        REQUIRE(first.result);
+        CHECK((*first.result)["last_read_message_id"] == nullptr);
+        CHECK(fake.count(core::TdFunctionKind::ViewMessages) == 0);
+        {
+            auto guard = fake.foundation()->acquire_epoch();
+            const auto store = fake.foundation()->store().inspect(guard);
+            REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+            REQUIRE(store.snapshot.entries.size() == 1);
+            CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Completed);
+            CHECK(fake.foundation()
+                      ->run_core_gate(guard, store.snapshot.entries.front().created_at)
+                      .status == daemon::IdempotencyCoreGateStatus::Clean);
+        }
+        auto replay = fake.dispatch(request);
+        bind_principal(fake);
+        CHECK(replay.get().result == first.result);
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 1);
+        CHECK(fake.count(core::TdFunctionKind::ViewMessages) == 0);
+    }
+}
+
+TEST_CASE("chat mute copies every observed setting and enforces Saved Messages",
+          "[write-command][chat][mute][settings][fake-boundary]") {
+    SECTION("mute changes only the two mute fields") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_mute_request(true, 3600));
+        bind_principal(fake);
+        auto chat = basic_chat();
+        chat.notification_settings = core::TdChatNotificationSettings{
+            .use_default_mute_for = true,
+            .mute_for = 77,
+            .use_default_sound = false,
+            .sound_id = 99,
+            .use_default_show_preview = false,
+            .show_preview = true,
+            .use_default_mute_stories = false,
+            .mute_stories = true,
+            .use_default_story_sound = false,
+            .story_sound_id = 101,
+            .use_default_show_story_poster = false,
+            .show_story_poster = true,
+            .use_default_disable_pinned_message_notifications = false,
+            .disable_pinned_message_notifications = true,
+            .use_default_disable_mention_notifications = false,
+            .disable_mention_notifications = true};
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        const auto descriptor =
+            fake.respond(core::TdFunctionKind::SetChatNotificationSettings, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result ==
+              json{{"chat_id", -1001}, {"muted", true}, {"duration_seconds", 3600}});
+        CHECK_FALSE(function_field<bool>(descriptor, "use_default_mute_for"));
+        CHECK(function_field<std::int64_t>(descriptor, "mute_for") == 3600);
+        CHECK(function_field<std::int64_t>(descriptor, "sound_id") == 99);
+        CHECK(function_field<bool>(descriptor, "show_preview"));
+        CHECK(function_field<std::int64_t>(descriptor, "story_sound_id") == 101);
+        CHECK(function_field<bool>(descriptor, "disable_mention_notifications"));
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-mute.result.schema.json"));
+    }
+
+    SECTION("unmute rejects Saved Messages before mutation") {
+        FakeWrites fake;
+        auto request = chat_mute_request(false, 0);
+        request.args["chat"] = "42";
+        auto pending = fake.dispatch(request);
+        bind_principal(fake);
+        auto chat = private_chat(42);
+        chat.notification_settings = core::TdChatNotificationSettings{};
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        fake.respond(core::TdFunctionKind::GetUser, self());
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "saved_notifications_unsupported");
+        CHECK(fake.count(core::TdFunctionKind::SetChatNotificationSettings) == 0);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
+}
+
+TEST_CASE("chat pin and archive planners preserve list semantics",
+          "[write-command][chat][pin][archive][fake-boundary]") {
+    SECTION("pin prefers Archive over Main") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_target_request("pin"));
+        bind_principal(fake);
+        auto chat = basic_chat();
+        chat.chat_lists = {
+            {.kind = core::TdChatListKind::Main, .folder_id = 0, .tdlib_type_id = 1},
+            {.kind = core::TdChatListKind::Archive, .folder_id = 0, .tdlib_type_id = 2}};
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        const auto descriptor =
+            fake.respond(core::TdFunctionKind::ToggleChatIsPinned, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["chat_list"] == "archive");
+        CHECK(function_field<std::string>(descriptor, "chat_list") == "archive");
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-pin.result.schema.json"));
+    }
+
+    SECTION("unlisted chat fails before mutation") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_target_request("unpin"));
+        resolve_basic(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "chat_not_listed");
+        CHECK(fake.count(core::TdFunctionKind::ToggleChatIsPinned) == 0);
+    }
+
+    SECTION("archive uses the Archive list and exact result") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_target_request("archive"));
+        resolve_basic(fake);
+        const auto descriptor = fake.respond(core::TdFunctionKind::AddChatToList, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"chat_id", -1001}, {"archived", true}});
+        CHECK(function_field<std::string>(descriptor, "chat_list") == "archive");
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-archive.result.schema.json"));
+    }
+}
+
+TEST_CASE("chat join keeps invite bytes out of durable and TD descriptors",
+          "[write-command][chat][join][secrecy][fake-boundary]") {
+    SECTION("username joins the exact resolved chat") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_join_request("@project"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::SearchPublicChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup,
+                     core::TdSupergroup{.id = 55, .usernames = {"project"}, .is_channel = false});
+        const auto descriptor =
+            fake.respond(core::TdFunctionKind::JoinChat,
+                         core::TdChatJoinResult{.kind = core::TdChatJoinResultKind::Success,
+                                                .chat_id = -1001,
+                                                .guard_bot_user_id = std::nullopt,
+                                                .guard_query_id = std::nullopt,
+                                                .unsupported_tdlib_type_id = std::nullopt});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"status", "joined"}, {"chat_id", -1001}});
+        CHECK(function_field<std::int64_t>(descriptor, "chat_id") == -1001);
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-join.result.schema.json"));
+    }
+
+    SECTION("invite mutation remains joinChatByInviteLink even with known metadata") {
+        const std::string invite = "https://t.me/+ChatJoinSecretSentinel123";
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_join_request(invite, "join-invite-key"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                     core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                          .username = {},
+                                          .url = invite,
+                                          .tdlib_type_id = 1});
+        fake.respond(core::TdFunctionKind::CheckChatInviteLink,
+                     core::TdChatInviteLinkInfo{.chat_id = -1001, .is_public = false});
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        const auto descriptor =
+            fake.respond(core::TdFunctionKind::JoinChatByInviteLink,
+                         core::TdChatJoinResult{.kind = core::TdChatJoinResultKind::RequestSent,
+                                                .chat_id = std::nullopt,
+                                                .guard_bot_user_id = std::nullopt,
+                                                .guard_query_id = std::nullopt,
+                                                .unsupported_tdlib_type_id = std::nullopt});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"status", "request_sent"}, {"chat_id", -1001}});
+        CHECK(function_field<core::TdRedactedValue>(descriptor, "invite_link") ==
+              core::TdRedactedValue::InviteLink);
+        CHECK(read_bytes(fake.tree().audit_path()).find(invite) == std::string::npos);
+        CHECK(read_bytes(fake.tree().store_path()).find(invite) == std::string::npos);
+        CHECK(read_bytes(fake.tree().audit_path()).find(daemon::invite_link_hash(invite)) !=
+              std::string::npos);
+    }
+
+    SECTION("guard is an explicit mutation-none terminal") {
+        const std::string invite = "https://t.me/+ChatJoinGuardSentinel123";
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_join_request(invite, "join-guard-key"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                     core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                          .username = {},
+                                          .url = invite,
+                                          .tdlib_type_id = 1});
+        fake.respond(core::TdFunctionKind::CheckChatInviteLink,
+                     core::TdChatInviteLinkInfo{.chat_id = 0, .is_public = false});
+        fake.respond(
+            core::TdFunctionKind::JoinChatByInviteLink,
+            core::TdChatJoinResult{.kind = core::TdChatJoinResultKind::GuardBotApprovalRequired,
+                                   .chat_id = std::nullopt,
+                                   .guard_bot_user_id = 77,
+                                   .guard_query_id = 88,
+                                   .unsupported_tdlib_type_id = std::nullopt});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "JOIN_APPROVAL_REQUIRED");
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("invite misses expose only the domain-separated hash") {
+        const std::string invite = "https://t.me/+ChatJoinMissingSentinel123";
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_join_request(invite));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                     core::TdError{.code = 404, .message = invite});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        const auto rendered = outcome.error->dump();
+        CHECK(rendered.find(invite) == std::string::npos);
+        CHECK((*outcome.error)["error"]["details"]["selector"] == daemon::invite_link_hash(invite));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+
+    SECTION("invite dry-run performs metadata reads without mutation or persistence") {
+        const std::string invite = "https://t.me/+ChatJoinDryRunSentinel123";
+        FakeWrites fake(false);
+        auto pending = fake.dispatch(chat_join_request(invite, std::nullopt, true));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                     core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                          .username = {},
+                                          .url = invite,
+                                          .tdlib_type_id = 1});
+        fake.respond(core::TdFunctionKind::CheckChatInviteLink,
+                     core::TdChatInviteLinkInfo{.chat_id = 0, .is_public = false});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["dry_run"] == true);
+        CHECK((*outcome.result)["plan"]["invite_link_sha256"] == daemon::invite_link_hash(invite));
+        CHECK(outcome.result->dump().find(invite) == std::string::npos);
+        CHECK(fake.count(core::TdFunctionKind::JoinChatByInviteLink) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    }
+}
+
+TEST_CASE("chat leave requires immutable-plan confirmation and supports dry-run",
+          "[write-command][chat][leave][confirmation][fake-boundary]") {
+    SECTION("non-TTY invocation without yes is rejected before intent") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(chat_target_request("leave"));
+        resolve_basic(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "CONFIRMATION_REQUIRED");
+        CHECK((*outcome.error)["error"]["details"]["target"]["chat"]["id"] == -1001);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
+
+    SECTION("yes confirms one leave mutation") {
+        FakeWrites fake;
+        const auto confirmed =
+            chat_target_request("leave", "-1001", "leave-replay-key", false, true);
+        auto pending = fake.dispatch(confirmed);
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::LeaveChat, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"chat_id", -1001}, {"left", true}});
+        CHECK(fake.count(core::TdFunctionKind::LeaveChat) == 1);
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-leave.result.schema.json"));
+
+        auto unconfirmed_request = confirmed;
+        unconfirmed_request.context.yes = false;
+        auto unconfirmed = fake.dispatch(unconfirmed_request);
+        bind_principal(fake);
+        const auto rejected = unconfirmed.get();
+        REQUIRE(rejected.error);
+        CHECK((*rejected.error)["error"]["code"] == "CONFIRMATION_REQUIRED");
+        CHECK((*rejected.error)["error"]["details"]["target"]["chat"]["title"] == "Project");
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 1);
+
+        auto replay = fake.dispatch(confirmed);
+        bind_principal(fake);
+        CHECK(replay.get().result == outcome.result);
+        CHECK(fake.count(core::TdFunctionKind::LeaveChat) == 1);
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 1);
+    }
+
+    SECTION("dry-run plans without confirmation or persistence") {
+        FakeWrites fake(false);
+        auto pending = fake.dispatch(chat_target_request("leave", "-1001", std::nullopt, true));
+        resolve_basic(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["dry_run"] == true);
+        CHECK(fake.count(core::TdFunctionKind::LeaveChat) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("chat-leave.result.schema.json"));
+    }
+}
+
+TEST_CASE("chat mutation handlers enforce the closed bot matrix before target reads",
+          "[write-command][chat][bot][fake-boundary]") {
+    const std::vector<proto::Request> user_only{
+        chat_target_request("mark-read"), chat_mute_request(true, 3600),
+        chat_mute_request(false, 0),      chat_target_request("pin"),
+        chat_target_request("unpin"),     chat_target_request("archive"),
+        chat_target_request("unarchive"), chat_join_request("@project"),
+    };
+    for (const auto& request : user_only) {
+        CAPTURE(request.command);
+        FakeWrites fake;
+        auto pending = fake.dispatch(request);
+        auto bot = self();
+        bot.is_bot = true;
+        fake.respond(core::TdFunctionKind::GetMe, bot);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "BOT_UNSUPPORTED");
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::JoinChat) == 0);
+    }
+
+    FakeWrites fake;
+    auto pending = fake.dispatch(chat_target_request("leave", "-1001", std::nullopt, false, true));
+    auto bot = self();
+    bot.is_bot = true;
+    fake.respond(core::TdFunctionKind::GetMe, bot);
+    fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+    fake.respond(core::TdFunctionKind::LeaveChat, core::TdOk{});
+    REQUIRE(pending.get().result);
+    CHECK(fake.count(core::TdFunctionKind::LeaveChat) == 1);
 }

@@ -42,15 +42,18 @@ struct ResolveResult {
                            std::optional<std::int64_t> message_id_value = std::nullopt,
                            std::optional<core::TdTopic> topic_value = std::nullopt,
                            std::optional<ResolvedLinkType> link_type_value = std::nullopt,
-                           std::optional<bool> is_public_value = std::nullopt)
+                           std::optional<bool> is_public_value = std::nullopt,
+                           std::optional<core::TdChat> observed_chat_value = std::nullopt)
         : chat(std::move(chat_value)), message_id(message_id_value), topic(topic_value),
-          link_type(link_type_value), is_public(is_public_value) {}
+          link_type(link_type_value), is_public(is_public_value),
+          observed_chat(std::move(observed_chat_value)) {}
 
     ChatIdentity chat;
     std::optional<std::int64_t> message_id;
     std::optional<core::TdTopic> topic;
     std::optional<ResolvedLinkType> link_type;
     std::optional<bool> is_public;
+    std::optional<core::TdChat> observed_chat;
 };
 
 std::optional<ChatIdentity> shallow_candidate_identity(const core::TdChat& chat) {
@@ -274,6 +277,7 @@ class ResolverRun {
         }
         return ResolvedChatTarget{.principal = principal,
                                   .chat = std::move(result.chat),
+                                  .observed_chat = std::move(result.observed_chat),
                                   .contextual_message_id = result.message_id,
                                   .contextual_topic = topic,
                                   .link_type = result.link_type,
@@ -490,7 +494,7 @@ class ResolverRun {
     }
 
     std::optional<ResolveResult> resolve_numeric(std::int64_t chat_id) {
-        const auto chat = get_chat(chat_id);
+        auto chat = get_chat(chat_id);
         if (!chat) {
             return std::nullopt;
         }
@@ -498,7 +502,8 @@ class ResolverRun {
         if (!materialized) {
             return std::nullopt;
         }
-        return ResolveResult(std::move(*materialized));
+        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt, std::nullopt,
+                             std::nullopt, std::move(chat));
     }
 
     std::optional<ResolveResult> resolve_public_username(const std::string& username,
@@ -531,7 +536,8 @@ class ResolverRun {
             internal_error();
             return std::nullopt;
         }
-        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt, link_type);
+        return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt, link_type,
+                             std::nullopt, *chat);
     }
 
     std::optional<std::vector<std::int64_t>> load_list(core::TdChatListKind list,
@@ -802,7 +808,7 @@ class ResolverRun {
             internal_error();
             return std::nullopt;
         }
-        const auto chat = get_chat(info->chat_id);
+        auto chat = get_chat(info->chat_id);
         if (!chat) {
             return std::nullopt;
         }
@@ -811,7 +817,7 @@ class ResolverRun {
             return std::nullopt;
         }
         return ResolveResult(std::move(*materialized), info->message_id, info->topic,
-                             ResolvedLinkType::Message, info->is_public);
+                             ResolvedLinkType::Message, info->is_public, std::move(chat));
     }
 
     std::optional<ResolveResult> resolve_invite_link(const core::TdInternalLink& link) {
@@ -841,7 +847,7 @@ class ResolverRun {
             not_found();
             return std::nullopt;
         }
-        const auto chat = get_chat(info->chat_id);
+        auto chat = get_chat(info->chat_id);
         if (!chat) {
             return std::nullopt;
         }
@@ -850,7 +856,7 @@ class ResolverRun {
             return std::nullopt;
         }
         return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
-                             ResolvedLinkType::ChatInvite, info->is_public);
+                             ResolvedLinkType::ChatInvite, info->is_public, std::move(chat));
     }
 
     std::optional<ResolveResult> resolve_direct_messages_link(const core::TdInternalLink& link) {
@@ -898,7 +904,7 @@ class ResolverRun {
             not_found();
             return std::nullopt;
         }
-        const auto chat = get_chat(full->direct_messages_chat_id);
+        auto chat = get_chat(full->direct_messages_chat_id);
         if (!chat) {
             return std::nullopt;
         }
@@ -907,7 +913,7 @@ class ResolverRun {
             return std::nullopt;
         }
         return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
-                             ResolvedLinkType::DirectMessagesChat);
+                             ResolvedLinkType::DirectMessagesChat, std::nullopt, std::move(chat));
     }
 
     std::optional<ResolveResult> resolve_saved_messages_link() {
@@ -936,7 +942,7 @@ class ResolverRun {
         }
         saved_messages_chat_ = *chat;
         return ResolveResult(std::move(*materialized), std::nullopt, std::nullopt,
-                             ResolvedLinkType::SavedMessages);
+                             ResolvedLinkType::SavedMessages, std::nullopt, *chat);
     }
 
     core::TdClient& client_;

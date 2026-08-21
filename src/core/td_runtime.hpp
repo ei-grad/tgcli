@@ -195,7 +195,7 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
     return "other";
 }
 
-enum class TdRedactedValue { Credential };
+enum class TdRedactedValue { Credential, InviteLink };
 
 using TdFieldValue = std::variant<bool, std::int64_t, std::uint64_t, double, std::string,
                                   std::vector<std::int64_t>, TdRedactedValue>;
@@ -1277,6 +1277,7 @@ struct TdAddChatToListRequest {
 struct TdJoinChatRequest {
     std::optional<std::int64_t> chat_id;
     std::optional<std::string> invite_link;
+    std::optional<std::int64_t> expected_invite_chat_id;
 
     bool operator==(const TdJoinChatRequest&) const = default;
 };

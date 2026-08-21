@@ -459,6 +459,57 @@ std::string render_message_pin(const nlohmann::json& data) {
                        data.at("message_id").get<std::int64_t>(), data.at("pinned").dump());
 }
 
+std::string render_chat_mark_read(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\nlast_read_message_id\t{}\nmarked_read\t{}\n",
+                       data.at("chat_id").get<std::int64_t>(),
+                       data.at("last_read_message_id").dump(), data.at("marked_read").dump());
+}
+
+std::string render_chat_mute(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\nmuted\t{}\nduration_seconds\t{}\n",
+                       data.at("chat_id").get<std::int64_t>(), data.at("muted").dump(),
+                       data.at("duration_seconds").get<std::int32_t>());
+}
+
+std::string render_chat_pin(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format(
+        "chat_id\t{}\nchat_list\t{}\npinned\t{}\n", data.at("chat_id").get<std::int64_t>(),
+        data.at("chat_list").get_ref<const std::string&>(), data.at("pinned").dump());
+}
+
+std::string render_chat_archive(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\narchived\t{}\n", data.at("chat_id").get<std::int64_t>(),
+                       data.at("archived").dump());
+}
+
+std::string render_chat_join(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("status\t{}\nchat_id\t{}\n", data.at("status").get_ref<const std::string&>(),
+                       data.at("chat_id").dump());
+}
+
+std::string render_chat_leave(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\nleft\t{}\n", data.at("chat_id").get<std::int64_t>(),
+                       data.at("left").dump());
+}
+
 std::string render_msg_link(const nlohmann::json& data) {
     return fmt::format("chat_id\t{}\nmessage_id\t{}\nlink\t{}\nis_public\t{}\n",
                        data.at("chat_id").get<std::int64_t>(),
@@ -585,6 +636,24 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "msg pin" || command_key == "msg unpin") {
         return render_message_pin(data);
+    }
+    if (command_key == "chat mark-read") {
+        return render_chat_mark_read(data);
+    }
+    if (command_key == "chat mute" || command_key == "chat unmute") {
+        return render_chat_mute(data);
+    }
+    if (command_key == "chat pin" || command_key == "chat unpin") {
+        return render_chat_pin(data);
+    }
+    if (command_key == "chat archive" || command_key == "chat unarchive") {
+        return render_chat_archive(data);
+    }
+    if (command_key == "chat join") {
+        return render_chat_join(data);
+    }
+    if (command_key == "chat leave") {
+        return render_chat_leave(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

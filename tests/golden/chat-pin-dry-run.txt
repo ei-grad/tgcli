@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"chat_list":"archive","operation":"chat_pin","pinned":true,"tdlib_request":"toggleChatIsPinned"}

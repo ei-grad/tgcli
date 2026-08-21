@@ -2133,10 +2133,12 @@ TdValue make_native_join_chat(TdJoinChatRequest request) {
             TdFunctionData{TdFunctionKind::JoinChat, {{"chat_id", *request.chat_id}}});
     }
     auto invite_link = std::move(request.invite_link).value_or(std::string{});
-    NativeFunctionPtr native = td_api::make_object<td_api::joinChatByInviteLink>(invite_link);
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::joinChatByInviteLink>(std::move(invite_link));
+    wipe(invite_link);
     return TdValue::function(std::move(native),
                              TdFunctionData{TdFunctionKind::JoinChatByInviteLink,
-                                            {{"invite_link", std::move(invite_link)}}});
+                                            {{"invite_link", TdRedactedValue::InviteLink}}});
 }
 
 TdValue make_native_leave_chat(TdLeaveChatRequest request) {

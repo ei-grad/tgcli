@@ -8,6 +8,7 @@
 #include "daemon/fetch_domain.hpp"
 #include "daemon/local_selector.hpp"
 #include "daemon/read_domain.hpp"
+#include "daemon/request_fingerprint.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "daemon/write_domain.hpp"
@@ -512,6 +513,20 @@ struct SendCliArguments {
     CLI::Option* schedule_option = nullptr;
 };
 
+struct ChatCliArguments {
+    std::string mark_read;
+    std::string mute;
+    std::string mute_for;
+    std::string unmute;
+    std::string pin;
+    std::string unpin;
+    std::string archive;
+    std::string unarchive;
+    std::string join;
+    std::string leave;
+    CLI::Option* mute_for_option = nullptr;
+};
+
 struct ReadCliArguments {
     std::string chat;
     std::int64_t before = 0;
@@ -595,8 +610,9 @@ std::optional<int> validate_chats_arguments(const std::vector<std::string>& comm
 std::optional<int>
 validate_command_arguments(const std::vector<std::string>& command, const SavedCliArguments& saved,
                            const ChatsCliArguments& chats, const MessageCliArguments& messages,
-                           const SendCliArguments& send, const ReadCliArguments& read,
-                           const FetchCliArguments& fetch, std::string_view resolve_selector) {
+                           const SendCliArguments& send, const ChatCliArguments& chat,
+                           const ReadCliArguments& read, const FetchCliArguments& fetch,
+                           std::string_view resolve_selector) {
     if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
         return saved_exit;
     }
@@ -792,6 +808,49 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
             return report_usage("message id must be a nonzero int53 value", "id");
         }
     }
+    const auto chat_target = [&]() -> const std::string* {
+        if (command == std::vector<std::string>{"chat", "mark-read"}) {
+            return &chat.mark_read;
+        }
+        if (command == std::vector<std::string>{"chat", "mute"}) {
+            return &chat.mute;
+        }
+        if (command == std::vector<std::string>{"chat", "unmute"}) {
+            return &chat.unmute;
+        }
+        if (command == std::vector<std::string>{"chat", "pin"}) {
+            return &chat.pin;
+        }
+        if (command == std::vector<std::string>{"chat", "unpin"}) {
+            return &chat.unpin;
+        }
+        if (command == std::vector<std::string>{"chat", "archive"}) {
+            return &chat.archive;
+        }
+        if (command == std::vector<std::string>{"chat", "unarchive"}) {
+            return &chat.unarchive;
+        }
+        if (command == std::vector<std::string>{"chat", "leave"}) {
+            return &chat.leave;
+        }
+        return nullptr;
+    }();
+    if (chat_target != nullptr && tgcli::daemon::classify_exact_write_selector(*chat_target) ==
+                                      tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+        return report_usage("chat selector is invalid", "chat");
+    }
+    if (command == std::vector<std::string>{"chat", "mute"} && chat.mute_for_option->count() != 0 &&
+        !tgcli::daemon::parse_mute_duration(chat.mute_for)) {
+        return report_usage("chat mute duration is invalid", "--for");
+    }
+    if (command == std::vector<std::string>{"chat", "join"}) {
+        const auto canonical = tgcli::daemon::canonical_write_selector(chat.join);
+        if (!canonical || (chat.join.starts_with('@') ? *canonical != chat.join
+                                                      : !canonical->starts_with("sha256:"))) {
+            return report_usage("chat join requires an invite link or @username",
+                                "invite-link|@username");
+        }
+    }
     return std::nullopt;
 }
 // NOLINTEND(readability-function-cognitive-complexity)
@@ -886,8 +945,8 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                                     bool login_bot, std::string_view resolve_selector,
                                     const ChatsCliArguments& chats, const SavedCliArguments& saved,
                                     const MessageCliArguments& messages,
-                                    const SendCliArguments& send, const ReadCliArguments& read,
-                                    const FetchCliArguments& fetch) {
+                                    const SendCliArguments& send, const ChatCliArguments& chat,
+                                    const ReadCliArguments& read, const FetchCliArguments& fetch) {
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -968,6 +1027,36 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     if (command == std::vector<std::string>{"msg", "unpin"}) {
         return {{"chat", messages.unpin_chat}, {"message_id", messages.unpin_id}};
+    }
+    if (command == std::vector<std::string>{"chat", "mark-read"}) {
+        return {{"chat", chat.mark_read}};
+    }
+    if (command == std::vector<std::string>{"chat", "mute"}) {
+        const auto duration = chat.mute_for_option->count() != 0
+                                  ? *tgcli::daemon::parse_mute_duration(chat.mute_for)
+                                  : std::numeric_limits<std::int32_t>::max();
+        return {{"chat", chat.mute}, {"duration_seconds", duration}};
+    }
+    if (command == std::vector<std::string>{"chat", "unmute"}) {
+        return {{"chat", chat.unmute}, {"duration_seconds", 0}};
+    }
+    if (command == std::vector<std::string>{"chat", "pin"}) {
+        return {{"chat", chat.pin}};
+    }
+    if (command == std::vector<std::string>{"chat", "unpin"}) {
+        return {{"chat", chat.unpin}};
+    }
+    if (command == std::vector<std::string>{"chat", "archive"}) {
+        return {{"chat", chat.archive}};
+    }
+    if (command == std::vector<std::string>{"chat", "unarchive"}) {
+        return {{"chat", chat.unarchive}};
+    }
+    if (command == std::vector<std::string>{"chat", "join"}) {
+        return {{"target", chat.join}};
+    }
+    if (command == std::vector<std::string>{"chat", "leave"}) {
+        return {{"chat", chat.leave}};
     }
     return nlohmann::json::object();
 }
@@ -1059,6 +1148,7 @@ int run(int argc, char** argv) {
     ChatsCliArguments chats;
     MessageCliArguments messages;
     SendCliArguments send;
+    ChatCliArguments chat;
     ReadCliArguments read;
     ReadCliArguments history;
     FetchCliArguments fetch;
@@ -1190,6 +1280,30 @@ int run(int argc, char** argv) {
     CLI::App* msg_unpin_cmd = msg_cmd->add_subcommand("unpin", "unpin a message");
     msg_unpin_cmd->add_option("chat", messages.unpin_chat)->required();
     msg_unpin_cmd->add_option("id", messages.unpin_id)->required();
+    CLI::App* chat_cmd = app.add_subcommand("chat", "chat mutations");
+    chat_cmd->require_subcommand(1);
+    chat_cmd->add_subcommand("mark-read", "mark a chat as read")
+        ->add_option("chat", chat.mark_read)
+        ->required();
+    CLI::App* chat_mute_cmd = chat_cmd->add_subcommand("mute", "mute a chat");
+    chat_mute_cmd->add_option("chat", chat.mute)->required();
+    chat.mute_for_option =
+        chat_mute_cmd->add_option("--for", chat.mute_for, "duration such as 30m or 1d");
+    chat_cmd->add_subcommand("unmute", "unmute a chat")
+        ->add_option("chat", chat.unmute)
+        ->required();
+    chat_cmd->add_subcommand("pin", "pin a chat")->add_option("chat", chat.pin)->required();
+    chat_cmd->add_subcommand("unpin", "unpin a chat")->add_option("chat", chat.unpin)->required();
+    chat_cmd->add_subcommand("archive", "archive a chat")
+        ->add_option("chat", chat.archive)
+        ->required();
+    chat_cmd->add_subcommand("unarchive", "unarchive a chat")
+        ->add_option("chat", chat.unarchive)
+        ->required();
+    chat_cmd->add_subcommand("join", "join a chat")
+        ->add_option("invite-link|@username", chat.join)
+        ->required();
+    chat_cmd->add_subcommand("leave", "leave a chat")->add_option("chat", chat.leave)->required();
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -1280,7 +1394,7 @@ int run(int argc, char** argv) {
         return report_missing_command();
     }
     if (const auto argument_exit = validate_command_arguments(
-            command, saved, chats, messages, send, *selected_read, fetch, resolve_selector);
+            command, saved, chats, messages, send, chat, *selected_read, fetch, resolve_selector);
         argument_exit) {
         return *argument_exit;
     }
@@ -1327,7 +1441,7 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
-                             send, *selected_read, fetch);
+                             send, chat, *selected_read, fetch);
     auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);

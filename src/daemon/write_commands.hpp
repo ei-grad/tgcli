@@ -32,6 +32,12 @@ class WriteCoordinator final {
     void delete_messages(const proto::Request& request, RequestSession& session);
     void react_to_message(const proto::Request& request, RequestSession& session);
     void pin_message(const proto::Request& request, RequestSession& session, bool pinned);
+    void mark_chat_read(const proto::Request& request, RequestSession& session);
+    void mute_chat(const proto::Request& request, RequestSession& session, bool muted);
+    void pin_chat(const proto::Request& request, RequestSession& session, bool pinned);
+    void archive_chat(const proto::Request& request, RequestSession& session, bool archived);
+    void join_chat(const proto::Request& request, RequestSession& session);
+    void leave_chat(const proto::Request& request, RequestSession& session);
 
   private:
     std::reference_wrapper<core::TdClient> client_;

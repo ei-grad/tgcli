@@ -287,9 +287,11 @@ TEST_CASE("direct RPC maps all typed requests to bounded results",
                                             .list = tgcli::core::TdDirectChatList::Archive},
         tgcli::core::TdAddChatToListRequest{.chat_id = -1001,
                                             .list = tgcli::core::TdDirectChatList::Main},
-        tgcli::core::TdJoinChatRequest{.chat_id = -1001, .invite_link = std::nullopt},
+        tgcli::core::TdJoinChatRequest{
+            .chat_id = -1001, .invite_link = std::nullopt, .expected_invite_chat_id = std::nullopt},
         tgcli::core::TdJoinChatRequest{.chat_id = std::nullopt,
-                                       .invite_link = "https://t.me/+secret"},
+                                       .invite_link = "https://t.me/+secret",
+                                       .expected_invite_chat_id = std::nullopt},
         tgcli::core::TdLeaveChatRequest{.chat_id = -1001},
     };
     for (const auto& request : requests) {
@@ -545,7 +547,8 @@ TEST_CASE("direct RPC keeps pre-boundary authorization loss mutation-free",
 TEST_CASE("direct join guard and decline are explicit mutation-none outcomes",
           "[daemon][direct][join][fake-boundary]") {
     const auto request = tgcli::core::TdJoinChatRequest{.chat_id = std::nullopt,
-                                                        .invite_link = "https://t.me/+secret"};
+                                                        .invite_link = "https://t.me/+secret",
+                                                        .expected_invite_chat_id = std::nullopt};
     SECTION("guard") {
         DirectHarness harness;
         auto pending = harness.execute(request);
@@ -580,4 +583,28 @@ TEST_CASE("direct join guard and decline are explicit mutation-none outcomes",
         auto outcome = pending.get();
         CHECK(std::holds_alternative<tgcli::daemon::DirectJoinDeclined>(outcome));
     }
+}
+
+TEST_CASE("invite request-sent preserves correlation metadata without changing the TD function",
+          "[daemon][direct][join][fake-boundary]") {
+    DirectHarness harness;
+    const auto request = tgcli::core::TdJoinChatRequest{.chat_id = std::nullopt,
+                                                        .invite_link = "https://t.me/+known-secret",
+                                                        .expected_invite_chat_id = -1001};
+    auto pending = harness.execute(request);
+    const auto sent = harness.await_direct_send();
+    CHECK(sent.function.kind() == tgcli::core::TdFunctionKind::JoinChatByInviteLink);
+    harness.runtime().push_response(harness.first(), sent.query_id,
+                                    tgcli::core::TdValue::from(tgcli::core::TdChatJoinResult{
+                                        .kind = tgcli::core::TdChatJoinResultKind::RequestSent,
+                                        .chat_id = std::nullopt,
+                                        .guard_bot_user_id = std::nullopt,
+                                        .guard_query_id = std::nullopt,
+                                        .unsupported_tdlib_type_id = std::nullopt}));
+    auto outcome = pending.get();
+    const auto& success = require_success(outcome);
+    const auto* result = std::get_if<tgcli::daemon::DirectJoinResult>(&success.result);
+    REQUIRE(result != nullptr);
+    CHECK(result->status == tgcli::daemon::DirectJoinStatus::RequestSent);
+    CHECK(result->chat_id == -1001);
 }

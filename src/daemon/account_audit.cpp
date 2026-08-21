@@ -1482,6 +1482,7 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
         case AccountAuditOperation::MsgPin:
             return reason == "not_pinnable";
         case AccountAuditOperation::ChatMute:
+        case AccountAuditOperation::ChatUnmute:
             return reason == "saved_notifications_unsupported";
         case AccountAuditOperation::ChatPin:
         case AccountAuditOperation::ChatUnpin:
@@ -1492,7 +1493,6 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
             return one_of({"wrong_content_type", "wrong_topic"});
         case AccountAuditOperation::MsgUnpin:
         case AccountAuditOperation::ChatMarkRead:
-        case AccountAuditOperation::ChatUnmute:
         case AccountAuditOperation::ChatArchive:
         case AccountAuditOperation::ChatUnarchive:
         case AccountAuditOperation::ChatJoin:
@@ -1530,13 +1530,16 @@ bool terminal_proves_mutation(AccountAuditOperation operation, const json& termi
 }
 
 bool terminal_proves_explicit_no_mutation(AccountAuditOperation operation, const json& terminal) {
-    if (!valid_terminal(operation, terminal) || terminal["kind"] != "error" ||
-        (operation != AccountAuditOperation::Send &&
-         operation != AccountAuditOperation::SavedAttach)) {
+    if (!valid_terminal(operation, terminal) || terminal["kind"] != "error") {
         return false;
     }
     const auto& code = terminal["code"].get_ref<const std::string&>();
-    return code == "TDLIB_ERROR" || code == "RATE_LIMITED";
+    if (operation == AccountAuditOperation::ChatJoin) {
+        return code == "JOIN_APPROVAL_REQUIRED" || code == "JOIN_DECLINED";
+    }
+    return (operation == AccountAuditOperation::Send ||
+            operation == AccountAuditOperation::SavedAttach) &&
+           (code == "TDLIB_ERROR" || code == "RATE_LIMITED");
 }
 
 std::uint64_t terminal_byte_ceiling(AccountAuditOperation operation) {
@@ -1805,10 +1808,14 @@ bool validate_outcome_impl(const json& document, std::string& error) {
     const bool has_progress = unique.contains(AccountAuditStage::ForwardProgress);
     const bool has_proof = unique.contains(AccountAuditStage::MutationConfirmed);
     const bool success = document["success"].get<bool>();
+    const bool successful_mark_read_noop = operation == AccountAuditOperation::ChatMarkRead &&
+                                           success && mutation == "none" && !has_dispatch &&
+                                           !has_proof && terminal["kind"] == "result" &&
+                                           terminal["data"]["last_read_message_id"].is_null();
     const bool spool_unavailable = document["terminal"]["kind"] == "error" &&
                                    document["terminal"]["code"] == "SPOOL_UNAVAILABLE";
     if (!legal_prefix || (document["terminal"]["kind"] == "result") != success ||
-        (success && (mutation != "confirmed" || !has_proof)) ||
+        (success && !successful_mark_read_noop && (mutation != "confirmed" || !has_proof)) ||
         (!has_dispatch && mutation != "none") || (has_proof && mutation != "confirmed") ||
         (has_dispatch && !has_progress && !has_proof && mutation != "possible" &&
          !(mutation == "none" && terminal_proves_explicit_no_mutation(operation, terminal))) ||
@@ -3564,14 +3571,29 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
     }
     if (!group.dispatch_started) {
         result.mutation_state = AccountAuditMutationState::None;
-        result.terminal =
-            incomplete_terminal(account, audit_path, result.mutation_state, group.completed_stages);
+        const auto operation =
+            parse_account_audit_operation(group.intent["command"].get_ref<const std::string&>());
+        const bool mark_read_noop = operation == AccountAuditOperation::ChatMarkRead &&
+                                    group.intent["plan"]["tdlib_request"].is_null() &&
+                                    group.intent["plan"]["last_message_id"].is_null();
+        result.terminal = mark_read_noop
+                              ? json{{"kind", "result"},
+                                     {"data",
+                                      {{"chat_id", group.intent["plan"]["chat"]["id"]},
+                                       {"last_read_message_id", nullptr},
+                                       {"marked_read", true}}}}
+                              : incomplete_terminal(account, audit_path, result.mutation_state,
+                                                    group.completed_stages);
         if (group.has_spool) {
             result.boundaries.push_back(AccountAuditRecoveryBoundary::DeleteSpoolAndSyncRoot);
         }
         result.boundaries.push_back(AccountAuditRecoveryBoundary::AppendOutcomeAndSync);
         if (group.keyed) {
             result.boundaries.push_back(AccountAuditRecoveryBoundary::TransitionStoreAndSync);
+            result.complete_store =
+                mark_read_noop &&
+                std::ranges::find(group.completed_stages, AccountAuditStage::IdempotencyPending) !=
+                    group.completed_stages.end();
         }
         result.continue_current_request = true;
         error.clear();

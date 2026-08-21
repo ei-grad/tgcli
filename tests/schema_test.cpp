@@ -345,6 +345,15 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"account remove", {{"result", "account-remove.result.schema.json"}}},
           {"account show", {{"result", "account-show.result.schema.json"}}},
           {"account use", {{"result", "account-use.result.schema.json"}}},
+          {"chat archive", {{"result", "chat-archive.result.schema.json"}}},
+          {"chat join", {{"result", "chat-join.result.schema.json"}}},
+          {"chat leave", {{"result", "chat-leave.result.schema.json"}}},
+          {"chat mark-read", {{"result", "chat-mark-read.result.schema.json"}}},
+          {"chat mute", {{"result", "chat-mute.result.schema.json"}}},
+          {"chat pin", {{"result", "chat-pin.result.schema.json"}}},
+          {"chat unarchive", {{"result", "chat-unarchive.result.schema.json"}}},
+          {"chat unmute", {{"result", "chat-unmute.result.schema.json"}}},
+          {"chat unpin", {{"result", "chat-unpin.result.schema.json"}}},
           {"chats", {{"result", "chats.result.schema.json"}}},
           {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
           {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
@@ -372,7 +381,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 31);
+    CHECK(manifest["commands"].size() == 40);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -787,6 +796,126 @@ TEST_CASE("direct message write schemas pair exact result plans and operation er
     auto invalid_error = errors.front();
     invalid_error["error"]["details"]["reason"] = "reaction_unavailable";
     CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+}
+
+TEST_CASE("chat write schemas pair exact real and dry-run relations", "[schema][m3][chat-write]") {
+    const json chat{{"id", -1001},
+                    {"title", "Project"},
+                    {"type", "supergroup"},
+                    {"is_bot", false},
+                    {"usernames", json::array({"project"})}};
+    struct Case {
+        std::string schema;
+        json result;
+        json plan;
+    };
+    const std::vector<Case> cases{
+        {"chat-mark-read.result.schema.json",
+         {{"chat_id", -1001}, {"last_read_message_id", nullptr}, {"marked_read", true}},
+         {{"operation", "chat_mark_read"},
+          {"account", "main"},
+          {"tdlib_request", nullptr},
+          {"chat", chat},
+          {"last_message_id", nullptr}}},
+        {"chat-mute.result.schema.json",
+         {{"chat_id", -1001}, {"muted", true}, {"duration_seconds", 3600}},
+         {{"operation", "chat_mute"},
+          {"account", "main"},
+          {"tdlib_request", "setChatNotificationSettings"},
+          {"chat", chat},
+          {"muted", true},
+          {"duration_seconds", 3600}}},
+        {"chat-unmute.result.schema.json",
+         {{"chat_id", -1001}, {"muted", false}, {"duration_seconds", 0}},
+         {{"operation", "chat_unmute"},
+          {"account", "main"},
+          {"tdlib_request", "setChatNotificationSettings"},
+          {"chat", chat},
+          {"muted", false},
+          {"duration_seconds", 0}}},
+        {"chat-pin.result.schema.json",
+         {{"chat_id", -1001}, {"chat_list", "archive"}, {"pinned", true}},
+         {{"operation", "chat_pin"},
+          {"account", "main"},
+          {"tdlib_request", "toggleChatIsPinned"},
+          {"chat", chat},
+          {"chat_list", "archive"},
+          {"pinned", true}}},
+        {"chat-unpin.result.schema.json",
+         {{"chat_id", -1001}, {"chat_list", "main"}, {"pinned", false}},
+         {{"operation", "chat_unpin"},
+          {"account", "main"},
+          {"tdlib_request", "toggleChatIsPinned"},
+          {"chat", chat},
+          {"chat_list", "main"},
+          {"pinned", false}}},
+        {"chat-archive.result.schema.json",
+         {{"chat_id", -1001}, {"archived", true}},
+         {{"operation", "chat_archive"},
+          {"account", "main"},
+          {"tdlib_request", "addChatToList"},
+          {"chat", chat},
+          {"archived", true}}},
+        {"chat-unarchive.result.schema.json",
+         {{"chat_id", -1001}, {"archived", false}},
+         {{"operation", "chat_unarchive"},
+          {"account", "main"},
+          {"tdlib_request", "addChatToList"},
+          {"chat", chat},
+          {"archived", false}}},
+        {"chat-join.result.schema.json",
+         {{"status", "request_sent"}, {"chat_id", nullptr}},
+         {{"operation", "chat_join"},
+          {"account", "main"},
+          {"tdlib_request", "joinChatByInviteLink"},
+          {"source", "invite_link"},
+          {"chat", nullptr},
+          {"invite_link_sha256",
+           "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}},
+        {"chat-leave.result.schema.json",
+         {{"chat_id", -1001}, {"left", true}},
+         {{"operation", "chat_leave"},
+          {"account", "main"},
+          {"tdlib_request", "leaveChat"},
+          {"chat", chat}}},
+    };
+    for (const auto& test_case : cases) {
+        INFO(test_case.schema);
+        CHECK_THAT(test_case.result, tgcli::test::matches_json_schema(test_case.schema));
+        const json dry{{"dry_run", true}, {"plan", test_case.plan}};
+        CHECK_THAT(dry, tgcli::test::matches_json_schema(test_case.schema));
+        auto unknown = test_case.result;
+        unknown["extra"] = true;
+        CHECK_THAT(unknown, !tgcli::test::matches_json_schema(test_case.schema));
+    }
+
+    auto wrong_pin = cases[3].result;
+    wrong_pin["pinned"] = false;
+    CHECK_THAT(wrong_pin, !tgcli::test::matches_json_schema("chat-pin.result.schema.json"));
+    auto wrong_join = cases[7].plan;
+    wrong_join["source"] = "username";
+    const json wrong_join_dry{{"dry_run", true}, {"plan", wrong_join}};
+    CHECK_THAT(wrong_join_dry, !tgcli::test::matches_json_schema("chat-join.result.schema.json"));
+
+    const auto saved =
+        terminal_error("PRECONDITION_FAILED", {{"operation", "chat_unmute"},
+                                               {"chat_id", 42},
+                                               {"message_id", nullptr},
+                                               {"reason", "saved_notifications_unsupported"}});
+    const auto listed = terminal_error("PRECONDITION_FAILED", {{"operation", "chat_pin"},
+                                                               {"chat_id", -1001},
+                                                               {"message_id", nullptr},
+                                                               {"reason", "chat_not_listed"}});
+    const auto leave = terminal_error(
+        "CONFIRMATION_REQUIRED",
+        {{"account", "main"}, {"action", "chat_leave"}, {"target", cases.back().plan}});
+    const auto guard =
+        terminal_error("JOIN_APPROVAL_REQUIRED",
+                       {{"operation", "chat_join"}, {"bot_user_id", 77}, {"query_id", 88}});
+    const auto declined = terminal_error("JOIN_DECLINED", {{"operation", "chat_join"}});
+    for (const auto& error : {saved, listed, leave, guard, declined}) {
+        CHECK_THAT(error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
 }
 
 TEST_CASE("destructive error schemas close command shapes and uint64 request ids",

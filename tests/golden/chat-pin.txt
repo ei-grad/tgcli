@@ -1,0 +1,3 @@
+chat_id	-1001
+chat_list	archive
+pinned	true

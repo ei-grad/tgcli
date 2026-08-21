@@ -269,12 +269,12 @@ before the milestone is closed.
 - [x] Implement destructive `tgcli msg delete`, including confirmation of the
       immutable plan on new invocation and completed replay, plus
       `completed_unchanged` replay-confirmation timeout
-- [ ] Implement destructive `tgcli chat leave` with the same immutable-plan,
+- [x] Implement destructive `tgcli chat leave` with the same immutable-plan,
       confirmation, replay, timeout, audit, and idempotency guarantees
 - [ ] Implement the ordered `tgcli msg forward` vector coordinator with one
       strict `ForwardItem` across success/error/timeout/audit/store, partial
       outcomes, deleted-before-confirmation handling and 429 aggregation
-- [ ] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
+- [x] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
       with exact direct-call state machines, invite secrecy and
       notification-setting plans
 - [ ] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel

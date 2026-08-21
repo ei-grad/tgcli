@@ -1,5 +1,6 @@
 #include "daemon/direct_rpc.hpp"
 
+#include "common/secure_wipe.hpp"
 #include "common/utf8.hpp"
 #include "daemon/request_session.hpp"
 
@@ -175,8 +176,10 @@ DirectOutcome direct_result_from(const core::TdJoinChatRequest& input, const cor
         return DirectSuccess{.result = DirectJoinResult{.status = DirectJoinStatus::Joined,
                                                         .chat_id = joined->chat_id}};
     case core::TdChatJoinResultKind::RequestSent:
-        return DirectSuccess{.result = DirectJoinResult{.status = DirectJoinStatus::RequestSent,
-                                                        .chat_id = input.chat_id}};
+        return DirectSuccess{
+            .result = DirectJoinResult{.status = DirectJoinStatus::RequestSent,
+                                       .chat_id = input.chat_id ? input.chat_id
+                                                                : input.expected_invite_chat_id}};
     case core::TdChatJoinResultKind::GuardBotApprovalRequired:
         if (!joined->guard_bot_user_id || !joined->guard_query_id ||
             !core::valid_td_message_id(joined->guard_bot_user_id.value_or(0)) ||
@@ -211,6 +214,14 @@ DirectOutcome success_from(const core::TdDirectRequest& request, const core::TdV
     return std::visit([&](const auto& input) { return direct_result_from(input, value); }, request);
 }
 
+void wipe_invite(core::TdDirectRequest& request) {
+    if (auto* join = std::get_if<core::TdJoinChatRequest>(&request);
+        join != nullptr && join->invite_link) {
+        secure::wipe(*join->invite_link);
+        join->invite_link.reset();
+    }
+}
+
 } // namespace
 
 class DirectRpcCoordinator::Impl {
@@ -232,6 +243,9 @@ class DirectRpcCoordinator::Impl {
     }
 
     ~Impl() {
+        if (request_) {
+            wipe_invite(*request_);
+        }
         settle_in_flight();
         client_.unsubscribe_response_completions(response_subscription_);
         client_.unsubscribe_auth_states(auth_subscription_);
@@ -285,8 +299,12 @@ class DirectRpcCoordinator::Impl {
         }
         in_flight_ = true;
         request_ = request;
+        if (request_) {
+            wipe_invite(*request_);
+        }
         authorization_ = authorization;
         prepared_write_ = client_.prepare_direct_mutation(authorization, std::move(request));
+        wipe_invite(request);
         if (!prepared_write_) {
             const auto failure = prepared_write_.authorization_failure();
             const auto auth = first_auth_competitor(*authorization);

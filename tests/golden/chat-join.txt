@@ -1,0 +1,2 @@
+status	joined
+chat_id	-1001

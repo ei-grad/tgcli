@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"duration_seconds":3600,"muted":true,"operation":"chat_mute","tdlib_request":"setChatNotificationSettings"}

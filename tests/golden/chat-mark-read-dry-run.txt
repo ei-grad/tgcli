@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"last_message_id":321,"operation":"chat_mark_read","tdlib_request":"viewMessages"}

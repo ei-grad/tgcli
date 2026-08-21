@@ -946,6 +946,7 @@ const preconditionReasons = {
   msg_react: ['reaction_unavailable'],
   msg_pin: ['not_pinnable'],
   chat_mute: ['saved_notifications_unsupported'],
+  chat_unmute: ['saved_notifications_unsupported'],
   chat_pin: ['chat_not_listed'],
   chat_unpin: ['chat_not_listed'],
   chat_leave: ['wrong_chat_type'],
@@ -1830,6 +1831,31 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
     v2OutcomeBranch(operation, false, 'none', none,
       v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
   ];
+  if (operation === 'chat_mark_read') {
+    branches.push(v2OutcomeBranch(
+      operation,
+      true,
+      'none',
+      undispatched,
+      object(['kind', 'data'], {
+        kind: { const: 'result' },
+        data: object(['chat_id', 'last_read_message_id', 'marked_read'], {
+          chat_id: reference('int53'),
+          last_read_message_id: { type: 'null' },
+          marked_read: { const: true },
+        }),
+      }),
+    ));
+  }
+  if (operation === 'chat_join') {
+    branches.push(v2OutcomeBranch(
+      operation,
+      false,
+      'none',
+      ambiguous,
+      v2StoredErrorTerminal(operation, ['JOIN_APPROVAL_REQUIRED', 'JOIN_DECLINED']),
+    ));
+  }
   if (['send', 'saved_attach'].includes(operation)) {
     branches.push(v2OutcomeBranch(
       operation,

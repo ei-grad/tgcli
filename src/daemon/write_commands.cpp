@@ -1,6 +1,8 @@
 #include "daemon/write_commands.hpp"
 
 #include "common/exit_codes.hpp"
+#include "common/invite_redaction.hpp"
+#include "common/secure_wipe.hpp"
 #include "common/utf8.hpp"
 #include "daemon/direct_rpc.hpp"
 #include "daemon/message_summary.hpp"
@@ -76,6 +78,22 @@ struct MessagePinInput {
     bool pinned = false;
 };
 
+struct ChatTargetInput {
+    std::string chat;
+};
+
+struct ChatMuteInput {
+    std::string chat;
+    std::int32_t duration_seconds = 0;
+    bool muted = false;
+};
+
+struct ChatJoinInput {
+    std::string target;
+    bool invite = false;
+    std::string invite_hash;
+};
+
 struct SendState {
     SendInput input;
     ResolverPrincipal principal;
@@ -118,6 +136,27 @@ struct MessagePinState {
     MessagePinInput input;
     ResolverPrincipal principal;
     std::optional<ResolvedChatTarget> target;
+    std::shared_ptr<DirectDispatchState> dispatch;
+};
+
+struct ChatTargetState {
+    ChatTargetInput input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> target;
+    std::shared_ptr<DirectDispatchState> dispatch;
+};
+
+struct ChatMuteState {
+    ChatMuteInput input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> target;
+    std::shared_ptr<DirectDispatchState> dispatch;
+};
+
+struct ChatJoinState {
+    ChatJoinInput input;
+    ResolverPrincipal principal;
+    std::optional<ChatIdentity> chat;
     std::shared_ptr<DirectDispatchState> dispatch;
 };
 
@@ -462,6 +501,62 @@ std::optional<MessagePinInput> parse_message_pin_input(const json& args, bool pi
         .chat = args["chat"].get<std::string>(), .message_id = *message_id, .pinned = pinned};
 }
 
+std::optional<ChatTargetInput> parse_chat_target_input(const json& args, std::string_view command,
+                                                       json& failure) {
+    if (!exact_fields(args, {"chat"}) || !args["chat"].is_string()) {
+        failure = usage(std::string(command) + " received malformed arguments", nullptr);
+        return std::nullopt;
+    }
+    return ChatTargetInput{.chat = args["chat"].get<std::string>()};
+}
+
+std::optional<ChatMuteInput> parse_chat_mute_input(const json& args, bool muted, json& failure) {
+    if (!exact_fields(args, {"chat", "duration_seconds"}) || !args["chat"].is_string()) {
+        failure = usage(muted ? "chat mute received malformed arguments"
+                              : "chat unmute received malformed arguments",
+                        nullptr);
+        return std::nullopt;
+    }
+    const auto duration = integer64(args["duration_seconds"]);
+    const bool valid_muted = duration && ((*duration >= 1 && *duration <= 31'622'400) ||
+                                          *duration == std::numeric_limits<std::int32_t>::max());
+    if ((!muted && duration != std::optional<std::int64_t>{0}) || (muted && !valid_muted)) {
+        failure = usage("chat mute duration is invalid", "--for");
+        return std::nullopt;
+    }
+    return ChatMuteInput{.chat = args["chat"].get<std::string>(),
+                         .duration_seconds = static_cast<std::int32_t>(*duration),
+                         .muted = muted};
+}
+
+std::optional<ChatJoinInput> parse_chat_join_input(const json& args, json& failure) {
+    if (!exact_fields(args, {"target"}) || !args["target"].is_string()) {
+        failure = usage("chat join received malformed arguments", nullptr);
+        return std::nullopt;
+    }
+    ChatJoinInput input{
+        .target = args["target"].get<std::string>(), .invite = false, .invite_hash = {}};
+    const auto canonical = canonical_write_selector(input.target);
+    if (!canonical) {
+        failure = usage("chat join target is invalid", "invite-link|@username");
+        return std::nullopt;
+    }
+    if (input.target.starts_with('@')) {
+        if (*canonical != input.target) {
+            failure = usage("chat join username is invalid", "@username");
+            return std::nullopt;
+        }
+        return input;
+    }
+    if (!canonical->starts_with("sha256:")) {
+        failure = usage("chat join requires an invite link or @username", "invite-link|@username");
+        return std::nullopt;
+    }
+    input.invite = true;
+    input.invite_hash = *canonical;
+    return input;
+}
+
 template <std::size_t Size> bool fill_random(std::array<unsigned char, Size>& bytes) {
     const int descriptor = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (descriptor < 0) {
@@ -724,6 +819,106 @@ std::optional<bool> reaction_is_available(const core::TdMessageAvailableReaction
     return matched;
 }
 
+std::optional<core::TdDirectChatList> chat_pin_list(const core::TdChat& chat, bool& malformed) {
+    malformed = false;
+    bool main = false;
+    bool archive = false;
+    for (const auto& list : chat.chat_lists) {
+        switch (list.kind) {
+        case core::TdChatListKind::Main:
+            malformed = malformed || list.folder_id != 0;
+            main = true;
+            break;
+        case core::TdChatListKind::Archive:
+            malformed = malformed || list.folder_id != 0;
+            archive = true;
+            break;
+        case core::TdChatListKind::Folder:
+            malformed = malformed || list.folder_id <= 0;
+            break;
+        case core::TdChatListKind::Unknown:
+            malformed = true;
+            break;
+        }
+    }
+    if (malformed) {
+        return std::nullopt;
+    }
+    if (archive) {
+        return core::TdDirectChatList::Archive;
+    }
+    return main ? std::optional{core::TdDirectChatList::Main} : std::nullopt;
+}
+
+std::string_view direct_chat_list_name(core::TdDirectChatList list) {
+    return list == core::TdDirectChatList::Archive ? std::string_view{"archive"}
+                                                   : std::string_view{"main"};
+}
+
+using JoinChatIdentityOutcome = std::variant<ChatIdentity, json>;
+
+JoinChatIdentityOutcome materialize_join_chat_identity(ResolverConsumer& resolver,
+                                                       core::TdClient& client,
+                                                       RequestSession& session,
+                                                       const proto::Request& request,
+                                                       const core::TdChat& chat) {
+    std::optional<json> stopped;
+    auto materialized = materialize_chat_identity(
+        client, chat, [&](const auto& start) -> std::optional<ReadyReadResult> {
+            auto result = resolver.read_target(start);
+            if (result.status == ReadyReadStatus::Response) {
+                return result;
+            }
+            switch (result.status) {
+            case ReadyReadStatus::AuthorizationLost:
+                stopped = not_authed_terminal(request.account, result.snapshot
+                                                                   ? result.snapshot->data.state
+                                                                   : core::AuthState::Unknown);
+                break;
+            case ReadyReadStatus::TimedOut:
+                stopped = timeout(proto::M3Operation::ChatJoin, "preflight",
+                                  pre_intent_idempotency(request));
+                break;
+            case ReadyReadStatus::Cancelled:
+                stopped = json(nullptr);
+                break;
+            case ReadyReadStatus::Failed:
+                stopped = internal(proto::M3Operation::ChatJoin);
+                break;
+            case ReadyReadStatus::Response:
+                break;
+            }
+            static_cast<void>(session);
+            return std::nullopt;
+        });
+    if (stopped) {
+        return std::move(*stopped);
+    }
+    if (materialized.status == ChatIdentityStatus::TdError && materialized.error) {
+        const ResolverError error =
+            materialized.error->code == 429
+                ? ResolverError{ResolverRateLimitedError{
+                      .operation = M2Operation::Resolve,
+                      .retry_after = parse_retry_after_seconds(materialized.error->message)}}
+                : ResolverError{ResolverTdlibError{.operation = M2Operation::Resolve,
+                                                   .tdlib_code = materialized.error->code}};
+        return resolver_error_terminal(error, M2Operation::Resolve);
+    }
+    if (materialized.status == ChatIdentityStatus::Secret) {
+        return resolver_error_terminal(
+            ResolverError{ResolverUsageError{.argument = "invite-link|@username",
+                                             .reason = ResolverUsageReason::UnsupportedChatType}},
+            M2Operation::Resolve);
+    }
+    if (materialized.status != ChatIdentityStatus::Success || !materialized.identity ||
+        !persistable_chat_identity(*materialized.identity)) {
+        return resolver_error_terminal(
+            ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}},
+            M2Operation::Resolve);
+    }
+    return std::move(*materialized.identity);
+}
+
 json message_write_result_json(const core::TdMessageWriteResult& value) {
     const core::TdMessageSummary summary{.id = value.id,
                                          .chat_id = value.chat_id,
@@ -819,6 +1014,42 @@ WriteConfirmationOutcome confirm_delete(const write_contract::Plan& plan, Reques
     return {.status = WriteConfirmationStatus::Rejected, .terminal = required()};
 }
 
+WriteConfirmationOutcome confirm_leave(const write_contract::Plan& plan, RequestSession& session) {
+    const auto required = [&] {
+        return terminal(
+            "CONFIRMATION_REQUIRED", "chat leave was not confirmed",
+            {{"account", plan.account()}, {"action", "chat_leave"}, {"target", plan.value()}},
+            kDenied);
+    };
+    if (session.request().context.yes) {
+        return {.status = WriteConfirmationStatus::ConfirmedYes, .terminal = std::nullopt};
+    }
+    if (!session.request().context.tty) {
+        return {.status = WriteConfirmationStatus::Rejected, .terminal = required()};
+    }
+    const auto& chat = plan.value().at("chat");
+    auto answer = session.challenge({proto::ChallengeKind::DestructiveConfirmation,
+                                     std::nullopt,
+                                     std::nullopt,
+                                     "Leave \"" + chat.at("title").get<std::string>() + "\" (" +
+                                         chat.at("id").dump() + ")? [y/N] ",
+                                     {{"action", "chat_leave"}, {"target", plan.value()}},
+                                     false});
+    const auto confirmed = answer.take_boolean();
+    if (answer.status() == ChallengeStatus::Answered && confirmed.value_or(false)) {
+        return {.status = WriteConfirmationStatus::ConfirmedTty, .terminal = std::nullopt};
+    }
+    if (answer.status() == ChallengeStatus::TimedOut) {
+        return {.status = WriteConfirmationStatus::TimedOut, .terminal = std::nullopt};
+    }
+    if (answer.status() == ChallengeStatus::Cancelled ||
+        answer.status() == ChallengeStatus::Disconnected ||
+        answer.status() == ChallengeStatus::Shutdown) {
+        return {.status = WriteConfirmationStatus::Cancelled, .terminal = required()};
+    }
+    return {.status = WriteConfirmationStatus::Rejected, .terminal = required()};
+}
+
 std::optional<AuthoritySource> authorize(const proto::Request& request, RequestSession& session,
                                          std::string_view account, proto::M3Operation operation) {
     const auto* identity = proto::m3_operation_identity(operation);
@@ -872,6 +1103,7 @@ WriteKernelRequest kernel_request(const proto::Request& request, RequestSession&
             .cancelled = [&session] { return session.cancellation_requested(); }};
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed direct-RPC outcome matrix.
 void execute_direct_write(
     core::TdClient& client, std::string_view account, config::Store& config_store,
     const std::shared_ptr<IdempotencyFoundation>& foundation,
@@ -948,7 +1180,8 @@ void execute_direct_write(
         dispatch->coordinator =
             std::make_unique<DirectRpcCoordinator>(client, session, std::move(direct_hooks));
         auto preparation =
-            dispatch->coordinator->prepare(*dispatch->request, dispatch->authorization);
+            dispatch->coordinator->prepare(std::move(*dispatch->request), dispatch->authorization);
+        dispatch->request.reset();
         if (std::holds_alternative<DirectTimedOut>(preparation)) {
             return stored_from_terminal(
                 operation, timeout(operation, "preflight",
@@ -1019,7 +1252,7 @@ void execute_direct_write(
                             .mutation_confirmed = false};
                 } else if constexpr (std::is_same_v<Outcome, DirectJoinGuardRequired>) {
                     return {.terminal = stored_error(operation, "JOIN_APPROVAL_REQUIRED",
-                                                     "join requires bot approval",
+                                                     "join request requires approval",
                                                      {{"operation", "chat_join"},
                                                       {"bot_user_id", outcome.bot_user_id},
                                                       {"query_id", outcome.query_id}},
@@ -1583,6 +1816,7 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact edit planning matrix.
 void WriteCoordinator::edit_message(const proto::Request& request, RequestSession& session) {
     json parse_failure;
     auto input = parse_edit_input(request.args, parse_failure);
@@ -1695,6 +1929,7 @@ void WriteCoordinator::edit_message(const proto::Request& request, RequestSessio
                          hooks_, request, session, *authority, std::move(definition));
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact reaction planning matrix.
 void WriteCoordinator::react_to_message(const proto::Request& request, RequestSession& session) {
     json parse_failure;
     auto input = parse_react_input(request.args, parse_failure);
@@ -1841,6 +2076,7 @@ void WriteCoordinator::react_to_message(const proto::Request& request, RequestSe
                          hooks_, request, session, *authority, std::move(definition));
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact message-pin planning matrix.
 void WriteCoordinator::pin_message(const proto::Request& request, RequestSession& session,
                                    bool pinned) {
     const auto operation = pinned ? proto::M3Operation::MsgPin : proto::M3Operation::MsgUnpin;
@@ -1937,6 +2173,756 @@ void WriteCoordinator::pin_message(const proto::Request& request, RequestSession
         return stored_result(operation, {{"chat_id", result->chat_id},
                                          {"message_id", result->message_id},
                                          {"pinned", result->pinned}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact mark-read/no-op matrix.
+void WriteCoordinator::mark_chat_read(const proto::Request& request, RequestSession& session) {
+    constexpr auto operation = proto::M3Operation::ChatMarkRead;
+    json parse_failure;
+    auto input = parse_chat_target_input(request.args, "chat mark-read", parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "chat mark-read requires a user account",
+                      {{"operation", "chat_mark_read"}}, kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ChatTargetState>(
+        ChatTargetState{.input = std::move(*input),
+                        .principal = principal,
+                        .target = std::nullopt,
+                        .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, this]() -> WriteAdmissionOutcome {
+        const auto fingerprint_value =
+            fingerprint(account_, state->principal,
+                        FingerprintPayload{ChatMarkReadFingerprintPayload{state->input.chat}});
+        std::string error;
+        auto arguments = write_contract::make_arguments(proto::M3Operation::ChatMarkRead,
+                                                        {{"chat", state->input.chat}}, error);
+        if (!fingerprint_value || !arguments) {
+            return internal(proto::M3Operation::ChatMarkRead);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, &resolver, &request, this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, proto::M3Operation::ChatMarkRead, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        if (!state->target->observed_chat ||
+            state->target->observed_chat->id != state->target->chat.id) {
+            return internal(proto::M3Operation::ChatMarkRead);
+        }
+        std::optional<std::int64_t> last_message_id;
+        if (state->target->observed_chat->last_message) {
+            const auto materialized =
+                materialize_message_summary(*state->target->observed_chat->last_message);
+            if (!materialized || !persistable_message_summary(*materialized) ||
+                materialized->chat_id != state->target->chat.id) {
+                return internal(proto::M3Operation::ChatMarkRead);
+            }
+            last_message_id = materialized->id;
+            state->dispatch->request = core::TdViewMessagesRequest{
+                .chat_id = state->target->chat.id, .message_ids = {*last_message_id}};
+        }
+        std::string error;
+        auto plan = write_contract::make_plan(
+            proto::M3Operation::ChatMarkRead, account_,
+            {{"operation", "chat_mark_read"},
+             {"account", account_},
+             {"tdlib_request", last_message_id ? json("viewMessages") : json(nullptr)},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"last_message_id", last_message_id ? json(*last_message_id) : json(nullptr)}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(proto::M3Operation::ChatMarkRead)};
+    };
+    definition.post_intent = [](const write_contract::Plan& plan,
+                                const WriteAdmission&) -> WritePostIntentPreparation {
+        if (!plan.value()["last_message_id"].is_null()) {
+            return {};
+        }
+        return {.spool = std::nullopt,
+                .terminal_without_dispatch = stored_result(proto::M3Operation::ChatMarkRead,
+                                                           {{"chat_id", plan.value()["chat"]["id"]},
+                                                            {"last_read_message_id", nullptr},
+                                                            {"marked_read", true}}),
+                .complete_without_mutation = true};
+    };
+    definition.success =
+        [](const write_contract::Plan& plan,
+           const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectMarkReadResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] ||
+            !result->last_read_message_id ||
+            *result->last_read_message_id != plan.value()["last_message_id"] ||
+            !result->marked_read) {
+            return std::nullopt;
+        }
+        return stored_result(proto::M3Operation::ChatMarkRead,
+                             {{"chat_id", result->chat_id},
+                              {"last_read_message_id", *result->last_read_message_id},
+                              {"marked_read", true}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact notification plan matrix.
+void WriteCoordinator::mute_chat(const proto::Request& request, RequestSession& session,
+                                 bool muted) {
+    const auto operation = muted ? proto::M3Operation::ChatMute : proto::M3Operation::ChatUnmute;
+    json parse_failure;
+    auto input = parse_chat_mute_input(request.args, muted, parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "chat notification settings require a user account",
+                      {{"operation", proto::m3_operation_identity(operation)->canonical_name}},
+                      kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ChatMuteState>(
+        ChatMuteState{.input = std::move(*input),
+                      .principal = principal,
+                      .target = std::nullopt,
+                      .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, operation, this]() -> WriteAdmissionOutcome {
+        const auto payload = state->input.muted
+                                 ? FingerprintPayload{ChatMuteFingerprintPayload{
+                                       state->input.chat, state->input.duration_seconds}}
+                                 : FingerprintPayload{ChatUnmuteFingerprintPayload{
+                                       state->input.chat, state->input.duration_seconds}};
+        const auto fingerprint_value = fingerprint(account_, state->principal, payload);
+        std::string error;
+        auto arguments = write_contract::make_arguments(
+            operation,
+            {{"chat", state->input.chat}, {"duration_seconds", state->input.duration_seconds}},
+            error);
+        if (!fingerprint_value || !arguments) {
+            return internal(operation);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, operation, &resolver, &request, this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        if (!state->target->observed_chat ||
+            state->target->observed_chat->id != state->target->chat.id ||
+            !state->target->observed_chat->notification_settings) {
+            return internal(operation);
+        }
+        if (state->target->chat.type == "private" &&
+            state->target->chat.id == state->principal.id) {
+            return precondition(operation, state->target->chat.id, std::nullopt,
+                                "saved_notifications_unsupported");
+        }
+        auto settings = *state->target->observed_chat->notification_settings;
+        settings.use_default_mute_for = false;
+        settings.mute_for = state->input.duration_seconds;
+        state->dispatch->request = core::TdSetChatNotificationSettingsRequest{
+            .chat_id = state->target->chat.id, .settings = settings};
+        std::string error;
+        auto plan = write_contract::make_plan(
+            operation, account_,
+            {{"operation", proto::m3_operation_identity(operation)->canonical_name},
+             {"account", account_},
+             {"tdlib_request", "setChatNotificationSettings"},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"muted", state->input.muted},
+             {"duration_seconds", state->input.duration_seconds}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(operation)};
+    };
+    definition.success =
+        [operation](const write_contract::Plan& plan,
+                    const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectMuteResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] ||
+            result->muted != plan.value()["muted"] ||
+            result->duration_seconds != plan.value()["duration_seconds"]) {
+            return std::nullopt;
+        }
+        return stored_result(operation, {{"chat_id", result->chat_id},
+                                         {"muted", result->muted},
+                                         {"duration_seconds", result->duration_seconds}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact chat-list pin matrix.
+void WriteCoordinator::pin_chat(const proto::Request& request, RequestSession& session,
+                                bool pinned) {
+    const auto operation = pinned ? proto::M3Operation::ChatPin : proto::M3Operation::ChatUnpin;
+    json parse_failure;
+    auto input =
+        parse_chat_target_input(request.args, pinned ? "chat pin" : "chat unpin", parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "chat pinning requires a user account",
+                      {{"operation", proto::m3_operation_identity(operation)->canonical_name}},
+                      kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ChatTargetState>(
+        ChatTargetState{.input = std::move(*input),
+                        .principal = principal,
+                        .target = std::nullopt,
+                        .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, operation, pinned, this]() -> WriteAdmissionOutcome {
+        const auto payload =
+            pinned ? FingerprintPayload{ChatPinFingerprintPayload{state->input.chat}}
+                   : FingerprintPayload{ChatUnpinFingerprintPayload{state->input.chat}};
+        const auto fingerprint_value = fingerprint(account_, state->principal, payload);
+        std::string error;
+        auto arguments =
+            write_contract::make_arguments(operation, {{"chat", state->input.chat}}, error);
+        if (!fingerprint_value || !arguments) {
+            return internal(operation);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, operation, pinned, &resolver, &request,
+                       this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        if (!state->target->observed_chat ||
+            state->target->observed_chat->id != state->target->chat.id) {
+            return internal(operation);
+        }
+        bool malformed = false;
+        const auto list = chat_pin_list(*state->target->observed_chat, malformed);
+        if (malformed) {
+            return internal(operation);
+        }
+        if (!list) {
+            return precondition(operation, state->target->chat.id, std::nullopt, "chat_not_listed");
+        }
+        state->dispatch->request = core::TdToggleChatIsPinnedRequest{
+            .chat_id = state->target->chat.id, .list = *list, .pinned = pinned};
+        std::string error;
+        auto plan = write_contract::make_plan(
+            operation, account_,
+            {{"operation", proto::m3_operation_identity(operation)->canonical_name},
+             {"account", account_},
+             {"tdlib_request", "toggleChatIsPinned"},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"chat_list", direct_chat_list_name(*list)},
+             {"pinned", pinned}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(operation)};
+    };
+    definition.success =
+        [operation](const write_contract::Plan& plan,
+                    const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectChatPinResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] ||
+            direct_chat_list_name(result->chat_list) !=
+                plan.value()["chat_list"].get<std::string>() ||
+            result->pinned != plan.value()["pinned"]) {
+            return std::nullopt;
+        }
+        return stored_result(operation, {{"chat_id", result->chat_id},
+                                         {"chat_list", direct_chat_list_name(result->chat_list)},
+                                         {"pinned", result->pinned}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+void WriteCoordinator::archive_chat(const proto::Request& request, RequestSession& session,
+                                    bool archived) {
+    const auto operation =
+        archived ? proto::M3Operation::ChatArchive : proto::M3Operation::ChatUnarchive;
+    json parse_failure;
+    auto input = parse_chat_target_input(request.args, archived ? "chat archive" : "chat unarchive",
+                                         parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "chat archiving requires a user account",
+                      {{"operation", proto::m3_operation_identity(operation)->canonical_name}},
+                      kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ChatTargetState>(
+        ChatTargetState{.input = std::move(*input),
+                        .principal = principal,
+                        .target = std::nullopt,
+                        .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, operation, archived, this]() -> WriteAdmissionOutcome {
+        const auto payload =
+            archived ? FingerprintPayload{ChatArchiveFingerprintPayload{state->input.chat}}
+                     : FingerprintPayload{ChatUnarchiveFingerprintPayload{state->input.chat}};
+        const auto fingerprint_value = fingerprint(account_, state->principal, payload);
+        std::string error;
+        auto arguments =
+            write_contract::make_arguments(operation, {{"chat", state->input.chat}}, error);
+        if (!fingerprint_value || !arguments) {
+            return internal(operation);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, operation, archived, &resolver, &request,
+                       this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        const auto list = archived ? core::TdDirectChatList::Archive : core::TdDirectChatList::Main;
+        state->dispatch->request =
+            core::TdAddChatToListRequest{.chat_id = state->target->chat.id, .list = list};
+        std::string error;
+        auto plan = write_contract::make_plan(
+            operation, account_,
+            {{"operation", proto::m3_operation_identity(operation)->canonical_name},
+             {"account", account_},
+             {"tdlib_request", "addChatToList"},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"archived", archived}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(operation)};
+    };
+    definition.success =
+        [operation](const write_contract::Plan& plan,
+                    const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectArchiveResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] ||
+            result->archived != plan.value()["archived"]) {
+            return std::nullopt;
+        }
+        return stored_result(operation,
+                             {{"chat_id", result->chat_id}, {"archived", result->archived}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): exact username/invite join matrix.
+void WriteCoordinator::join_chat(const proto::Request& request, RequestSession& session) {
+    constexpr auto operation = proto::M3Operation::ChatJoin;
+    json parse_failure;
+    auto input = parse_chat_join_input(request.args, parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "chat join requires a user account",
+                      {{"operation", "chat_join"}}, kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ChatJoinState>(
+        ChatJoinState{.input = std::move(*input),
+                      .principal = principal,
+                      .chat = std::nullopt,
+                      .dispatch = std::make_shared<DirectDispatchState>()});
+    const secure::StringWiper invite_wiper(state->input.target);
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, this]() -> WriteAdmissionOutcome {
+        const auto payload = state->input.invite
+                                 ? FingerprintPayload{ChatJoinFingerprintPayload{
+                                       ChatJoinInviteFingerprint{state->input.invite_hash}}}
+                                 : FingerprintPayload{ChatJoinFingerprintPayload{
+                                       ChatJoinUsernameFingerprint{state->input.target}}};
+        const auto fingerprint_value = fingerprint(account_, state->principal, payload);
+        std::string error;
+        auto arguments = write_contract::make_arguments(
+            proto::M3Operation::ChatJoin,
+            state->input.invite
+                ? json{{"source", "invite_link"}, {"invite_link_sha256", state->input.invite_hash}}
+                : json{{"source", "username"}, {"username", state->input.target}},
+            error);
+        if (!fingerprint_value || !arguments) {
+            return internal(proto::M3Operation::ChatJoin);
+        }
+        std::vector<redaction::CorrelatedInviteLink> redactions;
+        if (state->input.invite) {
+            auto lease =
+                redaction::InviteLinkRegistry::instance().register_link(state->input.target);
+            if (!lease.valid()) {
+                return internal(proto::M3Operation::ChatJoin);
+            }
+            redactions.push_back(std::move(lease));
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = std::move(redactions)};
+    };
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed invite metadata matrix.
+    definition.plan = [state, &resolver, &session, &request, this]() -> WritePlanningOutcome {
+        if (!state->input.invite) {
+            auto resolved = resolver.resolve_exact_chat(state->input.target);
+            if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+                return resolver_terminal_for_write(*error, proto::M3Operation::ChatJoin, request);
+            }
+            if (std::holds_alternative<ResolverStop>(resolved)) {
+                return json(nullptr);
+            }
+            auto target = std::get<ResolvedChatTarget>(std::move(resolved));
+            state->chat = target.chat;
+            state->dispatch->request =
+                core::TdJoinChatRequest{.chat_id = target.chat.id,
+                                        .invite_link = std::nullopt,
+                                        .expected_invite_chat_id = std::nullopt};
+        } else {
+            const auto read_error = [state](const core::TdError& error) -> json {
+                if (error.code == 404 || error.code == 400) {
+                    return resolver_error_terminal(
+                        ResolverError{ResolverNotFoundError{.selector = state->input.invite_hash,
+                                                            .scope = std::nullopt}},
+                        M2Operation::Resolve);
+                }
+                if (error.code == 429) {
+                    return resolver_error_terminal(
+                        ResolverError{ResolverRateLimitedError{
+                            .operation = M2Operation::Resolve,
+                            .retry_after = parse_retry_after_seconds(error.message)}},
+                        M2Operation::Resolve);
+                }
+                return resolver_error_terminal(
+                    ResolverError{ResolverTdlibError{.operation = M2Operation::Resolve,
+                                                     .tdlib_code = error.code}},
+                    M2Operation::Resolve);
+            };
+            auto classified = read_value(
+                resolver, client_.get(), session, proto::M3Operation::ChatJoin, request,
+                [&](const auto& current) {
+                    return client_.get().get_internal_link_type(current, state->input.target);
+                });
+            if (auto* failure = std::get_if<json>(&classified)) {
+                return std::move(*failure);
+            }
+            auto& classified_value = std::get<core::TdValue>(classified);
+            if (const auto* error = classified_value.get_if<core::TdError>()) {
+                return read_error(*error);
+            }
+            const auto* link = classified_value.get_if<core::TdInternalLink>();
+            if (link == nullptr) {
+                return resolver_error_terminal(
+                    ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}},
+                    M2Operation::Resolve);
+            }
+            if (link->kind != core::TdInternalLinkKind::ChatInvite) {
+                return resolver_error_terminal(
+                    ResolverError{
+                        ResolverUsageError{.argument = "invite-link|@username",
+                                           .reason = ResolverUsageReason::UnsupportedLinkType}},
+                    M2Operation::Resolve);
+            }
+            auto checked = read_value(
+                resolver, client_.get(), session, proto::M3Operation::ChatJoin, request,
+                [&](const auto& current) {
+                    return client_.get().check_chat_invite_link(current, state->input.target);
+                });
+            if (auto* failure = std::get_if<json>(&checked)) {
+                return std::move(*failure);
+            }
+            auto& checked_value = std::get<core::TdValue>(checked);
+            if (const auto* error = checked_value.get_if<core::TdError>()) {
+                return read_error(*error);
+            }
+            const auto* info = checked_value.get_if<core::TdChatInviteLinkInfo>();
+            if (info == nullptr || (info->chat_id != 0 && !core::valid_td_chat_id(info->chat_id))) {
+                return resolver_error_terminal(
+                    ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}},
+                    M2Operation::Resolve);
+            }
+            if (info->chat_id != 0) {
+                auto chat_read =
+                    read_value(resolver, client_.get(), session, proto::M3Operation::ChatJoin,
+                               request, [&](const auto& current) {
+                                   return client_.get().get_chat(current, info->chat_id);
+                               });
+                if (auto* failure = std::get_if<json>(&chat_read)) {
+                    return std::move(*failure);
+                }
+                auto& chat_value = std::get<core::TdValue>(chat_read);
+                if (const auto* error = chat_value.get_if<core::TdError>()) {
+                    return read_error(*error);
+                }
+                const auto* chat = chat_value.get_if<core::TdChat>();
+                if (chat == nullptr || chat->id != info->chat_id) {
+                    return resolver_error_terminal(
+                        ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}},
+                        M2Operation::Resolve);
+                }
+                auto identity = materialize_join_chat_identity(resolver, client_.get(), session,
+                                                               request, *chat);
+                if (auto* failure = std::get_if<json>(&identity)) {
+                    return std::move(*failure);
+                }
+                state->chat = std::get<ChatIdentity>(std::move(identity));
+            }
+            state->dispatch->request = core::TdJoinChatRequest{
+                .chat_id = std::nullopt,
+                .invite_link = state->input.target,
+                .expected_invite_chat_id =
+                    state->chat ? std::optional{state->chat->id} : std::nullopt};
+        }
+        std::string error;
+        auto plan = write_contract::make_plan(
+            proto::M3Operation::ChatJoin, account_,
+            {{"operation", "chat_join"},
+             {"account", account_},
+             {"tdlib_request", state->input.invite ? "joinChatByInviteLink" : "joinChat"},
+             {"source", state->input.invite ? "invite_link" : "username"},
+             {"chat", state->chat ? chat_identity_json(*state->chat) : json(nullptr)},
+             {"invite_link_sha256",
+              state->input.invite ? json(state->input.invite_hash) : json(nullptr)}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(proto::M3Operation::ChatJoin)};
+    };
+    definition.success =
+        [](const write_contract::Plan& plan,
+           const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectJoinResult>(&outcome);
+        if (result == nullptr) {
+            return std::nullopt;
+        }
+        const auto planned_chat =
+            plan.value()["chat"].is_object()
+                ? std::optional<std::int64_t>{plan.value()["chat"]["id"].get<std::int64_t>()}
+                : std::nullopt;
+        if (result->status == DirectJoinStatus::Joined) {
+            if (!result->chat_id || (planned_chat && result->chat_id != planned_chat)) {
+                return std::nullopt;
+            }
+            return stored_result(proto::M3Operation::ChatJoin,
+                                 {{"status", "joined"}, {"chat_id", *result->chat_id}});
+        }
+        if (result->chat_id != planned_chat) {
+            return std::nullopt;
+        }
+        return stored_result(
+            proto::M3Operation::ChatJoin,
+            {{"status", "request_sent"},
+             {"chat_id", result->chat_id ? json(*result->chat_id) : json(nullptr)}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+void WriteCoordinator::leave_chat(const proto::Request& request, RequestSession& session) {
+    constexpr auto operation = proto::M3Operation::ChatLeave;
+    json parse_failure;
+    auto input = parse_chat_target_input(request.args, "chat leave", parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ChatTargetState>(
+        ChatTargetState{.input = std::move(*input),
+                        .principal = std::get<ResolverPrincipal>(principal_outcome),
+                        .target = std::nullopt,
+                        .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, this]() -> WriteAdmissionOutcome {
+        const auto fingerprint_value =
+            fingerprint(account_, state->principal,
+                        FingerprintPayload{ChatLeaveFingerprintPayload{state->input.chat}});
+        std::string error;
+        auto arguments = write_contract::make_arguments(proto::M3Operation::ChatLeave,
+                                                        {{"chat", state->input.chat}}, error);
+        if (!fingerprint_value || !arguments) {
+            return internal(proto::M3Operation::ChatLeave);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, &resolver, &request, this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, proto::M3Operation::ChatLeave, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        if (state->target->chat.type != "basic_group" && state->target->chat.type != "supergroup" &&
+            state->target->chat.type != "channel") {
+            return precondition(proto::M3Operation::ChatLeave, state->target->chat.id, std::nullopt,
+                                "wrong_chat_type");
+        }
+        state->dispatch->request = core::TdLeaveChatRequest{.chat_id = state->target->chat.id};
+        std::string error;
+        auto plan = write_contract::make_plan(proto::M3Operation::ChatLeave, account_,
+                                              {{"operation", "chat_leave"},
+                                               {"account", account_},
+                                               {"tdlib_request", "leaveChat"},
+                                               {"chat", chat_identity_json(state->target->chat)}},
+                                              error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(proto::M3Operation::ChatLeave)};
+    };
+    definition.confirm = [&session](const write_contract::Plan& plan, bool) {
+        return confirm_leave(plan, session);
+    };
+    definition.success =
+        [](const write_contract::Plan& plan,
+           const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectLeaveResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] || !result->left) {
+            return std::nullopt;
+        }
+        return stored_result(proto::M3Operation::ChatLeave,
+                             {{"chat_id", result->chat_id}, {"left", true}});
     };
     execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
                          hooks_, request, session, *authority, std::move(definition));
@@ -2299,6 +3285,60 @@ void register_write_commands(Dispatcher& dispatcher, WriteCoordinator& coordinat
                           coordinator.pin_message(request, session, false);
                       },
                       false, proto::M3Operation::MsgUnpin});
+    dispatcher.register_command(
+        "chat mark-read", {Tier::Write,
+                           [&coordinator](const proto::Request& request, RequestSession& session) {
+                               coordinator.mark_chat_read(request, session);
+                           },
+                           false, proto::M3Operation::ChatMarkRead});
+    dispatcher.register_command(
+        "chat mute", {Tier::Write,
+                      [&coordinator](const proto::Request& request, RequestSession& session) {
+                          coordinator.mute_chat(request, session, true);
+                      },
+                      false, proto::M3Operation::ChatMute});
+    dispatcher.register_command(
+        "chat unmute", {Tier::Write,
+                        [&coordinator](const proto::Request& request, RequestSession& session) {
+                            coordinator.mute_chat(request, session, false);
+                        },
+                        false, proto::M3Operation::ChatUnmute});
+    dispatcher.register_command(
+        "chat pin", {Tier::Write,
+                     [&coordinator](const proto::Request& request, RequestSession& session) {
+                         coordinator.pin_chat(request, session, true);
+                     },
+                     false, proto::M3Operation::ChatPin});
+    dispatcher.register_command(
+        "chat unpin", {Tier::Write,
+                       [&coordinator](const proto::Request& request, RequestSession& session) {
+                           coordinator.pin_chat(request, session, false);
+                       },
+                       false, proto::M3Operation::ChatUnpin});
+    dispatcher.register_command(
+        "chat archive", {Tier::Write,
+                         [&coordinator](const proto::Request& request, RequestSession& session) {
+                             coordinator.archive_chat(request, session, true);
+                         },
+                         false, proto::M3Operation::ChatArchive});
+    dispatcher.register_command(
+        "chat unarchive", {Tier::Write,
+                           [&coordinator](const proto::Request& request, RequestSession& session) {
+                               coordinator.archive_chat(request, session, false);
+                           },
+                           false, proto::M3Operation::ChatUnarchive});
+    dispatcher.register_command(
+        "chat join", {Tier::Write,
+                      [&coordinator](const proto::Request& request, RequestSession& session) {
+                          coordinator.join_chat(request, session);
+                      },
+                      false, proto::M3Operation::ChatJoin});
+    dispatcher.register_command(
+        "chat leave", {Tier::Destructive,
+                       [&coordinator](const proto::Request& request, RequestSession& session) {
+                           coordinator.leave_chat(request, session);
+                       },
+                       false, proto::M3Operation::ChatLeave});
 }
 
 } // namespace tgcli::daemon

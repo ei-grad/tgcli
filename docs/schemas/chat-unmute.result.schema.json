@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli chat unmute result",
+  "$defs": {
+    "int53": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "not": { "const": 0 } },
+    "chat": { "type": "object", "additionalProperties": false, "required": ["id", "title", "type", "is_bot", "usernames"], "properties": { "id": { "$ref": "#/$defs/int53" }, "title": { "type": "string" }, "type": { "enum": ["private", "basic_group", "supergroup", "channel"] }, "is_bot": { "type": "boolean" }, "usernames": { "type": "array", "maxItems": 100, "items": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$" } } } },
+    "plan": { "type": "object", "additionalProperties": false, "required": ["operation", "account", "tdlib_request", "chat", "muted", "duration_seconds"], "properties": { "operation": { "const": "chat_unmute" }, "account": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$" }, "tdlib_request": { "const": "setChatNotificationSettings" }, "chat": { "$ref": "#/$defs/chat" }, "muted": { "const": false }, "duration_seconds": { "const": 0 } } }
+  },
+  "oneOf": [
+    { "type": "object", "additionalProperties": false, "required": ["chat_id", "muted", "duration_seconds"], "properties": { "chat_id": { "$ref": "#/$defs/int53" }, "muted": { "const": false }, "duration_seconds": { "const": 0 } } },
+    { "type": "object", "additionalProperties": false, "required": ["dry_run", "plan"], "properties": { "dry_run": { "const": true }, "plan": { "$ref": "#/$defs/plan" } } }
+  ]
+}

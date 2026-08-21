@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"invite_link_sha256":null,"operation":"chat_join","source":"username","tdlib_request":"joinChat"}

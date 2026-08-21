@@ -74,6 +74,7 @@ struct WriteConfirmationOutcome {
 struct WritePostIntentPreparation {
     std::optional<SpoolRef> spool;
     std::optional<write_contract::StoredTerminal> terminal_without_dispatch;
+    bool complete_without_mutation = false;
 };
 
 struct WriteDispatchPreparation {

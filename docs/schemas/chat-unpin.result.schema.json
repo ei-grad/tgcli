@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli chat unpin result",
+  "$defs": {
+    "int53": { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991, "not": { "const": 0 } },
+    "chat": { "type": "object", "additionalProperties": false, "required": ["id", "title", "type", "is_bot", "usernames"], "properties": { "id": { "$ref": "#/$defs/int53" }, "title": { "type": "string" }, "type": { "enum": ["private", "basic_group", "supergroup", "channel"] }, "is_bot": { "type": "boolean" }, "usernames": { "type": "array", "maxItems": 100, "items": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,32}$" } } } },
+    "plan": { "type": "object", "additionalProperties": false, "required": ["operation", "account", "tdlib_request", "chat", "chat_list", "pinned"], "properties": { "operation": { "const": "chat_unpin" }, "account": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$" }, "tdlib_request": { "const": "toggleChatIsPinned" }, "chat": { "$ref": "#/$defs/chat" }, "chat_list": { "enum": ["main", "archive"] }, "pinned": { "const": false } } }
+  },
+  "oneOf": [
+    { "type": "object", "additionalProperties": false, "required": ["chat_id", "chat_list", "pinned"], "properties": { "chat_id": { "$ref": "#/$defs/int53" }, "chat_list": { "enum": ["main", "archive"] }, "pinned": { "const": false } } },
+    { "type": "object", "additionalProperties": false, "required": ["dry_run", "plan"], "properties": { "dry_run": { "const": true }, "plan": { "$ref": "#/$defs/plan" } } }
+  ]
+}

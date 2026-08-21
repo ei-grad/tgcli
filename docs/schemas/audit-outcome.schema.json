@@ -18856,6 +18856,89 @@
           "const": "chat_mark_read"
         },
         "success": {
+          "const": true
+        },
+        "mutation_state": {
+          "const": "none"
+        },
+        "completed_stages": {
+          "enum": [
+            [],
+            [
+              "idempotency_pending"
+            ]
+          ]
+        },
+        "terminal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "data"
+          ],
+          "properties": {
+            "kind": {
+              "const": "result"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "chat_id",
+                "last_read_message_id",
+                "marked_read"
+              ],
+              "properties": {
+                "chat_id": {
+                  "$ref": "#/$defs/int53"
+                },
+                "last_read_message_id": {
+                  "type": "null"
+                },
+                "marked_read": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "success",
+        "mutation_state",
+        "completed_stages",
+        "terminal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "phase": {
+          "const": "outcome"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/hex32"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/v2Timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "command": {
+          "const": "chat_mark_read"
+        },
+        "success": {
           "const": false
         },
         "mutation_state": {
@@ -22440,6 +22523,73 @@
                   "const": 5
                 }
               }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "PRECONDITION_FAILED"
+                },
+                "message": {
+                  "enum": [
+                    "operation precondition failed"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "message_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "chat_unmute"
+                    },
+                    "chat_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/chatId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "message_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/messageId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "enum": [
+                        "saved_notifications_unsupported"
+                      ]
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
+                }
+              }
             }
           ]
         }
@@ -22978,6 +23128,73 @@
                 },
                 "exit_code": {
                   "const": 5
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "PRECONDITION_FAILED"
+                },
+                "message": {
+                  "enum": [
+                    "operation precondition failed"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "message_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "chat_unmute"
+                    },
+                    "chat_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/chatId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "message_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/messageId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "enum": [
+                        "saved_notifications_unsupported"
+                      ]
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
                 }
               }
             }
@@ -23520,6 +23737,73 @@
                 },
                 "exit_code": {
                   "const": 5
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "PRECONDITION_FAILED"
+                },
+                "message": {
+                  "enum": [
+                    "operation precondition failed"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "message_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "chat_unmute"
+                    },
+                    "chat_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/chatId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "message_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/messageId"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "enum": [
+                        "saved_notifications_unsupported"
+                      ]
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
                 }
               }
             }
@@ -31399,6 +31683,149 @@
                 }
               }
             },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "JOIN_APPROVAL_REQUIRED"
+                },
+                "message": {
+                  "enum": [
+                    "join request requires approval"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "bot_user_id",
+                    "query_id"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "chat_join"
+                    },
+                    "bot_user_id": {
+                      "$ref": "#/$defs/positiveInt53"
+                    },
+                    "query_id": {
+                      "$ref": "#/$defs/positiveInt53"
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "JOIN_DECLINED"
+                },
+                "message": {
+                  "enum": [
+                    "join request was declined"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "chat_join"
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "success",
+        "mutation_state",
+        "completed_stages",
+        "terminal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "phase": {
+          "const": "outcome"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/hex32"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/v2Timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "command": {
+          "const": "chat_join"
+        },
+        "success": {
+          "const": false
+        },
+        "mutation_state": {
+          "const": "none"
+        },
+        "completed_stages": {
+          "enum": [
+            [
+              "dispatch_started"
+            ],
+            [
+              "idempotency_pending",
+              "dispatch_started"
+            ]
+          ]
+        },
+        "terminal": {
+          "oneOf": [
             {
               "type": "object",
               "additionalProperties": false,

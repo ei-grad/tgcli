@@ -138,6 +138,45 @@ bool valid_message_reaction(std::string_view reaction) {
            reaction.find('\0') == std::string_view::npos && common::valid_utf8(reaction);
 }
 
+std::optional<std::int32_t> parse_mute_duration(std::string_view duration) {
+    if (duration.size() < 2) {
+        return std::nullopt;
+    }
+    std::int64_t multiplier = 0;
+    switch (duration.back()) {
+    case 's':
+        multiplier = 1;
+        break;
+    case 'm':
+        multiplier = 60;
+        break;
+    case 'h':
+        multiplier = 3'600;
+        break;
+    case 'd':
+        multiplier = 86'400;
+        break;
+    case 'w':
+        multiplier = 604'800;
+        break;
+    default:
+        return std::nullopt;
+    }
+    const auto count_text = duration.substr(0, duration.size() - 1);
+    if (count_text.empty() || count_text.front() == '0' || !digits(count_text)) {
+        return std::nullopt;
+    }
+    std::int64_t count = 0;
+    const auto [end, error] =
+        std::from_chars(count_text.data(), count_text.data() + count_text.size(), count);
+    constexpr std::int64_t maximum = 31'622'400;
+    if (error != std::errc{} || end != count_text.data() + count_text.size() || count <= 0 ||
+        count > maximum / multiplier) {
+        return std::nullopt;
+    }
+    return static_cast<std::int32_t>(count * multiplier);
+}
+
 std::optional<TopicRef> parse_send_topic(std::string_view value) {
     constexpr std::string_view forum = "forum:";
     if (value.starts_with(forum)) {

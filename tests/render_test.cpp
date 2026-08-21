@@ -364,7 +364,7 @@ TEST_CASE("public M3 write renderers preserve complete results and plans", "[m3]
     CHECK_THAT(delete_dry, tgcli::test::matches_json_schema("msg-delete.result.schema.json"));
     CHECK(tgcli::cli::render_human("msg delete", delete_dry) == golden("msg-delete-dry-run.txt"));
 
-    const json edit_result = send_result;
+    const json& edit_result = send_result;
     CHECK_THAT(edit_result, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
     CHECK(tgcli::cli::render_human("msg edit", edit_result) == golden("msg-edit.txt"));
     const json edit_plan{{"operation", "msg_edit"},
@@ -416,6 +416,99 @@ TEST_CASE("public M3 write renderers preserve complete results and plans", "[m3]
         CHECK(tgcli::cli::render_human(std::string(command), pin_dry) ==
               golden(std::string(dry_golden)));
     }
+
+    const json mark_result{
+        {"chat_id", -1001}, {"last_read_message_id", 321}, {"marked_read", true}};
+    const json mark_plan{{"operation", "chat_mark_read"},
+                         {"account", "main"},
+                         {"tdlib_request", "viewMessages"},
+                         {"chat", chat},
+                         {"last_message_id", 321}};
+    CHECK_THAT(mark_result, tgcli::test::matches_json_schema("chat-mark-read.result.schema.json"));
+    CHECK(tgcli::cli::render_human("chat mark-read", mark_result) == golden("chat-mark-read.txt"));
+    CHECK(tgcli::cli::render_human("chat mark-read", {{"dry_run", true}, {"plan", mark_plan}}) ==
+          golden("chat-mark-read-dry-run.txt"));
+
+    for (const auto& [command, operation, muted, duration, schema, result_golden, dry_golden] :
+         std::vector<std::tuple<std::string_view, std::string_view, bool, std::int32_t,
+                                std::string_view, std::string_view, std::string_view>>{
+             {"chat mute", "chat_mute", true, 3600, "chat-mute.result.schema.json", "chat-mute.txt",
+              "chat-mute-dry-run.txt"},
+             {"chat unmute", "chat_unmute", false, 0, "chat-unmute.result.schema.json",
+              "chat-unmute.txt", "chat-unmute-dry-run.txt"}}) {
+        const json result{{"chat_id", -1001}, {"muted", muted}, {"duration_seconds", duration}};
+        const json plan{{"operation", operation},
+                        {"account", "main"},
+                        {"tdlib_request", "setChatNotificationSettings"},
+                        {"chat", chat},
+                        {"muted", muted},
+                        {"duration_seconds", duration}};
+        CHECK_THAT(result, tgcli::test::matches_json_schema(std::string(schema)));
+        CHECK(tgcli::cli::render_human(std::string(command), result) ==
+              golden(std::string(result_golden)));
+        CHECK(tgcli::cli::render_human(std::string(command), {{"dry_run", true}, {"plan", plan}}) ==
+              golden(std::string(dry_golden)));
+    }
+
+    for (const auto& [command, operation, pinned, schema, result_golden, dry_golden] :
+         std::vector<std::tuple<std::string_view, std::string_view, bool, std::string_view,
+                                std::string_view, std::string_view>>{
+             {"chat pin", "chat_pin", true, "chat-pin.result.schema.json", "chat-pin.txt",
+              "chat-pin-dry-run.txt"},
+             {"chat unpin", "chat_unpin", false, "chat-unpin.result.schema.json", "chat-unpin.txt",
+              "chat-unpin-dry-run.txt"}}) {
+        const json result{{"chat_id", -1001}, {"chat_list", "archive"}, {"pinned", pinned}};
+        const json plan{{"operation", operation},
+                        {"account", "main"},
+                        {"tdlib_request", "toggleChatIsPinned"},
+                        {"chat", chat},
+                        {"chat_list", "archive"},
+                        {"pinned", pinned}};
+        CHECK_THAT(result, tgcli::test::matches_json_schema(std::string(schema)));
+        CHECK(tgcli::cli::render_human(std::string(command), result) ==
+              golden(std::string(result_golden)));
+        CHECK(tgcli::cli::render_human(std::string(command), {{"dry_run", true}, {"plan", plan}}) ==
+              golden(std::string(dry_golden)));
+    }
+
+    for (const auto& [command, operation, archived, schema, result_golden, dry_golden] :
+         std::vector<std::tuple<std::string_view, std::string_view, bool, std::string_view,
+                                std::string_view, std::string_view>>{
+             {"chat archive", "chat_archive", true, "chat-archive.result.schema.json",
+              "chat-archive.txt", "chat-archive-dry-run.txt"},
+             {"chat unarchive", "chat_unarchive", false, "chat-unarchive.result.schema.json",
+              "chat-unarchive.txt", "chat-unarchive-dry-run.txt"}}) {
+        const json result{{"chat_id", -1001}, {"archived", archived}};
+        const json plan{{"operation", operation},
+                        {"account", "main"},
+                        {"tdlib_request", "addChatToList"},
+                        {"chat", chat},
+                        {"archived", archived}};
+        CHECK_THAT(result, tgcli::test::matches_json_schema(std::string(schema)));
+        CHECK(tgcli::cli::render_human(std::string(command), result) ==
+              golden(std::string(result_golden)));
+        CHECK(tgcli::cli::render_human(std::string(command), {{"dry_run", true}, {"plan", plan}}) ==
+              golden(std::string(dry_golden)));
+    }
+
+    const json join_result{{"status", "joined"}, {"chat_id", -1001}};
+    const json join_plan{
+        {"operation", "chat_join"}, {"account", "main"}, {"tdlib_request", "joinChat"},
+        {"source", "username"},     {"chat", chat},      {"invite_link_sha256", nullptr}};
+    CHECK_THAT(join_result, tgcli::test::matches_json_schema("chat-join.result.schema.json"));
+    CHECK(tgcli::cli::render_human("chat join", join_result) == golden("chat-join.txt"));
+    CHECK(tgcli::cli::render_human("chat join", {{"dry_run", true}, {"plan", join_plan}}) ==
+          golden("chat-join-dry-run.txt"));
+
+    const json leave_result{{"chat_id", -1001}, {"left", true}};
+    const json leave_plan{{"operation", "chat_leave"},
+                          {"account", "main"},
+                          {"tdlib_request", "leaveChat"},
+                          {"chat", chat}};
+    CHECK_THAT(leave_result, tgcli::test::matches_json_schema("chat-leave.result.schema.json"));
+    CHECK(tgcli::cli::render_human("chat leave", leave_result) == golden("chat-leave.txt"));
+    CHECK(tgcli::cli::render_human("chat leave", {{"dry_run", true}, {"plan", leave_plan}}) ==
+          golden("chat-leave-dry-run.txt"));
 }
 
 TEST_CASE("read human renderer matches its reviewed exact TSV golden", "[read][render][golden]") {

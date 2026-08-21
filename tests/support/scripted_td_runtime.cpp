@@ -1,5 +1,7 @@
 #include "support/scripted_td_runtime.hpp"
 
+#include "common/secure_wipe.hpp"
+
 #include <stdexcept>
 #include <utility>
 
@@ -518,8 +520,10 @@ core::TdValue ScriptedTdRuntime::make_join_chat(core::TdJoinChatRequest request)
     }
     auto invite_link = std::move(request.invite_link).value_or(std::string{});
     before_make(core::TdFunctionKind::JoinChatByInviteLink);
-    return core::TdValue::scripted_function(core::TdFunctionData{
-        core::TdFunctionKind::JoinChatByInviteLink, {{"invite_link", std::move(invite_link)}}});
+    secure::wipe(invite_link);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::JoinChatByInviteLink,
+                             {{"invite_link", core::TdRedactedValue::InviteLink}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_leave_chat(core::TdLeaveChatRequest request) {

@@ -787,6 +787,24 @@ class ChildProtocolDaemon {
                 "msg pin", {daemon::Tier::Write, normalized, false, daemon::M3Operation::MsgPin});
             dispatcher.register_command("msg unpin", {daemon::Tier::Write, normalized, false,
                                                       daemon::M3Operation::MsgUnpin});
+            dispatcher.register_command("chat mark-read", {daemon::Tier::Write, normalized, false,
+                                                           daemon::M3Operation::ChatMarkRead});
+            dispatcher.register_command("chat mute", {daemon::Tier::Write, normalized, false,
+                                                      daemon::M3Operation::ChatMute});
+            dispatcher.register_command("chat unmute", {daemon::Tier::Write, normalized, false,
+                                                        daemon::M3Operation::ChatUnmute});
+            dispatcher.register_command(
+                "chat pin", {daemon::Tier::Write, normalized, false, daemon::M3Operation::ChatPin});
+            dispatcher.register_command("chat unpin", {daemon::Tier::Write, normalized, false,
+                                                       daemon::M3Operation::ChatUnpin});
+            dispatcher.register_command("chat archive", {daemon::Tier::Write, normalized, false,
+                                                         daemon::M3Operation::ChatArchive});
+            dispatcher.register_command("chat unarchive", {daemon::Tier::Write, normalized, false,
+                                                           daemon::M3Operation::ChatUnarchive});
+            dispatcher.register_command("chat join", {daemon::Tier::Write, normalized, false,
+                                                      daemon::M3Operation::ChatJoin});
+            dispatcher.register_command("chat leave", {daemon::Tier::Destructive, normalized, false,
+                                                       daemon::M3Operation::ChatLeave});
         }
         if (!server.start(error)) {
             if (!ready_reported) {
@@ -2548,6 +2566,13 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
         CHECK(msg_surface.find(command) != std::string::npos);
     }
     CHECK(msg_surface.find("forward") == std::string::npos);
+    const auto chat_help = run_binary_captured({"chat", "--help"}, env, "m3-chat-help");
+    REQUIRE(chat_help.exit_code == kOk);
+    const auto chat_surface = chat_help.out + chat_help.err;
+    for (const auto* command :
+         {"mark-read", "mute", "unmute", "pin", "unpin", "archive", "unarchive", "join", "leave"}) {
+        CHECK(chat_surface.find(command) != std::string::npos);
+    }
 
     std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
         {"send-format-exclusive", {"--json", "send", "-1001", "hello", "--md", "--html"}},
@@ -2570,6 +2595,13 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
         {"react-exclusive", {"--json", "msg", "react", "-1001", "1", "👍", "--remove", "--big"}},
         {"pin-zero", {"--json", "msg", "pin", "-1001", "0"}},
         {"unpin-over-int53", {"--json", "msg", "unpin", "-1001", "9007199254740992"}},
+        {"chat-mute-zero", {"--json", "chat", "mute", "-1001", "--for", "0s"}},
+        {"chat-mute-leading-zero", {"--json", "chat", "mute", "-1001", "--for", "01s"}},
+        {"chat-mute-too-long", {"--json", "chat", "mute", "-1001", "--for", "367d"}},
+        {"chat-unmute-for", {"--json", "chat", "unmute", "-1001", "--for", "1h"}},
+        {"chat-join-title", {"--json", "chat", "join", "Project"}},
+        {"chat-join-empty-username", {"--json", "chat", "join", "@"}},
+        {"chat-pin-invalid", {"--json", "chat", "pin", "@"}},
     };
     std::vector<std::string> too_many{"--json", "msg", "delete", "-1001"};
     for (int id = 1; id <= 101; ++id) {
@@ -2667,6 +2699,152 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
         CHECK(normalized["args"] == test_case.args);
     }
     CHECK(fixture.running());
+}
+
+TEST_CASE("chat mutation subprocesses emit exact normalized socket frames",
+          "[cli][m3][chat-write][frame][process]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.message_write_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    struct Case {
+        std::string stem;
+        std::vector<std::string> arguments;
+        std::vector<std::string> command;
+        json args;
+    };
+    const std::vector<Case> cases{
+        {"mark-read-frame",
+         {"--json", "chat", "mark-read", "-1001"},
+         {"chat", "mark-read"},
+         {{"chat", "-1001"}}},
+        {"mute-frame",
+         {"--json", "chat", "mute", "@project", "--for", "2h"},
+         {"chat", "mute"},
+         {{"chat", "@project"}, {"duration_seconds", 7200}}},
+        {"mute-default-frame",
+         {"--json", "chat", "mute", "-1001"},
+         {"chat", "mute"},
+         {{"chat", "-1001"}, {"duration_seconds", std::numeric_limits<std::int32_t>::max()}}},
+        {"unmute-frame",
+         {"--json", "chat", "unmute", "-1001"},
+         {"chat", "unmute"},
+         {{"chat", "-1001"}, {"duration_seconds", 0}}},
+        {"pin-chat-frame",
+         {"--json", "chat", "pin", "-1001"},
+         {"chat", "pin"},
+         {{"chat", "-1001"}}},
+        {"unpin-chat-frame",
+         {"--json", "chat", "unpin", "-1001"},
+         {"chat", "unpin"},
+         {{"chat", "-1001"}}},
+        {"archive-frame",
+         {"--json", "chat", "archive", "-1001"},
+         {"chat", "archive"},
+         {{"chat", "-1001"}}},
+        {"unarchive-frame",
+         {"--json", "chat", "unarchive", "-1001"},
+         {"chat", "unarchive"},
+         {{"chat", "-1001"}}},
+        {"join-frame",
+         {"--json", "chat", "join", "@project"},
+         {"chat", "join"},
+         {{"target", "@project"}}},
+        {"leave-frame",
+         {"--json", "--yes", "chat", "leave", "-1001"},
+         {"chat", "leave"},
+         {{"chat", "-1001"}}},
+    };
+    for (const auto& test_case : cases) {
+        const auto outcome = run_binary_captured(test_case.arguments, env, test_case.stem);
+        INFO(test_case.stem << ": " << outcome.err);
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        const auto normalized = json::parse(outcome.out);
+        CHECK(normalized["command"] == test_case.command);
+        CHECK(normalized["args"] == test_case.args);
+    }
+    CHECK(fixture.running());
+}
+
+TEST_CASE("chat mark-read no-daemon consumes the same normalized request without persistence",
+          "[cli][m3][chat-write][no-daemon][fake-boundary]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"chat", "mark-read"};
+    request.args = {{"chat", "-1001"}};
+    request.context.json = true;
+    request.context.cwd = "/";
+    request.context.dry_run = true;
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+
+    const auto respond = [&](std::size_t count, core::TdFunctionKind kind, core::TdValue value) {
+        REQUIRE(scripted->wait_for_sent(count));
+        const auto sent = scripted->sent_functions();
+        REQUIRE(sent.size() == count);
+        REQUIRE(sent.back().function.kind() == kind);
+        scripted->push_response(td_client, sent.back().query_id, std::move(value));
+    };
+    respond(2, core::TdFunctionKind::GetMe,
+            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                    .first_name = "Ada",
+                                                    .last_name = "",
+                                                    .usernames = {"ada"},
+                                                    .phone_number = "12025550123",
+                                                    .is_bot = false,
+                                                    .is_premium = false,
+                                                    .presence = core::TdUserPresence::Online}));
+    respond(3, core::TdFunctionKind::GetChat,
+            core::TdValue::from(core::TdChat{.id = -1001,
+                                             .title = "Project",
+                                             .kind = core::TdChatKind::BasicGroup,
+                                             .related_id = 0,
+                                             .tdlib_type_id = 1,
+                                             .positions = {},
+                                             .chat_lists = {},
+                                             .is_marked_unread = false,
+                                             .unread_count = 0,
+                                             .unread_mention_count = 0,
+                                             .unread_reaction_count = 0,
+                                             .unread_poll_vote_count = 0,
+                                             .last_message = std::nullopt,
+                                             .notification_settings = std::nullopt}));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    const auto result = json::parse(outcome.out);
+    CHECK(result["dry_run"] == true);
+    CHECK(result["plan"]["operation"] == "chat_mark_read");
+    CHECK_THAT(result, test::matches_json_schema("chat-mark-read.result.schema.json"));
+    CHECK(std::ranges::count_if(scripted->sent_functions(), [](const auto& sent) {
+              return sent.function.kind() == core::TdFunctionKind::ViewMessages;
+          }) == 0);
+    const auto state = paths::account_state_dir("main", paths::real_environment());
+    CHECK_FALSE(std::filesystem::exists(state + "/audit.log"));
+    CHECK_FALSE(std::filesystem::exists(state + "/idempotency.db"));
 }
 
 TEST_CASE("read parser exposes history and rejects closed grammar failures locally",

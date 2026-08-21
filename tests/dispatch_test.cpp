@@ -539,19 +539,15 @@ TEST_CASE("M3 descriptors must match the closed registry and remain fail closed"
         request.id = 1;
         request.command = command_parts(policy.command_path);
         const auto outcome = dispatch_frozen_request(dispatcher, request);
-        if (policy.operation == daemon::M3Operation::Send ||
-            policy.operation == daemon::M3Operation::MsgEdit ||
-            policy.operation == daemon::M3Operation::MsgDelete ||
-            policy.operation == daemon::M3Operation::MsgReact ||
-            policy.operation == daemon::M3Operation::MsgPin ||
-            policy.operation == daemon::M3Operation::MsgUnpin) {
+        if (policy.operation != daemon::M3Operation::MsgForward &&
+            policy.operation != daemon::M3Operation::SavedAttach) {
             CHECK(outcome.result == json::object());
         } else {
             CHECK(outcome.error_code == "DENIED");
             CHECK(outcome.exit_code == kDenied);
         }
     }
-    CHECK(handler_runs == 6);
+    CHECK(handler_runs == 15);
 }
 
 TEST_CASE("daemon stop triggers the shutdown hook and confirms", "[dispatch]") {

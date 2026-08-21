@@ -741,16 +741,22 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         };
 
         const auto finish_without_dispatch = [&](const write_contract::StoredTerminal& terminal,
-                                                 bool deliver_terminal = true) {
+                                                 bool deliver_terminal = true,
+                                                 bool complete_without_mutation = false) {
             if (!write_contract::terminal_matches_plan(terminal, proposed_plan) ||
                 !append_outcome(*foundation_, epoch, request, hooks, *operation, terminal,
                                 AccountAuditMutationState::None, completed)) {
                 return audit_fatal();
             }
             if (request.idempotency_key_hash) {
-                const auto removed = foundation_->store().remove_owned(
-                    *request.idempotency_key_hash, request.invocation_id, epoch);
-                if (removed.status == IdempotencyWriteStatus::Failed) {
+                const auto transition =
+                    complete_without_mutation
+                        ? foundation_->store().complete(*request.idempotency_key_hash,
+                                                        request.invocation_id, terminal.value(),
+                                                        epoch)
+                        : foundation_->store().remove_owned(*request.idempotency_key_hash,
+                                                            request.invocation_id, epoch);
+                if (transition.status == IdempotencyWriteStatus::Failed) {
                     return audit_fatal();
                 }
             }
@@ -762,7 +768,16 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         };
 
         if (post_intent.terminal_without_dispatch) {
-            return finish_without_dispatch(*post_intent.terminal_without_dispatch);
+            const bool valid_noop = post_intent.complete_without_mutation &&
+                                    request.operation == proto::M3Operation::ChatMarkRead &&
+                                    proposed_plan.value()["tdlib_request"].is_null() &&
+                                    proposed_plan.value()["last_message_id"].is_null() &&
+                                    post_intent.terminal_without_dispatch->success();
+            if (post_intent.complete_without_mutation != valid_noop) {
+                return audit_fatal();
+            }
+            return finish_without_dispatch(*post_intent.terminal_without_dispatch, true,
+                                           valid_noop);
         }
 
         if (!hooks.revalidate_auth_and_schedule || !hooks.dispatch) {

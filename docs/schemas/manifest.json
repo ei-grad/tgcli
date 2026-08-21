@@ -16,6 +16,33 @@
     "account use": {
       "result": "account-use.result.schema.json"
     },
+    "chat archive": {
+      "result": "chat-archive.result.schema.json"
+    },
+    "chat join": {
+      "result": "chat-join.result.schema.json"
+    },
+    "chat leave": {
+      "result": "chat-leave.result.schema.json"
+    },
+    "chat mark-read": {
+      "result": "chat-mark-read.result.schema.json"
+    },
+    "chat mute": {
+      "result": "chat-mute.result.schema.json"
+    },
+    "chat pin": {
+      "result": "chat-pin.result.schema.json"
+    },
+    "chat unarchive": {
+      "result": "chat-unarchive.result.schema.json"
+    },
+    "chat unmute": {
+      "result": "chat-unmute.result.schema.json"
+    },
+    "chat unpin": {
+      "result": "chat-unpin.result.schema.json"
+    },
     "chats": {
       "result": "chats.result.schema.json"
     },

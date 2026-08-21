@@ -227,6 +227,10 @@ void consume_completed_view(const AccountAuditCompletedGroupView& view,
         return;
     }
     const auto mutation = (*view.outcome)["mutation_state"].get<std::string>();
+    const bool completed_mark_read_noop =
+        view.operation == AccountAuditOperation::ChatMarkRead && mutation == "none" &&
+        view.plan["tdlib_request"].is_null() && view.plan["last_message_id"].is_null() &&
+        (*view.outcome)["terminal"]["kind"] == "result";
     if (view.idempotency_key_hash && !view.idempotency_pending && mutation != "none") {
         select_contradiction(state, "completed keyed mutation has no idempotency checkpoint");
         return;
@@ -278,7 +282,7 @@ void consume_completed_view(const AccountAuditCompletedGroupView& view,
                                   state)) {
             return;
         }
-        if (mutation == "none") {
+        if (mutation == "none" && !completed_mark_read_noop) {
             static_cast<void>(erase_entry(state.desired, pin->second));
         } else if (!completed_terminal_retains_pending(view)) {
             const auto& terminal = (*view.outcome)["terminal"];
@@ -906,12 +910,13 @@ std::optional<IdempotencyCoreGateResult> recover_open_group(
             return relation_failure(*store, "open recovery lost its key hash");
         }
         IdempotencyWriteResult transition;
-        if (plan->mutation_state == AccountAuditMutationState::None) {
-            transition =
-                store->remove_owned(*key, group.intent["invocation_id"].get<std::string>(), guard);
-        } else if (!plan->retain_store) {
+        if (plan->complete_store ||
+            (plan->mutation_state != AccountAuditMutationState::None && !plan->retain_store)) {
             transition = store->complete(*key, group.intent["invocation_id"].get<std::string>(),
                                          plan->terminal, guard);
+        } else if (plan->mutation_state == AccountAuditMutationState::None) {
+            transition =
+                store->remove_owned(*key, group.intent["invocation_id"].get<std::string>(), guard);
         } else {
             const auto inspection = store->inspect(guard);
             if (inspection.status != IdempotencyInspectionStatus::Clean) {

@@ -54,7 +54,10 @@ bool uses_account_removal_preflight(std::string_view command) {
            command == "chats" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
            command == "msg delete" || command == "msg react" || command == "msg pin" ||
-           command == "msg unpin" || command == "daemon status" || command == "daemon stop" ||
+           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
+           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
+           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
+           command == "chat leave" || command == "daemon status" || command == "daemon stop" ||
            command == "daemon restart";
 }
 
@@ -64,7 +67,10 @@ bool uses_logout_preflight(std::string_view command) {
            command == "chats" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
            command == "msg delete" || command == "msg react" || command == "msg pin" ||
-           command == "msg unpin";
+           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
+           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
+           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
+           command == "chat leave";
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
@@ -72,33 +78,37 @@ void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& co
     if (context.logout == nullptr && context.account_removal == nullptr) {
         return;
     }
-    dispatcher.set_request_preflight(
-        [&context](const std::string& command, RequestSession& session) {
-            if (command == "account remove") {
-                return true;
+    dispatcher.set_request_preflight([&context](const std::string& command,
+                                                RequestSession& session) {
+        if (command == "account remove") {
+            return true;
+        }
+        for (const auto preflight : recovery_preflight_order(command)) {
+            if (preflight == RecoveryPreflight::Removal && context.account_removal != nullptr &&
+                !context.account_removal->preflight(context.account, session)) {
+                return false;
             }
-            for (const auto preflight : recovery_preflight_order(command)) {
-                if (preflight == RecoveryPreflight::Removal && context.account_removal != nullptr &&
-                    !context.account_removal->preflight(context.account, session)) {
+            if (preflight == RecoveryPreflight::Logout) {
+                if (command == "logout" && session.request().context.dry_run) {
+                    continue;
+                }
+                const bool persistence_free_m3 =
+                    session.request().context.dry_run &&
+                    (command == "send" || command == "msg edit" || command == "msg delete" ||
+                     command == "msg react" || command == "msg pin" || command == "msg unpin" ||
+                     command == "chat mark-read" || command == "chat mute" ||
+                     command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
+                     command == "chat archive" || command == "chat unarchive" ||
+                     command == "chat join" || command == "chat leave");
+                if (context.logout != nullptr &&
+                    !(persistence_free_m3 ? context.logout->preflight_read_only(session)
+                                          : context.logout->preflight(session))) {
                     return false;
                 }
-                if (preflight == RecoveryPreflight::Logout) {
-                    if (command == "logout" && session.request().context.dry_run) {
-                        continue;
-                    }
-                    const bool persistence_free_m3 =
-                        session.request().context.dry_run &&
-                        (command == "send" || command == "msg edit" || command == "msg delete" ||
-                         command == "msg react" || command == "msg pin" || command == "msg unpin");
-                    if (context.logout != nullptr &&
-                        !(persistence_free_m3 ? context.logout->preflight_read_only(session)
-                                              : context.logout->preflight(session))) {
-                        return false;
-                    }
-                }
             }
-            return true;
-        });
+        }
+        return true;
+    });
 }
 
 } // namespace

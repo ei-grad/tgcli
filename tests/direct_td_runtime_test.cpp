@@ -134,8 +134,14 @@ std::vector<TdDirectRequest> direct_requests() {
             .chat_id = -1001, .list = TdDirectChatList::Archive, .pinned = false},
         TdAddChatToListRequest{.chat_id = -1001, .list = TdDirectChatList::Archive},
         TdAddChatToListRequest{.chat_id = -1001, .list = TdDirectChatList::Main},
-        TdJoinChatRequest{.chat_id = -1001, .invite_link = std::nullopt},
-        TdJoinChatRequest{.chat_id = std::nullopt, .invite_link = "https://t.me/+private-token"},
+        TdJoinChatRequest{
+            .chat_id = -1001, .invite_link = std::nullopt, .expected_invite_chat_id = std::nullopt},
+        TdJoinChatRequest{.chat_id = std::nullopt,
+                          .invite_link = "https://t.me/+private-token",
+                          .expected_invite_chat_id = std::nullopt},
+        TdJoinChatRequest{.chat_id = std::nullopt,
+                          .invite_link = "https://t.me/+known-private-token",
+                          .expected_invite_chat_id = -1001},
         TdLeaveChatRequest{.chat_id = -1001},
     };
 }
@@ -210,7 +216,7 @@ TEST_CASE("direct native factories match the scripted descriptor boundary exactl
           "[core][tdlib][direct][factory]") {
     tgcli::test::ScriptedTdRuntime scripted;
     const auto requests = direct_requests();
-    REQUIRE(requests.size() == 16);
+    REQUIRE(requests.size() == 17);
     for (const auto& request : requests) {
         auto native = detail::make_production_direct_request_for_test(request);
         auto fake = make_scripted(scripted, request);
@@ -577,9 +583,18 @@ TEST_CASE("production and scripted direct factories reject the same invalid requ
         TdViewMessagesRequest{.chat_id = -1001, .message_ids = {10, 11}},
         TdSetChatNotificationSettingsRequest{
             .chat_id = -1001, .settings = {.use_default_mute_for = false, .mute_for = -1}},
-        TdJoinChatRequest{.chat_id = -1001, .invite_link = "https://t.me/+token"},
-        TdJoinChatRequest{.chat_id = std::nullopt, .invite_link = std::nullopt},
-        TdJoinChatRequest{.chat_id = std::nullopt, .invite_link = std::string{}},
+        TdJoinChatRequest{.chat_id = -1001,
+                          .invite_link = "https://t.me/+token",
+                          .expected_invite_chat_id = std::nullopt},
+        TdJoinChatRequest{.chat_id = std::nullopt,
+                          .invite_link = std::nullopt,
+                          .expected_invite_chat_id = std::nullopt},
+        TdJoinChatRequest{.chat_id = std::nullopt,
+                          .invite_link = std::string{},
+                          .expected_invite_chat_id = std::nullopt},
+        TdJoinChatRequest{.chat_id = std::nullopt,
+                          .invite_link = "https://t.me/+token",
+                          .expected_invite_chat_id = 0},
         TdLeaveChatRequest{.chat_id = 0},
     };
     tgcli::test::ScriptedTdRuntime runtime;
