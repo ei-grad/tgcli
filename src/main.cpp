@@ -1,5 +1,6 @@
 #include "cli/client.hpp"
 #include "cli/routing.hpp"
+#include "cli/schema_command.hpp"
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
 #include "daemon/chats_commands.hpp"
@@ -88,6 +89,48 @@ bool contains_reserved_full(int argc, char** argv) noexcept {
         if (argument == option || argument.starts_with("--full=")) {
             return true;
         }
+    }
+    return false;
+}
+
+bool targets_schema_command(int argc, char** argv) noexcept {
+    constexpr std::array<std::string_view, 4> value_options{"--account", "--idempotency-key",
+                                                            "--timeout", "--cursor"};
+    bool positional_only = false;
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) {
+            continue;
+        }
+        const std::string_view argument(argv[index]);
+        if (positional_only) {
+            return argument == "schema";
+        }
+        if (argument == "--") {
+            positional_only = true;
+            continue;
+        }
+
+        bool consumes_value = false;
+        bool attached_value = false;
+        for (const auto option : value_options) {
+            if (argument == option) {
+                consumes_value = true;
+                break;
+            }
+            if (argument.size() > option.size() && argument.starts_with(option) &&
+                argument[option.size()] == '=') {
+                attached_value = true;
+                break;
+            }
+        }
+        if (consumes_value) {
+            ++index;
+            continue;
+        }
+        if (attached_value || argument.starts_with('-')) {
+            continue;
+        }
+        return argument == "schema";
     }
     return false;
 }
@@ -196,6 +239,62 @@ int report_unsupported_mode(std::string_view argument) {
           {"details", {{"argument", argument}, {"reason", "unsupported_mode"}}}}}};
     std::fputs((rendered.dump() + "\n").c_str(), stderr);
     return tgcli::kUsage;
+}
+
+std::string_view schema_unsupported_option(const CLI::Option& account, const CLI::Option& full,
+                                           const CLI::Option& allow_write, const CLI::Option& yes,
+                                           const CLI::Option& dry_run, const CLI::Option& timeout,
+                                           const CLI::Option& cursor,
+                                           const CLI::Option& idempotency_key) {
+    if (account.count() != 0) {
+        return "--account";
+    }
+    if (full.count() != 0) {
+        return "--full";
+    }
+    if (allow_write.count() != 0) {
+        return "--allow-write";
+    }
+    if (yes.count() != 0) {
+        return "--yes";
+    }
+    if (dry_run.count() != 0) {
+        return "--dry-run";
+    }
+    if (timeout.count() != 0) {
+        return "--timeout";
+    }
+    if (cursor.count() != 0) {
+        return "--cursor";
+    }
+    if (idempotency_key.count() != 0) {
+        return "--idempotency-key";
+    }
+    return {};
+}
+
+std::optional<int> handle_client_local_or_reserved_command(
+    const std::vector<std::string>& command, const CLI::Option& account, const CLI::Option& full,
+    const CLI::Option& allow_write, const CLI::Option& yes, const CLI::Option& dry_run,
+    const CLI::Option& timeout, const CLI::Option& cursor, const CLI::Option& idempotency_key,
+    const CLI::Option& no_color, const std::vector<std::string>& schema_target, bool schema_all,
+    bool schema_help, bool verbose) {
+    if (command == std::vector<std::string>{"schema"}) {
+        const auto unsupported_option = schema_unsupported_option(
+            account, full, allow_write, yes, dry_run, timeout, cursor, idempotency_key);
+        return tgcli::cli::run_schema_command(
+            {{schema_target}, unsupported_option, schema_all, schema_help, verbose});
+    }
+    if (full.count() != 0) {
+        return report_unsupported_mode("--full");
+    }
+    if (no_color.count() != 0) {
+        return report_usage("unknown command or argument", nullptr, "unknown_command");
+    }
+    if (command == std::vector<std::string>{"raw"}) {
+        return report_unsupported_mode("raw");
+    }
+    return std::nullopt;
 }
 
 std::optional<int> validate_idempotency_option(const CLI::Option& option,
@@ -700,7 +799,7 @@ int run(int argc, char** argv) {
     if (consume_legacy_bot_token(argc, argv)) {
         return report_insecure_bot_token();
     }
-    if (contains_reserved_full(argc, argv)) {
+    if (!targets_schema_command(argc, argv) && contains_reserved_full(argc, argv)) {
         return report_unsupported_mode("--full");
     }
     CLI::App app{"tgcli — Telegram CLI"};
@@ -711,6 +810,7 @@ int run(int argc, char** argv) {
     bool json_output = false;
     bool full = false;
     bool no_daemon = false;
+    bool no_color = false;
     bool verbose = false;
     bool allow_write = false;
     bool yes = false;
@@ -729,13 +829,18 @@ int run(int argc, char** argv) {
     app.add_flag("--json", json_output, "machine-readable JSON output");
     CLI::Option* full_option = app.add_flag("--full", full, "reserved until M7");
     app.add_flag("-v,--verbose", verbose, "show tgcli diagnostics on stderr");
-    app.add_flag("--allow-write", allow_write, "grant writes for this invocation");
-    app.add_flag("--yes", yes, "approve destructive actions non-interactively");
-    app.add_flag("--dry-run", dry_run, "validate and print a plan without mutation");
+    CLI::Option* allow_write_option =
+        app.add_flag("--allow-write", allow_write, "grant writes for this invocation");
+    CLI::Option* yes_option =
+        app.add_flag("--yes", yes, "approve destructive actions non-interactively");
+    CLI::Option* dry_run_option =
+        app.add_flag("--dry-run", dry_run, "validate and print a plan without mutation");
     CLI::Option* idempotency_key_option = app.add_option("--idempotency-key", idempotency_key,
                                                          "deduplicate an M3/M4 write invocation");
     app.add_flag("--no-daemon", no_daemon,
                  "run in-process without the daemon (debugging escape hatch)");
+    CLI::Option* no_color_option = app.add_flag("--no-color", no_color, "disable colored output");
+    no_color_option->group("");
     CLI::Option* timeout_option =
         app.add_option("--timeout", timeout_seconds, "per-command deadline in seconds");
     saved.cursor_option =
@@ -743,6 +848,15 @@ int run(int argc, char** argv) {
 
     app.add_subcommand("version", "print tgcli version");
     app.add_subcommand("doctor", "health/auth probe");
+    std::vector<std::string> schema_target;
+    bool schema_all = false;
+    bool schema_help = false;
+    CLI::App* schema_cmd = app.add_subcommand("schema", "Print curated JSON schemas");
+    schema_cmd->set_help_flag();
+    schema_cmd->add_flag("-h,--help", schema_help, "Print this help message and exit");
+    schema_cmd->add_flag("--all", schema_all,
+                         "include every cataloged result, item, and error schema");
+    schema_cmd->add_option("command", schema_target, "command path (for example: account list)");
     CLI::App* raw_cmd = app.add_subcommand("raw", "reserved until M7");
     raw_cmd->set_help_flag();
     raw_cmd->fallthrough(false)->prefix_command();
@@ -865,11 +979,12 @@ int run(int argc, char** argv) {
         command = {"read"};
         selected_read = &history;
     }
-    if (full_option->count() != 0) {
-        return report_unsupported_mode("--full");
-    }
-    if (command == std::vector<std::string>{"raw"}) {
-        return report_unsupported_mode("raw");
+    if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
+            command, *account_option, *full_option, *allow_write_option, *yes_option,
+            *dry_run_option, *timeout_option, *saved.cursor_option, *idempotency_key_option,
+            *no_color_option, schema_target, schema_all, schema_help, verbose);
+        pre_routing_exit) {
+        return *pre_routing_exit;
     }
     if (command.empty()) {
         return report_missing_command();

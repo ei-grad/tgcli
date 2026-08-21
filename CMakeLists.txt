@@ -179,9 +179,12 @@ add_custom_command(
 set_source_files_properties("${TGCLI_GENERATED_SCHEMA_ASSETS}" PROPERTIES GENERATED TRUE)
 
 add_library(tgcli_schema STATIC
+    src/cli/schema_command.cpp
     src/cli/schema_catalog.cpp
     "${TGCLI_GENERATED_SCHEMA_ASSETS}")
-target_link_libraries(tgcli_schema PUBLIC tgcli_common)
+target_link_libraries(tgcli_schema
+    PUBLIC tgcli_common
+    PRIVATE nlohmann_json::nlohmann_json)
 
 add_library(tgcli_proto STATIC
     src/proto/destructive_plan.cpp
@@ -283,7 +286,7 @@ add_dependencies(tgcli_cli tgcli_version_header)
 add_executable(tgcli
     src/main.cpp)
 target_link_libraries(tgcli
-    PRIVATE tgcli_cli tgcli_daemon CLI11::CLI11)
+    PRIVATE tgcli_cli tgcli_daemon tgcli_schema CLI11::CLI11)
 
 if(TGCLI_BUILD_TESTS)
     set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "Disable jsoncons upstream tests" FORCE)

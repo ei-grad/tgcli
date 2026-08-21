@@ -57,6 +57,7 @@ add_executable(tgcli_unit_tests
     render_test.cpp
     schema_matcher.cpp
     schema_catalog_test.cpp
+    schema_cli_test.cpp
     schema_test.cpp
     session_schema_test.cpp
     stream_schema_test.cpp
