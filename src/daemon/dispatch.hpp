@@ -152,6 +152,7 @@ class Dispatcher {
     void set_request_preflight(
         std::function<bool(const std::string&, RequestSession&)> request_preflight);
     [[nodiscard]] DeadlineDefault deadline_default(const proto::Request& request) const;
+    [[nodiscard]] bool requires_frozen_config_admission(const proto::Request& request) const;
     void dispatch(RequestSession& session) const;
     void dispatch(const proto::Request& request, ResponseSink& sink) const;
 

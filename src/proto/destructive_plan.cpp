@@ -394,7 +394,8 @@ std::optional<MsgDeletePlan> parse_msg_delete_plan(const json& value, std::strin
     const auto& type = value["chat"]["type"].get_ref<const std::string&>();
     const bool requested = value["requested_for_all"].get<bool>();
     const bool effective = value["effective_for_all"].get<bool>();
-    if ((type == "supergroup" || type == "channel") ? !effective : effective != requested) {
+    if ((type == "supergroup" || type == "channel") ? (!requested || !effective)
+                                                    : effective != requested) {
         error = "message deletion plan revoke policy contradicts its chat identity";
         return std::nullopt;
     }

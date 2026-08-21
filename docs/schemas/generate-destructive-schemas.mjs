@@ -321,7 +321,8 @@ const v2Definitions = () => ({
   chatId: { allOf: [reference('int53'), { not: { const: 0 } }] },
   positiveInt53: { type: 'integer', minimum: 1, maximum: 9007199254740991 },
   int32: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
-  positiveInt32: { type: 'integer', minimum: 1, maximum: 2147483647 },
+  positiveInt32: { type: 'integer', minimum: 0, maximum: 2147483647 },
+  strictPositiveInt32: { type: 'integer', minimum: 1, maximum: 2147483647 },
   uint32: { type: 'integer', minimum: 0, maximum: 4294967295 },
   positiveUint32: { type: 'integer', minimum: 1, maximum: 4294967295 },
   int64: {
@@ -360,7 +361,7 @@ const v2Definitions = () => ({
   ),
   forumTopic: object(['kind', 'id'], {
     kind: { const: 'forum' },
-    id: reference('positiveInt32'),
+    id: reference('strictPositiveInt32'),
   }),
   savedTopic: object(['kind', 'id'], {
     kind: { const: 'saved' },
@@ -368,7 +369,9 @@ const v2Definitions = () => ({
   }),
   topicRef: {
     oneOf: [
-      object(['kind', 'id'], { kind: { const: 'forum' }, id: reference('positiveInt32') }),
+      object(['kind', 'id'], {
+        kind: { const: 'forum' }, id: reference('strictPositiveInt32'),
+      }),
       ...['thread', 'direct', 'saved'].map((kind) =>
         object(['kind', 'id'], { kind: { const: kind }, id: reference('positiveInt53') }),
       ),
@@ -399,7 +402,7 @@ const v2Definitions = () => ({
       object(['kind'], { kind: { const: 'online' } }),
       object(['kind', 'send_date'], {
         kind: { const: 'at' },
-        send_date: reference('positiveInt32'),
+        send_date: reference('strictPositiveInt32'),
       }),
     ],
   },
@@ -657,7 +660,7 @@ const v2Plan = (operation) => {
               'schedule', 'observed_server_unix_time'],
             {
             schedule: object(['kind', 'send_date'], {
-              kind: { const: 'at' }, send_date: reference('positiveInt32'),
+              kind: { const: 'at' }, send_date: reference('strictPositiveInt32'),
             }),
             observed_server_unix_time: reference('int64'),
             },
@@ -1045,9 +1048,7 @@ const v2StoredErrorBranches = (operation) => {
     branches.push(storedError('RATE_LIMITED', operationDetails(
       operation, ['tdlib_code', 'retry_after'], {
         tdlib_code: { const: 429 },
-        retry_after: operation === 'session_terminate'
-          ? { type: 'integer', minimum: 0, maximum: 2147483647 }
-          : reference('positiveInt32'),
+        retry_after: reference('positiveInt32'),
       },
     ), 5));
   }
@@ -1828,11 +1829,22 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
     v2OutcomeBranch(operation, true, 'confirmed', successful, v2ResultTerminal(operation)),
     v2OutcomeBranch(operation, false, 'none', none,
       v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
+  ];
+  if (['send', 'saved_attach'].includes(operation)) {
+    branches.push(v2OutcomeBranch(
+      operation,
+      false,
+      'none',
+      ambiguous,
+      v2StoredErrorTerminal(operation, ['TDLIB_ERROR', 'RATE_LIMITED']),
+    ));
+  }
+  branches.push(
     v2OutcomeBranch(operation, false, 'possible', ambiguous,
       v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
     v2OutcomeBranch(operation, false, 'confirmed', confirmed,
       v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
-  ];
+  );
   if (operation === 'saved_attach') {
     const spoolPrefixes = undispatched;
     branches.push(v2OutcomeBranch(

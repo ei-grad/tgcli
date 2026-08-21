@@ -1860,9 +1860,10 @@ TEST_CASE("idempotency epoch cancellation automatically constrains spool enumera
     auto guard = std::get<daemon::AccountAuditCoordinator::Guard>(std::move(epoch));
     const auto result = tree.foundation().run_core_gate(
         guard, 1'700'000'001, [] { return "2026-08-20T12:00:03Z"; }, {}, spool_hooks);
-    REQUIRE(result.status == daemon::IdempotencyCoreGateStatus::SpoolUnavailable);
-    REQUIRE(result.spool_failure);
-    CHECK(result.spool_failure->kind == daemon::FileSpoolErrorKind::Cancelled);
+    REQUIRE(result.status == daemon::IdempotencyCoreGateStatus::Interrupted);
+    CHECK(result.audit_failure.interruption ==
+          daemon::AccountAuditFailure::Interruption::Cancelled);
+    CHECK_FALSE(result.spool_failure);
     CHECK(store_stages.load(std::memory_order_relaxed) == 0);
 }
 

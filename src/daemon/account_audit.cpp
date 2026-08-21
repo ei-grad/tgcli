@@ -771,7 +771,7 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
             return false;
         }
         return value["chat"]["type"] == "supergroup" || value["chat"]["type"] == "channel"
-                   ? value["effective_for_all"] == true
+                   ? value["requested_for_all"] == true && value["effective_for_all"] == true
                    : value["effective_for_all"] == value["requested_for_all"];
     case AccountAuditOperation::MsgForward:
         return exact_fields(value, {"operation", "account", "tdlib_request", "from", "to",
@@ -1273,7 +1273,7 @@ bool valid_forward_error_details(std::string_view code, const json& details) {
     if (code == "RATE_LIMITED") {
         if (!exact_fields(details, {"operation", "tdlib_code", "retry_after", "items"}) ||
             details["operation"] != "msg_forward" || details["tdlib_code"] != 429 ||
-            !valid_positive_int32(details["retry_after"]) ||
+            !valid_nonnegative_int32(details["retry_after"]) ||
             !valid_forward_items(details["items"], true, true)) {
             return false;
         }
@@ -1283,7 +1283,7 @@ bool valid_forward_error_details(std::string_view code, const json& details) {
         std::int64_t maximum_retry = 0;
         for (const auto& item : details["items"]) {
             if (item["status"] != "failed" || item["failure_reason"] != "tdlib_error" ||
-                item["tdlib_code"] != 429 || !valid_positive_int32(item["retry_after"])) {
+                item["tdlib_code"] != 429 || !valid_nonnegative_int32(item["retry_after"])) {
                 return false;
             }
             maximum_retry = std::max(maximum_retry, json_int64(item["retry_after"]).value_or(0));
@@ -1379,9 +1379,7 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
         }
         return exact_fields(details, {"operation", "tdlib_code", "retry_after"}) &&
                valid_operation_field(operation, details) && details["tdlib_code"] == 429 &&
-               (operation == AccountAuditOperation::SessionTerminate
-                    ? valid_nonnegative_int32(details["retry_after"])
-                    : valid_positive_int32(details["retry_after"]));
+               valid_nonnegative_int32(details["retry_after"]);
     }
     if (code == "INTERNAL") {
         if (exit != kGeneric || !valid_operation_field(operation, details)) {
@@ -1531,6 +1529,16 @@ bool terminal_proves_mutation(AccountAuditOperation operation, const json& termi
                                   operation == AccountAuditOperation::SavedAttach);
 }
 
+bool terminal_proves_explicit_no_mutation(AccountAuditOperation operation, const json& terminal) {
+    if (!valid_terminal(operation, terminal) || terminal["kind"] != "error" ||
+        (operation != AccountAuditOperation::Send &&
+         operation != AccountAuditOperation::SavedAttach)) {
+        return false;
+    }
+    const auto& code = terminal["code"].get_ref<const std::string&>();
+    return code == "TDLIB_ERROR" || code == "RATE_LIMITED";
+}
+
 std::uint64_t terminal_byte_ceiling(AccountAuditOperation operation) {
     if (operation == AccountAuditOperation::MsgForward) {
         return kForwardTerminalBytes;
@@ -1569,7 +1577,7 @@ bool valid_forward_item(const json& value) {
     }
     const bool code_valid = value["tdlib_code"].is_null() || valid_int32(value["tdlib_code"]);
     const bool retry_valid =
-        value["retry_after"].is_null() || valid_positive_int32(value["retry_after"]);
+        value["retry_after"].is_null() || valid_nonnegative_int32(value["retry_after"]);
     if (!code_valid || !retry_valid) {
         return false;
     }
@@ -1802,7 +1810,8 @@ bool validate_outcome_impl(const json& document, std::string& error) {
     if (!legal_prefix || (document["terminal"]["kind"] == "result") != success ||
         (success && (mutation != "confirmed" || !has_proof)) ||
         (!has_dispatch && mutation != "none") || (has_proof && mutation != "confirmed") ||
-        (has_dispatch && !has_progress && !has_proof && mutation != "possible") ||
+        (has_dispatch && !has_progress && !has_proof && mutation != "possible" &&
+         !(mutation == "none" && terminal_proves_explicit_no_mutation(operation, terminal))) ||
         (mutation == "confirmed" && !has_proof && !has_progress) ||
         ((mutation == "possible" || mutation == "confirmed") && !has_dispatch) ||
         (spool_unavailable &&
@@ -2879,13 +2888,18 @@ bool consume_v2(const json& document, ScanState& state, std::string& error,
         error = "v2 outcome stages do not match the durable prefix";
         return false;
     }
+    const auto operation =
+        parse_account_audit_operation(state.open->intent["command"].get_ref<const std::string&>());
     const auto expected_mutation = derive_mutation_state(*state.open);
-    if (document["mutation_state"] != account_audit_mutation_state_name(expected_mutation)) {
+    const bool explicit_no_mutation =
+        operation && expected_mutation == AccountAuditMutationState::Possible &&
+        document["mutation_state"] == "none" &&
+        terminal_proves_explicit_no_mutation(*operation, document["terminal"]);
+    if (document["mutation_state"] != account_audit_mutation_state_name(expected_mutation) &&
+        !explicit_no_mutation) {
         error = "v2 outcome mutation state contradicts the durable prefix";
         return false;
     }
-    const auto operation =
-        parse_account_audit_operation(state.open->intent["command"].get_ref<const std::string&>());
     if (!operation ||
         !terminal_matches_plan(*operation, document["terminal"], state.open->intent)) {
         error = "v2 outcome terminal contradicts the immutable plan";

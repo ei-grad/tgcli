@@ -218,6 +218,11 @@ DeadlineDefault Dispatcher::deadline_default(const proto::Request& request) cons
     return found == commands_.end() ? DeadlineDefault::Default60 : found->second.deadline_default;
 }
 
+bool Dispatcher::requires_frozen_config_admission(const proto::Request& request) const {
+    const auto found = commands_.find(command_key(request.command));
+    return found != commands_.end() && found->second.m3_operation.has_value();
+}
+
 void Dispatcher::set_request_preflight(
     std::function<bool(const std::string&, RequestSession&)> request_preflight) {
     request_preflight_ = std::move(request_preflight);
@@ -273,6 +278,9 @@ void Dispatcher::dispatch(const proto::Request& request, ResponseSink& sink) con
     auto admitted_request = proto::admit_request_source(request, source_error);
     if (!admitted_request) {
         throw std::invalid_argument(source_error);
+    }
+    if (requires_frozen_config_admission(*admitted_request)) {
+        throw std::invalid_argument("direct M3 dispatch requires frozen config admission");
     }
     const auto admitted_at = RequestClock::now();
     const auto admission_wall_time =

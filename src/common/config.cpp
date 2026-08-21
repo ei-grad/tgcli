@@ -1239,6 +1239,9 @@ GrantVerificationResult Store::verify_write_grant(std::string_view expected_iden
                            "config.lock changed or was replaced while acquiring it")};
     }
     notify_stage(hooks_, testing::MutationStage::AfterLock);
+    if (auto result = grant_verification_interruption(control)) {
+        return std::move(*result);
+    }
     if (!canonical_directory_matches(*directory, expected_uid_, error)) {
         return {GrantVerificationStatus::IoError, {}, std::move(error)};
     }
@@ -1250,6 +1253,9 @@ GrantVerificationResult Store::verify_write_grant(std::string_view expected_iden
     }
 
     auto current = read_from_directory(directory->get(), expected_uid_);
+    if (auto result = grant_verification_interruption(control)) {
+        return std::move(*result);
+    }
     if (!current.parsed) {
         return {GrantVerificationStatus::Invalid, {}, std::move(current.error)};
     }

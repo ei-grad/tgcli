@@ -340,6 +340,11 @@
     },
     "positiveInt32": {
       "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "strictPositiveInt32": {
+      "type": "integer",
       "minimum": 1,
       "maximum": 2147483647
     },
@@ -540,7 +545,7 @@
           "const": "forum"
         },
         "id": {
-          "$ref": "#/$defs/positiveInt32"
+          "$ref": "#/$defs/strictPositiveInt32"
         }
       }
     },
@@ -574,7 +579,7 @@
               "const": "forum"
             },
             "id": {
-              "$ref": "#/$defs/positiveInt32"
+              "$ref": "#/$defs/strictPositiveInt32"
             }
           }
         },
@@ -757,7 +762,7 @@
               "const": "at"
             },
             "send_date": {
-              "$ref": "#/$defs/positiveInt32"
+              "$ref": "#/$defs/strictPositiveInt32"
             }
           }
         }
@@ -1637,7 +1642,7 @@
                           "const": "at"
                         },
                         "send_date": {
-                          "$ref": "#/$defs/positiveInt32"
+                          "$ref": "#/$defs/strictPositiveInt32"
                         }
                       }
                     },

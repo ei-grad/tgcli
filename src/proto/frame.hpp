@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -21,6 +22,7 @@
 namespace tgcli::proto {
 
 struct RequestSourceAccess;
+struct RequestFacts;
 
 inline constexpr int kProtocolVersion = 3;
 inline constexpr std::uint64_t kMaximumRequestSourceBytes = 16'842'751;
@@ -95,6 +97,7 @@ struct Request {
 
   private:
     std::uint64_t source_bytes_ = 0;
+    std::shared_ptr<const RequestFacts> admitted_facts_;
 
     friend std::optional<Request> admit_request_source(const Request& request, std::string& error);
     friend struct RequestSourceAccess;

@@ -13,9 +13,36 @@
 
 namespace tgcli::proto {
 
+struct RequestFacts {
+    std::uint64_t id = 0;
+    std::string account;
+    std::vector<std::string> command;
+    nlohmann::json args;
+    RequestContext context;
+    std::uint64_t source_bytes = 0;
+};
+
 struct RequestSourceAccess {
     static void set(Request& request, std::uint64_t source_bytes) {
         request.source_bytes_ = source_bytes;
+        request.admitted_facts_ = std::make_shared<const RequestFacts>(
+            RequestFacts{request.id, request.account, request.command, request.args,
+                         request.context, source_bytes});
+    }
+
+    static Request frozen(const Request& request) {
+        if (!request.admitted_facts_) {
+            return request;
+        }
+        const auto& facts = *request.admitted_facts_;
+        Request frozen(facts.account);
+        frozen.id = facts.id;
+        frozen.command = facts.command;
+        frozen.args = facts.args;
+        frozen.context = facts.context;
+        frozen.source_bytes_ = facts.source_bytes;
+        frozen.admitted_facts_ = request.admitted_facts_;
+        return frozen;
     }
 };
 
@@ -237,27 +264,31 @@ struct FrameWriter {
     }
 
     json operator()(const Request& f) const {
-        if (validate_request && !paths::valid_account_name(f.account)) {
+        const auto frozen = RequestSourceAccess::frozen(f);
+        if (validate_request && !paths::valid_account_name(frozen.account)) {
             throw std::invalid_argument("request account is invalid");
         }
-        if (const auto validation = validate_idempotency(f);
+        if (const auto validation = validate_idempotency(frozen);
             validate_request && validation != IdempotencyValidation::Valid) {
             throw std::invalid_argument(std::string(idempotency_validation_error(validation)));
         }
-        json context{
-            {"tty", f.context.tty},
-            {"json", f.context.json},
-            {"yes", f.context.yes},
-            {"dry_run", f.context.dry_run},
-            {"timeout",
-             f.context.timeout_seconds ? json(*f.context.timeout_seconds) : json(nullptr)},
-            {"cwd", f.context.cwd},
-            {"media_dir", f.context.media_dir ? json(*f.context.media_dir) : json(nullptr)},
-            {"write_authority", authority_to_json(f.context.write_authority)},
-            {"idempotency_key",
-             f.context.idempotency_key ? json(*f.context.idempotency_key) : json(nullptr)}};
-        return {{"type", "request"},    {"id", f.id},     {"account", f.account},
-                {"command", f.command}, {"args", f.args}, {"context", std::move(context)}};
+        json context{{"tty", frozen.context.tty},
+                     {"json", frozen.context.json},
+                     {"yes", frozen.context.yes},
+                     {"dry_run", frozen.context.dry_run},
+                     {"timeout", frozen.context.timeout_seconds
+                                     ? json(*frozen.context.timeout_seconds)
+                                     : json(nullptr)},
+                     {"cwd", frozen.context.cwd},
+                     {"media_dir",
+                      frozen.context.media_dir ? json(*frozen.context.media_dir) : json(nullptr)},
+                     {"write_authority", authority_to_json(frozen.context.write_authority)},
+                     {"idempotency_key", frozen.context.idempotency_key
+                                             ? json(*frozen.context.idempotency_key)
+                                             : json(nullptr)}};
+        return {{"type", "request"},         {"id", frozen.id},
+                {"account", frozen.account}, {"command", frozen.command},
+                {"args", frozen.args},       {"context", std::move(context)}};
     }
 
     json operator()(const Result& f) const {
@@ -766,23 +797,23 @@ std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_obser
 }
 
 std::optional<Request> admit_request_source(const Request& request, std::string& error) {
-    if (request.source_bytes_ != 0) {
-        if (request.source_bytes_ > kMaximumRequestSourceBytes) {
+    auto admitted = RequestSourceAccess::frozen(request);
+    if (admitted.source_bytes_ != 0) {
+        if (admitted.source_bytes_ > kMaximumRequestSourceBytes) {
             error = "frame exceeds " + std::to_string(kMaximumRequestSourceBytes) + " bytes";
             return std::nullopt;
         }
         error.clear();
-        return request;
+        return admitted;
     }
-    auto document = FrameWriter{false}(request);
+    auto document = FrameWriter{false}(admitted);
     const secure::JsonWiper document_wiper(document, {}, "admitted_request_json");
     const auto source = document.dump();
     if (source.empty() || source.size() > kMaximumRequestSourceBytes) {
         error = "frame exceeds " + std::to_string(kMaximumRequestSourceBytes) + " bytes";
         return std::nullopt;
     }
-    auto admitted = request;
-    admitted.source_bytes_ = source.size();
+    RequestSourceAccess::set(admitted, source.size());
     error.clear();
     return admitted;
 }

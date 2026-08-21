@@ -1,4 +1,5 @@
 #include "common/config.hpp"
+#include "common/config_test_support.hpp"
 #include "common/invite_redaction.hpp"
 #include "core/td_log.hpp"
 #include "daemon/chat_identity.hpp"
@@ -12,6 +13,7 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <cerrno>
 #include <chrono>
 #include <fcntl.h>
@@ -155,6 +157,19 @@ TEST_CASE("request source bytes are exact and the socket/direct ceilings agree",
     auto exact_admitted = proto::admit_request_source(exact_request, error);
     REQUIRE(exact_admitted);
 
+    auto immutable = *admitted;
+    immutable.id = 99;
+    immutable.account = "other";
+    immutable.args["blob"] = "mutated";
+    immutable.context.cwd = "/mutated";
+    const auto immutable_copy = proto::admit_request_source(immutable, error);
+    REQUIRE(immutable_copy);
+    CHECK(immutable_copy->id == request.id);
+    CHECK(immutable_copy->account == request.account);
+    CHECK(immutable_copy->args == request.args);
+    CHECK(immutable_copy->context.cwd == request.context.cwd);
+    CHECK(proto::serialize(proto::Frame{immutable}) == canonical);
+
     auto oversized_request = request_with_blob(proto::kMaximumRequestSourceBytes - base + 1);
     CHECK_FALSE(proto::admit_request_source(oversized_request, error));
 
@@ -268,6 +283,21 @@ TEST_CASE("verify-only config grant CAS reports every stable outcome without rew
     REQUIRE(::flock(lock_fd, LOCK_UN) == 0);
     REQUIRE(::close(lock_fd) == 0);
 
+    auto hooks = std::make_shared<config::testing::StoreHooks>();
+    std::optional<std::chrono::steady_clock::time_point> hook_deadline;
+    hooks->at_stage = [&](config::testing::MutationStage stage) {
+        if (stage == config::testing::MutationStage::AfterLock) {
+            REQUIRE(hook_deadline);
+            std::this_thread::sleep_until(*hook_deadline + 1ms);
+        }
+    };
+    const config::Store hooked_store(config_path, hooks, ::getuid());
+    hook_deadline = std::chrono::steady_clock::now() + 20ms;
+    CHECK(hooked_store
+              .verify_write_grant(current.snapshot->identity, "main",
+                                  config::MutationControl{hook_deadline, {}})
+              .status == config::GrantVerificationStatus::TimedOut);
+
     REQUIRE(::chmod(config_dir.c_str(), 0755) == 0);
     CHECK(store.verify_write_grant(current.snapshot->identity, "main").status ==
           config::GrantVerificationStatus::IoError);
@@ -288,20 +318,41 @@ TEST_CASE("invite redaction is correlated move-only and precedes concurrent log 
     const std::string invite_b = "https://t.me/+InviteSentinelBeta";
     auto lease_a = redaction::InviteLinkRegistry::instance().register_link(invite_a);
     auto lease_b = redaction::InviteLinkRegistry::instance().register_link(invite_b);
+    const std::array matrix_phases{"td_error",      "td_timeout",     "audit_failure",
+                                   "store_failure", "crash_recovery", "release_race"};
+    std::vector<std::string> matrix_links;
+    std::vector<redaction::CorrelatedInviteLink> matrix_leases;
+    std::vector<redaction::CorrelatedInviteLink> matrix_shadow_leases;
+    matrix_links.reserve(matrix_phases.size());
+    matrix_leases.reserve(matrix_phases.size());
+    matrix_shadow_leases.reserve(matrix_phases.size());
+    for (const auto* const phase : matrix_phases) {
+        matrix_links.push_back("https://t.me/+InviteSentinel-" + std::string(phase));
+        matrix_leases.push_back(
+            redaction::InviteLinkRegistry::instance().register_link(matrix_links.back()));
+        matrix_shadow_leases.push_back(
+            redaction::InviteLinkRegistry::instance().register_link(matrix_links.back()));
+        REQUIRE(matrix_leases.back().valid());
+        REQUIRE(matrix_shadow_leases.back().valid());
+    }
     REQUIRE(lease_a.valid());
     REQUIRE(lease_b.valid());
     auto moved = std::move(lease_a);
 
     std::atomic<bool> append_ok{true};
+    std::barrier start(9);
     std::vector<std::thread> writers;
     writers.reserve(8);
     for (int index = 0; index < 8; ++index) {
         writers.emplace_back([&, index] {
-            std::string payload = std::to_string(index);
-            payload.append(invite_a);
-            payload.append(invite_b);
-            payload.push_back('\n');
+            start.arrive_and_wait();
             for (int record = 0; record < 20; ++record) {
+                std::string payload = std::to_string(index);
+                payload.append(invite_a);
+                payload.append(invite_b);
+                payload.append(
+                    matrix_links.at(static_cast<std::size_t>(record) % matrix_links.size()));
+                payload.push_back('\n');
                 std::string append_error;
                 if (!sink->append(1, payload, append_error)) {
                     append_ok = false;
@@ -309,17 +360,30 @@ TEST_CASE("invite redaction is correlated move-only and precedes concurrent log 
             }
         });
     }
+    std::thread release_racer([&] {
+        start.arrive_and_wait();
+        for (auto& lease : matrix_leases) {
+            lease.release();
+        }
+    });
     for (auto& writer : writers) {
         writer.join();
     }
+    release_racer.join();
     REQUIRE(append_ok);
     for (const auto& filename : sink->log_paths()) {
         const auto bytes = read_bytes(filename);
         CHECK(bytes.find(invite_a) == std::string::npos);
         CHECK(bytes.find(invite_b) == std::string::npos);
+        for (const auto& link : matrix_links) {
+            CHECK(bytes.find(link) == std::string::npos);
+        }
     }
     moved.release();
     lease_b.release();
+    for (auto& lease : matrix_shadow_leases) {
+        lease.release();
+    }
     CHECK(redaction::InviteLinkRegistry::instance().redact(invite_a) == invite_a);
 }
 
@@ -327,7 +391,7 @@ TEST_CASE("M3 destructive challenges accept only strict neutral plans",
           "[m3-foundation][challenge]") {
     const json deletion{{"operation", "msg_delete"},          {"account", "main"},
                         {"tdlib_request", "deleteMessages"},  {"chat", chat()},
-                        {"message_ids", json::array({1, 2})}, {"requested_for_all", false},
+                        {"message_ids", json::array({1, 2})}, {"requested_for_all", true},
                         {"effective_for_all", true}};
     const json leave{{"operation", "chat_leave"},
                      {"account", "main"},
@@ -337,9 +401,9 @@ TEST_CASE("M3 destructive challenges accept only strict neutral plans",
     CHECK(proto::validate_challenge_payload(challenge("msg_delete", deletion), error));
     CHECK(proto::validate_challenge_payload(challenge("chat_leave", leave), error));
 
-    auto mismatched = deletion;
-    mismatched["effective_for_all"] = false;
-    CHECK_FALSE(proto::validate_challenge_payload(challenge("msg_delete", mismatched), error));
+    auto implicit_revoke = deletion;
+    implicit_revoke["requested_for_all"] = false;
+    CHECK_FALSE(proto::validate_challenge_payload(challenge("msg_delete", implicit_revoke), error));
     auto private_leave = leave;
     private_leave["chat"] = chat("private");
     CHECK_FALSE(proto::validate_challenge_payload(challenge("chat_leave", private_leave), error));

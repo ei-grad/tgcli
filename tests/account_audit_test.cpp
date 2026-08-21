@@ -706,6 +706,17 @@ TEST_CASE("typed write contract covers every M3 operation family",
     }
 }
 
+TEST_CASE("supergroup deletion plans require explicit effective revoke",
+          "[write-contract][account-audit][msg-delete]") {
+    auto implicit_revoke = plan(daemon::AccountAuditOperation::MsgDelete);
+    implicit_revoke["requested_for_all"] = false;
+    CHECK_FALSE(daemon::validate_account_audit_persisted_plan(
+        daemon::AccountAuditOperation::MsgDelete, implicit_revoke, "main"));
+    std::string error;
+    CHECK_FALSE(daemon::write_contract::make_plan(proto::M3Operation::MsgDelete, "main",
+                                                  implicit_revoke, error));
+}
+
 TEST_CASE("account audit limits preserve the accepted equations", "[account-audit][limits]") {
     using namespace daemon::account_audit_limits;
     CHECK(kRequestSourceBytes == 16'842'751);
@@ -1605,6 +1616,8 @@ TEST_CASE("account audit enforces operation persistence constraints",
                                                            {"retry_after", 1}}})}})
                        .document();
     forward["data"]["items"][0]["retry_after"] = 0;
+    CHECK(daemon::validate_account_audit_checkpoint(forward, error));
+    forward["data"]["items"][0]["retry_after"] = -1;
     CHECK_FALSE(daemon::validate_account_audit_checkpoint(forward, error));
 }
 
@@ -2133,6 +2146,9 @@ TEST_CASE("account audit runtime and generated schemas share operation boundarie
                                                            {"retry_after", 1}}})}})
                        .document();
     forward["data"]["items"][0]["retry_after"] = 0;
+    CHECK(daemon::validate_account_audit_checkpoint(forward, error));
+    CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(forward));
+    forward["data"]["items"][0]["retry_after"] = -1;
     CHECK_FALSE(daemon::validate_account_audit_checkpoint(forward, error));
     CHECK_FALSE(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(forward));
 
@@ -2438,6 +2454,18 @@ TEST_CASE("account audit semantic marker rules are runtime-only conjunction chec
     CHECK(log.inspect(guard).status == daemon::AccountAuditInspectionStatus::Contradiction);
 }
 
+TEST_CASE("account audit accepts zero-second stored rate limits",
+          "[account-audit][contract][terminal][rate-limit]") {
+    const json terminal{
+        {"kind", "error"},
+        {"code", "RATE_LIMITED"},
+        {"message", "Telegram rate limit exceeded"},
+        {"details", {{"operation", "msg_delete"}, {"tdlib_code", 429}, {"retry_after", 0}}},
+        {"exit_code", 5}};
+    CHECK(daemon::validate_account_audit_persisted_stored_terminal(
+        daemon::AccountAuditOperation::MsgDelete, terminal));
+}
+
 TEST_CASE("account audit forward proof is byte-semantic with its final vector and plan",
           "[account-audit][forward][proof]") {
     AuditTree tree;
@@ -2605,6 +2633,17 @@ TEST_CASE("account audit stored errors are closed by operation stage and exit",
     accepts(O::MsgEdit, daemon::AccountAuditMutationState::Possible, {S::DispatchStarted},
             stored_error("TDLIB_ERROR", "Telegram request failed",
                          {{"operation", "msg_edit"}, {"tdlib_code", 400}}, 1));
+    accepts(O::Send, daemon::AccountAuditMutationState::None, {S::DispatchStarted},
+            stored_error("TDLIB_ERROR", "Telegram request failed",
+                         {{"operation", "send"}, {"tdlib_code", 400}}, 1));
+    accepts(O::Send, daemon::AccountAuditMutationState::None,
+            {S::DispatchStarted, S::TemporaryIdsObserved},
+            stored_error("RATE_LIMITED", "Telegram rate limit exceeded",
+                         {{"operation", "send"}, {"tdlib_code", 429}, {"retry_after", 0}}, 5));
+    accepts(O::SavedAttach, daemon::AccountAuditMutationState::None,
+            {S::SpoolReady, S::DispatchStarted, S::TemporaryIdsObserved},
+            stored_error("TDLIB_ERROR", "Telegram request failed",
+                         {{"operation", "saved_attach"}, {"tdlib_code", 400}}, 1));
     accepts(O::MsgDelete, daemon::AccountAuditMutationState::Possible, {S::DispatchStarted},
             stored_error("RATE_LIMITED", "Telegram rate limit exceeded",
                          {{"operation", "msg_delete"}, {"tdlib_code", 429}, {"retry_after", 1}},

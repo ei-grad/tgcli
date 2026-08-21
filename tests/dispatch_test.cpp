@@ -52,6 +52,27 @@ Outcome dispatch_request(const daemon::Dispatcher& dispatcher, const proto::Requ
     return outcome;
 }
 
+Outcome dispatch_frozen_request(const daemon::Dispatcher& dispatcher,
+                                const proto::Request& request) {
+    Outcome outcome;
+    daemon::CallbackSink sink(
+        [](const json&) {}, [](const json&) {},
+        [&outcome](json data) {
+            outcome.result = std::move(data);
+            outcome.exit_code = kOk;
+        },
+        [&outcome](std::string code, const std::string&, json details, int exit_code) {
+            outcome.error_code = std::move(code);
+            outcome.error_details = std::move(details);
+            outcome.exit_code = exit_code;
+        });
+    daemon::RequestSession session(request, sink, 0, daemon::RequestSession::NonceGenerator{},
+                                   daemon::ActivityTracker::Token{}, nullptr, std::nullopt,
+                                   daemon::ConfigAdmissionMode::FrozenRuntime);
+    dispatcher.dispatch(session);
+    return outcome;
+}
+
 Outcome dispatch(const daemon::Dispatcher& dispatcher, const std::vector<std::string>& command) {
     proto::Request request("testacct");
     request.id = 1;
@@ -392,6 +413,24 @@ TEST_CASE("dispatcher activates unlimited defaults only for registered eligible 
                     std::invalid_argument);
 }
 
+TEST_CASE("dormant M3 descriptors require frozen config admission in direct paths",
+          "[dispatch][m3][config-admission][no-daemon]") {
+    daemon::Dispatcher dispatcher;
+    dispatcher.register_command("send", {daemon::Tier::Write,
+                                         [](const proto::Request&, daemon::RequestSession&) {},
+                                         false, daemon::M3Operation::Send});
+    proto::Request send("testacct");
+    send.command = {"send"};
+    CHECK(dispatcher.requires_frozen_config_admission(send));
+    CHECK_THROWS_AS(dispatch_request(dispatcher, send), std::invalid_argument);
+
+    dispatcher.register_command(
+        "ordinary", {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession&) {}});
+    proto::Request ordinary("testacct");
+    ordinary.command = {"ordinary"};
+    CHECK_FALSE(dispatcher.requires_frozen_config_admission(ordinary));
+}
+
 TEST_CASE("fetch retains removal before logout recovery without broadening read history",
           "[dispatch][deadline][preflight][ordering]") {
     const auto fetch = daemon::recovery_preflight_order("fetch");
@@ -441,13 +480,13 @@ TEST_CASE("dispatcher independently rejects invalid or out-of-scope raw idempote
     dry_run.command = {"send"};
     dry_run.context.idempotency_key = "valid-key";
     dry_run.context.dry_run = true;
-    outcome = dispatch_request(m3, dry_run);
+    outcome = dispatch_frozen_request(m3, dry_run);
     CHECK(outcome.error_code == "USAGE");
     CHECK(outcome.error_details ==
           json{{"argument", "--idempotency-key"}, {"reason", "mutually_exclusive"}});
 
     dry_run.context.dry_run = false;
-    outcome = dispatch_request(m3, dry_run);
+    outcome = dispatch_frozen_request(m3, dry_run);
     CHECK(outcome.error_code == "DENIED");
     CHECK(outcome.exit_code == kDenied);
     CHECK_FALSE(handler_ran);
@@ -489,7 +528,10 @@ TEST_CASE("M3 descriptors must match the closed registry and remain fail closed"
              false, policy.operation});
     }
     for (const auto& policy : daemon::m3_operation_policies()) {
-        const auto outcome = dispatch(dispatcher, command_parts(policy.command_path));
+        proto::Request request("testacct");
+        request.id = 1;
+        request.command = command_parts(policy.command_path);
+        const auto outcome = dispatch_frozen_request(dispatcher, request);
         CHECK(outcome.error_code == "DENIED");
         CHECK(outcome.exit_code == kDenied);
     }

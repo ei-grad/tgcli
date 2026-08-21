@@ -1417,6 +1417,11 @@
     },
     "positiveInt32": {
       "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "strictPositiveInt32": {
+      "type": "integer",
       "minimum": 1,
       "maximum": 2147483647
     },
@@ -1617,7 +1622,7 @@
           "const": "forum"
         },
         "id": {
-          "$ref": "#/$defs/positiveInt32"
+          "$ref": "#/$defs/strictPositiveInt32"
         }
       }
     },
@@ -1651,7 +1656,7 @@
               "const": "forum"
             },
             "id": {
-              "$ref": "#/$defs/positiveInt32"
+              "$ref": "#/$defs/strictPositiveInt32"
             }
           }
         },
@@ -1834,7 +1839,7 @@
               "const": "at"
             },
             "send_date": {
-              "$ref": "#/$defs/positiveInt32"
+              "$ref": "#/$defs/strictPositiveInt32"
             }
           }
         }
@@ -4103,6 +4108,162 @@
                 },
                 "exit_code": {
                   "const": 1
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "success",
+        "mutation_state",
+        "completed_stages",
+        "terminal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "phase": {
+          "const": "outcome"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/hex32"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/v2Timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "command": {
+          "const": "send"
+        },
+        "success": {
+          "const": false
+        },
+        "mutation_state": {
+          "const": "none"
+        },
+        "completed_stages": {
+          "enum": [
+            [
+              "dispatch_started"
+            ],
+            [
+              "dispatch_started",
+              "temporary_ids_observed"
+            ],
+            [
+              "idempotency_pending",
+              "dispatch_started"
+            ],
+            [
+              "idempotency_pending",
+              "dispatch_started",
+              "temporary_ids_observed"
+            ]
+          ]
+        },
+        "terminal": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "TDLIB_ERROR"
+                },
+                "message": {
+                  "enum": [
+                    "Telegram request failed"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "tdlib_code"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "send"
+                    },
+                    "tdlib_code": {
+                      "$ref": "#/$defs/int32"
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "RATE_LIMITED"
+                },
+                "message": {
+                  "enum": [
+                    "Telegram rate limit exceeded"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "tdlib_code",
+                    "retry_after"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "send"
+                    },
+                    "tdlib_code": {
+                      "const": 429
+                    },
+                    "retry_after": {
+                      "$ref": "#/$defs/positiveInt32"
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 5
                 }
               }
             }
@@ -35484,6 +35645,166 @@
           "const": false
         },
         "mutation_state": {
+          "const": "none"
+        },
+        "completed_stages": {
+          "enum": [
+            [
+              "spool_ready",
+              "dispatch_started"
+            ],
+            [
+              "spool_ready",
+              "dispatch_started",
+              "temporary_ids_observed"
+            ],
+            [
+              "idempotency_pending",
+              "spool_ready",
+              "dispatch_started"
+            ],
+            [
+              "idempotency_pending",
+              "spool_ready",
+              "dispatch_started",
+              "temporary_ids_observed"
+            ]
+          ]
+        },
+        "terminal": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "TDLIB_ERROR"
+                },
+                "message": {
+                  "enum": [
+                    "Telegram request failed"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "tdlib_code"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "saved_attach"
+                    },
+                    "tdlib_code": {
+                      "$ref": "#/$defs/int32"
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "details",
+                "exit_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error"
+                },
+                "code": {
+                  "const": "RATE_LIMITED"
+                },
+                "message": {
+                  "enum": [
+                    "Telegram rate limit exceeded"
+                  ]
+                },
+                "details": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "tdlib_code",
+                    "retry_after"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "saved_attach"
+                    },
+                    "tdlib_code": {
+                      "const": 429
+                    },
+                    "retry_after": {
+                      "$ref": "#/$defs/positiveInt32"
+                    }
+                  }
+                },
+                "exit_code": {
+                  "const": 5
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "phase",
+        "invocation_id",
+        "timestamp",
+        "account",
+        "command",
+        "success",
+        "mutation_state",
+        "completed_stages",
+        "terminal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "phase": {
+          "const": "outcome"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/hex32"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/v2Timestamp"
+        },
+        "account": {
+          "$ref": "#/$defs/account"
+        },
+        "command": {
+          "const": "saved_attach"
+        },
+        "success": {
+          "const": false
+        },
+        "mutation_state": {
           "const": "possible"
         },
         "completed_stages": {
@@ -37757,9 +38078,7 @@
                       "const": 429
                     },
                     "retry_after": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 2147483647
+                      "$ref": "#/$defs/positiveInt32"
                     }
                   }
                 },
@@ -38275,9 +38594,7 @@
                       "const": 429
                     },
                     "retry_after": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 2147483647
+                      "$ref": "#/$defs/positiveInt32"
                     }
                   }
                 },
@@ -38794,9 +39111,7 @@
                       "const": 429
                     },
                     "retry_after": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 2147483647
+                      "$ref": "#/$defs/positiveInt32"
                     }
                   }
                 },

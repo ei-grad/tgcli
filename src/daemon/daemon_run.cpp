@@ -470,7 +470,8 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     if (!deadline) {
         sink.error("USAGE", "invalid request timeout",
                    {{"argument", "--timeout"}, {"reason", "invalid_argument"}}, kUsage);
-    } else if (deadline_policy == DeadlineDefault::Default60) {
+    } else if (deadline_policy == DeadlineDefault::Default60 &&
+               !selected_dispatcher.requires_frozen_config_admission(admitted)) {
         RequestSession session(admitted, sink, 0, RequestSession::NonceGenerator{},
                                ActivityTracker::Token{}, nullptr, deadline,
                                ConfigAdmissionMode::DirectFallback, admission_wall_time);

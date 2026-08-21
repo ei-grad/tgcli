@@ -114,17 +114,35 @@ tgcli::core::TdChat chat() {
 
 } // namespace
 
-TEST_CASE("ResolverConsumer rejects title-like write targets before every TD read",
+TEST_CASE("ResolverConsumer returns title-like write targets as non-retargeting ambiguity",
           "[resolver][consumer][m3-foundation][fake-boundary]") {
     ConsumerFixture fixture;
     const auto sent_before = fixture.sent_count();
     const auto outcome = fixture.consumer().resolve_exact_chat("Project Team");
     REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(outcome));
     const auto& error = std::get<tgcli::daemon::ResolverError>(outcome);
-    const auto* usage = std::get_if<tgcli::daemon::ResolverUsageError>(&error);
-    REQUIRE(usage != nullptr);
-    CHECK(usage->argument == "chat");
-    CHECK(usage->reason == tgcli::daemon::ResolverUsageReason::InvalidArgument);
+    const auto* ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&error);
+    REQUIRE(ambiguous != nullptr);
+    CHECK(ambiguous->selector == "Project Team");
+    CHECK(ambiguous->scope == tgcli::daemon::ResolverScope::ActiveDialogs);
+    CHECK(ambiguous->candidates.empty());
+    CHECK_FALSE(ambiguous->truncated);
+    CHECK(ambiguous->argument == "chat");
+    CHECK(fixture.sent_count() == sent_before);
+
+    const auto from_outcome = fixture.consumer().resolve_exact_chat("Project Team", "from");
+    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(from_outcome));
+    const auto& from_error = std::get<tgcli::daemon::ResolverError>(from_outcome);
+    const auto* from_ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&from_error);
+    REQUIRE(from_ambiguous != nullptr);
+    CHECK(from_ambiguous->argument == "from");
+
+    const auto to_outcome = fixture.consumer().resolve_exact_chat("Project Team", "to");
+    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(to_outcome));
+    const auto& to_error = std::get<tgcli::daemon::ResolverError>(to_outcome);
+    const auto* to_ambiguous = std::get_if<tgcli::daemon::ResolverAmbiguousError>(&to_error);
+    REQUIRE(to_ambiguous != nullptr);
+    CHECK(to_ambiguous->argument == "to");
     CHECK(fixture.sent_count() == sent_before);
 }
 

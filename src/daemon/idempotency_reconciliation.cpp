@@ -454,6 +454,14 @@ AccountAuditSpoolHold* find_hold(std::vector<AccountAuditSpoolHold>& holds, cons
 
 IdempotencyCoreGateResult spool_failure_result(FileSpoolError failure) {
     IdempotencyCoreGateResult result;
+    if (failure.kind == FileSpoolErrorKind::TimedOut ||
+        failure.kind == FileSpoolErrorKind::Cancelled) {
+        result.status = IdempotencyCoreGateStatus::Interrupted;
+        result.audit_failure.interruption = failure.kind == FileSpoolErrorKind::TimedOut
+                                                ? AccountAuditFailure::Interruption::Deadline
+                                                : AccountAuditFailure::Interruption::Cancelled;
+        return result;
+    }
     result.status = IdempotencyCoreGateStatus::SpoolUnavailable;
     result.spool_failure = std::move(failure);
     return result;

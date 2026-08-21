@@ -889,13 +889,25 @@ class ResolverConsumer::Impl {
         return run_.resolve_chat(std::move(selector), scope);
     }
 
-    ResolverOutcome resolve_exact_chat(std::string selector) {
+    ResolverOutcome resolve_exact_chat(std::string selector, std::string argument) {
         const auto classification = classify_exact_write_selector(selector);
+        if (argument != "chat" && argument != "from" && argument != "to") {
+            return ResolverError{ResolverUsageError{
+                .argument = std::move(argument), .reason = ResolverUsageReason::InvalidArgument}};
+        }
+        if (classification == ExactWriteSelectorStatus::Title) {
+            return ResolverError{ResolverAmbiguousError{.selector = std::move(selector),
+                                                        .scope = ResolverScope::ActiveDialogs,
+                                                        .candidates = {},
+                                                        .truncated = false,
+                                                        .argument = std::move(argument)}};
+        }
         if (classification != ExactWriteSelectorStatus::Exact) {
             const auto reason = classification == ExactWriteSelectorStatus::UnsupportedLink
                                     ? ResolverUsageReason::UnsupportedLinkType
                                     : ResolverUsageReason::InvalidArgument;
-            return ResolverError{ResolverUsageError{.argument = "chat", .reason = reason}};
+            return ResolverError{
+                ResolverUsageError{.argument = std::move(argument), .reason = reason}};
         }
         auto result = run_.resolve_chat(std::move(selector), ResolverScope::ActiveDialogs);
         if (auto* target = std::get_if<ResolvedChatTarget>(&result);
@@ -965,8 +977,8 @@ ResolverOutcome ResolverConsumer::resolve_chat(std::string selector, ResolverSco
     return impl_->resolve_chat(std::move(selector), scope);
 }
 
-ResolverOutcome ResolverConsumer::resolve_exact_chat(std::string selector) {
-    return impl_->resolve_exact_chat(std::move(selector));
+ResolverOutcome ResolverConsumer::resolve_exact_chat(std::string selector, std::string argument) {
+    return impl_->resolve_exact_chat(std::move(selector), std::move(argument));
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {

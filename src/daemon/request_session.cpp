@@ -13,6 +13,16 @@ namespace tgcli::daemon {
 
 namespace {
 
+proto::Request freeze_request(proto::Request&& request) {
+    const proto::Request source = std::move(request);
+    std::string error;
+    auto frozen = proto::admit_request_source(source, error);
+    if (!frozen) {
+        throw std::invalid_argument(error);
+    }
+    return std::move(*frozen);
+}
+
 constexpr std::size_t kConsumedChallengeLimit = 16;
 
 std::optional<std::uint64_t> optional_uint(const nlohmann::json& value) {
@@ -130,7 +140,8 @@ RequestSession::RequestSession(proto::Request request, ResponseSink& transport,
                                std::optional<RequestDeadline> admission_deadline,
                                ConfigAdmissionMode config_admission_mode,
                                std::optional<WallClock::time_point> admission_wall_time)
-    : request_(std::move(request)), transport_(&transport), connection_id_(connection_id),
+    : request_(freeze_request(std::move(request))), transport_(&transport),
+      connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
       admission_wall_time_(admission_wall_time ? admission_wall_time.value() : WallClock::now()),
       nonce_generator_(nonce_generator ? std::move(nonce_generator) : secure_nonce),
@@ -144,7 +155,7 @@ RequestSession::RequestSession(proto::Request request, std::shared_ptr<ResponseS
                                std::optional<RequestDeadline> admission_deadline,
                                ConfigAdmissionMode config_admission_mode,
                                std::optional<WallClock::time_point> admission_wall_time)
-    : request_(std::move(request)), transport_owner_(std::move(transport)),
+    : request_(freeze_request(std::move(request))), transport_owner_(std::move(transport)),
       transport_(transport_owner_.get()), connection_id_(connection_id),
       deadline_(admission_deadline ? *admission_deadline : compute_deadline(request_)),
       admission_wall_time_(admission_wall_time ? admission_wall_time.value() : WallClock::now()),
