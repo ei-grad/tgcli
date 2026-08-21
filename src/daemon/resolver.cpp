@@ -889,6 +889,22 @@ class ResolverConsumer::Impl {
         return run_.resolve_chat(std::move(selector), scope);
     }
 
+    ResolverOutcome resolve_exact_chat(std::string selector) {
+        const auto classification = classify_exact_write_selector(selector);
+        if (classification != ExactWriteSelectorStatus::Exact) {
+            const auto reason = classification == ExactWriteSelectorStatus::UnsupportedLink
+                                    ? ResolverUsageReason::UnsupportedLinkType
+                                    : ResolverUsageReason::InvalidArgument;
+            return ResolverError{ResolverUsageError{.argument = "chat", .reason = reason}};
+        }
+        auto result = run_.resolve_chat(std::move(selector), ResolverScope::ActiveDialogs);
+        if (auto* target = std::get_if<ResolvedChatTarget>(&result);
+            target != nullptr && !persistable_chat_identity(target->chat)) {
+            return ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}};
+        }
+        return result;
+    }
+
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const {
         return run_.cached_saved_messages_chat();
     }
@@ -947,6 +963,10 @@ ResolverPrincipalOutcome ResolverConsumer::bind_principal(ResolverCaller caller)
 
 ResolverOutcome ResolverConsumer::resolve_chat(std::string selector, ResolverScope scope) {
     return impl_->resolve_chat(std::move(selector), scope);
+}
+
+ResolverOutcome ResolverConsumer::resolve_exact_chat(std::string selector) {
+    return impl_->resolve_exact_chat(std::move(selector));
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {
@@ -1067,6 +1087,20 @@ void emit_resolver_error(const ResolverError& error, RequestSession& session,
 
 bool valid_resolve_selector(std::string_view selector) {
     return !selector.empty() && common::valid_utf8(selector) && classify_selector(selector);
+}
+
+ExactWriteSelectorStatus classify_exact_write_selector(std::string_view selector) {
+    const auto classified = classify_local_selector(selector);
+    if (!classified || classified->kind == LocalSelectorKind::InvalidLink) {
+        return ExactWriteSelectorStatus::Invalid;
+    }
+    if (classified->kind == LocalSelectorKind::Title) {
+        return ExactWriteSelectorStatus::Title;
+    }
+    if (classified->kind == LocalSelectorKind::UnsupportedLink) {
+        return ExactWriteSelectorStatus::UnsupportedLink;
+    }
+    return ExactWriteSelectorStatus::Exact;
 }
 
 void ResolveCoordinator::resolve(const proto::Request& request, RequestSession& session) {

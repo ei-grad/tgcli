@@ -1,5 +1,6 @@
 #include "common/daemon_lock.hpp"
 #include "daemon/account_audit.hpp"
+#include "daemon/write_contract.hpp"
 #include "schema_matcher.hpp"
 
 #include <array>
@@ -668,6 +669,42 @@ daemon::AccountAuditDurabilityReason expected_fault_reason(daemon::AccountAuditF
 }
 
 } // namespace
+
+TEST_CASE("typed write contract covers every M3 operation family",
+          "[write-contract][account-audit]") {
+    for (const auto& identity : proto::m3_operation_identities()) {
+        const auto operation = daemon::parse_account_audit_operation(identity.canonical_name);
+        REQUIRE(operation);
+        std::string error;
+        auto typed_arguments = daemon::write_contract::make_arguments(identity.operation,
+                                                                      arguments(*operation), error);
+        INFO(identity.canonical_name);
+        INFO(error);
+        REQUIRE(typed_arguments);
+        auto typed_plan =
+            daemon::write_contract::make_plan(identity.operation, "main", plan(*operation), error);
+        INFO(error);
+        REQUIRE(typed_plan);
+        auto result_document = result_data(*operation);
+        if (*operation == daemon::AccountAuditOperation::MsgEdit) {
+            result_document["id"] = 1;
+        } else if (*operation == daemon::AccountAuditOperation::MsgForward) {
+            result_document["items"][0]["message"]["chat_id"] = -1002;
+        }
+        auto typed_result =
+            daemon::write_contract::make_result(identity.operation, result_document, error);
+        INFO(error);
+        REQUIRE(typed_result);
+        auto terminal = daemon::write_contract::make_result_terminal(*typed_result, error);
+        INFO(error);
+        REQUIRE(terminal);
+        CHECK(daemon::write_contract::terminal_matches_plan(*terminal, *typed_plan));
+
+        auto invalid = typed_plan->value();
+        invalid["unexpected"] = true;
+        CHECK_FALSE(daemon::write_contract::make_plan(identity.operation, "main", invalid, error));
+    }
+}
 
 TEST_CASE("account audit limits preserve the accepted equations", "[account-audit][limits]") {
     using namespace daemon::account_audit_limits;
@@ -3386,6 +3423,35 @@ TEST_CASE("account audit spool holds require durable cleanup receipts before evi
         CHECK(release_failure.reason == daemon::AccountAuditDurabilityReason::Contradiction);
         CHECK(std::filesystem::exists(second.state() + "/spool/" + spool_invocation + "/input"));
     }
+}
+
+TEST_CASE("current spool holds are bound to the exact durable intent receipt",
+          "[account-audit][spool-hold][receipt][write-kernel]") {
+    AuditTree tree;
+    const auto invocation = hex_invocation(119);
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    const auto intent = make_intent(daemon::AccountAuditOperation::SavedAttach, invocation);
+    daemon::AccountAuditAppendReceipt intent_receipt;
+    daemon::AccountAuditFailure failure;
+    REQUIRE(append_intent(log, intent, daemon::KnownAccountAuditPins{}, guard, intent_receipt,
+                          failure));
+    create_spool_object(tree, invocation);
+    const daemon::SpoolRef spool{"spool/" + invocation + "/input",
+                                 {"/tmp/input", "input", std::uint64_t{1},
+                                  std::string(kFingerprint), std::uint64_t{1}, std::uint64_t{2}, 3,
+                                  4}};
+    auto hold = log.hold_current_spool(intent_receipt, spool, guard, failure);
+    INFO(failure.detail);
+    REQUIRE(hold);
+    CHECK(hold->audit_generation() == intent_receipt.audit_generation);
+    CHECK(hold->invocation_id() == invocation);
+    auto cleanup = daemon::cleanup_spool_file_with_hold(std::move(*hold), guard);
+    REQUIRE(std::holds_alternative<daemon::AccountAuditSpoolReleaseReceipt>(cleanup));
+    CHECK(log.release_current_spool(
+        std::move(std::get<daemon::AccountAuditSpoolReleaseReceipt>(cleanup)), intent_receipt,
+        guard, failure));
+    CHECK_FALSE(std::filesystem::exists(tree.state() + "/spool/" + invocation));
 }
 
 TEST_CASE("account audit open spool groups expose typed recovery holds",

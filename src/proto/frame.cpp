@@ -13,6 +13,12 @@
 
 namespace tgcli::proto {
 
+struct RequestSourceAccess {
+    static void set(Request& request, std::uint64_t source_bytes) {
+        request.source_bytes_ = source_bytes;
+    }
+};
+
 namespace {
 
 using nlohmann::json;
@@ -83,7 +89,9 @@ bool validate_destructive_details(const json& details, std::string& error) {
     const auto& action = details["action"].get_ref<const std::string&>();
     const bool matches =
         plan && ((action == "logout" && std::holds_alternative<LogoutPlan>(*plan)) ||
-                 (action == "account_remove" && std::holds_alternative<AccountRemovePlan>(*plan)));
+                 (action == "account_remove" && std::holds_alternative<AccountRemovePlan>(*plan)) ||
+                 (action == "msg_delete" && std::holds_alternative<MsgDeletePlan>(*plan)) ||
+                 (action == "chat_leave" && std::holds_alternative<ChatLeavePlan>(*plan)));
     if (!matches) {
         error = "challenge: invalid destructive_confirmation target";
     }
@@ -220,6 +228,8 @@ std::string_view idempotency_validation_error(IdempotencyValidation validation) 
 }
 
 struct FrameWriter {
+    bool validate_request = true;
+
     json operator()(const Hello& f) const {
         return {{"type", "hello"},
                 {"binary_version", f.binary_version},
@@ -227,11 +237,11 @@ struct FrameWriter {
     }
 
     json operator()(const Request& f) const {
-        if (!paths::valid_account_name(f.account)) {
+        if (validate_request && !paths::valid_account_name(f.account)) {
             throw std::invalid_argument("request account is invalid");
         }
         if (const auto validation = validate_idempotency(f);
-            validation != IdempotencyValidation::Valid) {
+            validate_request && validation != IdempotencyValidation::Valid) {
             throw std::invalid_argument(std::string(idempotency_validation_error(validation)));
         }
         json context{
@@ -750,9 +760,31 @@ bool validate_answer_payload(const json& payload, std::string& error) {
 }
 
 std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_observer) {
-    auto document = std::visit(FrameWriter{}, frame);
+    auto document = std::visit(FrameWriter{true}, frame);
     const secure::JsonWiper document_wiper(document, wipe_observer, "serialized_json");
     return document.dump();
+}
+
+std::optional<Request> admit_request_source(const Request& request, std::string& error) {
+    if (request.source_bytes_ != 0) {
+        if (request.source_bytes_ > kMaximumRequestSourceBytes) {
+            error = "frame exceeds " + std::to_string(kMaximumRequestSourceBytes) + " bytes";
+            return std::nullopt;
+        }
+        error.clear();
+        return request;
+    }
+    auto document = FrameWriter{false}(request);
+    const secure::JsonWiper document_wiper(document, {}, "admitted_request_json");
+    const auto source = document.dump();
+    if (source.empty() || source.size() > kMaximumRequestSourceBytes) {
+        error = "frame exceeds " + std::to_string(kMaximumRequestSourceBytes) + " bytes";
+        return std::nullopt;
+    }
+    auto admitted = request;
+    admitted.source_bytes_ = source.size();
+    error.clear();
+    return admitted;
 }
 
 std::optional<Frame> parse(std::string line, std::string& error,
@@ -766,7 +798,18 @@ std::optional<Frame> parse(std::string line, std::string& error,
     }
     const secure::JsonWiper document_wiper(doc, wipe_observer, "parsed_json");
     try {
-        return Parser(doc, wipe_observer, invalid_answer).run(error);
+        auto parsed = Parser(doc, wipe_observer, invalid_answer).run(error);
+        if (parsed) {
+            if (auto* request = std::get_if<Request>(&*parsed)) {
+                if (line.empty() || line.size() > kMaximumRequestSourceBytes) {
+                    error =
+                        "frame exceeds " + std::to_string(kMaximumRequestSourceBytes) + " bytes";
+                    return std::nullopt;
+                }
+                RequestSourceAccess::set(*request, line.size());
+            }
+        }
+        return parsed;
     } catch (const std::exception&) {
         error = "invalid frame value";
         return std::nullopt;

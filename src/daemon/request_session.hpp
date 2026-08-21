@@ -101,6 +101,7 @@ class RequestSession final : public ResponseSink {
                    std::optional<WallClock::time_point> admission_wall_time = {});
 
     [[nodiscard]] const proto::Request& request() const;
+    [[nodiscard]] std::uint64_t request_source_bytes() const;
     [[nodiscard]] std::uint64_t connection_id() const;
     [[nodiscard]] const RequestDeadline& deadline() const;
     [[nodiscard]] WallClock::time_point admission_wall_time() const;

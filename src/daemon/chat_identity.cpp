@@ -1,6 +1,7 @@
 #include "daemon/chat_identity.hpp"
 
 #include "common/utf8.hpp"
+#include "daemon/account_audit_limits.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -130,6 +131,25 @@ nlohmann::json chat_identity_json(const ChatIdentity& identity) {
             {"type", identity.type},
             {"is_bot", identity.is_bot},
             {"usernames", identity.usernames}};
+}
+
+bool persistable_chat_identity(const ChatIdentity& identity) {
+    if (!valid_int53(identity.id) || !common::valid_utf8(identity.title) ||
+        identity.title.size() > account_audit_limits::kChatTitleBytes ||
+        identity.usernames.size() > account_audit_limits::kChatUsernameCount ||
+        (identity.type != "private" && identity.type != "basic_group" &&
+         identity.type != "supergroup" && identity.type != "channel") ||
+        (identity.type != "private" && identity.is_bot)) {
+        return false;
+    }
+    return std::ranges::all_of(identity.usernames, [](const std::string& username) {
+        return !username.empty() && username.size() <= account_audit_limits::kChatUsernameBytes &&
+               std::ranges::all_of(username, [](char character) {
+                   return (character >= 'A' && character <= 'Z') ||
+                          (character >= 'a' && character <= 'z') ||
+                          (character >= '0' && character <= '9') || character == '_';
+               });
+    });
 }
 
 } // namespace tgcli::daemon

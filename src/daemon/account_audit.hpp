@@ -170,6 +170,12 @@ bool validate_account_audit_stage_history(AccountAuditOperation operation,
                                           std::string& error);
 bool validate_account_audit_persisted_plan(AccountAuditOperation operation,
                                            const nlohmann::json& plan, std::string_view account);
+bool validate_account_audit_persisted_arguments(AccountAuditOperation operation,
+                                                const nlohmann::json& arguments);
+bool validate_account_audit_persisted_result(AccountAuditOperation operation,
+                                             const nlohmann::json& result);
+bool validate_account_audit_persisted_stored_terminal(AccountAuditOperation operation,
+                                                      const nlohmann::json& terminal);
 bool validate_account_audit_persisted_terminal(AccountAuditOperation operation,
                                                const nlohmann::json& terminal,
                                                const nlohmann::json& plan,
@@ -360,6 +366,7 @@ class AccountAuditSpoolHold final {
 
     friend class AccountAuditAppendPermit;
     friend class AccountAuditRecoveryPermit;
+    friend class AccountAuditLog;
     friend class AccountAuditSpoolReleaseReceipt;
     friend struct AccountAuditSpoolHoldAccess;
 };
@@ -390,6 +397,7 @@ class AccountAuditSpoolReleaseReceipt final {
 
     friend class AccountAuditAppendPermit;
     friend class AccountAuditRecoveryPermit;
+    friend class AccountAuditLog;
     friend struct AccountAuditSpoolHoldAccess;
 };
 
@@ -537,6 +545,14 @@ class AccountAuditLog final {
     [[nodiscard]] bool append_outcome(const AccountAuditOutcome& outcome,
                                       const AccountAuditCoordinator::Guard& guard,
                                       AccountAuditFailure& failure) const;
+    [[nodiscard]] std::optional<AccountAuditSpoolHold>
+    hold_current_spool(const AccountAuditAppendReceipt& receipt, const SpoolRef& spool,
+                       const AccountAuditCoordinator::Guard& guard,
+                       AccountAuditFailure& failure) const;
+    [[nodiscard]] bool release_current_spool(AccountAuditSpoolReleaseReceipt release,
+                                             const AccountAuditAppendReceipt& receipt,
+                                             const AccountAuditCoordinator::Guard& guard,
+                                             AccountAuditFailure& failure) const;
 
   private:
     [[nodiscard]]

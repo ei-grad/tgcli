@@ -160,6 +160,10 @@ const proto::Request& RequestSession::request() const {
     return request_;
 }
 
+std::uint64_t RequestSession::request_source_bytes() const {
+    return request_.source_bytes();
+}
+
 std::uint64_t RequestSession::connection_id() const {
     return connection_id_;
 }

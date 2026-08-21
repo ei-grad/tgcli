@@ -3454,6 +3454,23 @@ bool validate_account_audit_persisted_plan(AccountAuditOperation operation, cons
            valid_plan(operation, plan, account);
 }
 
+bool validate_account_audit_persisted_arguments(AccountAuditOperation operation,
+                                                const json& arguments) {
+    return operation != AccountAuditOperation::SessionTerminate &&
+           valid_arguments(operation, arguments);
+}
+
+bool validate_account_audit_persisted_result(AccountAuditOperation operation, const json& result) {
+    return operation != AccountAuditOperation::SessionTerminate &&
+           valid_result_data(operation, result);
+}
+
+bool validate_account_audit_persisted_stored_terminal(AccountAuditOperation operation,
+                                                      const json& terminal) {
+    return operation != AccountAuditOperation::SessionTerminate &&
+           valid_terminal(operation, terminal);
+}
+
 bool validate_account_audit_persisted_terminal(AccountAuditOperation operation,
                                                const json& terminal, const json& plan,
                                                std::string_view account) {
@@ -4380,6 +4397,53 @@ bool AccountAuditLog::append_outcome(const AccountAuditOutcome& outcome,
     }
     return append_document(state_directory_, expected_uid_, outcome.document(), account_, guard,
                            hooks_, failure);
+}
+
+std::optional<AccountAuditSpoolHold>
+AccountAuditLog::hold_current_spool(const AccountAuditAppendReceipt& receipt, const SpoolRef& spool,
+                                    const AccountAuditCoordinator::Guard& guard,
+                                    AccountAuditFailure& failure) const {
+    if (!guard.valid() || receipt.coordinator_ != guard.owner_ || receipt.audit_generation == 0 ||
+        receipt.operation != AccountAuditOperation::SavedAttach || receipt.invocation_id.empty() ||
+        !valid_spool_reference(spool, receipt.invocation_id)) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "current spool hold does not match its durable intent receipt"};
+        return std::nullopt;
+    }
+    std::string lease_error;
+    if (!guard.validate_lease(state_directory_, account_, expected_uid_, lease_error)) {
+        failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
+        return std::nullopt;
+    }
+    failure = {};
+    return AccountAuditSpoolHold(next_spool_permit_id(), 1, state_directory_, account_,
+                                 expected_uid_, guard.owner_, receipt.audit_generation,
+                                 receipt.invocation_id, spool);
+}
+
+bool AccountAuditLog::release_current_spool(AccountAuditSpoolReleaseReceipt release,
+                                            const AccountAuditAppendReceipt& receipt,
+                                            const AccountAuditCoordinator::Guard& guard,
+                                            AccountAuditFailure& failure) const {
+    if (!release.valid() || !guard.valid() || receipt.coordinator_ != guard.owner_ ||
+        release.coordinator_ != guard.owner_ || release.state_directory_ != state_directory_ ||
+        release.account_ != account_ || release.expected_uid_ != expected_uid_ ||
+        release.audit_generation_ != receipt.audit_generation ||
+        release.invocation_id_ != receipt.invocation_id) {
+        failure = {AccountAuditDurabilityReason::Contradiction,
+                   "current spool release does not match its durable intent receipt"};
+        release.invalidate();
+        return false;
+    }
+    std::string lease_error;
+    if (!guard.validate_lease(state_directory_, account_, expected_uid_, lease_error)) {
+        failure = {AccountAuditDurabilityReason::LockFailed, std::move(lease_error)};
+        release.invalidate();
+        return false;
+    }
+    release.invalidate();
+    failure = {};
+    return true;
 }
 
 } // namespace tgcli::daemon

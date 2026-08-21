@@ -194,6 +194,7 @@ add_library(tgcli_util STATIC
     src/common/canonical_json.cpp
     src/common/config.cpp
     src/common/daemon_lock.cpp
+    src/common/invite_redaction.cpp
     src/common/paths.cpp
     src/common/sha256.cpp
     src/common/secret_hook.cpp)
@@ -208,7 +209,7 @@ add_library(tgcli_td_runtime STATIC
     src/core/td_runtime.cpp)
 target_link_libraries(tgcli_td_runtime
     PUBLIC tgcli_common
-    PRIVATE Td::TdStatic)
+    PRIVATE tgcli_util Td::TdStatic)
 
 add_library(tgcli_core STATIC
     src/core/auth_bootstrap.cpp
@@ -252,6 +253,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/ready_read.cpp
     src/daemon/request_fingerprint.cpp
     src/daemon/resolver.cpp
+    src/daemon/write_contract.cpp
+    src/daemon/write_kernel.cpp
     src/daemon/saved_commands.cpp
     src/daemon/single_send.cpp
     src/daemon/commands.cpp

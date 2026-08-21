@@ -12,6 +12,7 @@
 #include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
 #include "daemon/fetch_commands.hpp"
+#include "daemon/idempotency_reconciliation.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
@@ -208,12 +209,23 @@ int run_daemon(const std::string& account) {
         return 1;
     }
     daemon_lock::Identity lock_identity;
-    const int lock_fd = daemon_lock::acquire(account_paths.lock_file, lock_identity, error);
-    if (lock_fd < 0) {
+    auto lifetime_lease =
+        daemon_lock::acquire_lifetime(account_paths.lock_file, lock_identity, error);
+    if (!lifetime_lease) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         ::close(removal_gate_fd);
         return 1;
     }
+    auto foundation_result = IdempotencyFoundation::create(account_paths.state_dir, account,
+                                                           environment.uid, lifetime_lease);
+    if (auto* failure = std::get_if<IdempotencyFailure>(&foundation_result)) {
+        std::fprintf(stderr, "error: cannot initialize account durability foundation: %s\n",
+                     failure->detail.c_str());
+        ::close(removal_gate_fd);
+        return 1;
+    }
+    auto idempotency = std::make_shared<IdempotencyFoundation>(
+        std::get<IdempotencyFoundation>(std::move(foundation_result)));
 
     // Consumed by a dedicated sigwait watcher below; blocked before any
     // thread (tdlib's included) is created so none of them steals the
@@ -274,6 +286,7 @@ int run_daemon(const std::string& account) {
     context.read = &read;
     context.fetch = &fetch;
     context.resolver = &resolver;
+    context.idempotency = idempotency;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -298,7 +311,6 @@ int run_daemon(const std::string& account) {
 
     if (!server.start(error)) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
-        ::close(lock_fd);
         ::close(removal_gate_fd);
         return 1;
     }
@@ -326,7 +338,6 @@ int run_daemon(const std::string& account) {
 
     server.stop();
     td.close();
-    ::close(lock_fd);
     ::close(removal_gate_fd);
     return 0;
 }
@@ -336,12 +347,17 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
                    std::string& error, const Dispatcher* dispatcher_override,
                    core::TdClient* td_client_override,
                    const testing::RequestWallClock& request_wall_clock) {
+    auto admitted_request = proto::admit_request_source(request, error);
+    if (!admitted_request) {
+        return false;
+    }
+    const auto& admitted = *admitted_request;
     const auto admitted_at = RequestClock::now();
     const auto admission_wall_time =
         request_wall_clock ? request_wall_clock() : RequestSession::WallClock::now();
     std::optional<RequestDeadline> admitted_deadline;
-    if (request.context.timeout_seconds) {
-        admitted_deadline = request_deadline(request.context.timeout_seconds,
+    if (admitted.context.timeout_seconds) {
+        admitted_deadline = request_deadline(admitted.context.timeout_seconds,
                                              DeadlineDefault::Default60, admitted_at);
         if (!admitted_deadline) {
             sink.error("USAGE", "invalid request timeout",
@@ -350,16 +366,16 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         }
     }
     const auto environment = paths::real_environment();
-    if (request.command == std::vector<std::string>{"account", "remove"} &&
-        request.args.is_object()) {
+    if (admitted.command == std::vector<std::string>{"account", "remove"} &&
+        admitted.args.is_object()) {
         const RemovalJournal journal(paths::removals_state_dir(environment), environment.uid);
         const auto inspection = journal.inspect_account(account);
         const bool local_recovery = inspection.status == RemovalInspectionStatus::Incomplete &&
                                     inspection.tombstone &&
                                     can_resume_removal_without_tdlib(*inspection.tombstone);
-        if (request.context.dry_run || request.args.value("keep_session", false) ||
+        if (admitted.context.dry_run || admitted.args.value("keep_session", false) ||
             local_recovery) {
-            return run_account_removal_local(request, sink, account, error);
+            return run_account_removal_local(admitted, sink, account, error);
         }
     }
     daemon_lock::Identity removal_gate_identity;
@@ -374,17 +390,27 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         return false;
     }
     daemon_lock::Identity lock_identity;
-    const int lock_fd = daemon_lock::acquire(account_paths.lock_file, lock_identity, error);
-    if (lock_fd < 0) {
+    auto lifetime_lease =
+        daemon_lock::acquire_lifetime(account_paths.lock_file, lock_identity, error);
+    if (!lifetime_lease) {
         ::close(removal_gate_fd);
         return false;
     }
+    auto foundation_result = IdempotencyFoundation::create(account_paths.state_dir, account,
+                                                           environment.uid, lifetime_lease);
+    if (auto* failure = std::get_if<IdempotencyFailure>(&foundation_result)) {
+        error = "cannot initialize account durability foundation: " + failure->detail;
+        ::close(removal_gate_fd);
+        return false;
+    }
+    auto idempotency = std::make_shared<IdempotencyFoundation>(
+        std::get<IdempotencyFoundation>(std::move(foundation_result)));
 
     std::unique_ptr<core::TdClient> owned_td;
     if (td_client_override == nullptr) {
         owned_td = std::make_unique<core::TdClient>(core::TdLogConfiguration{
             .file_path = paths::tdlib_log_file(account, environment),
-            .json_diagnostics = request.context.json,
+            .json_diagnostics = admitted.context.json,
         });
         td_client_override = owned_td.get();
     }
@@ -426,6 +452,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.read = &read;
     context.fetch = &fetch;
     context.resolver = &resolver;
+    context.idempotency = idempotency;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
         return state ? std::string(core::auth_state_name(state->data.state)) : "unknown";
@@ -435,7 +462,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     register_commands(dispatcher, context);
     const auto& selected_dispatcher =
         dispatcher_override != nullptr ? *dispatcher_override : dispatcher;
-    const auto deadline_policy = selected_dispatcher.deadline_default(request);
+    const auto deadline_policy = selected_dispatcher.deadline_default(admitted);
     if (!admitted_deadline) {
         admitted_deadline = request_deadline(std::nullopt, deadline_policy, admitted_at);
     }
@@ -444,14 +471,14 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
         sink.error("USAGE", "invalid request timeout",
                    {{"argument", "--timeout"}, {"reason", "invalid_argument"}}, kUsage);
     } else if (deadline_policy == DeadlineDefault::Default60) {
-        RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
+        RequestSession session(admitted, sink, 0, RequestSession::NonceGenerator{},
                                ActivityTracker::Token{}, nullptr, deadline,
                                ConfigAdmissionMode::DirectFallback, admission_wall_time);
         selected_dispatcher.dispatch(session);
     } else {
-        const auto admission = config_runtime.admit(request.account, *deadline);
+        const auto admission = config_runtime.admit(admitted.account, *deadline);
         if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
-            const bool fetch = request.command == std::vector<std::string>{"fetch"} &&
+            const bool fetch = admitted.command == std::vector<std::string>{"fetch"} &&
                                deadline_policy == DeadlineDefault::Unlimited;
             sink.error("TIMEOUT", "config admission timed out",
                        {{"operation", fetch ? "fetch" : "config_admission"}, {"state", nullptr}},
@@ -462,7 +489,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
                        {{"reason", "daemon_shutdown"}}, kGeneric);
         } else if (const auto* accepted = std::get_if<std::shared_ptr<const AdmittedAccountConfig>>(
                        &*admission.decision)) {
-            RequestSession session(request, sink, 0, RequestSession::NonceGenerator{},
+            RequestSession session(admitted, sink, 0, RequestSession::NonceGenerator{},
                                    ActivityTracker::Token{}, *accepted, deadline,
                                    ConfigAdmissionMode::FrozenRuntime, admission_wall_time);
             selected_dispatcher.dispatch(session);
@@ -484,7 +511,6 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     if (owned_td) {
         td.close();
     }
-    ::close(lock_fd);
     ::close(removal_gate_fd);
     return true;
 }

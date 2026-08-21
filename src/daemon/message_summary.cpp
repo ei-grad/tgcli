@@ -1,7 +1,9 @@
 #include "daemon/message_summary.hpp"
 
 #include "common/utf8.hpp"
+#include "daemon/account_audit_limits.hpp"
 
+#include <algorithm>
 #include <array>
 #include <ctime>
 #include <limits>
@@ -189,6 +191,18 @@ nlohmann::json message_summary_json(const MessageSummary& message) {
         {"topic", message.topic ? topic_ref_json(*message.topic) : nlohmann::json(nullptr)},
         {"type", content_kind_name(message.type)},
         {"text", message.text}};
+}
+
+bool persistable_message_summary(const MessageSummary& message) {
+    if (!valid_int53(message.id) || !valid_int53(message.chat_id) ||
+        !common::valid_utf8(message.text) ||
+        message.text.size() > account_audit_limits::kMessageTextBytes) {
+        return false;
+    }
+    const auto scalars = static_cast<std::size_t>(
+        std::count_if(message.text.begin(), message.text.end(),
+                      [](unsigned char byte) { return (byte & 0xC0U) != 0x80U; }));
+    return scalars <= account_audit_limits::kMessageTextScalars;
 }
 
 } // namespace tgcli::daemon

@@ -17,7 +17,7 @@ namespace {
 
 // A frame is one command's worth of JSON; anything beyond this is a protocol
 // violation, not data.
-constexpr std::size_t kMaxLineBytes = std::size_t{16} * 1024 * 1024;
+constexpr std::size_t kMaxLineBytes = kMaximumRequestSourceBytes;
 
 bool wait_for_io(int fd, short events, const IoDeadline& deadline, std::string_view operation,
                  std::string& error) {
@@ -138,6 +138,11 @@ std::optional<std::string> FrameReader::read_line_impl(const IoDeadline* deadlin
     error.clear();
     while (true) {
         if (const auto pos = buffer_.find('\n'); pos != std::string::npos) {
+            if (pos > kMaxLineBytes) {
+                error = "frame exceeds " + std::to_string(kMaxLineBytes) + " bytes";
+                secure::wipe(buffer_, wipe_observer_, "frame_reader_error");
+                return std::nullopt;
+            }
             std::string line = buffer_.substr(0, pos);
             std::string remainder = buffer_.substr(pos + 1);
             secure::wipe(buffer_, wipe_observer_, "frame_reader_buffer");

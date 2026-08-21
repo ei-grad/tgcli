@@ -12,6 +12,7 @@ add_executable(tgcli_unit_tests
     message_commands_test.cpp
     message_recovery_test.cpp
     message_td_runtime_conversion_test.cpp
+    m3_foundation_test.cpp
     login_commands_test.cpp
     logout_commands_test.cpp
     config_test.cpp
@@ -34,6 +35,7 @@ add_executable(tgcli_unit_tests
     frame_test.cpp
     hash_canonical_test.cpp
     idempotency_store_test.cpp
+    write_kernel_test.cpp
     paths_test.cpp
     query_registry_test.cpp
     update_bus_test.cpp

@@ -1,6 +1,7 @@
 #include "proto/destructive_plan.hpp"
 
 #include "common/paths.hpp"
+#include "common/utf8.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -57,6 +58,63 @@ bool valid_normalized_absolute_path(std::string_view value) {
         return false;
     }
     return candidate.lexically_normal().generic_string() == value;
+}
+
+bool valid_int53(const json& value, bool positive = false) {
+    constexpr auto maximum = std::int64_t{9'007'199'254'740'991};
+    if (!value.is_number_integer()) {
+        return false;
+    }
+    const auto number = value.get<std::int64_t>();
+    return positive ? number > 0 && number <= maximum
+                    : number != 0 && number >= -maximum && number <= maximum;
+}
+
+bool valid_chat_identity(const json& value) {
+    if (!exact_fields(value, {"id", "title", "type", "is_bot", "usernames"}) ||
+        !valid_int53(value["id"]) || !value["title"].is_string() ||
+        value["title"].get_ref<const std::string&>().size() > 1'048'576 ||
+        !common::valid_utf8(value["title"].get_ref<const std::string&>()) ||
+        !value["type"].is_string() || !value["is_bot"].is_boolean() ||
+        !value["usernames"].is_array() || value["usernames"].size() > 100) {
+        return false;
+    }
+    const auto& type = value["type"].get_ref<const std::string&>();
+    if ((type != "private" && type != "basic_group" && type != "supergroup" && type != "channel") ||
+        (type != "private" && value["is_bot"].get<bool>())) {
+        return false;
+    }
+    return std::ranges::all_of(value["usernames"], [](const json& item) {
+        if (!item.is_string()) {
+            return false;
+        }
+        const auto& username = item.get_ref<const std::string&>();
+        return !username.empty() && username.size() <= 32 &&
+               std::ranges::all_of(username, [](char character) {
+                   return (character >= 'A' && character <= 'Z') ||
+                          (character >= 'a' && character <= 'z') ||
+                          (character >= '0' && character <= '9') || character == '_';
+               });
+    });
+}
+
+std::optional<std::vector<std::int64_t>> parse_message_ids(const json& value) {
+    if (!value.is_array() || value.empty() || value.size() > 100) {
+        return std::nullopt;
+    }
+    std::vector<std::int64_t> result;
+    result.reserve(value.size());
+    for (const auto& item : value) {
+        if (!valid_int53(item, true)) {
+            return std::nullopt;
+        }
+        const auto id = item.get<std::int64_t>();
+        if (!result.empty() && id <= result.back()) {
+            return std::nullopt;
+        }
+        result.push_back(id);
+    }
+    return result;
 }
 
 bool equivalent_path(std::string_view lhs, std::string_view rhs) {
@@ -176,6 +234,42 @@ const std::optional<std::string>& AccountRemovePlan::reassign_default() const {
     return input_.reassign_default;
 }
 
+MsgDeletePlan::MsgDeletePlan(std::string account, json chat, std::vector<std::int64_t> message_ids,
+                             bool requested_for_all, bool effective_for_all)
+    : account_(std::move(account)), chat_(std::move(chat)), message_ids_(std::move(message_ids)),
+      requested_for_all_(requested_for_all), effective_for_all_(effective_for_all) {}
+
+const std::string& MsgDeletePlan::account() const {
+    return account_;
+}
+
+const json& MsgDeletePlan::chat() const {
+    return chat_;
+}
+
+const std::vector<std::int64_t>& MsgDeletePlan::message_ids() const {
+    return message_ids_;
+}
+
+bool MsgDeletePlan::requested_for_all() const {
+    return requested_for_all_;
+}
+
+bool MsgDeletePlan::effective_for_all() const {
+    return effective_for_all_;
+}
+
+ChatLeavePlan::ChatLeavePlan(std::string account, json chat)
+    : account_(std::move(account)), chat_(std::move(chat)) {}
+
+const std::string& ChatLeavePlan::account() const {
+    return account_;
+}
+
+const json& ChatLeavePlan::chat() const {
+    return chat_;
+}
+
 std::optional<LogoutPlan> make_logout_plan(std::string account, std::string& error) {
     if (!paths::valid_account_name(account)) {
         error = "logout plan account is invalid";
@@ -282,6 +376,46 @@ std::optional<AccountRemovePlan> parse_account_remove_plan(const json& value, st
     return make_account_remove_plan(std::move(input), error);
 }
 
+std::optional<MsgDeletePlan> parse_msg_delete_plan(const json& value, std::string& error) {
+    if (!exact_fields(value, {"operation", "account", "tdlib_request", "chat", "message_ids",
+                              "requested_for_all", "effective_for_all"}) ||
+        value["operation"] != "msg_delete" || !value["account"].is_string() ||
+        !paths::valid_account_name(value["account"].get_ref<const std::string&>()) ||
+        value["tdlib_request"] != "deleteMessages" || !valid_chat_identity(value["chat"]) ||
+        !value["requested_for_all"].is_boolean() || !value["effective_for_all"].is_boolean()) {
+        error = "message deletion plan must have the exact contract shape and types";
+        return std::nullopt;
+    }
+    auto ids = parse_message_ids(value["message_ids"]);
+    if (!ids) {
+        error = "message deletion plan ids must be unique ascending positive int53 values";
+        return std::nullopt;
+    }
+    const auto& type = value["chat"]["type"].get_ref<const std::string&>();
+    const bool requested = value["requested_for_all"].get<bool>();
+    const bool effective = value["effective_for_all"].get<bool>();
+    if ((type == "supergroup" || type == "channel") ? !effective : effective != requested) {
+        error = "message deletion plan revoke policy contradicts its chat identity";
+        return std::nullopt;
+    }
+    error.clear();
+    return MsgDeletePlan(value["account"].get<std::string>(), value["chat"], std::move(*ids),
+                         requested, effective);
+}
+
+std::optional<ChatLeavePlan> parse_chat_leave_plan(const json& value, std::string& error) {
+    if (!exact_fields(value, {"operation", "account", "tdlib_request", "chat"}) ||
+        value["operation"] != "chat_leave" || !value["account"].is_string() ||
+        !paths::valid_account_name(value["account"].get_ref<const std::string&>()) ||
+        value["tdlib_request"] != "leaveChat" || !valid_chat_identity(value["chat"]) ||
+        value["chat"]["type"] == "private") {
+        error = "chat leave plan must have the exact contract shape and group target";
+        return std::nullopt;
+    }
+    error.clear();
+    return ChatLeavePlan(value["account"].get<std::string>(), value["chat"]);
+}
+
 std::optional<DestructivePlan> parse_destructive_plan(const json& value, std::string& error) {
     if (!value.is_object()) {
         error = "destructive plan must be an object";
@@ -301,6 +435,20 @@ std::optional<DestructivePlan> parse_destructive_plan(const json& value, std::st
     }
     if (*operation == "account_remove") {
         auto plan = parse_account_remove_plan(value, error);
+        if (plan) {
+            return DestructivePlan{std::move(*plan)};
+        }
+        return std::nullopt;
+    }
+    if (*operation == "msg_delete") {
+        auto plan = parse_msg_delete_plan(value, error);
+        if (plan) {
+            return DestructivePlan{std::move(*plan)};
+        }
+        return std::nullopt;
+    }
+    if (*operation == "chat_leave") {
+        auto plan = parse_chat_leave_plan(value, error);
         if (plan) {
             return DestructivePlan{std::move(*plan)};
         }
@@ -328,6 +476,23 @@ json serialize(const AccountRemovePlan& plan) {
             {"data_root", serialize_root(plan.data_root())},
             {"state_root", serialize_root(plan.state_root())},
             {"reassign_default", serialize_nullable_string(plan.reassign_default())}};
+}
+
+json serialize(const MsgDeletePlan& plan) {
+    return {{"operation", "msg_delete"},
+            {"account", plan.account()},
+            {"tdlib_request", "deleteMessages"},
+            {"chat", plan.chat()},
+            {"message_ids", plan.message_ids()},
+            {"requested_for_all", plan.requested_for_all()},
+            {"effective_for_all", plan.effective_for_all()}};
+}
+
+json serialize(const ChatLeavePlan& plan) {
+    return {{"operation", "chat_leave"},
+            {"account", plan.account()},
+            {"tdlib_request", "leaveChat"},
+            {"chat", plan.chat()}};
 }
 
 json serialize(const DestructivePlan& plan) {

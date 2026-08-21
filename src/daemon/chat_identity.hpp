@@ -35,5 +35,6 @@ using ChatIdentityRead = std::function<std::optional<ReadyReadResult>(const Read
 ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core::TdChat& chat,
                                              const ChatIdentityRead& read);
 nlohmann::json chat_identity_json(const ChatIdentity& identity);
+bool persistable_chat_identity(const ChatIdentity& identity);
 
 } // namespace tgcli::daemon

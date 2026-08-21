@@ -121,6 +121,10 @@ struct ResolvedChatTarget {
 using ResolverPrincipalOutcome = std::variant<ResolverPrincipal, ResolverError, ResolverStop>;
 using ResolverOutcome = std::variant<ResolvedChatTarget, ResolverError, ResolverStop>;
 
+enum class ExactWriteSelectorStatus { Exact, Invalid, Title, UnsupportedLink };
+
+ExactWriteSelectorStatus classify_exact_write_selector(std::string_view selector);
+
 class ResolverConsumer {
   public:
     ResolverConsumer(core::TdClient& client, std::string_view account, RequestSession& session);
@@ -132,6 +136,7 @@ class ResolverConsumer {
 
     ResolverPrincipalOutcome bind_principal(ResolverCaller caller);
     ResolverOutcome resolve_chat(std::string selector, ResolverScope scope);
+    ResolverOutcome resolve_exact_chat(std::string selector);
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const;
     ReadyReadResult read_target(const ReadyReadStart& start);
 

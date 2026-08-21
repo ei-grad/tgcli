@@ -47,5 +47,6 @@ std::optional<TopicRef> materialize_topic_ref(const core::TdTopic& topic);
 std::optional<MessageSummary> materialize_message_summary(const core::TdMessageSummary& message);
 nlohmann::json topic_ref_json(const TopicRef& topic);
 nlohmann::json message_summary_json(const MessageSummary& message);
+bool persistable_message_summary(const MessageSummary& message);
 
 } // namespace tgcli::daemon

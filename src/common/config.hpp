@@ -106,6 +106,22 @@ struct MutationResult {
     std::optional<ConfigError> error;
 };
 
+enum class GrantVerificationStatus {
+    Matched,
+    Denied,
+    Conflict,
+    Invalid,
+    IoError,
+    TimedOut,
+    Cancelled,
+};
+
+struct GrantVerificationResult {
+    GrantVerificationStatus status = GrantVerificationStatus::IoError;
+    std::shared_ptr<const ConfigSnapshot> snapshot;
+    std::optional<ConfigError> error;
+};
+
 struct PromptedAppCredentials {
     std::optional<std::int32_t> api_id;
     std::optional<std::string> api_hash;
@@ -121,6 +137,9 @@ class Store {
           uid_t expected_uid = static_cast<uid_t>(-1));
 
     [[nodiscard]] LoadResult load(const MutationControl& control = {}) const;
+    [[nodiscard]] GrantVerificationResult
+    verify_write_grant(std::string_view expected_identity, std::string_view account,
+                       const MutationControl& control = {}) const;
     [[nodiscard]] MutationResult add_account(std::string_view expected_identity,
                                              std::string_view account,
                                              const MutationControl& control = {}) const;

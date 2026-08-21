@@ -114,6 +114,20 @@ tgcli::core::TdChat chat() {
 
 } // namespace
 
+TEST_CASE("ResolverConsumer rejects title-like write targets before every TD read",
+          "[resolver][consumer][m3-foundation][fake-boundary]") {
+    ConsumerFixture fixture;
+    const auto sent_before = fixture.sent_count();
+    const auto outcome = fixture.consumer().resolve_exact_chat("Project Team");
+    REQUIRE(std::holds_alternative<tgcli::daemon::ResolverError>(outcome));
+    const auto& error = std::get<tgcli::daemon::ResolverError>(outcome);
+    const auto* usage = std::get_if<tgcli::daemon::ResolverUsageError>(&error);
+    REQUIRE(usage != nullptr);
+    CHECK(usage->argument == "chat");
+    CHECK(usage->reason == tgcli::daemon::ResolverUsageReason::InvalidArgument);
+    CHECK(fixture.sent_count() == sent_before);
+}
+
 TEST_CASE("ResolverConsumer returns immutable context without emitting a terminal",
           "[resolver][consumer][fake-boundary]") {
     ConsumerFixture fixture;

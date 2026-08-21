@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace tgcli::daemon {
@@ -14,6 +15,7 @@ class MessageCoordinator;
 class ReadCoordinator;
 class FetchCoordinator;
 class ResolveCoordinator;
+class IdempotencyFoundation;
 
 // Everything M0 command handlers need. Grows with the milestones (config,
 // resolver, safety state); td_api types never appear here — handlers that
@@ -34,6 +36,7 @@ struct DaemonContext {
     ReadCoordinator* read = nullptr;
     FetchCoordinator* fetch = nullptr;
     ResolveCoordinator* resolver = nullptr;
+    std::shared_ptr<IdempotencyFoundation> idempotency;
     std::function<std::string()> auth_state = [] { return "unknown"; };
     // Wired by the daemon entrypoint; asks the server to shut down
     // gracefully (daemon stop). No-op in --no-daemon mode.

@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -70,7 +71,48 @@ class AccountRemovePlan final {
                                                                      std::string& error);
 };
 
-using DestructivePlan = std::variant<LogoutPlan, AccountRemovePlan>;
+class MsgDeletePlan final {
+  public:
+    [[nodiscard]] const std::string& account() const;
+    [[nodiscard]] const nlohmann::json& chat() const;
+    [[nodiscard]] const std::vector<std::int64_t>& message_ids() const;
+    [[nodiscard]] bool requested_for_all() const;
+    [[nodiscard]] bool effective_for_all() const;
+
+    friend bool operator==(const MsgDeletePlan&, const MsgDeletePlan&) = default;
+
+  private:
+    MsgDeletePlan(std::string account, nlohmann::json chat, std::vector<std::int64_t> message_ids,
+                  bool requested_for_all, bool effective_for_all);
+
+    std::string account_;
+    nlohmann::json chat_;
+    std::vector<std::int64_t> message_ids_;
+    bool requested_for_all_ = false;
+    bool effective_for_all_ = false;
+
+    friend std::optional<MsgDeletePlan> parse_msg_delete_plan(const nlohmann::json& value,
+                                                              std::string& error);
+};
+
+class ChatLeavePlan final {
+  public:
+    [[nodiscard]] const std::string& account() const;
+    [[nodiscard]] const nlohmann::json& chat() const;
+
+    friend bool operator==(const ChatLeavePlan&, const ChatLeavePlan&) = default;
+
+  private:
+    ChatLeavePlan(std::string account, nlohmann::json chat);
+
+    std::string account_;
+    nlohmann::json chat_;
+
+    friend std::optional<ChatLeavePlan> parse_chat_leave_plan(const nlohmann::json& value,
+                                                              std::string& error);
+};
+
+using DestructivePlan = std::variant<LogoutPlan, AccountRemovePlan, MsgDeletePlan, ChatLeavePlan>;
 
 std::optional<LogoutPlan> make_logout_plan(std::string account, std::string& error);
 std::optional<AccountRemovePlan> make_account_remove_plan(AccountRemovePlanInput input,
@@ -79,11 +121,15 @@ std::optional<AccountRemovePlan> make_account_remove_plan(AccountRemovePlanInput
 std::optional<LogoutPlan> parse_logout_plan(const nlohmann::json& value, std::string& error);
 std::optional<AccountRemovePlan> parse_account_remove_plan(const nlohmann::json& value,
                                                            std::string& error);
+std::optional<MsgDeletePlan> parse_msg_delete_plan(const nlohmann::json& value, std::string& error);
+std::optional<ChatLeavePlan> parse_chat_leave_plan(const nlohmann::json& value, std::string& error);
 std::optional<DestructivePlan> parse_destructive_plan(const nlohmann::json& value,
                                                       std::string& error);
 
 nlohmann::json serialize(const LogoutPlan& plan);
 nlohmann::json serialize(const AccountRemovePlan& plan);
+nlohmann::json serialize(const MsgDeletePlan& plan);
+nlohmann::json serialize(const ChatLeavePlan& plan);
 nlohmann::json serialize(const DestructivePlan& plan);
 
 bool valid_config_snapshot_identity(std::string_view identity, bool allow_missing = true);

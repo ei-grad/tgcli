@@ -867,6 +867,42 @@ bool cleanup_transaction(int directory_fd, ConfigError& error) {
     return true;
 }
 
+std::optional<GrantVerificationResult>
+grant_verification_interruption(const MutationControl& control) {
+    if (control.cancellation.stop_requested()) {
+        return GrantVerificationResult{GrantVerificationStatus::Cancelled, {}, {}};
+    }
+    if (control.deadline && std::chrono::steady_clock::now() >= *control.deadline) {
+        return GrantVerificationResult{GrantVerificationStatus::TimedOut, {}, {}};
+    }
+    return std::nullopt;
+}
+
+std::optional<GrantVerificationResult>
+acquire_grant_verification_lock(int descriptor, const MutationControl& control) {
+    while (::flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
+        const int lock_error = errno;
+        if (auto result = grant_verification_interruption(control)) {
+            return result;
+        }
+        if (lock_error != EINTR && lock_error != EWOULDBLOCK && lock_error != EAGAIN) {
+            return GrantVerificationResult{
+                GrantVerificationStatus::IoError,
+                {},
+                make_error(ConfigReason::IoError,
+                           "cannot lock config.lock: " + std::string(std::strerror(lock_error)))};
+        }
+        if (control.deadline) {
+            std::this_thread::sleep_until(
+                std::min(*control.deadline,
+                         std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    return grant_verification_interruption(control);
+}
+
 // Recovery exhaustively distinguishes every durable pending/committed file layout.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool recover_transaction(int directory_fd, uid_t expected_uid, ConfigError& error) {
@@ -1152,6 +1188,80 @@ LoadResult Store::load(const MutationControl& control) const {
     return {{},
             make_error(ConfigReason::IoError,
                        "config.toml kept changing while a stable snapshot was read")};
+}
+
+GrantVerificationResult Store::verify_write_grant(std::string_view expected_identity,
+                                                  std::string_view account,
+                                                  const MutationControl& control) const {
+    if (auto result = grant_verification_interruption(control)) {
+        return std::move(*result);
+    }
+    if (!paths::valid_account_name(std::string(account)) || expected_identity.empty()) {
+        return {GrantVerificationStatus::Invalid,
+                {},
+                make_error(ConfigReason::PathInvalid, "invalid config grant verification input")};
+    }
+
+    ConfigError error;
+    bool missing = false;
+    auto directory =
+        open_config_directory(config_path_, expected_uid_, false, hooks_, missing, error);
+    if (!directory) {
+        return {GrantVerificationStatus::IoError, {}, std::move(error)};
+    }
+    if (missing) {
+        auto snapshot = std::make_shared<ConfigSnapshot>();
+        snapshot->identity = "missing";
+        return {GrantVerificationStatus::Conflict, std::move(snapshot), {}};
+    }
+
+    const int raw_lock =
+        ::openat(directory->get(), kLockName.data(), nofollow_flags(O_RDWR | O_CREAT), 0600);
+    if (raw_lock < 0) {
+        const auto reason = errno == ELOOP ? ConfigReason::WrongType : ConfigReason::IoError;
+        return {
+            GrantVerificationStatus::IoError,
+            {},
+            make_error(reason, "cannot open config.lock: " + std::string(std::strerror(errno)))};
+    }
+    const Descriptor lock(raw_lock);
+    struct stat lock_status {};
+    if (!validate_regular_file(lock.get(), expected_uid_, "config.lock", lock_status, error)) {
+        return {GrantVerificationStatus::IoError, {}, std::move(error)};
+    }
+    if (auto result = acquire_grant_verification_lock(lock.get(), control)) {
+        return std::move(*result);
+    }
+    if (!lock_entry_matches(directory->get(), lock_status, expected_uid_)) {
+        return {GrantVerificationStatus::IoError,
+                {},
+                make_error(ConfigReason::PathInvalid,
+                           "config.lock changed or was replaced while acquiring it")};
+    }
+    notify_stage(hooks_, testing::MutationStage::AfterLock);
+    if (!canonical_directory_matches(*directory, expected_uid_, error)) {
+        return {GrantVerificationStatus::IoError, {}, std::move(error)};
+    }
+    if (transaction_marker_present(directory->get())) {
+        return {GrantVerificationStatus::IoError,
+                {},
+                make_error(ConfigReason::SyncError,
+                           "config transaction requires recovery before grant verification")};
+    }
+
+    auto current = read_from_directory(directory->get(), expected_uid_);
+    if (!current.parsed) {
+        return {GrantVerificationStatus::Invalid, {}, std::move(current.error)};
+    }
+    auto snapshot = std::move(current.parsed->snapshot);
+    if (snapshot->identity != expected_identity) {
+        return {GrantVerificationStatus::Conflict, std::move(snapshot), {}};
+    }
+    const auto found = snapshot->accounts.find(account);
+    if (found == snapshot->accounts.end() || !found->second.allow_write) {
+        return {GrantVerificationStatus::Denied, std::move(snapshot), {}};
+    }
+    return {GrantVerificationStatus::Matched, std::move(snapshot), {}};
 }
 
 MutationResult Store::add_account(std::string_view expected_identity, std::string_view account,

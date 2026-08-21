@@ -1,5 +1,7 @@
 #include "core/td_log.hpp"
 
+#include "common/invite_redaction.hpp"
+
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -273,6 +275,8 @@ bool TdLogSink::append(int verbosity, std::string_view record, std::string& erro
         error.clear();
         return true;
     }
+    const auto redacted = redaction::InviteLinkRegistry::instance().redact(record);
+    record = redacted;
     const std::lock_guard<std::mutex> lock(mutex_);
     error.clear();
     if (poisoned_) {

@@ -20,7 +20,10 @@
 // the spec-bound part.
 namespace tgcli::proto {
 
+struct RequestSourceAccess;
+
 inline constexpr int kProtocolVersion = 3;
+inline constexpr std::uint64_t kMaximumRequestSourceBytes = 16'842'751;
 
 // The client folds --allow-write and TGCLI_ALLOW_WRITE into this field; the
 // daemon cannot see the invoking shell's environment (DESIGN.md §6/§10).
@@ -78,11 +81,23 @@ struct RequestContext {
 struct Request {
     explicit Request(std::string account_value);
 
-    std::uint64_t id = 0;
-    std::string account;
+    [[nodiscard]] std::uint64_t source_bytes() const noexcept {
+        return source_bytes_;
+    }
+
+    std::uint64_t id = 0; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+    std::string account;  // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+    // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
     std::vector<std::string> command;
+    // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
     nlohmann::json args = nlohmann::json::object();
-    RequestContext context;
+    RequestContext context; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+
+  private:
+    std::uint64_t source_bytes_ = 0;
+
+    friend std::optional<Request> admit_request_source(const Request& request, std::string& error);
+    friend struct RequestSourceAccess;
 };
 
 // Terminal success frame for a request.
@@ -140,6 +155,10 @@ struct Answer {
 };
 
 using Frame = std::variant<Hello, Request, Result, Item, Progress, Error, Challenge, Answer>;
+
+// Canonically samples an in-process Request using the same compact JSON bytes
+// admitted by the socket reader. The returned copy owns the immutable sample.
+std::optional<Request> admit_request_source(const Request& request, std::string& error);
 
 // Single-line JSON without a trailing newline; the transport appends '\n'.
 std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_observer = {});
