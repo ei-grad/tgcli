@@ -3,6 +3,7 @@
 #include "common/utf8.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstddef>
 #include <limits>
@@ -34,15 +35,15 @@ bool leap_year(int year) {
 }
 
 int days_in_month(int year, int month) {
-    constexpr int days[]{0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    constexpr std::array days{0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     if (month < 1 || month > 12) {
         return 0;
     }
-    return month == 2 && leap_year(year) ? 29 : days[month];
+    return month == 2 && leap_year(year) ? 29 : days.at(static_cast<std::size_t>(month));
 }
 
 std::int64_t days_from_civil(int year, unsigned month, unsigned day) {
-    year -= month <= 2;
+    year -= static_cast<int>(month <= 2);
     const auto era = (year >= 0 ? year : year - 399) / 400;
     const auto year_of_era = static_cast<unsigned>(year - era * 400);
     const auto adjusted_month = month > 2 ? month - 3U : month + 9U;
@@ -52,6 +53,7 @@ std::int64_t days_from_civil(int year, unsigned month, unsigned day) {
     return static_cast<std::int64_t>(era) * 146097 + static_cast<std::int64_t>(day_of_era) - 719468;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): strict timestamp grammar and bounds.
 std::optional<std::int32_t> parse_rfc3339(std::string_view value) {
     if (value.size() < 20 || value[4] != '-' || value[7] != '-' || value[10] != 'T' ||
         value[13] != ':' || value[16] != ':') {
@@ -92,7 +94,8 @@ std::optional<std::int32_t> parse_rfc3339(std::string_view value) {
         if (!zone_hour || !zone_minute || *zone_hour > 23 || *zone_minute > 59) {
             return std::nullopt;
         }
-        zone_seconds = static_cast<std::int64_t>(*zone_hour) * 3600 + *zone_minute * 60;
+        zone_seconds = static_cast<std::int64_t>(*zone_hour) * 3600 +
+                       static_cast<std::int64_t>(*zone_minute) * 60;
         if (value[offset] == '-') {
             zone_seconds = -zone_seconds;
         }
@@ -107,8 +110,8 @@ std::optional<std::int32_t> parse_rfc3339(std::string_view value) {
     const auto unix_seconds =
         days_from_civil(*year, static_cast<unsigned>(*month), static_cast<unsigned>(*day)) *
             86'400 +
-        static_cast<std::int64_t>(*hour) * 3'600 + *minute * 60 + *second - zone_seconds +
-        (fractional_nonzero ? 1 : 0);
+        static_cast<std::int64_t>(*hour) * 3'600 + static_cast<std::int64_t>(*minute) * 60 +
+        *second - zone_seconds + (fractional_nonzero ? 1 : 0);
     if (unix_seconds < 1 || unix_seconds > std::numeric_limits<std::int32_t>::max()) {
         return std::nullopt;
     }

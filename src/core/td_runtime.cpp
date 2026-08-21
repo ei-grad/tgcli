@@ -1451,6 +1451,7 @@ TdValue convert_delete_messages_update(td_api::updateDeleteMessages& update,
                                                 .from_cache = update.from_cache_});
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed TDLib response type union.
 TdValue convert_response(NativeObjectPtr object, std::uint64_t client_generation = 0) {
     if (object == nullptr) {
         return {};

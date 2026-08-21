@@ -91,7 +91,7 @@ bool reject_invalid_idempotency(const proto::Request& request, RequestSession& s
     return false;
 }
 
-constexpr bool publicly_active_m3(M3Operation operation) noexcept {
+constexpr bool publicly_active_m3(const std::optional<M3Operation>& operation) noexcept {
     return operation == M3Operation::Send || operation == M3Operation::MsgDelete;
 }
 
@@ -254,7 +254,7 @@ void Dispatcher::dispatch(RequestSession& session) const {
     const bool m1_destructive = is_m1_destructive_command(key) &&
                                 it->second.tier == Tier::Destructive &&
                                 it->second.m1_destructive_kernel;
-    const bool active_m3 = it->second.m3_operation && publicly_active_m3(*it->second.m3_operation);
+    const bool active_m3 = publicly_active_m3(it->second.m3_operation);
     if (it->second.tier != Tier::Read && !m1_destructive && !active_m3) {
         session.error("DENIED", "write-tier commands are not implemented yet (fail-closed gate)",
                       nlohmann::json::object(), kDenied);

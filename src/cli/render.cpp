@@ -481,6 +481,7 @@ std::string render_fetch(const nlohmann::json& data) {
 
 } // namespace
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed public command renderer table.
 std::string render_human(const std::string& command_key, const nlohmann::json& data) {
     if (command_key == "version") {
         return render_version(data);

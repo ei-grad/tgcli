@@ -714,7 +714,7 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
             return report_usage("--reply-to must be a nonzero int53 message id", "--reply-to");
         }
         if (send.topic_option->count() != 0 && !tgcli::daemon::parse_send_topic(send.topic)) {
-            const auto reason =
+            const char* const reason =
                 send.topic.find(':') != std::string::npos && !send.topic.starts_with("forum:")
                     ? "unsupported_topic_kind"
                     : "invalid_argument";
@@ -826,6 +826,7 @@ nlohmann::json read_request_args(const ReadCliArguments& read,
     };
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed CLI request shape table.
 nlohmann::json command_request_args(const std::vector<std::string>& command, bool login_qr,
                                     bool login_bot, std::string_view resolve_selector,
                                     const ChatsCliArguments& chats, const SavedCliArguments& saved,
@@ -875,11 +876,15 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                     ? nlohmann::json{{"kind", "online"}}
                     : nlohmann::json{{"kind", "at"}, {"send_date", schedule->send_date}};
         }
+        const char* parse_mode = "plain";
+        if (send.markdown) {
+            parse_mode = "markdown_v2";
+        } else if (send.html) {
+            parse_mode = "html";
+        }
         return {{"chat", send.chat},
                 {"text", send.text},
-                {"parse_mode", send.markdown ? "markdown_v2"
-                               : send.html   ? "html"
-                                             : "plain"},
+                {"parse_mode", parse_mode},
                 {"reply_to", send.reply_option->count() != 0 ? nlohmann::json(send.reply_to)
                                                              : nlohmann::json(nullptr)},
                 {"topic", topic ? tgcli::daemon::topic_ref_json(*topic) : nlohmann::json(nullptr)},
@@ -898,7 +903,7 @@ std::optional<int> read_send_stdin(SendCliArguments& send) {
     if (send.text != "-") {
         return std::nullopt;
     }
-    constexpr std::size_t maximum = 1024 * 1024;
+    constexpr std::size_t maximum = static_cast<std::size_t>(1024) * 1024;
     std::string value;
     std::array<char, 65'536> buffer{};
     for (;;) {
@@ -922,6 +927,7 @@ std::optional<int> read_send_stdin(SendCliArguments& send) {
     return std::nullopt;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed CLI grammar and routing table.
 int run(int argc, char** argv) {
     if (consume_legacy_bot_token(argc, argv)) {
         return report_insecure_bot_token();

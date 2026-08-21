@@ -63,6 +63,7 @@ bool uses_logout_preflight(std::string_view command) {
            command == "fetch" || command == "send" || command == "msg delete";
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
 void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& context) {
     if (context.logout == nullptr && context.account_removal == nullptr) {
         return;

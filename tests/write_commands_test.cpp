@@ -64,6 +64,8 @@ class WriteTree final {
 
     WriteTree(const WriteTree&) = delete;
     WriteTree& operator=(const WriteTree&) = delete;
+    WriteTree(WriteTree&&) = delete;
+    WriteTree& operator=(WriteTree&&) = delete;
 
     [[nodiscard]] std::string config_path() const {
         return root_ + "/config/tgcli/config.toml";
@@ -261,8 +263,10 @@ class FakeWrites final {
 
     FakeWrites(const FakeWrites&) = delete;
     FakeWrites& operator=(const FakeWrites&) = delete;
+    FakeWrites(FakeWrites&&) = delete;
+    FakeWrites& operator=(FakeWrites&&) = delete;
 
-    std::future<Outcome> dispatch(proto::Request request) {
+    std::future<Outcome> dispatch(const proto::Request& request) {
         std::string error;
         auto frozen = proto::admit_request_source(request, error);
         INFO(error);
@@ -397,7 +401,7 @@ TEST_CASE("send text topic and RFC3339 schedule normalization is closed at bound
     CHECK(daemon::valid_send_text(std::string(4096, 'x')));
     CHECK_FALSE(daemon::valid_send_text(std::string(4097, 'x')));
     std::string emoji;
-    emoji.reserve(4096 * 4);
+    emoji.reserve(static_cast<std::size_t>(4096) * 4);
     for (std::size_t index = 0; index < 4096; ++index) {
         emoji.append("\xF0\x9F\x98\x80", 4);
     }
@@ -445,7 +449,7 @@ TEST_CASE("public send dry-run plans through the read boundary without durable w
           "[write-command][send][dry-run][fake-boundary]") {
     FakeWrites fake;
     auto request = send_request("hello", true, std::nullopt);
-    auto pending = fake.dispatch(std::move(request));
+    auto pending = fake.dispatch(request);
     resolve_basic(fake);
     const auto outcome = pending.get();
     REQUIRE(outcome.result);
@@ -476,7 +480,7 @@ TEST_CASE("public send authority is frozen while dry-run remains read-only",
         FakeWrites fake(false);
         auto request = send_request("hello", false, std::nullopt);
         request.context.write_authority = proto::WriteAuthority::Grant;
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         resolve_basic(fake);
         fake.respond(core::TdFunctionKind::SendMessage, stable_message());
         REQUIRE(pending.get().result);
@@ -487,7 +491,7 @@ TEST_CASE("public send authority is frozen while dry-run remains read-only",
         FakeWrites fake;
         auto request = send_request("hello", false, std::nullopt);
         request.context.write_authority = proto::WriteAuthority::Deny;
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         bind_principal(fake);
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
@@ -564,7 +568,7 @@ TEST_CASE("online schedule requires a visible non-bot non-self private peer",
         auto request = send_request("hello", false, std::nullopt);
         request.args["chat"] = "77";
         request.args["schedule"] = json{{"kind", "online"}};
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         bind_principal(fake);
         fake.respond(core::TdFunctionKind::GetChat, private_chat(77));
         fake.respond(core::TdFunctionKind::GetUser, peer(presence));
@@ -586,7 +590,7 @@ TEST_CASE("online schedule requires a visible non-bot non-self private peer",
         auto request = send_request("hello", false, std::nullopt);
         request.args["chat"] = std::to_string(user_id);
         request.args["schedule"] = json{{"kind", "online"}};
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         bind_principal(fake);
         fake.respond(core::TdFunctionKind::GetChat, private_chat(user_id));
         fake.respond(core::TdFunctionKind::GetUser, user);
@@ -604,7 +608,7 @@ TEST_CASE("send reply planning accepts signed ids and inherits only matching for
         FakeWrites fake;
         auto request = send_request("hello", false, std::nullopt);
         request.args["reply_to"] = -7;
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         resolve_basic(fake);
         auto reply = planning_message(-7);
         reply.topic = core::TdTopic{.kind = core::TdTopicKind::Forum, .id = 9, .tdlib_type_id = 1};
@@ -627,7 +631,7 @@ TEST_CASE("send reply planning accepts signed ids and inherits only matching for
         auto request = send_request("hello", false, std::nullopt);
         request.args["reply_to"] = -7;
         request.args["topic"] = json{{"kind", "forum"}, {"id", 8}};
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         resolve_basic(fake);
         auto reply = planning_message(-7);
         reply.topic = core::TdTopic{.kind = core::TdTopicKind::Forum, .id = 9, .tdlib_type_id = 1};
@@ -647,7 +651,7 @@ TEST_CASE("Markdown send dispatches only the generation-bound parsed formatted t
     FakeWrites fake;
     auto request = send_request("**hello**", false, std::nullopt);
     request.args["parse_mode"] = "markdown_v2";
-    auto pending = fake.dispatch(std::move(request));
+    auto pending = fake.dispatch(request);
     resolve_basic(fake);
     fake.respond(core::TdFunctionKind::ParseTextEntities, fake.parsed_text("hello"));
     const auto descriptor =
@@ -700,7 +704,7 @@ TEST_CASE("post-proof send timeout retains an unknown keyed invocation for recov
     FakeWrites fake;
     auto request = send_request("hello", false, "timeout-key-sentinel");
     request.context.timeout_seconds = 0.5;
-    auto pending = fake.dispatch(std::move(request));
+    auto pending = fake.dispatch(request);
     resolve_basic(fake);
     fake.observe(core::TdFunctionKind::SendMessage);
     const auto outcome = pending.get();
@@ -758,7 +762,7 @@ TEST_CASE("msg delete applies exact self/revoke property rules before confirmati
         FakeWrites fake;
         auto request = delete_request();
         request.args["for_all"] = true;
-        auto pending = fake.dispatch(std::move(request));
+        auto pending = fake.dispatch(request);
         resolve_basic(fake);
         fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
         core::TdMessageProperties properties;
@@ -791,7 +795,7 @@ TEST_CASE("msg delete dry-run performs property planning without confirmation or
     FakeWrites fake(false);
     auto request = delete_request(101, std::nullopt, false);
     request.context.dry_run = true;
-    auto pending = fake.dispatch(std::move(request));
+    auto pending = fake.dispatch(request);
     resolve_basic(fake);
     fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
     core::TdMessageProperties properties;

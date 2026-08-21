@@ -197,6 +197,25 @@ json schedule_json(const std::optional<SendSchedule>& schedule) {
     return {{"kind", "at"}, {"send_date", schedule->send_date}};
 }
 
+M3ScheduleKind admission_schedule_kind(const std::optional<SendSchedule>& schedule) {
+    if (!schedule) {
+        return M3ScheduleKind::None;
+    }
+    return schedule->kind == SendScheduleKind::Online ? M3ScheduleKind::Online : M3ScheduleKind::At;
+}
+
+std::optional<FingerprintSchedule>
+fingerprint_schedule(const std::optional<SendSchedule>& schedule) {
+    if (!schedule) {
+        return std::nullopt;
+    }
+    if (schedule->kind == SendScheduleKind::Online) {
+        return FingerprintScheduleOnline{};
+    }
+    return FingerprintScheduleAt{schedule->send_date};
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed normalized send grammar.
 std::optional<SendInput> parse_send_input(const json& args, json& failure) {
     static const std::set<std::string> fields{"chat",  "text",   "parse_mode", "reply_to",
                                               "topic", "silent", "schedule"};
@@ -229,7 +248,7 @@ std::optional<SendInput> parse_send_input(const json& args, json& failure) {
             failure = usage("--reply-to must be a nonzero int53 message id", "--reply-to");
             return std::nullopt;
         }
-        result.reply_to = *reply;
+        result.reply_to = reply;
     }
     if (!args["topic"].is_null()) {
         if (!exact_fields(args["topic"], {"kind", "id"}) || args["topic"]["kind"] != "forum") {
@@ -290,7 +309,7 @@ std::optional<DeleteInput> parse_delete_input(const json& args, json& failure) {
             return std::nullopt;
         }
         result.message_ids.push_back(*id);
-        previous = *id;
+        previous = id;
     }
     return result;
 }
@@ -444,14 +463,14 @@ ReadOutcome read_value(ResolverConsumer& resolver, core::TdClient& client,
 }
 
 json message_write_result_json(const core::TdMessageWriteResult& value) {
-    core::TdMessageSummary summary{.id = value.id,
-                                   .chat_id = value.chat_id,
-                                   .date = value.date.value_or(0),
-                                   .sender = value.sender,
-                                   .is_outgoing = value.is_outgoing,
-                                   .topic = value.topic,
-                                   .content_kind = value.content_kind,
-                                   .text = value.text};
+    const core::TdMessageSummary summary{.id = value.id,
+                                         .chat_id = value.chat_id,
+                                         .date = value.date.value_or(0),
+                                         .sender = value.sender,
+                                         .is_outgoing = value.is_outgoing,
+                                         .topic = value.topic,
+                                         .content_kind = value.content_kind,
+                                         .text = value.text};
     auto materialized = materialize_message_summary(summary);
     if (!materialized || !persistable_message_summary(*materialized) ||
         value.scheduled != !value.date.has_value()) {
@@ -527,14 +546,12 @@ WriteConfirmationOutcome confirm_delete(const write_contract::Plan& plan, Reques
 }
 
 std::optional<AuthoritySource> authorize(const proto::Request& request, RequestSession& session,
-                                         std::string_view account) {
+                                         std::string_view account, proto::M3Operation operation) {
+    const auto* identity = proto::m3_operation_identity(operation);
     const auto& admitted = session.admitted_config();
     if (!admitted || admitted->account != account || !admitted->account_snapshot) {
         session.error("INTERNAL", "write config admission is missing",
-                      {{"operation", proto::m3_operation_identity(
-                                         *proto::m3_operation_for_command(request.command))
-                                         ->canonical_name},
-                       {"reason", "internal_error"}},
+                      {{"operation", identity->canonical_name}, {"reason", "internal_error"}},
                       kGeneric);
         return std::nullopt;
     }
@@ -553,10 +570,7 @@ std::optional<AuthoritySource> authorize(const proto::Request& request, RequestS
     const auto* granted = std::get_if<GrantedAuthority>(&decision);
     if (granted == nullptr) {
         session.error("INTERNAL", "write authority decision is invalid",
-                      {{"operation", proto::m3_operation_identity(
-                                         *proto::m3_operation_for_command(request.command))
-                                         ->canonical_name},
-                       {"reason", "internal_error"}},
+                      {{"operation", identity->canonical_name}, {"reason", "internal_error"}},
                       kGeneric);
         return std::nullopt;
     }
@@ -594,6 +608,7 @@ WriteCoordinator::WriteCoordinator(core::TdClient& client, std::string account,
       config_store_(std::move(config_path), expected_uid), foundation_(std::move(foundation)),
       audit_fatal_shutdown_(std::move(audit_fatal_shutdown)) {}
 
+// NOLINTBEGIN(readability-function-cognitive-complexity): exact two-epoch send transaction.
 void WriteCoordinator::send(const proto::Request& request, RequestSession& session) {
     json parse_failure;
     auto input = parse_send_input(request.args, parse_failure);
@@ -612,17 +627,14 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
         return;
     }
     const auto principal = std::get<ResolverPrincipal>(principal_outcome);
-    const auto schedule_policy = !input->schedule ? M3ScheduleKind::None
-                                 : input->schedule->kind == SendScheduleKind::Online
-                                     ? M3ScheduleKind::Online
-                                     : M3ScheduleKind::At;
+    const auto schedule_policy = admission_schedule_kind(input->schedule);
     if (evaluate_m3_bot_admission(proto::M3Operation::Send, principal.is_bot, schedule_policy) !=
         M3BotAdmission::Allowed) {
         session.error("BOT_UNSUPPORTED", "scheduled send requires a user account",
                       {{"operation", "send"}}, kUsage);
         return;
     }
-    const auto authority = authorize(request, session, account_);
+    const auto authority = authorize(request, session, account_, proto::M3Operation::Send);
     if (!authority) {
         return;
     }
@@ -650,7 +662,7 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                       kDenied);
         return;
     }
-    WriteKernel kernel(foundation_);
+    const WriteKernel kernel(foundation_);
     auto kernel_input =
         kernel_request(request, session, proto::M3Operation::Send, *authority, std::move(hash),
                        std::move(invocation), config_store_.path());
@@ -658,18 +670,13 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
     hooks.admit = [state, this]() -> WriteAdmissionOutcome {
         const auto fingerprint_value = fingerprint(
             account_, state->principal,
-            SendFingerprintPayload{
-                .chat_selector = state->input.chat,
-                .text = state->input.text,
-                .parse_mode = state->input.parse_mode,
-                .reply_to = state->input.reply_to,
-                .requested_topic = state->input.requested_topic,
-                .silent = state->input.silent,
-                .schedule = !state->input.schedule ? std::optional<FingerprintSchedule>{}
-                            : state->input.schedule->kind == SendScheduleKind::Online
-                                ? std::optional<FingerprintSchedule>{FingerprintScheduleOnline{}}
-                                : std::optional<FingerprintSchedule>{
-                                      FingerprintScheduleAt{state->input.schedule->send_date}}});
+            SendFingerprintPayload{.chat_selector = state->input.chat,
+                                   .text = state->input.text,
+                                   .parse_mode = state->input.parse_mode,
+                                   .reply_to = state->input.reply_to,
+                                   .requested_topic = state->input.requested_topic,
+                                   .silent = state->input.silent,
+                                   .schedule = fingerprint_schedule(state->input.schedule)});
         std::string error;
         auto arguments = write_contract::make_arguments(
             proto::M3Operation::Send,
@@ -685,7 +692,7 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
             return internal(proto::M3Operation::Send);
         }
         return WriteAdmission{.arguments = std::move(*arguments),
-                              .request_fingerprint = std::move(*fingerprint_value),
+                              .request_fingerprint = *fingerprint_value,
                               .pass1_source = nullptr,
                               .invite_redactions = {}};
     };
@@ -887,7 +894,8 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
             const auto delta =
                 static_cast<std::int64_t>(state->input.schedule->send_date) - server->value;
             if (delta <= 10 || delta > kMaximumScheduleWindow) {
-                const auto reason = delta <= 10 ? "schedule_window_elapsed" : "schedule_too_far";
+                const char* const reason =
+                    delta <= 10 ? "schedule_window_elapsed" : "schedule_too_far";
                 return stored_from_terminal(proto::M3Operation::Send,
                                             precondition(proto::M3Operation::Send,
                                                          plan.value()["chat"]["id"], std::nullopt,
@@ -1061,7 +1069,9 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
         }
     }
 }
+// NOLINTEND(readability-function-cognitive-complexity)
 
+// NOLINTBEGIN(readability-function-cognitive-complexity): exact two-epoch delete transaction.
 void WriteCoordinator::delete_messages(const proto::Request& request, RequestSession& session) {
     json parse_failure;
     auto input = parse_delete_input(request.args, parse_failure);
@@ -1080,7 +1090,7 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
         return;
     }
     const auto principal = std::get<ResolverPrincipal>(principal_outcome);
-    const auto authority = authorize(request, session, account_);
+    const auto authority = authorize(request, session, account_, proto::M3Operation::MsgDelete);
     if (!authority) {
         return;
     }
@@ -1107,7 +1117,7 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
                       kDenied);
         return;
     }
-    WriteKernel kernel(foundation_);
+    const WriteKernel kernel(foundation_);
     auto kernel_input =
         kernel_request(request, session, proto::M3Operation::MsgDelete, *authority, std::move(hash),
                        std::move(invocation), config_store_.path());
@@ -1128,7 +1138,7 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
             return internal(proto::M3Operation::MsgDelete);
         }
         return WriteAdmission{.arguments = std::move(*arguments),
-                              .request_fingerprint = std::move(*fingerprint_value),
+                              .request_fingerprint = *fingerprint_value,
                               .pass1_source = nullptr,
                               .invite_redactions = {}};
     };
@@ -1324,6 +1334,7 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
         }
     }
 }
+// NOLINTEND(readability-function-cognitive-complexity)
 
 void register_write_commands(Dispatcher& dispatcher, WriteCoordinator& coordinator) {
     dispatcher.register_command(
