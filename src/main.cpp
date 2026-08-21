@@ -135,6 +135,13 @@ bool targets_schema_command(int argc, char** argv) noexcept {
     return false;
 }
 
+void configure_schema_parent_help(CLI::App& app, bool schema_invocation, bool& schema_help) {
+    if (schema_invocation) {
+        app.set_help_flag();
+        app.add_flag("-h,--help", schema_help, "Print this help message and exit");
+    }
+}
+
 int report_insecure_bot_token() {
     const nlohmann::json rendered{
         {"error",
@@ -276,10 +283,15 @@ std::string_view schema_unsupported_option(const CLI::Option& account, const CLI
 std::optional<int> handle_client_local_or_reserved_command(
     const std::vector<std::string>& command, const CLI::Option& account, const CLI::Option& full,
     const CLI::Option& allow_write, const CLI::Option& yes, const CLI::Option& dry_run,
-    const CLI::Option& timeout, const CLI::Option& cursor, const CLI::Option& idempotency_key,
-    const CLI::Option& no_color, const std::vector<std::string>& schema_target, bool schema_all,
-    bool schema_help, bool verbose) {
+    const CLI::Option& timeout, double timeout_seconds, const CLI::Option& cursor,
+    const CLI::Option& idempotency_key, const CLI::Option& no_color,
+    const std::vector<std::string>& schema_target, bool schema_all, bool schema_help,
+    bool verbose) {
     if (command == std::vector<std::string>{"schema"}) {
+        if (timeout.count() != 0 &&
+            !tgcli::request_deadline(timeout_seconds, tgcli::DeadlineDefault::Default60)) {
+            return report_usage("invalid request timeout", "--timeout");
+        }
         const auto unsupported_option = schema_unsupported_option(
             account, full, allow_write, yes, dry_run, timeout, cursor, idempotency_key);
         return tgcli::cli::run_schema_command(
@@ -799,12 +811,15 @@ int run(int argc, char** argv) {
     if (consume_legacy_bot_token(argc, argv)) {
         return report_insecure_bot_token();
     }
-    if (!targets_schema_command(argc, argv) && contains_reserved_full(argc, argv)) {
+    const bool schema_invocation = targets_schema_command(argc, argv);
+    if (!schema_invocation && contains_reserved_full(argc, argv)) {
         return report_unsupported_mode("--full");
     }
+    bool schema_help = false;
     CLI::App app{"tgcli — Telegram CLI"};
     app.require_subcommand(0, 1);
     app.fallthrough();
+    configure_schema_parent_help(app, schema_invocation, schema_help);
 
     std::string account;
     bool json_output = false;
@@ -850,7 +865,6 @@ int run(int argc, char** argv) {
     app.add_subcommand("doctor", "health/auth probe");
     std::vector<std::string> schema_target;
     bool schema_all = false;
-    bool schema_help = false;
     CLI::App* schema_cmd = app.add_subcommand("schema", "Print curated JSON schemas");
     schema_cmd->set_help_flag();
     schema_cmd->add_flag("-h,--help", schema_help, "Print this help message and exit");
@@ -981,8 +995,9 @@ int run(int argc, char** argv) {
     }
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
             command, *account_option, *full_option, *allow_write_option, *yes_option,
-            *dry_run_option, *timeout_option, *saved.cursor_option, *idempotency_key_option,
-            *no_color_option, schema_target, schema_all, schema_help, verbose);
+            *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
+            *idempotency_key_option, *no_color_option, schema_target, schema_all, schema_help,
+            verbose);
         pre_routing_exit) {
         return *pre_routing_exit;
     }

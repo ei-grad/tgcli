@@ -305,9 +305,33 @@ TEST_CASE("schema CLI freezes help and parser unsupported lookup precedence",
     constexpr std::string_view unknown_argument =
         R"({"error":{"code":"USAGE","details":{"argument":null,"reason":"unknown_command"},"message":"unknown command or argument"}}
 )";
+    constexpr std::string_view invalid_timeout =
+        R"({"error":{"code":"USAGE","details":{"argument":"--timeout","reason":"invalid_argument"},"message":"invalid request timeout"}}
+)";
     check_usage(environment.run({"schema", "--timeout", "not-a-number", "--help", "version"}),
                 invalid_argument);
     check_usage(environment.run({"schema", "version", "--unknown", "--help"}), unknown_argument);
+
+    check_success(environment.run({"--help", "schema"}), kHelp);
+    check_success(environment.run({"-h", "schema"}), kHelp);
+    check_success(environment.run({"--help", "schema", "--account", "main", "unknown"}), kHelp);
+    check_usage(environment.run({"--help", "schema", "--unknown"}), unknown_argument);
+    check_usage(environment.run({"--help", "schema", "--timeout", "not-a-number"}),
+                invalid_argument);
+
+    for (const auto* const timeout :
+         {"0", "-1", "nan", "inf", "-inf", "1e9999", "1e308", "1e-9999"}) {
+        CAPTURE(timeout);
+        check_usage(environment.run({"schema", "--timeout", timeout, "version"}), invalid_timeout);
+        check_usage(environment.run({"schema", "--timeout", timeout, "--help", "version"}),
+                    invalid_timeout);
+        check_usage(environment.run({"--help", "schema", "--timeout", timeout, "version"}),
+                    invalid_timeout);
+    }
+    check_usage(environment.run({"schema", "--timeout", "0.000001", "unknown"}),
+                unsupported_error("--timeout"));
+    check_success(environment.run({"schema", "--timeout", "0.000001", "--help", "unknown"}), kHelp);
+    check_success(environment.run({"--help", "schema", "--timeout", "0.000001", "unknown"}), kHelp);
 
     const std::vector<std::pair<std::vector<std::string>, std::string_view>> unsupported{
         {{"schema", "--account", "main", "unknown"}, "--account"},
