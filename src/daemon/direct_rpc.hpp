@@ -140,6 +140,12 @@ struct DirectMalformed {
     bool operator==(const DirectMalformed&) const = default;
 };
 
+struct DirectOversizedMessage {
+    DirectMutationState mutation_state = DirectMutationState::Confirmed;
+
+    bool operator==(const DirectOversizedMessage&) const = default;
+};
+
 struct DirectJoinGuardRequired {
     std::int64_t bot_user_id = 0;
     std::int64_t query_id = 0;
@@ -154,9 +160,10 @@ struct DirectJoinDeclined {
     bool operator==(const DirectJoinDeclined&) const = default;
 };
 
-using DirectOutcome = std::variant<DirectSuccess, DirectTdError, DirectAuthorizationLost,
-                                   DirectTimedOut, DirectCancelled, DirectRejected, DirectMalformed,
-                                   DirectJoinGuardRequired, DirectJoinDeclined>;
+using DirectOutcome =
+    std::variant<DirectSuccess, DirectTdError, DirectAuthorizationLost, DirectTimedOut,
+                 DirectCancelled, DirectRejected, DirectMalformed, DirectOversizedMessage,
+                 DirectJoinGuardRequired, DirectJoinDeclined>;
 
 struct DirectPrepared {};
 using DirectPreparationOutcome = std::variant<DirectPrepared, DirectAuthorizationLost,

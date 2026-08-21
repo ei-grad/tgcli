@@ -449,6 +449,7 @@ struct ChildDaemonOptions {
     bool ignore_control_token = false;
     bool require_no_dispatch = false;
     bool read_alias_fixture = false;
+    bool message_write_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
     std::string binary_version = "old-test-binary";
@@ -772,6 +773,20 @@ class ChildProtocolDaemon {
                                      {"next", daemon::encode_read_cursor(cursor)},
                                      {"boundary", "page"}});
                  }});
+        }
+        if (options.message_write_fixture) {
+            const auto normalized = [](const proto::Request& request,
+                                       daemon::RequestSession& session) {
+                session.result({{"command", request.command}, {"args", request.args}});
+            };
+            dispatcher.register_command(
+                "msg edit", {daemon::Tier::Write, normalized, false, daemon::M3Operation::MsgEdit});
+            dispatcher.register_command("msg react", {daemon::Tier::Write, normalized, false,
+                                                      daemon::M3Operation::MsgReact});
+            dispatcher.register_command(
+                "msg pin", {daemon::Tier::Write, normalized, false, daemon::M3Operation::MsgPin});
+            dispatcher.register_command("msg unpin", {daemon::Tier::Write, normalized, false,
+                                                      daemon::M3Operation::MsgUnpin});
         }
         if (!server.start(error)) {
             if (!ready_reported) {
@@ -2511,8 +2526,8 @@ TEST_CASE("msg parser exposes get and link and rejects invalid ids locally",
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
 }
 
-TEST_CASE("public M3 parser exposes only flat send and msg delete with closed limits",
-          "[cli][m3][send][delete][process]") {
+TEST_CASE("public M3 parser exposes flat send and direct message mutations with closed limits",
+          "[cli][m3][send][message-write][process]") {
     const IsolatedEnv env;
     const auto root_help = run_binary_captured({"--help"}, env, "m3-root-help");
     REQUIRE(root_help.exit_code == kOk);
@@ -2528,7 +2543,11 @@ TEST_CASE("public M3 parser exposes only flat send and msg delete with closed li
     }
     const auto msg_help = run_binary_captured({"msg", "--help"}, env, "m3-msg-help");
     REQUIRE(msg_help.exit_code == kOk);
-    CHECK((msg_help.out + msg_help.err).find("delete") != std::string::npos);
+    const auto msg_surface = msg_help.out + msg_help.err;
+    for (const auto* command : {"edit", "delete", "react", "pin", "unpin"}) {
+        CHECK(msg_surface.find(command) != std::string::npos);
+    }
+    CHECK(msg_surface.find("forward") == std::string::npos);
 
     std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
         {"send-format-exclusive", {"--json", "send", "-1001", "hello", "--md", "--html"}},
@@ -2544,6 +2563,13 @@ TEST_CASE("public M3 parser exposes only flat send and msg delete with closed li
         {"delete-zero", {"--json", "msg", "delete", "-1001", "0"}},
         {"delete-duplicate", {"--json", "msg", "delete", "-1001", "2", "1", "2"}},
         {"delete-over-int53", {"--json", "msg", "delete", "-1001", "9007199254740992"}},
+        {"edit-zero", {"--json", "msg", "edit", "-1001", "0", "revised"}},
+        {"edit-empty", {"--json", "msg", "edit", "-1001", "1", ""}},
+        {"react-zero", {"--json", "msg", "react", "-1001", "0", "👍"}},
+        {"react-empty", {"--json", "msg", "react", "-1001", "1", ""}},
+        {"react-exclusive", {"--json", "msg", "react", "-1001", "1", "👍", "--remove", "--big"}},
+        {"pin-zero", {"--json", "msg", "pin", "-1001", "0"}},
+        {"unpin-over-int53", {"--json", "msg", "unpin", "-1001", "9007199254740992"}},
     };
     std::vector<std::string> too_many{"--json", "msg", "delete", "-1001"};
     for (int id = 1; id <= 101; ++id) {
@@ -2574,6 +2600,73 @@ TEST_CASE("public M3 parser exposes only flat send and msg delete with closed li
                             std::string(1024 * 1024 + 1, 'x'));
     CHECK(oversized_stdin.exit_code == kUsage);
     CHECK(oversized_stdin.out.empty());
+
+    const auto edit_empty_stdin = run_binary_captured({"--json", "msg", "edit", "-1001", "1", "-"},
+                                                      env, "edit-stdin-empty", "");
+    CHECK(edit_empty_stdin.exit_code == kUsage);
+    CHECK(edit_empty_stdin.out.empty());
+    const auto edit_nul_stdin = run_binary_captured({"--json", "msg", "edit", "-1001", "1", "-"},
+                                                    env, "edit-stdin-nul", std::string("a\0b", 3));
+    CHECK(edit_nul_stdin.exit_code == kUsage);
+    CHECK(edit_nul_stdin.out.empty());
+    const auto edit_oversized_stdin =
+        run_binary_captured({"--json", "msg", "edit", "-1001", "1", "-"}, env,
+                            "edit-stdin-oversized", std::string(1024 * 1024 + 1, 'x'));
+    CHECK(edit_oversized_stdin.exit_code == kUsage);
+    CHECK(edit_oversized_stdin.out.empty());
+}
+
+TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
+          "[cli][m3][message-write][frame][process]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.message_write_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    struct Case {
+        std::string stem;
+        std::vector<std::string> arguments;
+        std::optional<std::string> stdin_data;
+        std::vector<std::string> command;
+        json args;
+    };
+    const std::vector<Case> cases{
+        {"edit-frame",
+         {"--json", "msg", "edit", "-1001", "-7", "-"},
+         "revised",
+         {"msg", "edit"},
+         {{"chat", "-1001"}, {"message_id", -7}, {"text", "revised"}}},
+        {"react-frame",
+         {"--json", "msg", "react", "@project", "9", "👍", "--big"},
+         std::nullopt,
+         {"msg", "react"},
+         {{"chat", "@project"},
+          {"message_id", 9},
+          {"reaction", "👍"},
+          {"remove", false},
+          {"big", true}}},
+        {"pin-frame",
+         {"--json", "msg", "pin", "-1001", "11"},
+         std::nullopt,
+         {"msg", "pin"},
+         {{"chat", "-1001"}, {"message_id", 11}}},
+        {"unpin-frame",
+         {"--json", "msg", "unpin", "-1001", "-11"},
+         std::nullopt,
+         {"msg", "unpin"},
+         {{"chat", "-1001"}, {"message_id", -11}}},
+    };
+    for (const auto& test_case : cases) {
+        const auto outcome =
+            run_binary_captured(test_case.arguments, env, test_case.stem, test_case.stdin_data);
+        INFO(test_case.stem << ": " << outcome.err);
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        const auto normalized = json::parse(outcome.out);
+        CHECK(normalized["command"] == test_case.command);
+        CHECK(normalized["args"] == test_case.args);
+    }
+    CHECK(fixture.running());
 }
 
 TEST_CASE("read parser exposes history and rejects closed grammar failures locally",

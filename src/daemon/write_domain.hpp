@@ -18,6 +18,7 @@ struct SendSchedule {
 };
 
 [[nodiscard]] bool valid_send_text(std::string_view text);
+[[nodiscard]] bool valid_message_reaction(std::string_view reaction);
 [[nodiscard]] std::optional<TopicRef> parse_send_topic(std::string_view value);
 [[nodiscard]] std::optional<SendSchedule> parse_send_schedule(std::string_view value);
 

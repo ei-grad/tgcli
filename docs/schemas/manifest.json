@@ -46,11 +46,23 @@
     "msg delete": {
       "result": "msg-delete.result.schema.json"
     },
+    "msg edit": {
+      "result": "msg-edit.result.schema.json"
+    },
     "msg get": {
       "result": "msg-get.result.schema.json"
     },
     "msg link": {
       "result": "msg-link.result.schema.json"
+    },
+    "msg pin": {
+      "result": "msg-pin.result.schema.json"
+    },
+    "msg react": {
+      "result": "msg-react.result.schema.json"
+    },
+    "msg unpin": {
+      "result": "msg-unpin.result.schema.json"
     },
     "read": {
       "result": "read.result.schema.json"

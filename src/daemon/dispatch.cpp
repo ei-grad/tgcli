@@ -92,7 +92,9 @@ bool reject_invalid_idempotency(const proto::Request& request, RequestSession& s
 }
 
 constexpr bool publicly_active_m3(const std::optional<M3Operation>& operation) noexcept {
-    return operation == M3Operation::Send || operation == M3Operation::MsgDelete;
+    return operation == M3Operation::Send || operation == M3Operation::MsgEdit ||
+           operation == M3Operation::MsgDelete || operation == M3Operation::MsgReact ||
+           operation == M3Operation::MsgPin || operation == M3Operation::MsgUnpin;
 }
 
 } // namespace

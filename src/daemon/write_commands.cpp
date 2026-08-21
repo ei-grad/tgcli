@@ -56,6 +56,26 @@ struct DeleteInput {
     bool for_all = false;
 };
 
+struct EditInput {
+    std::string chat;
+    std::int64_t message_id = 0;
+    std::string text;
+};
+
+struct ReactInput {
+    std::string chat;
+    std::int64_t message_id = 0;
+    std::string reaction;
+    bool remove = false;
+    bool big = false;
+};
+
+struct MessagePinInput {
+    std::string chat;
+    std::int64_t message_id = 0;
+    bool pinned = false;
+};
+
 struct SendState {
     SendInput input;
     ResolverPrincipal principal;
@@ -72,6 +92,46 @@ struct DeleteState {
     std::optional<ResolvedChatTarget> target;
     std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
     std::unique_ptr<DirectRpcCoordinator> coordinator;
+};
+
+struct DirectDispatchState {
+    std::optional<core::TdDirectRequest> request;
+    std::shared_ptr<const core::AuthStateSnapshot> authorization;
+    std::unique_ptr<DirectRpcCoordinator> coordinator;
+};
+
+struct EditState {
+    EditInput input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> target;
+    std::shared_ptr<DirectDispatchState> dispatch;
+};
+
+struct ReactState {
+    ReactInput input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> target;
+    std::shared_ptr<DirectDispatchState> dispatch;
+};
+
+struct MessagePinState {
+    MessagePinInput input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> target;
+    std::shared_ptr<DirectDispatchState> dispatch;
+};
+
+struct DirectWriteDefinition {
+    proto::M3Operation operation = proto::M3Operation::MsgEdit;
+    std::function<WriteAdmissionOutcome()> admit;
+    std::function<WritePlanningOutcome()> plan;
+    std::function<std::optional<write_contract::StoredTerminal>(const write_contract::Plan&,
+                                                                const DirectResult&)>
+        success;
+    std::function<WriteConfirmationOutcome(const write_contract::Plan&, bool)> confirm;
+    std::function<WritePostIntentPreparation(const write_contract::Plan&, const WriteAdmission&)>
+        post_intent;
+    std::shared_ptr<DirectDispatchState> dispatch;
 };
 
 bool exact_fields(const json& value, const std::set<std::string>& expected) {
@@ -335,6 +395,73 @@ std::optional<DeleteInput> parse_delete_input(const json& args, json& failure) {
     return result;
 }
 
+std::optional<EditInput> parse_edit_input(const json& args, json& failure) {
+    if (!exact_fields(args, {"chat", "message_id", "text"}) || !args["chat"].is_string() ||
+        !args["text"].is_string()) {
+        failure = usage("msg edit received malformed arguments", nullptr);
+        return std::nullopt;
+    }
+    const auto message_id = integer64(args["message_id"]);
+    if (!message_id || !nonzero_int53(*message_id)) {
+        failure = usage("msg edit message id must be a nonzero int53 value", "id");
+        return std::nullopt;
+    }
+    EditInput input{.chat = args["chat"].get<std::string>(),
+                    .message_id = *message_id,
+                    .text = args["text"].get<std::string>()};
+    if (!valid_send_text(input.text)) {
+        failure = usage("msg edit text must contain between 1 and 4096 Unicode scalars", "TEXT");
+        return std::nullopt;
+    }
+    return input;
+}
+
+std::optional<ReactInput> parse_react_input(const json& args, json& failure) {
+    if (!exact_fields(args, {"chat", "message_id", "reaction", "remove", "big"}) ||
+        !args["chat"].is_string() || !args["reaction"].is_string() ||
+        !args["remove"].is_boolean() || !args["big"].is_boolean()) {
+        failure = usage("msg react received malformed arguments", nullptr);
+        return std::nullopt;
+    }
+    const auto message_id = integer64(args["message_id"]);
+    ReactInput input{.chat = args["chat"].get<std::string>(),
+                     .message_id = message_id.value_or(0),
+                     .reaction = args["reaction"].get<std::string>(),
+                     .remove = args["remove"].get<bool>(),
+                     .big = args["big"].get<bool>()};
+    if (!message_id || !nonzero_int53(*message_id)) {
+        failure = usage("msg react message id must be a nonzero int53 value", "id");
+        return std::nullopt;
+    }
+    if (!valid_message_reaction(input.reaction)) {
+        failure = usage("msg react emoji must be valid UTF-8 between 1 and 64 bytes", "emoji");
+        return std::nullopt;
+    }
+    if (input.remove && input.big) {
+        failure = usage("--remove and --big are mutually exclusive", "--remove/--big",
+                        "mutually_exclusive");
+        return std::nullopt;
+    }
+    return input;
+}
+
+std::optional<MessagePinInput> parse_message_pin_input(const json& args, bool pinned,
+                                                       json& failure) {
+    if (!exact_fields(args, {"chat", "message_id"}) || !args["chat"].is_string()) {
+        failure = usage(pinned ? "msg pin received malformed arguments"
+                               : "msg unpin received malformed arguments",
+                        nullptr);
+        return std::nullopt;
+    }
+    const auto message_id = integer64(args["message_id"]);
+    if (!message_id || !nonzero_int53(*message_id)) {
+        failure = usage("message id must be a nonzero int53 value", "id");
+        return std::nullopt;
+    }
+    return MessagePinInput{
+        .chat = args["chat"].get<std::string>(), .message_id = *message_id, .pinned = pinned};
+}
+
 template <std::size_t Size> bool fill_random(std::array<unsigned char, Size>& bytes) {
     const int descriptor = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (descriptor < 0) {
@@ -483,6 +610,120 @@ ReadOutcome read_value(ResolverConsumer& resolver, core::TdClient& client,
     return internal(operation);
 }
 
+struct MessagePlanningFacts {
+    core::TdPlanningMessage message;
+    core::TdMessageProperties properties;
+};
+
+using MessagePlanningOutcome = std::variant<MessagePlanningFacts, json>;
+
+using MessagePropertiesOutcome = std::variant<core::TdMessageProperties, json>;
+
+MessagePropertiesOutcome read_message_properties(ResolverConsumer& resolver, core::TdClient& client,
+                                                 RequestSession& session,
+                                                 proto::M3Operation operation,
+                                                 const proto::Request& request,
+                                                 std::int64_t chat_id, std::int64_t message_id) {
+    auto properties_read =
+        read_value(resolver, client, session, operation, request, [&](const auto& current) {
+            return client.get_message_properties(current, chat_id, message_id);
+        });
+    if (auto* failure = std::get_if<json>(&properties_read)) {
+        return std::move(*failure);
+    }
+    auto& properties_value = std::get<core::TdValue>(properties_read);
+    if (const auto* error = properties_value.get_if<core::TdError>()) {
+        if (error->code == 404) {
+            return terminal("NOT_FOUND", "message was not found",
+                            {{"chat_id", chat_id}, {"message_id", message_id}}, kNotFound);
+        }
+        return td_error_terminal(operation, *error);
+    }
+    const auto* properties = properties_value.get_if<core::TdMessageProperties>();
+    return properties == nullptr ? MessagePropertiesOutcome{internal(operation)}
+                                 : MessagePropertiesOutcome{*properties};
+}
+
+MessagePlanningOutcome read_message_planning_facts(ResolverConsumer& resolver,
+                                                   core::TdClient& client, RequestSession& session,
+                                                   proto::M3Operation operation,
+                                                   const proto::Request& request,
+                                                   std::int64_t chat_id, std::int64_t message_id) {
+    auto message_read =
+        read_value(resolver, client, session, operation, request, [&](const auto& current) {
+            return client.get_message(current, chat_id, message_id);
+        });
+    if (auto* failure = std::get_if<json>(&message_read)) {
+        return std::move(*failure);
+    }
+    auto& message_value = std::get<core::TdValue>(message_read);
+    if (const auto* error = message_value.get_if<core::TdError>()) {
+        if (error->code == 404) {
+            return terminal("NOT_FOUND", "message was not found",
+                            {{"chat_id", chat_id}, {"message_id", message_id}}, kNotFound);
+        }
+        return td_error_terminal(operation, *error);
+    }
+    const auto* message = message_value.get_if<core::TdPlanningMessage>();
+    if (message == nullptr || message->chat_id != chat_id || message->id != message_id) {
+        return internal(operation);
+    }
+    const core::TdMessageSummary summary{.id = message->id,
+                                         .chat_id = message->chat_id,
+                                         .date = message->date,
+                                         .sender = message->sender,
+                                         .is_outgoing = message->is_outgoing,
+                                         .topic = message->topic,
+                                         .content_kind = message->content_kind,
+                                         .text = message->text};
+    const auto materialized = materialize_message_summary(summary);
+    if (!materialized || !persistable_message_summary(*materialized)) {
+        return internal(operation, "TDLib returned data outside the supported persistence bounds");
+    }
+
+    auto properties_read =
+        read_message_properties(resolver, client, session, operation, request, chat_id, message_id);
+    if (auto* failure = std::get_if<json>(&properties_read)) {
+        return std::move(*failure);
+    }
+    return MessagePlanningFacts{
+        .message = *message,
+        .properties = std::get<core::TdMessageProperties>(std::move(properties_read))};
+}
+
+bool valid_available_reaction(const core::TdAvailableReaction& reaction) {
+    switch (reaction.type.kind) {
+    case core::TdReactionKind::Emoji:
+        return valid_message_reaction(reaction.type.emoji) && reaction.type.custom_emoji_id == 0;
+    case core::TdReactionKind::CustomEmoji:
+        return reaction.type.emoji.empty() && reaction.type.custom_emoji_id > 0;
+    case core::TdReactionKind::Paid:
+        return reaction.type.emoji.empty() && reaction.type.custom_emoji_id == 0;
+    case core::TdReactionKind::Unknown:
+        return false;
+    }
+    return false;
+}
+
+std::optional<bool> reaction_is_available(const core::TdMessageAvailableReactions& available,
+                                          std::string_view wanted) {
+    if (available.unavailability_reason == core::TdReactionUnavailabilityReason::Unknown ||
+        available.unsupported_unavailability_tdlib_type_id) {
+        return std::nullopt;
+    }
+    bool matched = false;
+    for (const auto* collection : {&available.top, &available.recent, &available.popular}) {
+        for (const auto& reaction : *collection) {
+            if (!valid_available_reaction(reaction)) {
+                return std::nullopt;
+            }
+            matched = matched || (reaction.type.kind == core::TdReactionKind::Emoji &&
+                                  reaction.type.emoji == wanted);
+        }
+    }
+    return matched;
+}
+
 json message_write_result_json(const core::TdMessageWriteResult& value) {
     const core::TdMessageSummary summary{.id = value.id,
                                          .chat_id = value.chat_id,
@@ -629,6 +870,201 @@ WriteKernelRequest kernel_request(const proto::Request& request, RequestSession&
             .deadline = session.deadline(),
             .cancellation_token = session.cancellation_token(),
             .cancelled = [&session] { return session.cancellation_requested(); }};
+}
+
+void execute_direct_write(
+    core::TdClient& client, std::string_view account, config::Store& config_store,
+    const std::shared_ptr<IdempotencyFoundation>& foundation,
+    const std::function<void()>& audit_fatal_shutdown,
+    const std::shared_ptr<const testing::WriteCoordinatorHooks>& coordinator_hooks,
+    const proto::Request& request, RequestSession& session, AuthoritySource authority,
+    DirectWriteDefinition definition) {
+    if (!request.context.dry_run &&
+        session.begin_audited_terminal() != AuditedTerminalStatus::Designated) {
+        return;
+    }
+    auto hash = key_hash(request);
+    const auto* identity = proto::m3_operation_identity(definition.operation);
+    if (request.context.idempotency_key && !hash) {
+        session.error("INTERNAL", "cannot hash idempotency key",
+                      {{"operation", identity->canonical_name}, {"reason", "internal_error"}},
+                      kGeneric);
+        return;
+    }
+    auto invocation = request.context.dry_run ? std::string{} : random_hex32();
+    if (!request.context.dry_run && invocation.empty()) {
+        session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
+                      {{"account", account},
+                       {"path", foundation ? foundation->audit().path() : std::string{}},
+                       {"reason", "open_failed"}},
+                      kDenied);
+        return;
+    }
+    if (!definition.dispatch || !definition.admit || !definition.plan || !definition.success) {
+        session.error("INTERNAL", "write operation is incomplete",
+                      {{"operation", identity->canonical_name}, {"reason", "internal_error"}},
+                      kGeneric);
+        return;
+    }
+
+    const WriteKernel kernel(foundation);
+    auto kernel_input = kernel_request(request, session, definition.operation, authority,
+                                       std::move(hash), std::move(invocation), config_store.path());
+    WriteKernelHooks hooks;
+    hooks.admit = std::move(definition.admit);
+    hooks.plan = [plan = std::move(definition.plan)](const WriteAdmission&) { return plan(); };
+    hooks.confirm = std::move(definition.confirm);
+    hooks.verify_config_grant = [&config_store](std::string_view expected,
+                                                std::string_view expected_account,
+                                                const config::MutationControl& control) {
+        return config_store.verify_write_grant(expected, expected_account, control);
+    };
+    hooks.post_intent = std::move(definition.post_intent);
+    const auto operation = definition.operation;
+    const auto dispatch = std::move(definition.dispatch);
+    hooks.revalidate_auth_and_schedule =
+        [&client, &session, &request, dispatch, operation, account = std::string(account),
+         coordinator_hooks](const write_contract::Plan& plan) -> WriteDispatchAdmissionOutcome {
+        if (deadline_expired(session.deadline())) {
+            return stored_from_terminal(
+                operation, timeout(operation, "preflight",
+                                   request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (session.cancellation_requested()) {
+            return WriteDispatchStopped{};
+        }
+        auto current = client.auth_state();
+        if (!current || current->data.state != core::AuthState::Ready) {
+            return stored_from_terminal(
+                operation, not_authed_terminal(account, current ? current->data.state
+                                                                : core::AuthState::Unknown));
+        }
+        dispatch->authorization = std::move(current);
+        if (!dispatch->request || plan.value()["tdlib_request"].is_null() ||
+            !plan.value()["tdlib_request"].is_string()) {
+            return stored_from_terminal(operation, internal(operation));
+        }
+        auto direct_hooks = coordinator_hooks ? coordinator_hooks->direct_rpc : DirectRpcHooks{};
+        dispatch->coordinator =
+            std::make_unique<DirectRpcCoordinator>(client, session, std::move(direct_hooks));
+        auto preparation =
+            dispatch->coordinator->prepare(*dispatch->request, dispatch->authorization);
+        if (std::holds_alternative<DirectTimedOut>(preparation)) {
+            return stored_from_terminal(
+                operation, timeout(operation, "preflight",
+                                   request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (std::holds_alternative<DirectCancelled>(preparation)) {
+            return WriteDispatchStopped{};
+        }
+        if (const auto* lost = std::get_if<DirectAuthorizationLost>(&preparation)) {
+            return stored_from_terminal(
+                operation, not_authed_terminal(account, lost->snapshot ? lost->snapshot->data.state
+                                                                       : core::AuthState::Unknown));
+        }
+        if (std::holds_alternative<DirectRejected>(preparation)) {
+            return stored_from_terminal(operation, internal(operation));
+        }
+        const auto token = random_hex32();
+        if (token.empty()) {
+            throw std::runtime_error("cannot create dispatch token");
+        }
+        return WriteDispatchPreparation{
+            .proof = {{"tdlib_function", plan.value()["tdlib_request"]},
+                      {"dispatch_token", token},
+                      {"client_generation", dispatch->authorization->client_generation}}};
+    };
+    hooks.dispatch = [dispatch, success = std::move(definition.success), operation, &request,
+                      account = std::string(account)](
+                         const write_contract::Plan& plan, const WriteDispatchPreparation&,
+                         WriteDurableObservationSink&) -> WriteDispatchOutcome {
+        if (!dispatch->authorization || !dispatch->coordinator) {
+            throw std::logic_error("direct dispatch state is incomplete");
+        }
+        auto selected = dispatch->coordinator->execute_prepared();
+        return std::visit(
+            [&](auto&& outcome) -> WriteDispatchOutcome {
+                using Outcome = std::decay_t<decltype(outcome)>;
+                if constexpr (std::is_same_v<Outcome, DirectSuccess>) {
+                    auto terminal_value = success(plan, outcome.result);
+                    if (!terminal_value) {
+                        return {.terminal = stored_from_terminal(operation, internal(operation)),
+                                .mutation_state = AccountAuditMutationState::Possible,
+                                .mutation_confirmed = false};
+                    }
+                    return {.terminal = std::move(*terminal_value),
+                            .mutation_state = AccountAuditMutationState::Confirmed,
+                            .mutation_confirmed = true};
+                } else if constexpr (std::is_same_v<Outcome, DirectTdError>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, td_error_terminal(operation, outcome.error)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectAuthorizationLost>) {
+                    const auto state_value =
+                        outcome.snapshot ? outcome.snapshot->data.state : core::AuthState::Unknown;
+                    return {.terminal = stored_from_terminal(
+                                operation, not_authed_terminal(account, state_value)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectTimedOut>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, timeout(operation, "dispatch",
+                                                   post_intent_idempotency(request), "unknown")),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectCancelled>) {
+                    return {.terminal = stored_from_terminal(operation, shutdown_terminal()),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectJoinGuardRequired>) {
+                    return {.terminal = stored_error(operation, "JOIN_APPROVAL_REQUIRED",
+                                                     "join requires bot approval",
+                                                     {{"operation", "chat_join"},
+                                                      {"bot_user_id", outcome.bot_user_id},
+                                                      {"query_id", outcome.query_id}},
+                                                     kGeneric),
+                            .mutation_state = AccountAuditMutationState::None,
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectJoinDeclined>) {
+                    return {.terminal = stored_error(operation, "JOIN_DECLINED",
+                                                     "join request was declined",
+                                                     {{"operation", "chat_join"}}, kGeneric),
+                            .mutation_state = AccountAuditMutationState::None,
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, DirectOversizedMessage>) {
+                    return {
+                        .terminal = stored_from_terminal(
+                            operation,
+                            internal(
+                                operation,
+                                "TDLib returned data outside the supported persistence bounds")),
+                        .mutation_state = AccountAuditMutationState::Confirmed,
+                        .mutation_confirmed = true};
+                } else {
+                    return {.terminal = stored_from_terminal(operation, internal(operation)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                }
+            },
+            std::move(selected));
+    };
+    hooks.timestamp = timestamp;
+    hooks.audit_fatal_shutdown = [&session, &audit_fatal_shutdown] {
+        session.audit_fatal();
+        if (audit_fatal_shutdown) {
+            audit_fatal_shutdown();
+        }
+    };
+    const auto result = kernel.run(kernel_input, hooks);
+    if (result.status == WriteKernelStatus::DryRunPlanned && result.plan) {
+        session.result({{"dry_run", true}, {"plan", result.plan->value()}});
+    } else if (result.terminal) {
+        emit_terminal(session, *result.terminal);
+        if (result.status == WriteKernelStatus::DurabilityFatal && audit_fatal_shutdown) {
+            audit_fatal_shutdown();
+        }
+    }
 }
 
 } // namespace
@@ -1147,6 +1583,365 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 
+void WriteCoordinator::edit_message(const proto::Request& request, RequestSession& session) {
+    json parse_failure;
+    auto input = parse_edit_input(request.args, parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(proto::M3Operation::MsgEdit);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session,
+                      resolver_terminal_for_write(*error, proto::M3Operation::MsgEdit, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto authority = authorize(request, session, account_, proto::M3Operation::MsgEdit);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<EditState>(
+        EditState{.input = std::move(*input),
+                  .principal = std::get<ResolverPrincipal>(principal_outcome),
+                  .target = std::nullopt,
+                  .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = proto::M3Operation::MsgEdit;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, this]() -> WriteAdmissionOutcome {
+        const auto fingerprint_value =
+            fingerprint(account_, state->principal,
+                        MsgEditFingerprintPayload{state->input.chat, state->input.message_id,
+                                                  state->input.text});
+        std::string error;
+        auto arguments = write_contract::make_arguments(proto::M3Operation::MsgEdit,
+                                                        {{"chat", state->input.chat},
+                                                         {"message_id", state->input.message_id},
+                                                         {"text", state->input.text}},
+                                                        error);
+        if (!fingerprint_value || !arguments) {
+            return internal(proto::M3Operation::MsgEdit);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, &resolver, &session, &request, this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, proto::M3Operation::MsgEdit, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        auto facts = read_message_planning_facts(resolver, client_.get(), session,
+                                                 proto::M3Operation::MsgEdit, request,
+                                                 state->target->chat.id, state->input.message_id);
+        if (auto* failure = std::get_if<json>(&facts)) {
+            return std::move(*failure);
+        }
+        const auto& message = std::get<MessagePlanningFacts>(facts);
+        if (message.message.content_kind != core::TdMessageContentKind::Text) {
+            return precondition(proto::M3Operation::MsgEdit, state->target->chat.id,
+                                state->input.message_id, "wrong_content_type");
+        }
+        if (!message.properties.can_be_edited) {
+            return precondition(proto::M3Operation::MsgEdit, state->target->chat.id,
+                                state->input.message_id, "not_editable");
+        }
+        if (message.message.has_reply_markup) {
+            return precondition(proto::M3Operation::MsgEdit, state->target->chat.id,
+                                state->input.message_id, "reply_markup_preservation_unsupported");
+        }
+        state->dispatch->request =
+            core::TdEditMessageTextRequest{.chat_id = state->target->chat.id,
+                                           .message_id = state->input.message_id,
+                                           .text = state->input.text};
+        std::string error;
+        auto plan = write_contract::make_plan(proto::M3Operation::MsgEdit, account_,
+                                              {{"operation", "msg_edit"},
+                                               {"account", account_},
+                                               {"tdlib_request", "editMessageText"},
+                                               {"chat", chat_identity_json(state->target->chat)},
+                                               {"message_id", state->input.message_id},
+                                               {"text", state->input.text}},
+                                              error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(proto::M3Operation::MsgEdit)};
+    };
+    definition.success =
+        [](const write_contract::Plan& plan,
+           const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* message = std::get_if<core::TdMessageWriteResult>(&outcome);
+        if (message == nullptr || message->chat_id != plan.value()["chat"]["id"] ||
+            message->id != plan.value()["message_id"] ||
+            message->content_kind != core::TdMessageContentKind::Text ||
+            message->text != plan.value()["text"].get<std::string>()) {
+            return std::nullopt;
+        }
+        auto result = message_write_result_json(*message);
+        if (result.is_null()) {
+            return std::nullopt;
+        }
+        return stored_result(proto::M3Operation::MsgEdit, std::move(result));
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+void WriteCoordinator::react_to_message(const proto::Request& request, RequestSession& session) {
+    json parse_failure;
+    auto input = parse_react_input(request.args, parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(proto::M3Operation::MsgReact);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session,
+                      resolver_terminal_for_write(*error, proto::M3Operation::MsgReact, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(proto::M3Operation::MsgReact, principal.is_bot,
+                                  M3ScheduleKind::None) != M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "message reactions require a user account",
+                      {{"operation", "msg_react"}}, kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, proto::M3Operation::MsgReact);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<ReactState>(
+        ReactState{.input = std::move(*input),
+                   .principal = principal,
+                   .target = std::nullopt,
+                   .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = proto::M3Operation::MsgReact;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, this]() -> WriteAdmissionOutcome {
+        const auto fingerprint_value =
+            fingerprint(account_, state->principal,
+                        MsgReactFingerprintPayload{state->input.chat, state->input.message_id,
+                                                   state->input.reaction, state->input.remove,
+                                                   state->input.big});
+        std::string error;
+        auto arguments = write_contract::make_arguments(proto::M3Operation::MsgReact,
+                                                        {{"chat", state->input.chat},
+                                                         {"message_id", state->input.message_id},
+                                                         {"reaction", state->input.reaction},
+                                                         {"remove", state->input.remove},
+                                                         {"big", state->input.big}},
+                                                        error);
+        if (!fingerprint_value || !arguments) {
+            return internal(proto::M3Operation::MsgReact);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, &resolver, &session, &request, this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, proto::M3Operation::MsgReact, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        auto available_read =
+            read_value(resolver, client_.get(), session, proto::M3Operation::MsgReact, request,
+                       [&](const auto& current) {
+                           return client_.get().get_message_available_reactions(
+                               current, state->target->chat.id, state->input.message_id);
+                       });
+        if (auto* failure = std::get_if<json>(&available_read)) {
+            return std::move(*failure);
+        }
+        auto& available_value = std::get<core::TdValue>(available_read);
+        if (const auto* error = available_value.get_if<core::TdError>()) {
+            if (error->code == 404) {
+                return terminal(
+                    "NOT_FOUND", "message was not found",
+                    {{"chat_id", state->target->chat.id}, {"message_id", state->input.message_id}},
+                    kNotFound);
+            }
+            return td_error_terminal(proto::M3Operation::MsgReact, *error);
+        }
+        const auto* available = available_value.get_if<core::TdMessageAvailableReactions>();
+        if (available == nullptr) {
+            return internal(proto::M3Operation::MsgReact);
+        }
+        const auto availability = reaction_is_available(*available, state->input.reaction);
+        if (!availability) {
+            return internal(proto::M3Operation::MsgReact);
+        }
+        auto properties =
+            read_message_properties(resolver, client_.get(), session, proto::M3Operation::MsgReact,
+                                    request, state->target->chat.id, state->input.message_id);
+        if (auto* failure = std::get_if<json>(&properties)) {
+            return std::move(*failure);
+        }
+        if (!*availability) {
+            return precondition(proto::M3Operation::MsgReact, state->target->chat.id,
+                                state->input.message_id, "reaction_unavailable");
+        }
+        state->dispatch->request =
+            core::TdMessageReactionRequest{.chat_id = state->target->chat.id,
+                                           .message_id = state->input.message_id,
+                                           .reaction = state->input.reaction,
+                                           .remove = state->input.remove,
+                                           .big = state->input.big};
+        std::string error;
+        auto plan = write_contract::make_plan(
+            proto::M3Operation::MsgReact, account_,
+            {{"operation", "msg_react"},
+             {"account", account_},
+             {"tdlib_request",
+              state->input.remove ? "removeMessageReaction" : "addMessageReaction"},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"message_id", state->input.message_id},
+             {"reaction", state->input.reaction},
+             {"remove", state->input.remove},
+             {"big", state->input.big}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(proto::M3Operation::MsgReact)};
+    };
+    definition.success =
+        [](const write_contract::Plan& plan,
+           const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectReactionResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] ||
+            result->message_id != plan.value()["message_id"] ||
+            result->reaction != plan.value()["reaction"].get<std::string>() ||
+            result->removed != plan.value()["remove"] || result->big != plan.value()["big"]) {
+            return std::nullopt;
+        }
+        return stored_result(proto::M3Operation::MsgReact, {{"chat_id", result->chat_id},
+                                                            {"message_id", result->message_id},
+                                                            {"reaction", result->reaction},
+                                                            {"removed", result->removed},
+                                                            {"big", result->big}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
+void WriteCoordinator::pin_message(const proto::Request& request, RequestSession& session,
+                                   bool pinned) {
+    const auto operation = pinned ? proto::M3Operation::MsgPin : proto::M3Operation::MsgUnpin;
+    json parse_failure;
+    auto input = parse_message_pin_input(request.args, pinned, parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    auto state = std::make_shared<MessagePinState>(
+        MessagePinState{.input = std::move(*input),
+                        .principal = std::get<ResolverPrincipal>(principal_outcome),
+                        .target = std::nullopt,
+                        .dispatch = std::make_shared<DirectDispatchState>()});
+    DirectWriteDefinition definition;
+    definition.operation = operation;
+    definition.dispatch = state->dispatch;
+    definition.admit = [state, operation, this]() -> WriteAdmissionOutcome {
+        const auto payload = state->input.pinned ? FingerprintPayload{MsgPinFingerprintPayload{
+                                                       state->input.chat, state->input.message_id}}
+                                                 : FingerprintPayload{MsgUnpinFingerprintPayload{
+                                                       state->input.chat, state->input.message_id}};
+        const auto fingerprint_value = fingerprint(account_, state->principal, payload);
+        std::string error;
+        auto arguments = write_contract::make_arguments(
+            operation, {{"chat", state->input.chat}, {"message_id", state->input.message_id}},
+            error);
+        if (!fingerprint_value || !arguments) {
+            return internal(operation);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    definition.plan = [state, operation, &resolver, &session, &request,
+                       this]() -> WritePlanningOutcome {
+        auto resolved = resolver.resolve_exact_chat(state->input.chat);
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        auto properties =
+            read_message_properties(resolver, client_.get(), session, operation, request,
+                                    state->target->chat.id, state->input.message_id);
+        if (auto* failure = std::get_if<json>(&properties)) {
+            return std::move(*failure);
+        }
+        if (state->input.pinned && !std::get<core::TdMessageProperties>(properties).can_be_pinned) {
+            return precondition(operation, state->target->chat.id, state->input.message_id,
+                                "not_pinnable");
+        }
+        state->dispatch->request = core::TdPinMessageRequest{.chat_id = state->target->chat.id,
+                                                             .message_id = state->input.message_id,
+                                                             .pinned = state->input.pinned};
+        std::string error;
+        auto plan = write_contract::make_plan(
+            operation, account_,
+            {{"operation", state->input.pinned ? "msg_pin" : "msg_unpin"},
+             {"account", account_},
+             {"tdlib_request", state->input.pinned ? "pinChatMessage" : "unpinChatMessage"},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"message_id", state->input.message_id},
+             {"pinned", state->input.pinned}},
+            error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(operation)};
+    };
+    definition.success =
+        [operation](const write_contract::Plan& plan,
+                    const DirectResult& outcome) -> std::optional<write_contract::StoredTerminal> {
+        const auto* result = std::get_if<DirectMessagePinResult>(&outcome);
+        if (result == nullptr || result->chat_id != plan.value()["chat"]["id"] ||
+            result->message_id != plan.value()["message_id"] ||
+            result->pinned != plan.value()["pinned"]) {
+            return std::nullopt;
+        }
+        return stored_result(operation, {{"chat_id", result->chat_id},
+                                         {"message_id", result->message_id},
+                                         {"pinned", result->pinned}});
+    };
+    execute_direct_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                         hooks_, request, session, *authority, std::move(definition));
+}
+
 // NOLINTBEGIN(readability-function-cognitive-complexity): exact two-epoch delete transaction.
 void WriteCoordinator::delete_messages(const proto::Request& request, RequestSession& session) {
     json parse_failure;
@@ -1475,11 +2270,35 @@ void register_write_commands(Dispatcher& dispatcher, WriteCoordinator& coordinat
                  },
                  false, proto::M3Operation::Send});
     dispatcher.register_command(
+        "msg edit", {Tier::Write,
+                     [&coordinator](const proto::Request& request, RequestSession& session) {
+                         coordinator.edit_message(request, session);
+                     },
+                     false, proto::M3Operation::MsgEdit});
+    dispatcher.register_command(
         "msg delete", {Tier::Destructive,
                        [&coordinator](const proto::Request& request, RequestSession& session) {
                            coordinator.delete_messages(request, session);
                        },
                        false, proto::M3Operation::MsgDelete});
+    dispatcher.register_command(
+        "msg react", {Tier::Write,
+                      [&coordinator](const proto::Request& request, RequestSession& session) {
+                          coordinator.react_to_message(request, session);
+                      },
+                      false, proto::M3Operation::MsgReact});
+    dispatcher.register_command(
+        "msg pin", {Tier::Write,
+                    [&coordinator](const proto::Request& request, RequestSession& session) {
+                        coordinator.pin_message(request, session, true);
+                    },
+                    false, proto::M3Operation::MsgPin});
+    dispatcher.register_command(
+        "msg unpin", {Tier::Write,
+                      [&coordinator](const proto::Request& request, RequestSession& session) {
+                          coordinator.pin_message(request, session, false);
+                      },
+                      false, proto::M3Operation::MsgUnpin});
 }
 
 } // namespace tgcli::daemon

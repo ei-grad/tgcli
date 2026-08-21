@@ -263,7 +263,7 @@ before the milestone is closed.
 - [x] Implement `tgcli send` text/Markdown/HTML/reply/forum-topic/silent/
       schedule paths, wait for authoritative final send state, and return the
       exact `MessageWriteResult`
-- [ ] Implement `tgcli msg edit|react|pin|unpin` with exact property
+- [x] Implement `tgcli msg edit|react|pin|unpin` with exact property
       validation, reaction availability, plan, audit, timeout and idempotency
       behavior
 - [x] Implement destructive `tgcli msg delete`, including confirmation of the

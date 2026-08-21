@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","big":true,"chat":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"message_id":321,"operation":"msg_react","reaction":"👍","remove":false,"tdlib_request":"addMessageReaction"}

@@ -444,7 +444,8 @@ TEST_CASE("fetch retains removal before logout recovery without broadening read 
     REQUIRE(daemon_status.size() == 1);
     CHECK(daemon_status.front() == daemon::RecoveryPreflight::Removal);
 
-    for (const auto* command : {"send", "msg delete"}) {
+    for (const auto* command :
+         {"send", "msg edit", "msg delete", "msg react", "msg pin", "msg unpin"}) {
         const auto write = daemon::recovery_preflight_order(command);
         REQUIRE(write.size() == 2);
         CHECK(write[0] == daemon::RecoveryPreflight::Removal);
@@ -539,14 +540,18 @@ TEST_CASE("M3 descriptors must match the closed registry and remain fail closed"
         request.command = command_parts(policy.command_path);
         const auto outcome = dispatch_frozen_request(dispatcher, request);
         if (policy.operation == daemon::M3Operation::Send ||
-            policy.operation == daemon::M3Operation::MsgDelete) {
+            policy.operation == daemon::M3Operation::MsgEdit ||
+            policy.operation == daemon::M3Operation::MsgDelete ||
+            policy.operation == daemon::M3Operation::MsgReact ||
+            policy.operation == daemon::M3Operation::MsgPin ||
+            policy.operation == daemon::M3Operation::MsgUnpin) {
             CHECK(outcome.result == json::object());
         } else {
             CHECK(outcome.error_code == "DENIED");
             CHECK(outcome.exit_code == kDenied);
         }
     }
-    CHECK(handler_runs == 2);
+    CHECK(handler_runs == 6);
 }
 
 TEST_CASE("daemon stop triggers the shutdown hook and confirms", "[dispatch]") {

@@ -460,6 +460,72 @@ proto::Request delete_request(std::int64_t message_id = 101,
     return request;
 }
 
+proto::Request edit_request(std::string text = "revised",
+                            std::optional<std::string> key = std::nullopt, bool dry_run = false) {
+    proto::Request request("main");
+    request.id = 43;
+    request.command = {"msg", "edit"};
+    request.args = {{"chat", "-1001"}, {"message_id", 101}, {"text", std::move(text)}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    request.context.dry_run = dry_run;
+    return request;
+}
+
+proto::Request react_request(bool remove = false, bool big = false,
+                             std::optional<std::string> key = std::nullopt) {
+    proto::Request request("main");
+    request.id = 44;
+    request.command = {"msg", "react"};
+    request.args = {{"chat", "-1001"},
+                    {"message_id", 101},
+                    {"reaction", "👍"},
+                    {"remove", remove},
+                    {"big", big}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    return request;
+}
+
+proto::Request message_pin_request(bool pinned, std::optional<std::string> key = std::nullopt) {
+    proto::Request request("main");
+    request.id = 45;
+    request.command = {"msg", pinned ? "pin" : "unpin"};
+    request.args = {{"chat", "-1001"}, {"message_id", 101}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    return request;
+}
+
+core::TdMessageWriteResult edited_message(std::string text = "revised") {
+    return {.id = 101,
+            .chat_id = -1001,
+            .date = 1'785'924'000,
+            .sender = {.kind = core::TdMessageSenderKind::User, .id = 42, .tdlib_type_id = 1},
+            .is_outgoing = true,
+            .topic = std::nullopt,
+            .content_kind = core::TdMessageContentKind::Text,
+            .text = std::move(text),
+            .scheduled = false};
+}
+
+core::TdMessageAvailableReactions available_reactions() {
+    return {.top = {{.type = {.kind = core::TdReactionKind::Emoji,
+                              .emoji = "👍",
+                              .custom_emoji_id = 0,
+                              .tdlib_type_id = 1},
+                     .needs_premium = false}},
+            .recent = {},
+            .popular = {},
+            .allow_custom_emoji = false,
+            .are_tags = false,
+            .unavailability_reason = core::TdReactionUnavailabilityReason::None,
+            .unsupported_unavailability_tdlib_type_id = std::nullopt};
+}
+
 void resolve_basic(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
     fake.respond(core::TdFunctionKind::GetChat, basic_chat());
@@ -1147,6 +1213,250 @@ TEST_CASE("post-proof send timeout retains an unknown keyed invocation for recov
     REQUIRE(store["entries"].size() == 1);
     CHECK(store["entries"][0]["state"] == "pending");
     CHECK(read_bytes(fake.tree().store_path()).find("timeout-key-sentinel") == std::string::npos);
+}
+
+TEST_CASE("public msg edit validates text state and returns the correlated message",
+          "[write-command][edit][fake-boundary]") {
+    FakeWrites fake;
+    auto pending = fake.dispatch(edit_request("revised", "edit-key-sentinel"));
+    resolve_basic(fake);
+    fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+    core::TdMessageProperties properties;
+    properties.can_be_edited = true;
+    fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+    const auto descriptor =
+        fake.respond(core::TdFunctionKind::EditMessageText, edited_message("revised"));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["id"] == 101);
+    CHECK((*outcome.result)["chat_id"] == -1001);
+    CHECK((*outcome.result)["text"] == "revised");
+    CHECK((*outcome.result)["scheduled"] == false);
+    CHECK(function_field<std::string>(descriptor, "text") == "revised");
+    CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 1);
+    CHECK_THAT(*outcome.result, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+
+    auto replay = fake.dispatch(edit_request("revised", "edit-key-sentinel"));
+    bind_principal(fake);
+    const auto replay_outcome = replay.get();
+    CHECK(replay_outcome.result == outcome.result);
+    CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 1);
+
+    auto conflict = fake.dispatch(edit_request("different", "edit-key-sentinel"));
+    bind_principal(fake);
+    const auto conflict_outcome = conflict.get();
+    REQUIRE(conflict_outcome.error);
+    CHECK((*conflict_outcome.error)["error"]["code"] == "IDEMPOTENCY_CONFLICT");
+    CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 1);
+    const auto artifacts = outcome.result->dump() + replay_outcome.result.value_or(json{}).dump();
+    CHECK(artifacts.find("edit-key-sentinel") == std::string::npos);
+}
+
+TEST_CASE("msg edit property failures and dry-run stop before mutation",
+          "[write-command][edit][dry-run][properties][fake-boundary]") {
+    SECTION("non-text content is rejected") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(edit_request());
+        resolve_basic(fake);
+        auto message = planning_message(101);
+        message.content_kind = core::TdMessageContentKind::Photo;
+        fake.respond(core::TdFunctionKind::GetMessage, message);
+        core::TdMessageProperties properties;
+        properties.can_be_edited = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "wrong_content_type");
+        CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 0);
+    }
+
+    SECTION("reply markup is never silently discarded") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(edit_request());
+        resolve_basic(fake);
+        auto message = planning_message(101);
+        message.has_reply_markup = true;
+        fake.respond(core::TdFunctionKind::GetMessage, message);
+        core::TdMessageProperties properties;
+        properties.can_be_edited = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["details"]["reason"] ==
+              "reply_markup_preservation_unsupported");
+        CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 0);
+    }
+
+    SECTION("dry-run plans with no persistence") {
+        FakeWrites fake(false);
+        auto pending = fake.dispatch(edit_request("revised", std::nullopt, true));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_edited = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["dry_run"] == true);
+        CHECK((*outcome.result)["plan"]["tdlib_request"] == "editMessageText");
+        CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    }
+}
+
+TEST_CASE("oversized correlated msg edit success is durable confirmed INTERNAL",
+          "[write-command][edit][bounds][idempotency][fake-boundary]") {
+    FakeWrites fake;
+    auto pending = fake.dispatch(edit_request("revised", "edit-oversized-key"));
+    resolve_basic(fake);
+    fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+    core::TdMessageProperties properties;
+    properties.can_be_edited = true;
+    fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+    fake.respond(core::TdFunctionKind::EditMessageText, edited_message(std::string(4'097, 'x')));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+    CHECK((*outcome.error)["error"]["message"] ==
+          "TDLib returned data outside the supported persistence bounds");
+    CHECK((*outcome.error)["error"]["details"] ==
+          json{{"operation", "msg_edit"}, {"reason", "internal_error"}});
+    CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+
+    auto guard = fake.foundation()->acquire_epoch();
+    const auto store = fake.foundation()->store().inspect(guard);
+    REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+    REQUIRE(store.snapshot.entries.size() == 1);
+    CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Completed);
+    REQUIRE(store.snapshot.entries.front().terminal);
+    CHECK((*store.snapshot.entries.front().terminal)["code"] == "INTERNAL");
+    const auto audit = fake.foundation()->audit().inspect(guard);
+    CHECK(audit.status == daemon::AccountAuditInspectionStatus::Clean);
+}
+
+TEST_CASE("public msg react validates availability and exact add-remove options",
+          "[write-command][react][fake-boundary]") {
+    for (const auto& [remove, big, function] :
+         std::vector<std::tuple<bool, bool, core::TdFunctionKind>>{
+             {false, true, core::TdFunctionKind::AddMessageReaction},
+             {true, false, core::TdFunctionKind::RemoveMessageReaction}}) {
+        CAPTURE(remove, big);
+        FakeWrites fake;
+        auto pending = fake.dispatch(react_request(remove, big));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessageAvailableReactions, available_reactions());
+        fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+        const auto descriptor = fake.respond(function, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"chat_id", -1001},
+                                      {"message_id", 101},
+                                      {"reaction", "👍"},
+                                      {"removed", remove},
+                                      {"big", big}});
+        CHECK(function_field<std::string>(descriptor, "reaction") == "👍");
+        if (!remove) {
+            CHECK(function_field<bool>(descriptor, "is_big") == big);
+            CHECK(function_field<bool>(descriptor, "update_recent_reactions"));
+        }
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("msg-react.result.schema.json"));
+    }
+
+    SECTION("an unavailable reaction is a planning precondition") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(react_request());
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessageAvailableReactions,
+                     core::TdMessageAvailableReactions{});
+        fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "reaction_unavailable");
+        CHECK(fake.count(core::TdFunctionKind::AddMessageReaction) == 0);
+    }
+
+    SECTION("a bot is rejected before reaction reads") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(react_request());
+        fake.respond(core::TdFunctionKind::GetMe, peer(core::TdUserPresence::Online, true, 42));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "BOT_UNSUPPORTED");
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetMessageAvailableReactions) == 0);
+    }
+}
+
+TEST_CASE("public msg pin and unpin preserve exact property and TD request semantics",
+          "[write-command][message-pin][fake-boundary]") {
+    for (const bool pinned : {true, false}) {
+        CAPTURE(pinned);
+        FakeWrites fake;
+        auto pending = fake.dispatch(message_pin_request(pinned));
+        resolve_basic(fake);
+        core::TdMessageProperties properties;
+        properties.can_be_pinned = pinned;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto function =
+            pinned ? core::TdFunctionKind::PinChatMessage : core::TdFunctionKind::UnpinChatMessage;
+        const auto descriptor = fake.respond(function, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"chat_id", -1001}, {"message_id", 101}, {"pinned", pinned}});
+        CHECK(function_field<std::int64_t>(descriptor, "message_id") == 101);
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema(pinned ? "msg-pin.result.schema.json"
+                                                           : "msg-unpin.result.schema.json"));
+    }
+
+    FakeWrites denied;
+    auto pending = denied.dispatch(message_pin_request(true));
+    resolve_basic(denied);
+    denied.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["details"]["reason"] == "not_pinnable");
+    CHECK(denied.count(core::TdFunctionKind::PinChatMessage) == 0);
+}
+
+TEST_CASE("direct message operations separate pre-proof and post-proof deadline cuts",
+          "[write-command][edit][deadline][idempotency][fake-boundary]") {
+    SECTION("preparation deadline closes mutation none") {
+        FakeWrites fake;
+        fake.expire_direct_before_request();
+        auto pending = fake.dispatch(edit_request("revised", "edit-preproof-key"));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_edited = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "preflight");
+        CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("deadline after dispatch proof retains unknown pending") {
+        FakeWrites fake;
+        fake.expire_direct_before_submit();
+        auto pending = fake.dispatch(edit_request("revised", "edit-postproof-key"));
+        resolve_basic(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(101));
+        core::TdMessageProperties properties;
+        properties.can_be_edited = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "dispatch");
+        CHECK((*outcome.error)["error"]["details"]["outcome"] == "unknown");
+        CHECK(fake.count(core::TdFunctionKind::EditMessageText) == 0);
+        check_completed_possible_with_pending(fake);
+    }
 }
 
 TEST_CASE("public msg delete confirms the immutable plan and accepts correlated ok",

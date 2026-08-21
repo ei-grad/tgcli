@@ -37,6 +37,18 @@
     "msg delete": {
       "error": "m3-write.error.schema.json"
     },
+    "msg edit": {
+      "error": "m3-write.error.schema.json"
+    },
+    "msg pin": {
+      "error": "m3-write.error.schema.json"
+    },
+    "msg react": {
+      "error": "m3-write.error.schema.json"
+    },
+    "msg unpin": {
+      "error": "m3-write.error.schema.json"
+    },
     "resolve": {
       "error": "resolve.error.schema.json"
     },

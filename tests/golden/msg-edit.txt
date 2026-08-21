@@ -1,0 +1,9 @@
+id	321
+chat_id	-1001
+date	"2026-08-05T10:00:00Z"
+sender	{"id":42,"type":"user"}
+is_outgoing	true
+topic	{"id":7,"kind":"forum"}
+type	"text"
+text	"hello"
+scheduled	false

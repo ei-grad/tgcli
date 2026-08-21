@@ -355,8 +355,12 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"logout", {{"result", "logout.result.schema.json"}}},
           {"me", {{"result", "me.result.schema.json"}}},
           {"msg delete", {{"result", "msg-delete.result.schema.json"}}},
+          {"msg edit", {{"result", "msg-edit.result.schema.json"}}},
           {"msg get", {{"result", "msg-get.result.schema.json"}}},
           {"msg link", {{"result", "msg-link.result.schema.json"}}},
+          {"msg pin", {{"result", "msg-pin.result.schema.json"}}},
+          {"msg react", {{"result", "msg-react.result.schema.json"}}},
+          {"msg unpin", {{"result", "msg-unpin.result.schema.json"}}},
           {"read", {{"result", "read.result.schema.json"}}},
           {"resolve", {{"result", "resolve.result.schema.json"}}},
           {"saved search", {{"result", "saved-search.result.schema.json"}}},
@@ -368,7 +372,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 27);
+    CHECK(manifest["commands"].size() == 31);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -703,6 +707,86 @@ TEST_CASE("Saved Messages errors have exact command-specific shapes", "[schema][
     auto unknown = errors.front();
     unknown["error"]["details"]["extra"] = true;
     CHECK_THAT(unknown, !tgcli::test::matches_json_schema("saved.error.schema.json"));
+}
+
+TEST_CASE("direct message write schemas pair exact result plans and operation errors",
+          "[schema][m3][message-write]") {
+    const json chat{{"id", -1001},
+                    {"title", "Project"},
+                    {"type", "supergroup"},
+                    {"is_bot", false},
+                    {"usernames", json::array({"project"})}};
+    const json message{{"id", 101},
+                       {"chat_id", -1001},
+                       {"date", "2026-08-05T10:00:00Z"},
+                       {"sender", {{"type", "user"}, {"id", 42}}},
+                       {"is_outgoing", true},
+                       {"topic", nullptr},
+                       {"type", "text"},
+                       {"text", "revised"},
+                       {"scheduled", false}};
+    CHECK_THAT(message, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+    auto invalid_message = message;
+    invalid_message["scheduled"] = true;
+    CHECK_THAT(invalid_message, !tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+    invalid_message = message;
+    invalid_message["type"] = "photo";
+    CHECK_THAT(invalid_message, !tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+
+    const json edit_dry{{"dry_run", true},
+                        {"plan",
+                         {{"operation", "msg_edit"},
+                          {"account", "main"},
+                          {"tdlib_request", "editMessageText"},
+                          {"chat", chat},
+                          {"message_id", 101},
+                          {"text", "revised"}}}};
+    CHECK_THAT(edit_dry, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+    auto invalid_dry = edit_dry;
+    invalid_dry["plan"]["tdlib_request"] = "sendMessage";
+    CHECK_THAT(invalid_dry, !tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+
+    const json reaction{{"chat_id", -1001},
+                        {"message_id", 101},
+                        {"reaction", "👍"},
+                        {"removed", false},
+                        {"big", true}};
+    CHECK_THAT(reaction, tgcli::test::matches_json_schema("msg-react.result.schema.json"));
+    auto invalid_reaction = reaction;
+    invalid_reaction["removed"] = true;
+    CHECK_THAT(invalid_reaction, !tgcli::test::matches_json_schema("msg-react.result.schema.json"));
+
+    const json pinned_result{{"chat_id", -1001}, {"message_id", 101}, {"pinned", true}};
+    const json unpinned_result{{"chat_id", -1001}, {"message_id", 101}, {"pinned", false}};
+    CHECK_THAT(pinned_result, tgcli::test::matches_json_schema("msg-pin.result.schema.json"));
+    CHECK_THAT(unpinned_result, tgcli::test::matches_json_schema("msg-unpin.result.schema.json"));
+    CHECK_THAT(unpinned_result, !tgcli::test::matches_json_schema("msg-pin.result.schema.json"));
+
+    const std::vector<json> errors{
+        terminal_error("PRECONDITION_FAILED", {{"operation", "msg_edit"},
+                                               {"chat_id", -1001},
+                                               {"message_id", 101},
+                                               {"reason", "not_editable"}}),
+        terminal_error("PRECONDITION_FAILED", {{"operation", "msg_react"},
+                                               {"chat_id", -1001},
+                                               {"message_id", 101},
+                                               {"reason", "reaction_unavailable"}}),
+        terminal_error("PRECONDITION_FAILED", {{"operation", "msg_pin"},
+                                               {"chat_id", -1001},
+                                               {"message_id", 101},
+                                               {"reason", "not_pinnable"}}),
+        terminal_error("TIMEOUT", {{"operation", "msg_unpin"},
+                                   {"phase", "dispatch"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"}}),
+        terminal_error("BOT_UNSUPPORTED", {{"operation", "msg_react"}})};
+    for (const auto& error : errors) {
+        CHECK_THAT(error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
+    auto invalid_error = errors.front();
+    invalid_error["error"]["details"]["reason"] = "reaction_unavailable";
+    CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
 }
 
 TEST_CASE("destructive error schemas close command shapes and uint64 request ids",

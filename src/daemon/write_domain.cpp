@@ -133,6 +133,11 @@ bool valid_send_text(std::string_view text) {
     return true;
 }
 
+bool valid_message_reaction(std::string_view reaction) {
+    return !reaction.empty() && reaction.size() <= 64 &&
+           reaction.find('\0') == std::string_view::npos && common::valid_utf8(reaction);
+}
+
 std::optional<TopicRef> parse_send_topic(std::string_view value) {
     constexpr std::string_view forum = "forum:";
     if (value.starts_with(forum)) {

@@ -440,6 +440,25 @@ std::string render_message_delete(const nlohmann::json& data) {
                        data.at("for_all").dump(), data.at("deleted").dump());
 }
 
+std::string render_message_reaction(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\nmessage_id\t{}\nreaction\t{}\nremoved\t{}\nbig\t{}\n",
+                       data.at("chat_id").get<std::int64_t>(),
+                       data.at("message_id").get<std::int64_t>(), data.at("reaction").dump(),
+                       data.at("removed").dump(), data.at("big").dump());
+}
+
+std::string render_message_pin(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("chat_id\t{}\nmessage_id\t{}\npinned\t{}\n",
+                       data.at("chat_id").get<std::int64_t>(),
+                       data.at("message_id").get<std::int64_t>(), data.at("pinned").dump());
+}
+
 std::string render_msg_link(const nlohmann::json& data) {
     return fmt::format("chat_id\t{}\nmessage_id\t{}\nlink\t{}\nis_public\t{}\n",
                        data.at("chat_id").get<std::int64_t>(),
@@ -555,11 +574,17 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     if (command_key == "msg link") {
         return render_msg_link(data);
     }
-    if (command_key == "send") {
+    if (command_key == "send" || command_key == "msg edit") {
         return render_message_write(data);
     }
     if (command_key == "msg delete") {
         return render_message_delete(data);
+    }
+    if (command_key == "msg react") {
+        return render_message_reaction(data);
+    }
+    if (command_key == "msg pin" || command_key == "msg unpin") {
+        return render_message_pin(data);
     }
     // Until a command grows a dedicated renderer, readable JSON is the
     // honest fallback.

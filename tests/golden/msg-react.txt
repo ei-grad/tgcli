@@ -1,0 +1,5 @@
+chat_id	-1001
+message_id	321
+reaction	"👍"
+removed	false
+big	true

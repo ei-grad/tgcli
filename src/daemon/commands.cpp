@@ -52,15 +52,19 @@ bool uses_account_removal_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
-           command == "fetch" || command == "send" || command == "msg delete" ||
-           command == "daemon status" || command == "daemon stop" || command == "daemon restart";
+           command == "fetch" || command == "send" || command == "msg edit" ||
+           command == "msg delete" || command == "msg react" || command == "msg pin" ||
+           command == "msg unpin" || command == "daemon status" || command == "daemon stop" ||
+           command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
-           command == "fetch" || command == "send" || command == "msg delete";
+           command == "fetch" || command == "send" || command == "msg edit" ||
+           command == "msg delete" || command == "msg react" || command == "msg pin" ||
+           command == "msg unpin";
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
@@ -82,8 +86,10 @@ void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& co
                     if (command == "logout" && session.request().context.dry_run) {
                         continue;
                     }
-                    const bool persistence_free_m3 = session.request().context.dry_run &&
-                                                     (command == "send" || command == "msg delete");
+                    const bool persistence_free_m3 =
+                        session.request().context.dry_run &&
+                        (command == "send" || command == "msg edit" || command == "msg delete" ||
+                         command == "msg react" || command == "msg pin" || command == "msg unpin");
                     if (context.logout != nullptr &&
                         !(persistence_free_m3 ? context.logout->preflight_read_only(session)
                                               : context.logout->preflight(session))) {

@@ -4,6 +4,9 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -360,6 +363,59 @@ TEST_CASE("public M3 write renderers preserve complete results and plans", "[m3]
     const json delete_dry{{"dry_run", true}, {"plan", delete_plan}};
     CHECK_THAT(delete_dry, tgcli::test::matches_json_schema("msg-delete.result.schema.json"));
     CHECK(tgcli::cli::render_human("msg delete", delete_dry) == golden("msg-delete-dry-run.txt"));
+
+    const json edit_result = send_result;
+    CHECK_THAT(edit_result, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg edit", edit_result) == golden("msg-edit.txt"));
+    const json edit_plan{{"operation", "msg_edit"},
+                         {"account", "main"},
+                         {"tdlib_request", "editMessageText"},
+                         {"chat", chat},
+                         {"message_id", 321},
+                         {"text", "hello"}};
+    const json edit_dry{{"dry_run", true}, {"plan", edit_plan}};
+    CHECK_THAT(edit_dry, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg edit", edit_dry) == golden("msg-edit-dry-run.txt"));
+
+    const json react_result{{"chat_id", -1001},
+                            {"message_id", 321},
+                            {"reaction", "👍"},
+                            {"removed", false},
+                            {"big", true}};
+    CHECK_THAT(react_result, tgcli::test::matches_json_schema("msg-react.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg react", react_result) == golden("msg-react.txt"));
+    const json react_plan{{"operation", "msg_react"},
+                          {"account", "main"},
+                          {"tdlib_request", "addMessageReaction"},
+                          {"chat", chat},
+                          {"message_id", 321},
+                          {"reaction", "👍"},
+                          {"remove", false},
+                          {"big", true}};
+    const json react_dry{{"dry_run", true}, {"plan", react_plan}};
+    CHECK_THAT(react_dry, tgcli::test::matches_json_schema("msg-react.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg react", react_dry) == golden("msg-react-dry-run.txt"));
+
+    for (const auto& [command, operation, tdlib_request, pinned, schema, result_golden,
+                      dry_golden] :
+         std::vector<std::tuple<std::string_view, std::string_view, std::string_view, bool,
+                                std::string_view, std::string_view, std::string_view>>{
+             {"msg pin", "msg_pin", "pinChatMessage", true, "msg-pin.result.schema.json",
+              "msg-pin.txt", "msg-pin-dry-run.txt"},
+             {"msg unpin", "msg_unpin", "unpinChatMessage", false, "msg-unpin.result.schema.json",
+              "msg-unpin.txt", "msg-unpin-dry-run.txt"}}) {
+        const json pin_result{{"chat_id", -1001}, {"message_id", 321}, {"pinned", pinned}};
+        CHECK_THAT(pin_result, tgcli::test::matches_json_schema(std::string(schema)));
+        CHECK(tgcli::cli::render_human(std::string(command), pin_result) ==
+              golden(std::string(result_golden)));
+        const json pin_plan{
+            {"operation", operation}, {"account", "main"}, {"tdlib_request", tdlib_request},
+            {"chat", chat},           {"message_id", 321}, {"pinned", pinned}};
+        const json pin_dry{{"dry_run", true}, {"plan", pin_plan}};
+        CHECK_THAT(pin_dry, tgcli::test::matches_json_schema(std::string(schema)));
+        CHECK(tgcli::cli::render_human(std::string(command), pin_dry) ==
+              golden(std::string(dry_golden)));
+    }
 }
 
 TEST_CASE("read human renderer matches its reviewed exact TSV golden", "[read][render][golden]") {

@@ -484,6 +484,18 @@ struct MessageCliArguments {
     std::vector<std::int64_t> delete_ids;
     bool delete_for_all = false;
     bool delete_has_duplicate = false;
+    std::string edit_chat;
+    std::int64_t edit_id = 0;
+    std::string edit_text;
+    std::string react_chat;
+    std::int64_t react_id = 0;
+    std::string reaction;
+    bool react_remove = false;
+    bool react_big = false;
+    std::string pin_chat;
+    std::int64_t pin_id = 0;
+    std::string unpin_chat;
+    std::int64_t unpin_id = 0;
 };
 
 struct SendCliArguments {
@@ -737,6 +749,49 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
                                 "id");
         }
     }
+    if (command == std::vector<std::string>{"msg", "edit"}) {
+        if (tgcli::daemon::classify_exact_write_selector(messages.edit_chat) ==
+            tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+            return report_usage("msg edit chat selector is invalid", "chat");
+        }
+        if (!valid_message_id(messages.edit_id)) {
+            return report_usage("message id must be a nonzero int53 value", "id");
+        }
+        if (!tgcli::daemon::valid_send_text(messages.edit_text)) {
+            return report_usage("msg edit text must contain between 1 and 4096 Unicode scalars",
+                                "TEXT");
+        }
+    }
+    if (command == std::vector<std::string>{"msg", "react"}) {
+        if (tgcli::daemon::classify_exact_write_selector(messages.react_chat) ==
+            tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+            return report_usage("msg react chat selector is invalid", "chat");
+        }
+        if (!valid_message_id(messages.react_id)) {
+            return report_usage("message id must be a nonzero int53 value", "id");
+        }
+        if (!tgcli::daemon::valid_message_reaction(messages.reaction)) {
+            return report_usage("msg react emoji must be valid UTF-8 between 1 and 64 bytes",
+                                "emoji");
+        }
+        if (messages.react_remove && messages.react_big) {
+            return report_usage("--remove and --big are mutually exclusive", "--remove/--big",
+                                "mutually_exclusive");
+        }
+    }
+    if (command == std::vector<std::string>{"msg", "pin"} ||
+        command == std::vector<std::string>{"msg", "unpin"}) {
+        const bool pin = command.back() == "pin";
+        const auto& chat = pin ? messages.pin_chat : messages.unpin_chat;
+        const auto id = pin ? messages.pin_id : messages.unpin_id;
+        if (tgcli::daemon::classify_exact_write_selector(chat) ==
+            tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+            return report_usage("message pin chat selector is invalid", "chat");
+        }
+        if (!valid_message_id(id)) {
+            return report_usage("message id must be a nonzero int53 value", "id");
+        }
+    }
     return std::nullopt;
 }
 // NOLINTEND(readability-function-cognitive-complexity)
@@ -896,6 +951,24 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                 {"message_ids", messages.delete_ids},
                 {"for_all", messages.delete_for_all}};
     }
+    if (command == std::vector<std::string>{"msg", "edit"}) {
+        return {{"chat", messages.edit_chat},
+                {"message_id", messages.edit_id},
+                {"text", messages.edit_text}};
+    }
+    if (command == std::vector<std::string>{"msg", "react"}) {
+        return {{"chat", messages.react_chat},
+                {"message_id", messages.react_id},
+                {"reaction", messages.reaction},
+                {"remove", messages.react_remove},
+                {"big", messages.react_big}};
+    }
+    if (command == std::vector<std::string>{"msg", "pin"}) {
+        return {{"chat", messages.pin_chat}, {"message_id", messages.pin_id}};
+    }
+    if (command == std::vector<std::string>{"msg", "unpin"}) {
+        return {{"chat", messages.unpin_chat}, {"message_id", messages.unpin_id}};
+    }
     return nlohmann::json::object();
 }
 
@@ -924,6 +997,34 @@ std::optional<int> read_send_stdin(SendCliArguments& send) {
         value.append(buffer.data(), added);
     }
     send.text = std::move(value);
+    return std::nullopt;
+}
+
+std::optional<int> read_edit_stdin(MessageCliArguments& messages) {
+    if (messages.edit_text != "-") {
+        return std::nullopt;
+    }
+    constexpr std::size_t maximum = static_cast<std::size_t>(1024) * 1024;
+    std::string value;
+    std::array<char, 65'536> buffer{};
+    for (;;) {
+        const auto count = ::read(STDIN_FILENO, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0) {
+            return report_usage("cannot read msg edit text from stdin", "TEXT");
+        }
+        if (count == 0) {
+            break;
+        }
+        const auto added = static_cast<std::size_t>(count);
+        if (added > maximum - value.size()) {
+            return report_usage("msg edit stdin exceeds 1 MiB", "TEXT");
+        }
+        value.append(buffer.data(), added);
+    }
+    messages.edit_text = std::move(value);
     return std::nullopt;
 }
 
@@ -1069,6 +1170,26 @@ int run(int argc, char** argv) {
     msg_delete_cmd->add_option("chat", messages.delete_chat)->required();
     msg_delete_cmd->add_option("id", messages.delete_ids)->required()->expected(1, 100);
     msg_delete_cmd->add_flag("--for-all", messages.delete_for_all, "delete for all participants");
+    CLI::App* msg_edit_cmd = msg_cmd->add_subcommand("edit", "edit a text message");
+    msg_edit_cmd->add_option("chat", messages.edit_chat)->required();
+    msg_edit_cmd->add_option("id", messages.edit_id)->required();
+    msg_edit_cmd->add_option("TEXT", messages.edit_text, "message text or - for stdin")->required();
+    CLI::App* msg_react_cmd = msg_cmd->add_subcommand("react", "add or remove a reaction");
+    msg_react_cmd->add_option("chat", messages.react_chat)->required();
+    msg_react_cmd->add_option("id", messages.react_id)->required();
+    msg_react_cmd->add_option("emoji", messages.reaction)->required();
+    auto* react_remove_option =
+        msg_react_cmd->add_flag("--remove", messages.react_remove, "remove the reaction");
+    auto* react_big_option =
+        msg_react_cmd->add_flag("--big", messages.react_big, "use a big reaction animation");
+    react_remove_option->excludes(react_big_option);
+    react_big_option->excludes(react_remove_option);
+    CLI::App* msg_pin_cmd = msg_cmd->add_subcommand("pin", "pin a message");
+    msg_pin_cmd->add_option("chat", messages.pin_chat)->required();
+    msg_pin_cmd->add_option("id", messages.pin_id)->required();
+    CLI::App* msg_unpin_cmd = msg_cmd->add_subcommand("unpin", "unpin a message");
+    msg_unpin_cmd->add_option("chat", messages.unpin_chat)->required();
+    msg_unpin_cmd->add_option("id", messages.unpin_id)->required();
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -1128,6 +1249,11 @@ int run(int argc, char** argv) {
     auto command = selected_command(app);
     if (command == std::vector<std::string>{"send"}) {
         if (const auto stdin_exit = read_send_stdin(send); stdin_exit) {
+            return *stdin_exit;
+        }
+    }
+    if (command == std::vector<std::string>{"msg", "edit"}) {
+        if (const auto stdin_exit = read_edit_stdin(messages); stdin_exit) {
             return *stdin_exit;
         }
     }

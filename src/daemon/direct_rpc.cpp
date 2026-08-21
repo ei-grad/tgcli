@@ -49,33 +49,42 @@ bool valid_topic(const std::optional<core::TdTopic>& topic) {
     return false;
 }
 
-bool valid_write_message(const core::TdMessageWriteResult& message) {
-    const auto valid_text = [&] {
-        if (message.text.size() > 16'384 || !common::valid_utf8(message.text)) {
-            return false;
+enum class WriteMessageValidity { Valid, Oversized, Malformed };
+
+WriteMessageValidity write_message_validity(const core::TdMessageWriteResult& message) {
+    if (!core::valid_td_nonzero_int53(message.id) || !core::valid_td_chat_id(message.chat_id) ||
+        message.scheduled != !message.date.has_value() || (message.date && *message.date < 0) ||
+        !valid_sender(message.sender) || !valid_topic(message.topic) ||
+        !common::valid_utf8(message.text)) {
+        return WriteMessageValidity::Malformed;
+    }
+    std::size_t scalar_count = 0;
+    for (const auto byte : message.text) {
+        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U) {
+            ++scalar_count;
         }
-        std::size_t scalar_count = 0;
-        for (const auto byte : message.text) {
-            if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalar_count > 4'096) {
-                return false;
-            }
-        }
-        return true;
-    };
-    return core::valid_td_nonzero_int53(message.id) && core::valid_td_chat_id(message.chat_id) &&
-           message.scheduled == !message.date.has_value() &&
-           (!message.date || *message.date >= 0) && valid_sender(message.sender) &&
-           valid_topic(message.topic) && valid_text();
+    }
+    return message.text.size() > 16'384 || scalar_count > 4'096 ? WriteMessageValidity::Oversized
+                                                                : WriteMessageValidity::Valid;
 }
 
 bool is_ok_response(const core::TdValue& value) {
     return value.get_if<core::TdOk>() != nullptr;
 }
 
-DirectOutcome direct_result_from([[maybe_unused]] const core::TdEditMessageTextRequest& input,
+DirectOutcome direct_result_from(const core::TdEditMessageTextRequest& input,
                                  const core::TdValue& value) {
     const auto* message = value.get_if<core::TdMessageWriteResult>();
-    if (message == nullptr || !valid_write_message(*message)) {
+    if (message == nullptr) {
+        return DirectMalformed{};
+    }
+    const auto validity = write_message_validity(*message);
+    if (validity == WriteMessageValidity::Oversized) {
+        return message->chat_id == input.chat_id && message->id == input.message_id
+                   ? DirectOutcome{DirectOversizedMessage{}}
+                   : DirectOutcome{DirectMalformed{}};
+    }
+    if (validity == WriteMessageValidity::Malformed) {
         return DirectMalformed{};
     }
     return DirectSuccess{.result = *message};
