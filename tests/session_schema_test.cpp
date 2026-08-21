@@ -74,6 +74,23 @@ json audit_incomplete(std::string mutation_state, json completed_stages) {
                                                {"completed_stages", std::move(completed_stages)}});
 }
 
+json spool_unavailable(std::string operation, std::string reason) {
+    return terminal_error(
+        "SPOOL_UNAVAILABLE",
+        {{"operation", std::move(operation)}, {"path", "spool/"}, {"reason", std::move(reason)}},
+        "attachment spool is unavailable");
+}
+
+json spool_audit_incomplete(json path = {{"kind", "bytes_hex"},
+                                         {"value", "2f73746174652f73706f6f6c2fff"}}) {
+    return terminal_error("AUDIT_INCOMPLETE",
+                          {{"account", "main"},
+                           {"path", std::move(path)},
+                           {"mutation_state", "none"},
+                           {"completed_stages", json::array()}},
+                          "attachment spool recovery is incomplete");
+}
+
 void check_schema_node(const json& schema) {
     std::vector<const json*> pending{&schema};
     while (!pending.empty()) {
@@ -127,6 +144,36 @@ TEST_CASE("session schemas are self-contained strict Draft 2020-12 documents",
     CHECK(list_schema["properties"]["items"]["type"] == "array");
 
     const auto error_schema = tgcli::test::load_schema_document("session.error.schema.json");
+    json references = json::array();
+    for (const auto& branch : error_schema["properties"]["error"]["oneOf"]) {
+        references.push_back(branch["$ref"]);
+    }
+    CHECK(references == json::array({"#/$defs/usageError",
+                                     "#/$defs/accountNotFoundError",
+                                     "#/$defs/accountMismatchError",
+                                     "#/$defs/configInvalidError",
+                                     "#/$defs/configConflictError",
+                                     "#/$defs/hookFailedError",
+                                     "#/$defs/notAuthedError",
+                                     "#/$defs/writeDeniedError",
+                                     "#/$defs/confirmationRequiredError",
+                                     "#/$defs/auditUnavailableError",
+                                     "#/$defs/spoolUnavailableError",
+                                     "#/$defs/auditIncompleteError",
+                                     "#/$defs/spoolAuditIncompleteError",
+                                     "#/$defs/protocolAnswerInvalidError",
+                                     "#/$defs/daemonNotRunningError",
+                                     "#/$defs/daemonControlFailedError",
+                                     "#/$defs/daemonShutdownError",
+                                     "#/$defs/botUnsupportedError",
+                                     "#/$defs/notFoundError",
+                                     "#/$defs/preconditionFailedError",
+                                     "#/$defs/tdlibError",
+                                     "#/$defs/rateLimitedError",
+                                     "#/$defs/internalError",
+                                     "#/$defs/timeoutError"}));
+    CHECK(error_schema["$defs"]["filesystemDiagnosticPath"]["properties"]["value"]["pattern"] ==
+          "^2f(?:0[1-9a-f]|[1-9a-f][0-9a-f])+$");
     CHECK(error_schema["$defs"]["auditIncompleteError"]["properties"]["details"]["oneOf"].size() ==
           6);
     CHECK(error_schema["$defs"]["auditUnavailableError"]["properties"]["details"]["properties"]
@@ -500,6 +547,136 @@ TEST_CASE("session AUDIT_INCOMPLETE rejects illegal histories and inconsistent s
     auto additional = audit_incomplete("possible", json::array({"dispatch_started"}));
     additional["error"]["details"]["unexpected"] = true;
     CHECK_THAT(additional, !tgcli::test::matches_json_schema("session.error.schema.json"));
+}
+
+TEST_CASE("session SPOOL_UNAVAILABLE admits only the operation and root-reason cross-product",
+          "[schema][session][error]") {
+    const std::vector<std::string> operations{"session_list", "session_terminate"};
+    const std::vector<std::string> reasons{"path_invalid", "wrong_type",  "wrong_owner",
+                                           "wrong_mode",   "open_failed", "read_failed"};
+    for (const auto& operation : operations) {
+        for (const auto& reason : reasons) {
+            INFO(operation << " " << reason);
+            CHECK_THAT(spool_unavailable(operation, reason),
+                       tgcli::test::matches_json_schema("session.error.schema.json"));
+        }
+    }
+
+    for (const auto* operation : {"send", "msg_forward", "future_session_operation"}) {
+        INFO(operation);
+        CHECK_THAT(spool_unavailable(operation, "wrong_mode"),
+                   !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    for (const auto* reason :
+         {"sync_failed", "capacity_exhausted", "contradiction", "future_reason"}) {
+        INFO(reason);
+        CHECK_THAT(spool_unavailable("session_list", reason),
+                   !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    for (const auto& invalid_path :
+         std::vector<json>{"spool",
+                           "/spool",
+                           "/state/spool/",
+                           {{"kind", "bytes_hex"}, {"value", "2f73706f6f6c"}},
+                           nullptr}) {
+        INFO(invalid_path.dump());
+        auto error = spool_unavailable("session_list", "wrong_mode");
+        error["error"]["details"]["path"] = invalid_path;
+        CHECK_THAT(error, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    auto invalid = spool_unavailable("session_list", "wrong_mode");
+    invalid["error"]["message"] = "spool failed";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    for (const auto* field : {"code", "message", "details"}) {
+        INFO(field);
+        invalid = spool_unavailable("session_list", "wrong_mode");
+        invalid["error"].erase(field);
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    for (const auto* field : {"operation", "path", "reason"}) {
+        INFO(field);
+        invalid = spool_unavailable("session_list", "wrong_mode");
+        invalid["error"]["details"].erase(field);
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    for (const auto* field : {"operation", "reason"}) {
+        INFO(field);
+        invalid = spool_unavailable("session_list", "wrong_mode");
+        invalid["error"]["details"][field] = 1;
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    invalid = spool_unavailable("session_list", "wrong_mode");
+    invalid["error"]["details"]["unexpected"] = true;
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    invalid = spool_unavailable("session_list", "wrong_mode");
+    invalid["error"]["unexpected"] = true;
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    invalid = terminal_error(
+        "SPOOL_FUTURE",
+        {{"operation", "session_list"}, {"path", "spool/"}, {"reason", "wrong_mode"}},
+        "attachment spool is unavailable");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+}
+
+TEST_CASE("session spool AUDIT_INCOMPLETE requires a reversible absolute byte path",
+          "[schema][session][error]") {
+    CHECK_THAT(spool_audit_incomplete(),
+               tgcli::test::matches_json_schema("session.error.schema.json"));
+    CHECK_THAT(spool_audit_incomplete({{"kind", "bytes_hex"}, {"value", "2fff"}}),
+               tgcli::test::matches_json_schema("session.error.schema.json"));
+
+    for (const auto* encoding : {"2f", "61", "2f6", "2fgg", "2fFF", "2f6100", "2f00"}) {
+        INFO(encoding);
+        CHECK_THAT(spool_audit_incomplete({{"kind", "bytes_hex"}, {"value", encoding}}),
+                   !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    auto invalid = spool_audit_incomplete({{"kind", "path"}, {"value", "2f61"}});
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    invalid = spool_audit_incomplete({{"value", "2f61"}});
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    invalid = spool_audit_incomplete({{"kind", "bytes_hex"}});
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    invalid =
+        spool_audit_incomplete({{"kind", "bytes_hex"}, {"value", "2f61"}, {"unexpected", true}});
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    for (const auto* mutation_state : {"possible", "confirmed", "future"}) {
+        INFO(mutation_state);
+        invalid = spool_audit_incomplete();
+        invalid["error"]["details"]["mutation_state"] = mutation_state;
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    for (const auto& completed_stages :
+         std::vector<json>{json::array({"dispatch_started"}), json::array({nullptr}), "none"}) {
+        INFO(completed_stages.dump());
+        invalid = spool_audit_incomplete();
+        invalid["error"]["details"]["completed_stages"] = completed_stages;
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+
+    invalid = spool_audit_incomplete();
+    invalid["error"]["message"] = "audit recovery failed";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    for (const auto* field : {"code", "message", "details"}) {
+        INFO(field);
+        invalid = spool_audit_incomplete();
+        invalid["error"].erase(field);
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    for (const auto* field : {"account", "path", "mutation_state", "completed_stages"}) {
+        INFO(field);
+        invalid = spool_audit_incomplete();
+        invalid["error"]["details"].erase(field);
+        CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    }
+    invalid = spool_audit_incomplete();
+    invalid["error"]["details"]["account"] = 1;
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
+    invalid = spool_audit_incomplete();
+    invalid["error"]["details"]["unexpected"] = true;
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("session.error.schema.json"));
 }
 
 TEST_CASE("session error schema admits the exact common and session branches",

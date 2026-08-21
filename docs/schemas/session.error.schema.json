@@ -6,6 +6,18 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9_-]{1,32}$"
     },
+    "filesystemDiagnosticPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": { "const": "bytes_hex" },
+        "value": {
+          "type": "string",
+          "pattern": "^2f(?:0[1-9a-f]|[1-9a-f][0-9a-f])+$"
+        }
+      }
+    },
     "state": {
       "enum": [
         "unknown",
@@ -386,6 +398,34 @@
         }
       }
     },
+    "spoolUnavailableError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "SPOOL_UNAVAILABLE" },
+        "message": { "const": "attachment spool is unavailable" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "path", "reason"],
+          "properties": {
+            "operation": { "enum": ["session_list", "session_terminate"] },
+            "path": { "const": "spool/" },
+            "reason": {
+              "enum": [
+                "path_invalid",
+                "wrong_type",
+                "wrong_owner",
+                "wrong_mode",
+                "open_failed",
+                "read_failed"
+              ]
+            }
+          }
+        }
+      }
+    },
     "auditIncompleteError": {
       "type": "object",
       "additionalProperties": false,
@@ -572,6 +612,26 @@
               }
             }
           ]
+        }
+      }
+    },
+    "spoolAuditIncompleteError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "AUDIT_INCOMPLETE" },
+        "message": { "const": "attachment spool recovery is incomplete" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "path", "mutation_state", "completed_stages"],
+          "properties": {
+            "account": { "$ref": "#/$defs/account" },
+            "path": { "$ref": "#/$defs/filesystemDiagnosticPath" },
+            "mutation_state": { "const": "none" },
+            "completed_stages": { "const": [] }
+          }
         }
       }
     },
@@ -840,7 +900,9 @@
         { "$ref": "#/$defs/writeDeniedError" },
         { "$ref": "#/$defs/confirmationRequiredError" },
         { "$ref": "#/$defs/auditUnavailableError" },
+        { "$ref": "#/$defs/spoolUnavailableError" },
         { "$ref": "#/$defs/auditIncompleteError" },
+        { "$ref": "#/$defs/spoolAuditIncompleteError" },
         { "$ref": "#/$defs/protocolAnswerInvalidError" },
         { "$ref": "#/$defs/daemonNotRunningError" },
         { "$ref": "#/$defs/daemonControlFailedError" },

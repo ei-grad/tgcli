@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <sys/types.h>
 #include <thread>
@@ -28,6 +29,22 @@ namespace td_api = td::td_api;
 namespace {
 
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
+
+constexpr std::size_t kMaxSessionCount = 4'096;
+constexpr std::size_t kMaxSessionStringBytes = 1'048'576;
+constexpr std::size_t kMaxSessionListResultBytes = 16'842'751;
+
+using SessionStringMember = std::string td_api::session::*;
+
+constexpr std::array<std::pair<std::string_view, SessionStringMember>, 7> kSessionStringFields{{
+    {"application_name", &td_api::session::application_name_},
+    {"application_version", &td_api::session::application_version_},
+    {"device_model", &td_api::session::device_model_},
+    {"platform", &td_api::session::platform_},
+    {"system_version", &td_api::session::system_version_},
+    {"ip_address", &td_api::session::ip_address_},
+    {"location", &td_api::session::location_},
+}};
 
 template <typename... Types> struct TypeList {};
 
@@ -207,6 +224,72 @@ session(std::int64_t id, td_api::object_ptr<td_api::SessionDeviceType> device_ty
 NativeObjectPtr session_result(std::vector<td_api::object_ptr<td_api::session>> items,
                                std::int32_t ttl = 180) {
     return td_api::make_object<td_api::sessions>(std::move(items), ttl);
+}
+
+std::size_t
+compact_session_list_size(const std::vector<td_api::object_ptr<td_api::session>>& native_items,
+                          std::int32_t inactive_session_ttl_days = 180) {
+    nlohmann::json items = nlohmann::json::array();
+    for (const auto& item : native_items) {
+        items.push_back({{"id", std::to_string(item->id_)},
+                         {"is_current", item->is_current_},
+                         {"is_password_pending", item->is_password_pending_},
+                         {"is_unconfirmed", item->is_unconfirmed_},
+                         {"can_accept_secret_chats", item->can_accept_secret_chats_},
+                         {"can_accept_calls", item->can_accept_calls_},
+                         {"device_type", "linux"},
+                         {"api_id", item->api_id_},
+                         {"application_name", item->application_name_},
+                         {"application_version", item->application_version_},
+                         {"is_official_application", item->is_official_application_},
+                         {"device_model", item->device_model_},
+                         {"platform", item->platform_},
+                         {"system_version", item->system_version_},
+                         {"log_in_date", nullptr},
+                         {"last_active_date", nullptr},
+                         {"ip_address", item->ip_address_},
+                         {"location", item->location_}});
+    }
+    return nlohmann::json{{"items", std::move(items)},
+                          {"inactive_session_ttl_days", inactive_session_ttl_days},
+                          {"next", nullptr}}
+        .dump()
+        .size();
+}
+
+std::vector<td_api::object_ptr<td_api::session>>
+sessions_with_compact_size(std::size_t target_size) {
+    std::vector<td_api::object_ptr<td_api::session>> items;
+    for (std::int64_t id = 1; id <= 3; ++id) {
+        auto item = session(id);
+        item->log_in_date_ = 0;
+        item->last_active_date_ = 0;
+        for (const auto& [name, member] : kSessionStringFields) {
+            static_cast<void>(name);
+            item.get()->*member = {};
+        }
+        items.push_back(std::move(item));
+    }
+    items.front()->application_name_ = std::string("\0\b\f\n\r\t\"\\", 8);
+
+    const auto base_size = compact_session_list_size(items);
+    if (target_size < base_size) {
+        throw std::logic_error("target compact session result is below its fixed size");
+    }
+    auto remaining = target_size - base_size;
+    for (auto& item : items) {
+        for (const auto& [name, member] : kSessionStringFields) {
+            static_cast<void>(name);
+            const auto field_size =
+                std::min(remaining, kMaxSessionStringBytes - (item.get()->*member).size());
+            (item.get()->*member).append(field_size, 'a');
+            remaining -= field_size;
+        }
+    }
+    if (remaining != 0 || compact_session_list_size(items) != target_size) {
+        throw std::logic_error("target compact session result is not constructible");
+    }
+    return items;
 }
 
 const TdSessionConversionError& require_session_error(TdValue& converted) {
@@ -807,6 +890,65 @@ TEST_CASE("production session conversion is strict lossless and order preserving
     CHECK(sessions->items[2].device_type == TdSessionDeviceType::Windows);
 }
 
+TEST_CASE("production session conversion enforces the exact item and string limits",
+          "[core][tdlib][td-runtime-converter][session]") {
+    SECTION("session count boundary") {
+        for (const auto count : {kMaxSessionCount, kMaxSessionCount + 1}) {
+            CAPTURE(count);
+            std::vector<td_api::object_ptr<td_api::session>> items;
+            items.reserve(count);
+            for (std::size_t index = 0; index < count; ++index) {
+                items.push_back(session(static_cast<std::int64_t>(index)));
+            }
+            auto converted = convert_sessions(session_result(std::move(items)));
+            if (count == kMaxSessionCount) {
+                const auto* sessions = converted.get_if<TdSessions>();
+                REQUIRE(sessions != nullptr);
+                CHECK(sessions->items.size() == kMaxSessionCount);
+            } else {
+                CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+            }
+        }
+    }
+
+    SECTION("each bounded string accepts the boundary and rejects one byte over") {
+        for (const auto& [name, member] : kSessionStringFields) {
+            for (const auto size : {kMaxSessionStringBytes, kMaxSessionStringBytes + 1}) {
+                CAPTURE(name, size);
+                auto item = session(1);
+                item.get()->*member = std::string(size, 'a');
+                std::vector<td_api::object_ptr<td_api::session>> items;
+                items.push_back(std::move(item));
+                auto converted = convert_sessions(session_result(std::move(items)));
+                if (size == kMaxSessionStringBytes) {
+                    const auto* sessions = converted.get_if<TdSessions>();
+                    REQUIRE(sessions != nullptr);
+                    CHECK(sessions->items.size() == 1);
+                } else {
+                    CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("production session conversion enforces the exact compact result limit",
+          "[core][tdlib][td-runtime-converter][session]") {
+    for (const auto size : {kMaxSessionListResultBytes, kMaxSessionListResultBytes + 1}) {
+        CAPTURE(size);
+        auto items = sessions_with_compact_size(size);
+        REQUIRE(compact_session_list_size(items) == size);
+        auto converted = convert_sessions(session_result(std::move(items)));
+        if (size == kMaxSessionListResultBytes) {
+            const auto* sessions = converted.get_if<TdSessions>();
+            REQUIRE(sessions != nullptr);
+            CHECK(sessions->items.size() == 3);
+        } else {
+            CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+        }
+    }
+}
+
 TEST_CASE("production session conversion rejects malformed input all or nothing",
           "[core][tdlib][td-runtime-converter][session]") {
     SECTION("null result") {
@@ -877,13 +1019,16 @@ TEST_CASE("production session conversion rejects malformed input all or nothing"
         }
     }
 
-    SECTION("invalid UTF-8") {
-        auto item = session(1);
-        item->location_ = std::string("\xC3\x28", 2);
-        std::vector<td_api::object_ptr<td_api::session>> items;
-        items.push_back(std::move(item));
-        auto converted = convert_sessions(session_result(std::move(items)));
-        CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+    SECTION("invalid UTF-8 in every bounded string") {
+        for (const auto& [name, member] : kSessionStringFields) {
+            CAPTURE(name);
+            auto item = session(1);
+            item.get()->*member = std::string("\xC3\x28", 2);
+            std::vector<td_api::object_ptr<td_api::session>> items;
+            items.push_back(std::move(item));
+            auto converted = convert_sessions(session_result(std::move(items)));
+            CHECK_FALSE(require_session_error(converted).tdlib_type_id.has_value());
+        }
     }
 }
 

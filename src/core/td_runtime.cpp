@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <climits>
 #include <ctime>
 #include <mutex>
@@ -241,6 +242,74 @@ bool valid_persistable_message_text(std::string_view value) {
     return true;
 }
 
+constexpr std::size_t kMaxSessionCount = 4'096;
+constexpr std::size_t kMaxSessionStringBytes = 1'048'576;
+constexpr std::size_t kMaxSessionListResultBytes = 16'842'751;
+
+bool add_session_result_bytes(std::size_t& size, std::size_t amount) {
+    if (amount > kMaxSessionListResultBytes - size) {
+        return false;
+    }
+    size += amount;
+    return true;
+}
+
+bool add_session_result_literal(std::size_t& size, std::string_view literal) {
+    return add_session_result_bytes(size, literal.size());
+}
+
+bool add_session_result_json_string(std::size_t& size, std::string_view value,
+                                    bool enforce_td_string_limit) {
+    if ((enforce_td_string_limit && value.size() > kMaxSessionStringBytes) || !valid_utf8(value) ||
+        !add_session_result_bytes(size, 2)) {
+        return false;
+    }
+    for (const auto character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        std::size_t encoded_size = 1;
+        switch (byte) {
+        case '"':
+        case '\\':
+        case '\b':
+        case '\f':
+        case '\n':
+        case '\r':
+        case '\t':
+            encoded_size = 2;
+            break;
+        default:
+            if (byte <= 0x1FU) {
+                encoded_size = 6;
+            }
+            break;
+        }
+        if (!add_session_result_bytes(size, encoded_size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Integer> bool add_session_result_integer(std::size_t& size, Integer value) {
+    std::array<char, 32> buffer{};
+    const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+    if (result.ec != std::errc{}) {
+        return false;
+    }
+    return add_session_result_bytes(size, static_cast<std::size_t>(result.ptr - buffer.data()));
+}
+
+bool add_session_result_boolean(std::size_t& size, bool value) {
+    return add_session_result_literal(size, value ? "true" : "false");
+}
+
+bool add_session_result_timestamp(std::size_t& size, const std::optional<std::string>& timestamp) {
+    if (!timestamp) {
+        return add_session_result_literal(size, "null");
+    }
+    return add_session_result_json_string(size, *timestamp, false);
+}
+
 std::optional<TdSessionDeviceType>
 convert_session_device_type(const td_api::SessionDeviceType* device,
                             std::optional<std::int32_t>& unsupported_type_id) {
@@ -309,13 +378,57 @@ bool convert_session_timestamp(std::int32_t seconds, std::optional<std::string>&
     return true;
 }
 
+bool add_compact_session(std::size_t& size, const td_api::session& session,
+                         TdSessionDeviceType device_type, std::string_view id,
+                         const std::optional<std::string>& log_in_date,
+                         const std::optional<std::string>& last_active_date) {
+    return add_session_result_literal(size, R"({"id":)") &&
+           add_session_result_json_string(size, id, false) &&
+           add_session_result_literal(size, R"(,"is_current":)") &&
+           add_session_result_boolean(size, session.is_current_) &&
+           add_session_result_literal(size, R"(,"is_password_pending":)") &&
+           add_session_result_boolean(size, session.is_password_pending_) &&
+           add_session_result_literal(size, R"(,"is_unconfirmed":)") &&
+           add_session_result_boolean(size, session.is_unconfirmed_) &&
+           add_session_result_literal(size, R"(,"can_accept_secret_chats":)") &&
+           add_session_result_boolean(size, session.can_accept_secret_chats_) &&
+           add_session_result_literal(size, R"(,"can_accept_calls":)") &&
+           add_session_result_boolean(size, session.can_accept_calls_) &&
+           add_session_result_literal(size, R"(,"device_type":)") &&
+           add_session_result_json_string(size, td_session_device_type_name(device_type), false) &&
+           add_session_result_literal(size, R"(,"api_id":)") &&
+           add_session_result_integer(size, session.api_id_) &&
+           add_session_result_literal(size, R"(,"application_name":)") &&
+           add_session_result_json_string(size, session.application_name_, true) &&
+           add_session_result_literal(size, R"(,"application_version":)") &&
+           add_session_result_json_string(size, session.application_version_, true) &&
+           add_session_result_literal(size, R"(,"is_official_application":)") &&
+           add_session_result_boolean(size, session.is_official_application_) &&
+           add_session_result_literal(size, R"(,"device_model":)") &&
+           add_session_result_json_string(size, session.device_model_, true) &&
+           add_session_result_literal(size, R"(,"platform":)") &&
+           add_session_result_json_string(size, session.platform_, true) &&
+           add_session_result_literal(size, R"(,"system_version":)") &&
+           add_session_result_json_string(size, session.system_version_, true) &&
+           add_session_result_literal(size, R"(,"log_in_date":)") &&
+           add_session_result_timestamp(size, log_in_date) &&
+           add_session_result_literal(size, R"(,"last_active_date":)") &&
+           add_session_result_timestamp(size, last_active_date) &&
+           add_session_result_literal(size, R"(,"ip_address":)") &&
+           add_session_result_json_string(size, session.ip_address_, true) &&
+           add_session_result_literal(size, R"(,"location":)") &&
+           add_session_result_json_string(size, session.location_, true) &&
+           add_session_result_literal(size, "}");
+}
+
 TdValue session_conversion_error(std::optional<std::int32_t> tdlib_type_id = std::nullopt) {
     return TdValue::from(TdSessionConversionError{tdlib_type_id});
 }
 
 TdValue convert_sessions(td_api::object_ptr<td_api::sessions> sessions) {
     if (sessions == nullptr || sessions->inactive_session_ttl_days_ < 1 ||
-        sessions->inactive_session_ttl_days_ > 366) {
+        sessions->inactive_session_ttl_days_ > 366 ||
+        sessions->sessions_.size() > kMaxSessionCount) {
         return session_conversion_error();
     }
 
@@ -323,6 +436,11 @@ TdValue convert_sessions(td_api::object_ptr<td_api::sessions> sessions) {
     converted.inactive_session_ttl_days = sessions->inactive_session_ttl_days_;
     converted.items.reserve(sessions->sessions_.size());
     std::unordered_set<std::int64_t> ids;
+    ids.reserve(sessions->sessions_.size());
+    std::size_t compact_result_size = 0;
+    if (!add_session_result_literal(compact_result_size, R"({"items":[)")) {
+        return session_conversion_error();
+    }
     for (auto& item : sessions->sessions_) {
         if (item == nullptr || !ids.emplace(item->id_).second) {
             return session_conversion_error();
@@ -339,13 +457,13 @@ TdValue convert_sessions(td_api::object_ptr<td_api::sessions> sessions) {
             !convert_session_timestamp(item->last_active_date_, last_active_date)) {
             return session_conversion_error();
         }
-        if (!valid_utf8(item->application_name_) || !valid_utf8(item->application_version_) ||
-            !valid_utf8(item->device_model_) || !valid_utf8(item->platform_) ||
-            !valid_utf8(item->system_version_) || !valid_utf8(item->ip_address_) ||
-            !valid_utf8(item->location_)) {
+        const auto id = std::to_string(item->id_);
+        if ((!converted.items.empty() && !add_session_result_literal(compact_result_size, ",")) ||
+            !add_compact_session(compact_result_size, *item, *device_type, id, log_in_date,
+                                 last_active_date)) {
             return session_conversion_error();
         }
-        converted.items.push_back({.id = std::to_string(item->id_),
+        converted.items.push_back({.id = id,
                                    .is_current = item->is_current_,
                                    .is_password_pending = item->is_password_pending_,
                                    .is_unconfirmed = item->is_unconfirmed_,
@@ -363,6 +481,11 @@ TdValue convert_sessions(td_api::object_ptr<td_api::sessions> sessions) {
                                    .last_active_date = std::move(last_active_date),
                                    .ip_address = std::move(item->ip_address_),
                                    .location = std::move(item->location_)});
+    }
+    if (!add_session_result_literal(compact_result_size, R"(],"inactive_session_ttl_days":)") ||
+        !add_session_result_integer(compact_result_size, sessions->inactive_session_ttl_days_) ||
+        !add_session_result_literal(compact_result_size, R"(,"next":null})")) {
+        return session_conversion_error();
     }
     return TdValue::from(std::move(converted));
 }

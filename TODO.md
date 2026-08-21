@@ -360,7 +360,7 @@ before the milestone is closed.
       identity including zero, 17-value device enum, strict DTO/error/human
       output, bot/current/business-bot semantics, deadlines, TDLib acceptance
       meaning and no-idempotency decision
-- [ ] Add dormant typed Session DTO/conversion, `getActiveSessions` and
+- [x] Add dormant typed Session DTO/conversion, `getActiveSessions` and
       `terminateSession` runtime factories/descriptors/native matchers,
       scripted-fake seams and unregistered safety-policy descriptors at pinned
       TDLib 1.8.65 / a17f87c4cff7b90b278d12b91ba0614383aaee82
@@ -370,8 +370,10 @@ before the milestone is closed.
       use only non-evicting capacity without pin knowledge; expose no command
       and perform no terminate dispatch yet.
 - [x] Add the one-of real/dry-run terminate result schema, list result schema,
-      exact self-contained session error schema, manifest entries and
-      deterministic human renderers; keep the public `schema` CLI deferred M7
+      manifest entries and deterministic human renderers; keep the public
+      `schema` CLI deferred M7
+- [x] Add the exact self-contained session error schema with all common,
+      session-specific and account-global spool branches
 - [ ] Implement dormant complete list and terminate handlers with exact
       Ready/getMe/bot/deadline ordering; wire terminate dispatch only through
       the already-integrated destructive authority/confirmation/config-CAS/
