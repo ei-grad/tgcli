@@ -8,6 +8,7 @@ add_executable(tgcli_unit_tests
     account_cli_test.cpp
     account_commands_test.cpp
     auth_bootstrap_test.cpp
+    chat_summary_test.cpp
     chats_td_runtime_conversion_test.cpp
     message_commands_test.cpp
     message_recovery_test.cpp
@@ -59,6 +60,8 @@ add_executable(tgcli_unit_tests
     schema_test.cpp
     session_schema_test.cpp
     stream_schema_test.cpp
+    stream_metadata_test.cpp
+    stream_model_test.cpp
     secret_hook_test.cpp
     cli_test.cpp
     td_client_test.cpp

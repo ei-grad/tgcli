@@ -3,7 +3,7 @@
 #include "common/exit_codes.hpp"
 #include "common/utf8.hpp"
 #include "daemon/chat_identity.hpp"
-#include "daemon/message_summary.hpp"
+#include "daemon/chat_summary.hpp"
 #include "daemon/ready_read.hpp"
 #include "daemon/request_session.hpp"
 
@@ -207,14 +207,6 @@ std::int32_t retry_after(std::string_view message) {
     return result;
 }
 
-std::optional<json> message_json(const core::TdMessageSummary& message,
-                                 std::int64_t expected_chat_id) {
-    const auto converted = materialize_message_summary(message);
-    return converted && converted->chat_id == expected_chat_id
-               ? std::optional<json>{message_summary_json(*converted)}
-               : std::nullopt;
-}
-
 Position selected_position(const core::TdChat& chat, const core::TdChatList& selected) {
     Position result;
     for (const auto& position : chat.positions) {
@@ -261,31 +253,6 @@ bool valid_unread_fields(const core::TdChat& chat) {
 bool is_unread(const core::TdChat& chat) {
     return chat.is_marked_unread || chat.unread_count > 0 || chat.unread_mention_count > 0 ||
            chat.unread_reaction_count > 0 || chat.unread_poll_vote_count > 0;
-}
-
-std::optional<json> summary_json(const core::TdChat& chat, const ChatIdentity& identity,
-                                 const Membership& lists) {
-    if (!valid_unread_fields(chat)) {
-        return std::nullopt;
-    }
-    json last_message = nullptr;
-    if (chat.last_message) {
-        const auto converted = message_json(*chat.last_message, chat.id);
-        if (!converted) {
-            return std::nullopt;
-        }
-        last_message = *converted;
-    }
-    json result = chat_identity_json(identity);
-    result.update({{"is_archived", lists.archived},
-                   {"folder_ids", lists.folder_ids},
-                   {"is_marked_unread", chat.is_marked_unread},
-                   {"unread_count", chat.unread_count},
-                   {"unread_mention_count", chat.unread_mention_count},
-                   {"unread_reaction_count", chat.unread_reaction_count},
-                   {"unread_poll_vote_count", chat.unread_poll_vote_count},
-                   {"last_message", std::move(last_message)}});
-    return result;
 }
 
 std::optional<json> unread_summary_json(const core::TdChat& chat, const ChatIdentity& identity,
@@ -555,12 +522,12 @@ class ChatsRun {
                 internal_error();
                 return false;
             }
-            const auto summary = summary_json(chat, *identity.identity, lists);
+            const auto summary = materialize_chat_summary(chat, *identity.identity);
             if (!summary) {
                 internal_error();
                 return false;
             }
-            items.push_back(*summary);
+            items.push_back(chat_summary_json(*summary));
             if (items.size() == static_cast<std::size_t>(state_.limit)) {
                 break;
             }

@@ -243,6 +243,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/account_commands.cpp
     src/daemon/login_commands.cpp
     src/daemon/chat_identity.cpp
+    src/daemon/chat_summary.cpp
     src/daemon/local_selector.cpp
     src/daemon/message_summary.cpp
     src/daemon/read_domain.cpp
@@ -257,6 +258,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/write_kernel.cpp
     src/daemon/saved_commands.cpp
     src/daemon/single_send.cpp
+    src/daemon/stream_metadata.cpp
+    src/daemon/stream_model.cpp
     src/daemon/commands.cpp
     src/daemon/server.cpp
     src/daemon/daemon_run.cpp)
