@@ -781,6 +781,8 @@ class ChildProtocolDaemon {
             };
             dispatcher.register_command(
                 "msg edit", {daemon::Tier::Write, normalized, false, daemon::M3Operation::MsgEdit});
+            dispatcher.register_command("msg forward", {daemon::Tier::Write, normalized, false,
+                                                        daemon::M3Operation::MsgForward});
             dispatcher.register_command("msg react", {daemon::Tier::Write, normalized, false,
                                                       daemon::M3Operation::MsgReact});
             dispatcher.register_command(
@@ -2562,10 +2564,9 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
     const auto msg_help = run_binary_captured({"msg", "--help"}, env, "m3-msg-help");
     REQUIRE(msg_help.exit_code == kOk);
     const auto msg_surface = msg_help.out + msg_help.err;
-    for (const auto* command : {"edit", "delete", "react", "pin", "unpin"}) {
+    for (const auto* command : {"edit", "delete", "forward", "react", "pin", "unpin"}) {
         CHECK(msg_surface.find(command) != std::string::npos);
     }
-    CHECK(msg_surface.find("forward") == std::string::npos);
     const auto chat_help = run_binary_captured({"chat", "--help"}, env, "m3-chat-help");
     REQUIRE(chat_help.exit_code == kOk);
     const auto chat_surface = chat_help.out + chat_help.err;
@@ -2588,6 +2589,9 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
         {"delete-zero", {"--json", "msg", "delete", "-1001", "0"}},
         {"delete-duplicate", {"--json", "msg", "delete", "-1001", "2", "1", "2"}},
         {"delete-over-int53", {"--json", "msg", "delete", "-1001", "9007199254740992"}},
+        {"forward-order", {"--json", "msg", "forward", "-1001", "2", "1", "-1002"}},
+        {"forward-duplicate", {"--json", "msg", "forward", "-1001", "1", "1", "-1002"}},
+        {"forward-zero", {"--json", "msg", "forward", "-1001", "0", "-1002"}},
         {"edit-zero", {"--json", "msg", "edit", "-1001", "0", "revised"}},
         {"edit-empty", {"--json", "msg", "edit", "-1001", "1", ""}},
         {"react-zero", {"--json", "msg", "react", "-1001", "0", "👍"}},
@@ -2668,6 +2672,14 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
          "revised",
          {"msg", "edit"},
          {{"chat", "-1001"}, {"message_id", -7}, {"text", "revised"}}},
+        {"forward-frame",
+         {"--json", "msg", "forward", "-1001", "-7", "9", "@destination", "--drop-author"},
+         std::nullopt,
+         {"msg", "forward"},
+         {{"from", "-1001"},
+          {"to", "@destination"},
+          {"message_ids", json::array({-7, 9})},
+          {"drop_author", true}}},
         {"react-frame",
          {"--json", "msg", "react", "@project", "9", "👍", "--big"},
          std::nullopt,
@@ -2766,6 +2778,59 @@ TEST_CASE("chat mutation subprocesses emit exact normalized socket frames",
         CHECK(normalized["args"] == test_case.args);
     }
     CHECK(fixture.running());
+}
+
+TEST_CASE("msg forward socket and no-daemon dispatch preserve the same normalized frame",
+          "[cli][m3][forward][parity][no-daemon][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    daemon::Dispatcher dispatcher;
+    dispatcher.register_command(
+        "msg forward", {daemon::Tier::Write,
+                        [](const proto::Request& request, daemon::RequestSession& session) {
+                            session.result({{"command", request.command}, {"args", request.args}});
+                        },
+                        false, daemon::M3Operation::MsgForward});
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"msg", "forward"};
+    request.args = {{"from", "-1001"},
+                    {"to", "@destination"},
+                    {"message_ids", json::array({-7, 9})},
+                    {"drop_author", true}};
+    request.context.json = true;
+    request.context.cwd = "/";
+
+    cli::RunOptions direct_options;
+    direct_options.account = "main";
+    direct_options.json = true;
+    direct_options.no_daemon = true;
+    direct_options.in_process_dispatcher = &dispatcher;
+    const auto direct = run_request_captured(request, direct_options, env);
+
+    const auto real_env = paths::real_environment();
+    std::string error;
+    REQUIRE(paths::ensure_private_dir(paths::runtime_dir(real_env), real_env.uid, error));
+    const auto socket_path = paths::socket_path("main", real_env, error);
+    REQUIRE(socket_path);
+    daemon::Server server({"main", *socket_path, kVersion, proto::kProtocolVersion, {}, {}},
+                          dispatcher);
+    REQUIRE(server.start(error));
+    cli::RunOptions socket_options;
+    socket_options.account = "main";
+    socket_options.json = true;
+    socket_options.auto_spawn = false;
+    const auto socket = run_request_captured(request, socket_options, env);
+    server.stop();
+
+    REQUIRE(direct.exit_code == kOk);
+    CHECK(socket.exit_code == direct.exit_code);
+    CHECK(socket.out == direct.out);
+    CHECK(socket.err == direct.err);
+    const auto normalized = json::parse(direct.out);
+    CHECK(normalized["command"] == request.command);
+    CHECK(normalized["args"] == request.args);
 }
 
 TEST_CASE("chat mark-read no-daemon consumes the same normalized request without persistence",

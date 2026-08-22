@@ -90,6 +90,7 @@ struct WriteDispatchOutcome {
     write_contract::StoredTerminal terminal;
     AccountAuditMutationState mutation_state = AccountAuditMutationState::None;
     bool mutation_confirmed = false;
+    bool retain_pending = false;
 };
 
 class WriteDurableObservationSink final {

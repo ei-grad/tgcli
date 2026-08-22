@@ -931,6 +931,26 @@
         }
       }
     },
+    "forwardPendingItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "status",
+        "temporary_message_id"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "status": {
+          "const": "pending"
+        },
+        "temporary_message_id": {
+          "$ref": "#/$defs/messageId"
+        }
+      }
+    },
     "forwardFailedItem": {
       "oneOf": [
         {
@@ -1069,24 +1089,7 @@
     "forwardItem": {
       "oneOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "source_id",
-            "status",
-            "temporary_message_id"
-          ],
-          "properties": {
-            "source_id": {
-              "$ref": "#/$defs/messageId"
-            },
-            "status": {
-              "const": "pending"
-            },
-            "temporary_message_id": {
-              "$ref": "#/$defs/messageId"
-            }
-          }
+          "$ref": "#/$defs/forwardPendingItem"
         },
         {
           "$ref": "#/$defs/forwardSentItem"

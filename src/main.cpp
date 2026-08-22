@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -488,6 +490,12 @@ struct MessageCliArguments {
     std::vector<std::int64_t> delete_ids;
     bool delete_for_all = false;
     bool delete_has_duplicate = false;
+    std::string forward_from;
+    std::vector<std::string> forward_positionals;
+    std::vector<std::int64_t> forward_ids;
+    std::string forward_to;
+    bool forward_drop_author = false;
+    bool forward_ids_valid = true;
     std::string edit_chat;
     std::int64_t edit_id = 0;
     std::string edit_text;
@@ -768,6 +776,23 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
                                 "id");
         }
     }
+    if (command == std::vector<std::string>{"msg", "forward"}) {
+        if (tgcli::daemon::classify_exact_write_selector(messages.forward_from) ==
+                tgcli::daemon::ExactWriteSelectorStatus::Invalid ||
+            tgcli::daemon::classify_exact_write_selector(messages.forward_to) ==
+                tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
+            return report_usage("msg forward chat selector is invalid", "from|to");
+        }
+        if (!messages.forward_ids_valid || messages.forward_ids.empty() ||
+            messages.forward_ids.size() > 100 ||
+            !std::ranges::all_of(messages.forward_ids, valid_message_id) ||
+            std::adjacent_find(messages.forward_ids.begin(), messages.forward_ids.end(),
+                               std::greater_equal<>{}) != messages.forward_ids.end()) {
+            return report_usage(
+                "msg forward requires 1 to 100 strictly increasing nonzero int53 message ids",
+                "id");
+        }
+    }
     if (command == std::vector<std::string>{"msg", "edit"}) {
         if (tgcli::daemon::classify_exact_write_selector(messages.edit_chat) ==
             tgcli::daemon::ExactWriteSelectorStatus::Invalid) {
@@ -1012,6 +1037,12 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
         return {{"chat", messages.delete_chat},
                 {"message_ids", messages.delete_ids},
                 {"for_all", messages.delete_for_all}};
+    }
+    if (command == std::vector<std::string>{"msg", "forward"}) {
+        return {{"from", messages.forward_from},
+                {"to", messages.forward_to},
+                {"message_ids", messages.forward_ids},
+                {"drop_author", messages.forward_drop_author}};
     }
     if (command == std::vector<std::string>{"msg", "edit"}) {
         return {{"chat", messages.edit_chat},
@@ -1264,6 +1295,14 @@ int run(int argc, char** argv) {
     msg_delete_cmd->add_option("chat", messages.delete_chat)->required();
     msg_delete_cmd->add_option("id", messages.delete_ids)->required()->expected(1, 100);
     msg_delete_cmd->add_flag("--for-all", messages.delete_for_all, "delete for all participants");
+    CLI::App* msg_forward_cmd = msg_cmd->add_subcommand("forward", "forward messages");
+    msg_forward_cmd
+        ->add_option("arg", messages.forward_positionals,
+                     "source, ordered message ids, and destination")
+        ->required()
+        ->expected(3, 102);
+    msg_forward_cmd->add_flag("--drop-author", messages.forward_drop_author,
+                              "send copies without author attribution");
     CLI::App* msg_edit_cmd = msg_cmd->add_subcommand("edit", "edit a text message");
     msg_edit_cmd->add_option("chat", messages.edit_chat)->required();
     msg_edit_cmd->add_option("id", messages.edit_id)->required();
@@ -1391,6 +1430,25 @@ int run(int argc, char** argv) {
         messages.delete_has_duplicate =
             std::adjacent_find(messages.delete_ids.begin(), messages.delete_ids.end()) !=
             messages.delete_ids.end();
+    }
+    if (command == std::vector<std::string>{"msg", "forward"}) {
+        messages.forward_from = messages.forward_positionals.front();
+        messages.forward_to = messages.forward_positionals.back();
+        for (const auto& raw : std::span(messages.forward_positionals)
+                                   .subspan(1, messages.forward_positionals.size() - 2)) {
+            std::string_view value = raw;
+            if (value.starts_with('+')) {
+                value.remove_prefix(1);
+            }
+            std::int64_t id = 0;
+            const auto [end, error] =
+                std::from_chars(value.data(), value.data() + value.size(), id);
+            if (error != std::errc{} || end != value.data() + value.size() || value.empty()) {
+                messages.forward_ids_valid = false;
+                break;
+            }
+            messages.forward_ids.push_back(id);
+        }
     }
     const ReadCliArguments* selected_read = &read;
     if (command == std::vector<std::string>{"history"}) {

@@ -1,0 +1,3 @@
+from_chat_id	-1001
+to_chat_id	-1002
+items	[{"message":{"chat_id":-1002,"date":"2026-08-05T10:00:01Z","id":322,"is_outgoing":true,"scheduled":false,"sender":{"id":42,"type":"user"},"text":"forwarded","topic":null,"type":"text"},"source_id":-5,"status":"sent"}]

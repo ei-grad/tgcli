@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","drop_author":true,"from":{"id":-1001,"is_bot":false,"title":"Project","type":"supergroup","usernames":["project"]},"message_ids":[-5,7],"operation":"msg_forward","tdlib_request":"forwardMessages","to":{"id":-1002,"is_bot":false,"title":"Destination","type":"supergroup","usernames":["destination"]}}

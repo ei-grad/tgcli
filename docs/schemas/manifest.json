@@ -76,6 +76,9 @@
     "msg edit": {
       "result": "msg-edit.result.schema.json"
     },
+    "msg forward": {
+      "result": "msg-forward.result.schema.json"
+    },
     "msg get": {
       "result": "msg-get.result.schema.json"
     },

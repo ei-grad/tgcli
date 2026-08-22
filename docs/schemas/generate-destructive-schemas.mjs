@@ -476,6 +476,11 @@ const v2Definitions = () => ({
     status: { const: 'sent' },
     message: reference('messageWriteResult'),
   }),
+  forwardPendingItem: object(['source_id', 'status', 'temporary_message_id'], {
+    source_id: reference('messageId'),
+    status: { const: 'pending' },
+    temporary_message_id: reference('messageId'),
+  }),
   forwardFailedItem: {
     oneOf: [
       ...['upstream_null', 'deleted_before_confirmation'].map((failureReason) =>
@@ -507,11 +512,7 @@ const v2Definitions = () => ({
   },
   forwardItem: {
     oneOf: [
-      object(['source_id', 'status', 'temporary_message_id'], {
-        source_id: reference('messageId'),
-        status: { const: 'pending' },
-        temporary_message_id: reference('messageId'),
-      }),
+      reference('forwardPendingItem'),
       reference('forwardSentItem'),
       reference('forwardFailedItem'),
     ],
@@ -885,9 +886,9 @@ const storedError = (code, details, exitCode, message) => ({
 });
 const operationDetails = (operation, fields, properties) =>
   object(['operation', ...fields], { operation: { const: operation }, ...properties });
-const storedForwardItems = (minimum = 1) => ({
+const storedForwardItems = (minimum = 1, item = 'forwardTerminalItem') => ({
   type: 'array', minItems: minimum, maxItems: 100, uniqueItems: true,
-  items: reference('forwardTerminalItem'),
+  items: reference(item),
 });
 const storedTimeoutDetails = (operation) => {
   if (operation === 'session_terminate') {
@@ -923,7 +924,7 @@ const storedTimeoutDetails = (operation) => {
       operation, ['phase', 'state', 'outcome', 'idempotency', 'items'], {
         phase: { const: 'confirmation' }, state: reference('nullableState'),
         outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
-        items: storedForwardItems(0),
+        items: storedForwardItems(0, 'forwardItem'),
       },
     ));
   } else {
@@ -1110,8 +1111,27 @@ const v2MutationTerminal = (operation) => {
   const allowed = operation === 'msg_forward'
     ? ['FORWARD_PARTIAL', 'INTERNAL']
     : ['send', 'msg_edit', 'saved_attach'].includes(operation) ? ['INTERNAL'] : [];
+  const forwardTimeout = operation === 'msg_forward'
+    ? [storedError('TIMEOUT', operationDetails(
+      operation, ['phase', 'state', 'outcome', 'idempotency', 'items'], {
+        phase: { const: 'confirmation' }, state: reference('nullableState'),
+        outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
+        items: {
+          ...storedForwardItems(1, 'forwardItem'),
+          allOf: [
+            { contains: reference('forwardSentItem'), minContains: 1 },
+            { contains: reference('forwardPendingItem'), minContains: 1 },
+          ],
+        },
+      },
+    ), 7).schema]
+    : [];
   return {
-    oneOf: [v2ResultTerminal(operation), ...v2StoredErrorTerminal(operation, allowed).oneOf],
+    oneOf: [
+      v2ResultTerminal(operation),
+      ...v2StoredErrorTerminal(operation, allowed).oneOf,
+      ...forwardTimeout,
+    ],
   };
 };
 

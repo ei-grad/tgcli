@@ -93,13 +93,13 @@ bool reject_invalid_idempotency(const proto::Request& request, RequestSession& s
 
 constexpr bool publicly_active_m3(const std::optional<M3Operation>& operation) noexcept {
     return operation == M3Operation::Send || operation == M3Operation::MsgEdit ||
-           operation == M3Operation::MsgDelete || operation == M3Operation::MsgReact ||
-           operation == M3Operation::MsgPin || operation == M3Operation::MsgUnpin ||
-           operation == M3Operation::ChatMarkRead || operation == M3Operation::ChatMute ||
-           operation == M3Operation::ChatUnmute || operation == M3Operation::ChatPin ||
-           operation == M3Operation::ChatUnpin || operation == M3Operation::ChatArchive ||
-           operation == M3Operation::ChatUnarchive || operation == M3Operation::ChatJoin ||
-           operation == M3Operation::ChatLeave;
+           operation == M3Operation::MsgDelete || operation == M3Operation::MsgForward ||
+           operation == M3Operation::MsgReact || operation == M3Operation::MsgPin ||
+           operation == M3Operation::MsgUnpin || operation == M3Operation::ChatMarkRead ||
+           operation == M3Operation::ChatMute || operation == M3Operation::ChatUnmute ||
+           operation == M3Operation::ChatPin || operation == M3Operation::ChatUnpin ||
+           operation == M3Operation::ChatArchive || operation == M3Operation::ChatUnarchive ||
+           operation == M3Operation::ChatJoin || operation == M3Operation::ChatLeave;
 }
 
 } // namespace

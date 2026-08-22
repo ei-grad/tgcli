@@ -223,6 +223,13 @@ core::TdWriteMessage online_message() {
     return message;
 }
 
+core::TdWriteMessage forwarded_message(std::int64_t id) {
+    auto message = stable_message("forwarded");
+    message.message.id = id;
+    message.message.chat_id = -1002;
+    return message;
+}
+
 core::TdPlanningMessage planning_message(std::int64_t id) {
     return {.id = id,
             .chat_id = -1001,
@@ -393,12 +400,26 @@ class FakeWrites final {
         return sent.back().query_id;
     }
 
+    std::pair<core::TdFunctionData, std::uint64_t> observe_call(core::TdFunctionKind expected) {
+        CAPTURE(core::td_function_name(expected), sent_count_);
+        REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
+        const auto sent = runtime_->sent_functions();
+        REQUIRE(sent.size() == sent_count_ + 1);
+        CHECK(sent.back().function.kind() == expected);
+        ++sent_count_;
+        return {sent.back().function, sent.back().query_id};
+    }
+
     template <typename T> void push_response(std::uint64_t query_id, T value) {
         runtime_->push_response(client_id_, query_id, core::TdValue::from(std::move(value)));
     }
 
     void push_authorization(core::AuthStateData state) {
         runtime_->push_update(client_id_, {}, std::move(state));
+    }
+
+    void push_forward_success(std::int64_t temporary_id, core::TdWriteMessage message) {
+        runtime_->push_message_send_succeeded(client_id_, temporary_id, std::move(message));
     }
 
     template <typename T>
@@ -458,6 +479,28 @@ class FakeWrites final {
                                    : core::TdEventClock::now();
         };
         coordinator_hooks_->direct_rpc.before_submit = [expired] { expired->store(true); };
+    }
+
+    void expire_forward_before_request() {
+        coordinator_hooks_->forward.now = [] { return core::TdEventClock::time_point::max(); };
+    }
+
+    void expire_forward_before_submit() {
+        auto expired = std::make_shared<std::atomic<bool>>(false);
+        coordinator_hooks_->forward.now = [expired] {
+            return expired->load() ? core::TdEventClock::time_point::max()
+                                   : core::TdEventClock::now();
+        };
+        coordinator_hooks_->forward.before_submit = [expired] { expired->store(true); };
+    }
+
+    void expire_forward_after_progress() {
+        auto expired = std::make_shared<std::atomic<bool>>(false);
+        coordinator_hooks_->forward.now = [expired] {
+            return expired->load() ? core::TdEventClock::time_point::max()
+                                   : core::TdEventClock::now();
+        };
+        coordinator_hooks_->forward.on_progress = [expired](const auto&) { expired->store(true); };
     }
 
     void cancel_before_request(core::TdFunctionKind kind,
@@ -532,6 +575,22 @@ proto::Request delete_request(std::int64_t message_id = 101,
     request.context.timeout_seconds = 2.0;
     request.context.yes = yes;
     request.context.idempotency_key = std::move(key);
+    return request;
+}
+
+proto::Request forward_request(std::optional<std::string> key = std::nullopt,
+                               bool dry_run = false) {
+    proto::Request request("main");
+    request.id = 48;
+    request.command = {"msg", "forward"};
+    request.args = {{"from", "-1001"},
+                    {"to", "-1002"},
+                    {"message_ids", json::array({1, 2})},
+                    {"drop_author", false}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    request.context.dry_run = dry_run;
     return request;
 }
 
@@ -624,6 +683,37 @@ core::TdMessageWriteResult edited_message(std::string text = "revised") {
             .scheduled = false};
 }
 
+core::TdWriteMessage failed_forward_message(std::int64_t id, std::int32_t code,
+                                            double retry_after) {
+    auto message = forwarded_message(id);
+    message.sending_state = {.kind = core::TdMessageSendingStateKind::Failed,
+                             .sending_id = 0,
+                             .error = core::TdError{code, "failed"},
+                             .can_retry = false,
+                             .need_another_sender = false,
+                             .need_another_reply_quote = false,
+                             .need_drop_reply = false,
+                             .required_paid_message_star_count = 0,
+                             .retry_after = retry_after,
+                             .unsupported_tdlib_type_id = std::nullopt};
+    return message;
+}
+
+core::TdWriteMessage pending_forward_message(std::int64_t id, std::int32_t sending_id) {
+    auto message = forwarded_message(id);
+    message.sending_state = {.kind = core::TdMessageSendingStateKind::Pending,
+                             .sending_id = sending_id,
+                             .error = std::nullopt,
+                             .can_retry = false,
+                             .need_another_sender = false,
+                             .need_another_reply_quote = false,
+                             .need_drop_reply = false,
+                             .required_paid_message_star_count = 0,
+                             .retry_after = 0,
+                             .unsupported_tdlib_type_id = std::nullopt};
+    return message;
+}
+
 core::TdMessageAvailableReactions available_reactions() {
     return {.top = {{.type = {.kind = core::TdReactionKind::Emoji,
                               .emoji = "👍",
@@ -645,6 +735,25 @@ void resolve_basic(FakeWrites& fake) {
 
 void bind_principal(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
+}
+
+void plan_forward(FakeWrites& fake, bool drop_author = false,
+                  core::TdMessageProperties properties = {}) {
+    bind_principal(fake);
+    fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+    auto destination = basic_chat();
+    destination.id = -1002;
+    destination.title = "Destination";
+    fake.respond(core::TdFunctionKind::GetChat, destination);
+    if (drop_author) {
+        properties.can_be_copied = true;
+    } else {
+        properties.can_be_forwarded = true;
+    }
+    for (const auto id : {1, 2}) {
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(id));
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+    }
 }
 
 std::uint64_t reach_invite_dispatch(FakeWrites& fake, const std::string& invite) {
@@ -1616,6 +1725,261 @@ TEST_CASE("public msg react validates availability and exact add-remove options"
         CHECK(fake.count(core::TdFunctionKind::GetChat) == 0);
         CHECK(fake.count(core::TdFunctionKind::GetMessageAvailableReactions) == 0);
     }
+}
+
+TEST_CASE("public msg forward is registered through the write dispatcher",
+          "[write-command][forward][dispatch]") {
+    FakeWrites fake;
+    auto pending = fake.dispatch(forward_request());
+    plan_forward(fake);
+    core::TdForwardMessages forwarded;
+    forwarded.messages.emplace_back(forwarded_message(101));
+    forwarded.messages.emplace_back(forwarded_message(102));
+    const auto descriptor =
+        fake.respond(core::TdFunctionKind::ForwardMessages, std::move(forwarded));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["from_chat_id"] == -1001);
+    CHECK((*outcome.result)["to_chat_id"] == -1002);
+    REQUIRE((*outcome.result)["items"].size() == 2);
+    CHECK((*outcome.result)["items"][0]["source_id"] == 1);
+    CHECK((*outcome.result)["items"][0]["status"] == "sent");
+    CHECK((*outcome.result)["items"][1]["source_id"] == 2);
+    CHECK(function_field<std::vector<std::int64_t>>(descriptor, "message_ids") ==
+          std::vector<std::int64_t>{1, 2});
+    CHECK(function_field<bool>(descriptor, "send_copy") == false);
+    CHECK_THAT(*outcome.result, tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+}
+
+TEST_CASE("msg forward plans copy capability and dry-run without persistence",
+          "[write-command][forward][planning][dry-run]") {
+    SECTION("drop author requires copy capability") {
+        FakeWrites fake;
+        auto request = forward_request();
+        request.args["drop_author"] = true;
+        auto pending = fake.dispatch(request);
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        auto destination = basic_chat();
+        destination.id = -1002;
+        fake.respond(core::TdFunctionKind::GetChat, destination);
+        fake.respond(core::TdFunctionKind::GetMessage, planning_message(1));
+        const auto outcome = [&] {
+            fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+            return pending.get();
+        }();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "not_copyable");
+        CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    }
+
+    SECTION("dry-run returns the immutable dual-chat plan") {
+        FakeWrites fake(false);
+        auto request = forward_request(std::nullopt, true);
+        request.args["drop_author"] = true;
+        auto pending = fake.dispatch(request);
+        plan_forward(fake, true);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["dry_run"] == true);
+        CHECK((*outcome.result)["plan"]["operation"] == "msg_forward");
+        CHECK((*outcome.result)["plan"]["from"]["id"] == -1001);
+        CHECK((*outcome.result)["plan"]["to"]["id"] == -1002);
+        CHECK((*outcome.result)["plan"]["drop_author"] == true);
+        CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+        CHECK_THAT(*outcome.result,
+                   tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+    }
+}
+
+TEST_CASE("msg forward aggregates partial and rate-limited vectors exactly",
+          "[write-command][forward][aggregation][schema]") {
+    SECTION("one sent and one upstream null is a durable partial") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(forward_request("forward-partial-key"));
+        plan_forward(fake);
+        core::TdForwardMessages forwarded;
+        forwarded.messages.emplace_back(forwarded_message(101));
+        forwarded.messages.emplace_back(std::nullopt);
+        fake.respond(core::TdFunctionKind::ForwardMessages, std::move(forwarded));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "FORWARD_PARTIAL");
+        CHECK((*outcome.error)["error"]["details"]["items"][0]["status"] == "sent");
+        CHECK((*outcome.error)["error"]["details"]["items"][1]["failure_reason"] ==
+              "upstream_null");
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        auto guard = fake.foundation()->acquire_epoch();
+        const auto store = fake.foundation()->store().inspect(guard);
+        REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+        REQUIRE(store.snapshot.entries.size() == 1);
+        CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Completed);
+    }
+
+    SECTION("all 429 uses the maximum ceiling and closes mutation none") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(forward_request("forward-rate-key"));
+        plan_forward(fake);
+        core::TdForwardMessages forwarded;
+        forwarded.messages.emplace_back(failed_forward_message(-70, 429, 1.25));
+        forwarded.messages.emplace_back(failed_forward_message(-71, 429, 3.01));
+        fake.respond(core::TdFunctionKind::ForwardMessages, std::move(forwarded));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "RATE_LIMITED");
+        CHECK((*outcome.error)["error"]["details"]["retry_after"] == 4);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("top-level 429 has the strict empty post-dispatch vector") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(forward_request("forward-top-rate-key"));
+        plan_forward(fake);
+        fake.respond(core::TdFunctionKind::ForwardMessages, core::TdError{429, "retry after 6"});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "RATE_LIMITED");
+        CHECK((*outcome.error)["error"]["details"]["retry_after"] == 6);
+        CHECK((*outcome.error)["error"]["details"]["items"] == json::array());
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        check_completed_possible_with_pending(fake);
+    }
+
+    SECTION("authorization loss after a sent item closes without fabricating a mutation proof") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(forward_request("forward-auth-loss-key"));
+        plan_forward(fake);
+        const auto [descriptor, query_id] =
+            fake.observe_call(core::TdFunctionKind::ForwardMessages);
+        const auto sending_id =
+            static_cast<std::int32_t>(function_field<std::int64_t>(descriptor, "sending_id"));
+        core::TdForwardMessages forwarded;
+        forwarded.messages.emplace_back(forwarded_message(101));
+        forwarded.messages.emplace_back(pending_forward_message(-77, sending_id));
+        fake.push_response(query_id, std::move(forwarded));
+        fake.push_authorization(core::AuthStateData{core::AuthState::LoggingOut});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        check_completed_possible_with_pending(fake);
+        const auto audit = read_bytes(fake.tree().audit_path());
+        CHECK(audit.find(R"("mutation_state":"confirmed")") != std::string::npos);
+        CHECK(audit.find(R"("stage":"mutation_confirmed")") == std::string::npos);
+    }
+}
+
+TEST_CASE("msg forward persists pending then sent vectors before completing",
+          "[write-command][forward][progress][recovery]") {
+    FakeWrites fake;
+    auto pending = fake.dispatch(forward_request("forward-progress-key"));
+    plan_forward(fake);
+    const auto [descriptor, query_id] = fake.observe_call(core::TdFunctionKind::ForwardMessages);
+    const auto sending_id =
+        static_cast<std::int32_t>(function_field<std::int64_t>(descriptor, "sending_id"));
+    core::TdForwardMessages immediate;
+    immediate.messages.emplace_back(pending_forward_message(-77, sending_id));
+    immediate.messages.emplace_back(std::nullopt);
+    fake.push_response(query_id, std::move(immediate));
+    auto success = forwarded_message(101);
+    fake.push_forward_success(-77, std::move(success));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "FORWARD_PARTIAL");
+    CHECK(sending_id != 0);
+    const auto audit = read_bytes(fake.tree().audit_path());
+    const auto pending_position = audit.find(R"("status":"pending")");
+    const auto sent_position = audit.find(R"("status":"sent")");
+    CHECK(pending_position != std::string::npos);
+    CHECK(sent_position != std::string::npos);
+    CHECK(sent_position > pending_position);
+}
+
+TEST_CASE("msg forward separates pre-proof and post-proof deadline cuts",
+          "[write-command][forward][deadline][idempotency]") {
+    SECTION("preparation deadline closes mutation none") {
+        FakeWrites fake;
+        fake.expire_forward_before_request();
+        auto pending = fake.dispatch(forward_request("forward-preproof-key"));
+        plan_forward(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "preflight");
+        CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("deadline after dispatch proof retains unknown pending") {
+        FakeWrites fake;
+        fake.expire_forward_before_submit();
+        auto pending = fake.dispatch(forward_request("forward-postproof-key"));
+        plan_forward(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["phase"] == "confirmation");
+        CHECK((*outcome.error)["error"]["details"]["items"] == json::array());
+        CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 0);
+        check_completed_possible_with_pending(fake);
+    }
+
+    SECTION("deadline after a sent item confirms mutation but retains pending recovery") {
+        FakeWrites fake;
+        fake.expire_forward_after_progress();
+        auto pending = fake.dispatch(forward_request("forward-confirmed-timeout-key"));
+        plan_forward(fake);
+        const auto [descriptor, query_id] =
+            fake.observe_call(core::TdFunctionKind::ForwardMessages);
+        const auto sending_id =
+            static_cast<std::int32_t>(function_field<std::int64_t>(descriptor, "sending_id"));
+        core::TdForwardMessages forwarded;
+        forwarded.messages.emplace_back(forwarded_message(101));
+        forwarded.messages.emplace_back(pending_forward_message(-77, sending_id));
+        fake.push_response(query_id, std::move(forwarded));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"]["items"][0]["status"] == "sent");
+        CHECK((*outcome.error)["error"]["details"]["items"][1]["status"] == "pending");
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        check_completed_possible_with_pending(fake);
+        const auto audit = read_bytes(fake.tree().audit_path());
+        CHECK(audit.find(R"("mutation_state":"confirmed")") != std::string::npos);
+        CHECK(audit.find(R"("stage":"mutation_confirmed")") != std::string::npos);
+    }
+}
+
+TEST_CASE("completed msg forward replay is stable and conflicting vectors never re-dispatch",
+          "[write-command][forward][idempotency][replay][conflict]") {
+    FakeWrites fake;
+    auto first = fake.dispatch(forward_request("forward-replay-key"));
+    plan_forward(fake);
+    core::TdForwardMessages forwarded;
+    forwarded.messages.emplace_back(forwarded_message(101));
+    forwarded.messages.emplace_back(forwarded_message(102));
+    fake.respond(core::TdFunctionKind::ForwardMessages, std::move(forwarded));
+    const auto first_outcome = first.get();
+    REQUIRE(first_outcome.result);
+
+    auto replay = fake.dispatch(forward_request("forward-replay-key"));
+    bind_principal(fake);
+    const auto replay_outcome = replay.get();
+    CHECK(replay_outcome.result == first_outcome.result);
+    CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 1);
+
+    auto changed = forward_request("forward-replay-key");
+    changed.args["message_ids"] = json::array({1, 3});
+    auto conflict = fake.dispatch(changed);
+    bind_principal(fake);
+    const auto conflict_outcome = conflict.get();
+    REQUIRE(conflict_outcome.error);
+    CHECK((*conflict_outcome.error)["error"]["code"] == "IDEMPOTENCY_CONFLICT");
+    CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 1);
 }
 
 TEST_CASE("public msg pin and unpin preserve exact property and TD request semantics",

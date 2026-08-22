@@ -2805,7 +2805,7 @@ TEST_CASE("account audit stored errors are closed by operation stage and exit",
         error));
 }
 
-TEST_CASE("account audit forward rate limits correlate empty and durable vectors exactly",
+TEST_CASE("account audit forward no-vector terminals correlate before progress exactly",
           "[account-audit][forward][rate-limit][scanner][regression]") {
     using M = daemon::AccountAuditMutationState;
     using S = daemon::AccountAuditStage;
@@ -2881,8 +2881,7 @@ TEST_CASE("account audit forward rate limits correlate empty and durable vectors
                                {"items", json::array()}}},
                              {"exit_code", 7}};
     const auto unchanged_timeout = outcome(timeout_empty, M::Possible, {S::DispatchStarted});
-    CHECK(inspect(unchanged_timeout, std::nullopt) ==
-          daemon::AccountAuditInspectionStatus::Contradiction);
+    CHECK(inspect(unchanged_timeout, std::nullopt) == daemon::AccountAuditInspectionStatus::Clean);
 
     const json one_failed = json::array({failed_item(1, 3)});
     const auto unexpected = outcome(rate_limited(one_failed, 3), M::Possible, {S::DispatchStarted});
@@ -2896,6 +2895,90 @@ TEST_CASE("account audit forward rate limits correlate empty and durable vectors
     const auto changed =
         outcome(rate_limited(altered, 4), M::None, {S::DispatchStarted, S::ForwardProgress});
     CHECK(inspect(changed, one_failed) == daemon::AccountAuditInspectionStatus::Contradiction);
+}
+
+TEST_CASE("account audit preserves confirmed forward timeout with pending items",
+          "[account-audit][forward][timeout][recovery]") {
+    using M = daemon::AccountAuditMutationState;
+    using O = daemon::AccountAuditOperation;
+    using S = daemon::AccountAuditStage;
+    const auto invocation = hex_invocation(84);
+    auto intent = make_intent(O::MsgForward, invocation).document();
+    intent["arguments"]["message_ids"] = json::array({1, 2});
+    intent["plan"]["message_ids"] = json::array({1, 2});
+    const json dispatch{{"tdlib_function", "forwardMessages"},
+                        {"dispatch_token", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        {"client_generation", std::uint64_t{1}}};
+    const json items =
+        json::array({json{{"source_id", 1}, {"status", "sent"}, {"message", message_write()}},
+                     json{{"source_id", 2}, {"status", "pending"}, {"temporary_message_id", -2}}});
+    const json timeout{{"kind", "error"},
+                       {"code", "TIMEOUT"},
+                       {"message", "request timed out"},
+                       {"details",
+                        {{"operation", "msg_forward"},
+                         {"phase", "confirmation"},
+                         {"state", "ready"},
+                         {"outcome", "unknown"},
+                         {"idempotency", "not_requested"},
+                         {"items", items}}},
+                       {"exit_code", 7}};
+    const std::vector<S> stages{S::DispatchStarted, S::TemporaryIdsObserved, S::ForwardProgress,
+                                S::MutationConfirmed};
+    const std::vector<json> records{
+        intent,
+        checkpoint_record(O::MsgForward, S::DispatchStarted, 1, dispatch, invocation),
+        checkpoint_record(O::MsgForward, S::TemporaryIdsObserved, 2,
+                          {{"temporary_message_ids", json::array({-2})}}, invocation),
+        checkpoint_record(O::MsgForward, S::ForwardProgress, 3, {{"items", items}}, invocation),
+        checkpoint_record(O::MsgForward, S::MutationConfirmed, 4, {{"terminal", timeout}},
+                          invocation),
+        outcome_record(O::MsgForward, invocation, M::Confirmed, stages, timeout)};
+    CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(records[4]));
+
+    auto no_sent = records[4];
+    no_sent["data"]["terminal"]["details"]["items"][0] = json{{"source_id", 1},
+                                                              {"status", "failed"},
+                                                              {"failure_reason", "upstream_null"},
+                                                              {"tdlib_code", nullptr},
+                                                              {"retry_after", nullptr}};
+    std::string error;
+    CHECK_FALSE(daemon::validate_account_audit_checkpoint(no_sent, error));
+    CHECK_FALSE(tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(no_sent));
+
+    AuditTree tree;
+    tree.write({}, json_lines(records));
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    const auto inspection = log.inspect(guard);
+    INFO(inspection.failure.detail);
+    CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Clean);
+
+    auto complete_items = items;
+    complete_items[1] = json{{"source_id", 2},
+                             {"status", "failed"},
+                             {"failure_reason", "upstream_null"},
+                             {"tdlib_code", nullptr},
+                             {"retry_after", nullptr}};
+    auto complete_timeout = timeout;
+    complete_timeout["details"]["items"] = complete_items;
+    const std::vector<S> complete_stages{S::DispatchStarted, S::ForwardProgress,
+                                         S::MutationConfirmed};
+    const std::vector<json> complete_records{
+        intent, checkpoint_record(O::MsgForward, S::DispatchStarted, 1, dispatch, invocation),
+        checkpoint_record(O::MsgForward, S::ForwardProgress, 2, {{"items", complete_items}},
+                          invocation),
+        checkpoint_record(O::MsgForward, S::MutationConfirmed, 3, {{"terminal", complete_timeout}},
+                          invocation),
+        outcome_record(O::MsgForward, invocation, M::Confirmed, complete_stages, complete_timeout)};
+    CHECK_FALSE(tgcli::test::matches_json_schema("audit-checkpoint.schema.json")
+                    .match(complete_records[3]));
+    AuditTree complete_tree;
+    complete_tree.write({}, json_lines(complete_records));
+    daemon::AccountAuditLog complete_log(complete_tree.state(), "main", ::getuid());
+    auto complete_guard = complete_tree.coordinator().lock();
+    CHECK(complete_log.inspect(complete_guard).status ==
+          daemon::AccountAuditInspectionStatus::Contradiction);
 }
 
 TEST_CASE("account audit stores spool failures only at saved attach spool prefixes",

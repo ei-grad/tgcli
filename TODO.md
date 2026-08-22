@@ -271,7 +271,7 @@ before the milestone is closed.
       `completed_unchanged` replay-confirmation timeout
 - [x] Implement destructive `tgcli chat leave` with the same immutable-plan,
       confirmation, replay, timeout, audit, and idempotency guarantees
-- [ ] Implement the ordered `tgcli msg forward` vector coordinator with one
+- [x] Implement the ordered `tgcli msg forward` vector coordinator with one
       strict `ForwardItem` across success/error/timeout/audit/store, partial
       outcomes, deleted-before-confirmation handling and 429 aggregation
 - [x] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`

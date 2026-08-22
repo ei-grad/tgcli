@@ -119,6 +119,11 @@ class ForwardHarness {
         client_->close();
     }
 
+    ForwardHarness(const ForwardHarness&) = delete;
+    ForwardHarness& operator=(const ForwardHarness&) = delete;
+    ForwardHarness(ForwardHarness&&) = delete;
+    ForwardHarness& operator=(ForwardHarness&&) = delete;
+
     std::future<tgcli::daemon::ForwardOutcome> execute(tgcli::daemon::ForwardHooks hooks = {}) {
         coordinator_ = std::make_unique<tgcli::daemon::ForwardCoordinator>(*client_, *session_,
                                                                            std::move(hooks));
@@ -139,7 +144,7 @@ class ForwardHarness {
         return *runtime_;
     }
 
-    tgcli::test::ScriptedClient first() const {
+    [[nodiscard]] tgcli::test::ScriptedClient first() const {
         return first_;
     }
 
@@ -278,4 +283,70 @@ TEST_CASE("forward coordinator keeps pending state on post-dispatch auth loss an
         REQUIRE(cancelled->items.size() == 2);
         CHECK(cancelled->mutation_state == tgcli::daemon::ForwardMutationState::Possible);
     }
+}
+
+TEST_CASE("forward coordinator buffers early updates and classifies deletion ambiguity",
+          "[daemon][forward][arbitration][ordering][deletion]") {
+    SECTION("success update before the immediate vector") {
+        ForwardHarness harness;
+        auto outcome = harness.execute();
+        const auto sent = harness.await_forward();
+        harness.runtime().push_message_send_succeeded(harness.first(), -77, stable(101));
+        tgcli::core::TdForwardMessages immediate;
+        immediate.messages.emplace_back(pending(-77));
+        immediate.messages.emplace_back(std::nullopt);
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(std::move(immediate)));
+        const auto result = outcome.get();
+        const auto* completed = std::get_if<tgcli::daemon::ForwardCompleted>(&result);
+        REQUIRE(completed != nullptr);
+        CHECK(completed->mutation_state == tgcli::daemon::ForwardMutationState::Confirmed);
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardSent>(completed->items[0]));
+    }
+
+    SECTION("temporary deletion remains possible") {
+        ForwardHarness harness;
+        std::promise<void> observed;
+        auto observed_future = observed.get_future();
+        tgcli::daemon::ForwardHooks hooks;
+        hooks.on_progress = [&](const auto& items) {
+            if (std::holds_alternative<tgcli::daemon::ForwardPending>(items[0])) {
+                observed.set_value();
+            }
+        };
+        auto outcome = harness.execute(std::move(hooks));
+        const auto sent = harness.await_forward();
+        tgcli::core::TdForwardMessages immediate;
+        immediate.messages.emplace_back(pending(-77));
+        immediate.messages.emplace_back(std::nullopt);
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(std::move(immediate)));
+        REQUIRE(observed_future.wait_for(2s) == std::future_status::ready);
+        harness.runtime().push_delete_messages(harness.first(), -1002, {-77}, true, false);
+        const auto result = outcome.get();
+        const auto* completed = std::get_if<tgcli::daemon::ForwardCompleted>(&result);
+        REQUIRE(completed != nullptr);
+        CHECK(completed->mutation_state == tgcli::daemon::ForwardMutationState::Possible);
+        const auto& failed = std::get<tgcli::daemon::ForwardFailed>(completed->items[0]);
+        CHECK(failed.reason == tgcli::daemon::ForwardFailureReason::DeletedBeforeConfirmation);
+        CHECK_FALSE(failed.tdlib_code);
+        CHECK_FALSE(failed.retry_after);
+    }
+}
+
+TEST_CASE("forward coordinator rejects duplicate temporary correlations",
+          "[daemon][forward][arbitration][malformed][duplicate]") {
+    ForwardHarness harness;
+    auto outcome = harness.execute();
+    const auto sent = harness.await_forward();
+    tgcli::core::TdForwardMessages immediate;
+    immediate.messages.emplace_back(pending(-77));
+    immediate.messages.emplace_back(pending(-77));
+    harness.runtime().push_response(harness.first(), sent.query_id,
+                                    tgcli::core::TdValue::from(std::move(immediate)));
+    const auto result = outcome.get();
+    const auto* malformed = std::get_if<tgcli::daemon::ForwardMalformed>(&result);
+    REQUIRE(malformed != nullptr);
+    CHECK(malformed->mutation_state == tgcli::daemon::ForwardMutationState::Possible);
+    CHECK(malformed->items.empty());
 }

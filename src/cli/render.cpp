@@ -440,6 +440,15 @@ std::string render_message_delete(const nlohmann::json& data) {
                        data.at("for_all").dump(), data.at("deleted").dump());
 }
 
+std::string render_message_forward(const nlohmann::json& data) {
+    if (data.contains("dry_run")) {
+        return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
+    }
+    return fmt::format("from_chat_id\t{}\nto_chat_id\t{}\nitems\t{}\n",
+                       data.at("from_chat_id").get<std::int64_t>(),
+                       data.at("to_chat_id").get<std::int64_t>(), data.at("items").dump());
+}
+
 std::string render_message_reaction(const nlohmann::json& data) {
     if (data.contains("dry_run")) {
         return fmt::format("dry_run\ttrue\nplan\t{}\n", data.at("plan").dump());
@@ -630,6 +639,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "msg delete") {
         return render_message_delete(data);
+    }
+    if (command_key == "msg forward") {
+        return render_message_forward(data);
     }
     if (command_key == "msg react") {
         return render_message_reaction(data);

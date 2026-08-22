@@ -365,6 +365,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"me", {{"result", "me.result.schema.json"}}},
           {"msg delete", {{"result", "msg-delete.result.schema.json"}}},
           {"msg edit", {{"result", "msg-edit.result.schema.json"}}},
+          {"msg forward", {{"result", "msg-forward.result.schema.json"}}},
           {"msg get", {{"result", "msg-get.result.schema.json"}}},
           {"msg link", {{"result", "msg-link.result.schema.json"}}},
           {"msg pin", {{"result", "msg-pin.result.schema.json"}}},
@@ -381,7 +382,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 40);
+    CHECK(manifest["commands"].size() == 41);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -679,7 +680,7 @@ TEST_CASE("public M3 write errors close resolver durability and timeout branches
     invalid["error"]["details"].erase("temporary_message_id");
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     invalid = errors[10];
-    invalid["error"]["details"]["completed_stages"].push_back("forward_progress");
+    invalid["error"]["details"]["completed_stages"].push_back("spool_ready");
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     invalid = errors[11];
     invalid["error"]["details"]["path"]["value"] = "2f00";
@@ -795,6 +796,97 @@ TEST_CASE("direct message write schemas pair exact result plans and operation er
     }
     auto invalid_error = errors.front();
     invalid_error["error"]["details"]["reason"] = "reaction_unavailable";
+    CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+}
+
+TEST_CASE("msg forward schemas share one strict ordered item contract", "[schema][m3][forward]") {
+    const json chat{{"id", -1001},
+                    {"title", "Project"},
+                    {"type", "supergroup"},
+                    {"is_bot", false},
+                    {"usernames", json::array({"project"})}};
+    const json destination{{"id", -1002},
+                           {"title", "Destination"},
+                           {"type", "supergroup"},
+                           {"is_bot", false},
+                           {"usernames", json::array({"destination"})}};
+    const json message{{"id", 101},
+                       {"chat_id", -1002},
+                       {"date", "2026-08-05T10:00:00Z"},
+                       {"sender", {{"type", "user"}, {"id", 42}}},
+                       {"is_outgoing", true},
+                       {"topic", nullptr},
+                       {"type", "text"},
+                       {"text", "forwarded"},
+                       {"scheduled", false}};
+    const json sent{{"source_id", 1}, {"status", "sent"}, {"message", message}};
+    const json failed{{"source_id", 2},
+                      {"status", "failed"},
+                      {"failure_reason", "upstream_null"},
+                      {"tdlib_code", nullptr},
+                      {"retry_after", nullptr}};
+    const json rate_failed{{"source_id", 2},
+                           {"status", "failed"},
+                           {"failure_reason", "tdlib_error"},
+                           {"tdlib_code", 429},
+                           {"retry_after", 4}};
+    const json result{
+        {"from_chat_id", -1001}, {"to_chat_id", -1002}, {"items", json::array({sent})}};
+    CHECK_THAT(result, tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+    auto invalid_result = result;
+    invalid_result["items"][0] = failed;
+    CHECK_THAT(invalid_result, !tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+
+    const json dry{{"dry_run", true},
+                   {"plan",
+                    {{"operation", "msg_forward"},
+                     {"account", "main"},
+                     {"tdlib_request", "forwardMessages"},
+                     {"from", chat},
+                     {"to", destination},
+                     {"message_ids", json::array({1, 2})},
+                     {"drop_author", false}}}};
+    CHECK_THAT(dry, tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+
+    const std::vector<json> errors{
+        terminal_error("PRECONDITION_FAILED", {{"operation", "msg_forward"},
+                                               {"chat_id", -1001},
+                                               {"message_id", 1},
+                                               {"reason", "not_forwardable"}}),
+        terminal_error("FORWARD_PARTIAL", {{"operation", "msg_forward"},
+                                           {"from_chat_id", -1001},
+                                           {"to_chat_id", -1002},
+                                           {"items", json::array({sent, failed})}}),
+        terminal_error("FORWARD_FAILED", {{"operation", "msg_forward"},
+                                          {"from_chat_id", -1001},
+                                          {"to_chat_id", -1002},
+                                          {"items", json::array({failed})}}),
+        terminal_error("RATE_LIMITED", {{"operation", "msg_forward"},
+                                        {"tdlib_code", 429},
+                                        {"retry_after", 4},
+                                        {"items", json::array({rate_failed})}}),
+        terminal_error("RATE_LIMITED", {{"operation", "msg_forward"},
+                                        {"tdlib_code", 429},
+                                        {"retry_after", 4},
+                                        {"items", json::array()}}),
+        terminal_error("TIMEOUT", {{"operation", "msg_forward"},
+                                   {"phase", "confirmation"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"},
+                                   {"items", json::array({sent, failed})}})};
+    for (const auto& error : errors) {
+        INFO(error.dump());
+        CHECK_THAT(error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
+    auto invalid_error = errors[1];
+    invalid_error["error"]["details"]["items"] = json::array({sent});
+    CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid_error = errors[3];
+    invalid_error["error"]["details"]["items"] = json::array({sent});
+    CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid_error = errors[5];
+    invalid_error["error"]["details"]["items"][0]["status"] = "pending";
     CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
 }
 

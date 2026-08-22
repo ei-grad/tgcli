@@ -35,7 +35,7 @@
       "enum": ["path_invalid", "wrong_owner", "wrong_type", "wrong_mode", "wrong_link_count", "too_large", "parse_error", "type_error", "invalid_default", "conflicting_credentials", "io_error", "sync_error"]
     },
     "v2Stage": {
-      "enum": ["idempotency_pending", "dispatch_started", "temporary_ids_observed", "mutation_confirmed"]
+      "enum": ["idempotency_pending", "dispatch_started", "temporary_ids_observed", "forward_progress", "mutation_confirmed"]
     },
     "chatIdentity": {
       "type": "object",
@@ -102,6 +102,102 @@
           }
         }
       ]
+    },
+    "messageWriteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "chat_id", "date", "sender", "is_outgoing", "topic", "type", "text", "scheduled"],
+      "properties": {
+        "id": { "$ref": "#/$defs/int53" },
+        "chat_id": { "$ref": "#/$defs/int53" },
+        "date": { "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" }] },
+        "sender": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": { "type": { "const": "user" }, "id": { "$ref": "#/$defs/positiveInt53" } } },
+            { "type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": { "type": { "const": "chat" }, "id": { "$ref": "#/$defs/int53" } } }
+          ]
+        },
+        "is_outgoing": { "type": "boolean" },
+        "topic": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "const": "forum" }, "id": { "type": "integer", "minimum": 1, "maximum": 2147483647 } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "enum": ["thread", "direct", "saved"] }, "id": { "$ref": "#/$defs/positiveInt53" } } }
+          ]
+        },
+        "type": { "enum": ["text", "photo", "video", "doc", "voice", "other"] },
+        "text": { "type": "string" },
+        "scheduled": { "type": "boolean" }
+      },
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "chat_id", "date", "sender", "is_outgoing", "topic", "type", "text", "scheduled"],
+          "properties": { "id": { "$ref": "#/$defs/int53" }, "chat_id": { "$ref": "#/$defs/int53" }, "date": { "type": "null" }, "sender": { "oneOf": [{ "type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": { "type": { "const": "user" }, "id": { "$ref": "#/$defs/positiveInt53" } } }, { "type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": { "type": { "const": "chat" }, "id": { "$ref": "#/$defs/int53" } } }] }, "is_outgoing": { "type": "boolean" }, "topic": { "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "const": "forum" }, "id": { "type": "integer", "minimum": 1, "maximum": 2147483647 } } }, { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "enum": ["thread", "direct", "saved"] }, "id": { "$ref": "#/$defs/positiveInt53" } } }] }, "type": { "enum": ["text", "photo", "video", "doc", "voice", "other"] }, "text": { "type": "string" }, "scheduled": { "const": true } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "chat_id", "date", "sender", "is_outgoing", "topic", "type", "text", "scheduled"],
+          "properties": { "id": { "$ref": "#/$defs/int53" }, "chat_id": { "$ref": "#/$defs/int53" }, "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" }, "sender": { "oneOf": [{ "type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": { "type": { "const": "user" }, "id": { "$ref": "#/$defs/positiveInt53" } } }, { "type": "object", "additionalProperties": false, "required": ["type", "id"], "properties": { "type": { "const": "chat" }, "id": { "$ref": "#/$defs/int53" } } }] }, "is_outgoing": { "type": "boolean" }, "topic": { "oneOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "const": "forum" }, "id": { "type": "integer", "minimum": 1, "maximum": 2147483647 } } }, { "type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": { "kind": { "enum": ["thread", "direct", "saved"] }, "id": { "$ref": "#/$defs/positiveInt53" } } }] }, "type": { "enum": ["text", "photo", "video", "doc", "voice", "other"] }, "text": { "type": "string" }, "scheduled": { "const": false } }
+        }
+      ]
+    },
+    "forwardPendingItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "status", "temporary_message_id"],
+      "properties": { "source_id": { "$ref": "#/$defs/int53" }, "status": { "const": "pending" }, "temporary_message_id": { "$ref": "#/$defs/int53" } }
+    },
+    "forwardSentItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "status", "message"],
+      "properties": { "source_id": { "$ref": "#/$defs/int53" }, "status": { "const": "sent" }, "message": { "$ref": "#/$defs/messageWriteResult" } }
+    },
+    "forwardFailedItem": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_id", "status", "failure_reason", "tdlib_code", "retry_after"],
+          "properties": { "source_id": { "$ref": "#/$defs/int53" }, "status": { "const": "failed" }, "failure_reason": { "enum": ["upstream_null", "deleted_before_confirmation"] }, "tdlib_code": { "type": "null" }, "retry_after": { "type": "null" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_id", "status", "failure_reason", "tdlib_code", "retry_after"],
+          "properties": { "source_id": { "$ref": "#/$defs/int53" }, "status": { "const": "failed" }, "failure_reason": { "const": "tdlib_error" }, "tdlib_code": { "type": "integer", "not": { "const": 429 } }, "retry_after": { "type": "null" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_id", "status", "failure_reason", "tdlib_code", "retry_after"],
+          "properties": { "source_id": { "$ref": "#/$defs/int53" }, "status": { "const": "failed" }, "failure_reason": { "const": "tdlib_error" }, "tdlib_code": { "const": 429 }, "retry_after": { "type": "integer", "minimum": 0 } }
+        }
+      ]
+    },
+    "forwardRateFailedItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "status", "failure_reason", "tdlib_code", "retry_after"],
+      "properties": { "source_id": { "$ref": "#/$defs/int53" }, "status": { "const": "failed" }, "failure_reason": { "const": "tdlib_error" }, "tdlib_code": { "const": 429 }, "retry_after": { "type": "integer", "minimum": 0 } }
+    },
+    "forwardItem": {
+      "oneOf": [
+        { "$ref": "#/$defs/forwardPendingItem" },
+        { "$ref": "#/$defs/forwardSentItem" },
+        { "$ref": "#/$defs/forwardFailedItem" }
+      ]
+    },
+    "forwardItems": {
+      "type": "array", "minItems": 1, "maxItems": 100,
+      "items": { "$ref": "#/$defs/forwardItem" }
+    },
+    "forwardTerminalItems": {
+      "type": "array", "minItems": 1, "maxItems": 100,
+      "items": { "oneOf": [{ "$ref": "#/$defs/forwardSentItem" }, { "$ref": "#/$defs/forwardFailedItem" }] }
+    },
+    "forwardRateItems": {
+      "type": "array", "minItems": 1, "maxItems": 100,
+      "items": { "$ref": "#/$defs/forwardRateFailedItem" }
+    },
+    "forwardFailedItems": {
+      "type": "array", "minItems": 1, "maxItems": 100,
+      "items": { "$ref": "#/$defs/forwardFailedItem" }
     },
     "ids": {
       "type": "array",
@@ -348,13 +444,18 @@
                 "message": { "type": "string" },
                 "code": { "const": "RATE_LIMITED" },
                 "details": {
-                  "type": "object", "additionalProperties": false,
-                  "required": ["operation", "tdlib_code", "retry_after"],
-                  "properties": {
-                    "operation": { "$ref": "#/$defs/operation" },
-                    "tdlib_code": { "const": 429 },
-                    "retry_after": { "type": "integer", "minimum": 0 }
-                  }
+                  "oneOf": [
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "tdlib_code", "retry_after"],
+                      "properties": { "operation": { "$ref": "#/$defs/operation" }, "tdlib_code": { "const": 429 }, "retry_after": { "type": "integer", "minimum": 0 } }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "tdlib_code", "retry_after", "items"],
+                      "properties": { "operation": { "const": "msg_forward" }, "tdlib_code": { "const": 429 }, "retry_after": { "type": "integer", "minimum": 0 }, "items": { "oneOf": [{ "type": "array", "maxItems": 0 }, { "$ref": "#/$defs/forwardRateItems" }] } }
+                    }
+                  ]
                 }
               }
             },
@@ -369,7 +470,7 @@
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "tdlib_code"],
                   "properties": {
-                    "operation": { "$ref": "#/$defs/operation" },
+                    "operation": { "oneOf": [{ "$ref": "#/$defs/operation" }, { "const": "msg_forward" }] },
                     "tdlib_code": { "type": "integer" }
                   }
                 }
@@ -385,7 +486,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "reason"],
-                  "properties": { "operation": { "$ref": "#/$defs/operation" }, "reason": { "const": "internal_error" } }
+                  "properties": { "operation": { "oneOf": [{ "$ref": "#/$defs/operation" }, { "const": "msg_forward" }] }, "reason": { "const": "internal_error" } }
                 }
               }
             },
@@ -416,6 +517,16 @@
                         "chat_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
                         "message_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] },
                         "reason": { "enum": ["not_deletable_for_self", "not_deletable_for_all"] }
+                      }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "chat_id", "message_id", "reason"],
+                      "properties": {
+                        "operation": { "const": "msg_forward" },
+                        "chat_id": { "$ref": "#/$defs/int53" },
+                        "message_id": { "$ref": "#/$defs/int53" },
+                        "reason": { "enum": ["not_forwardable", "not_copyable"] }
                       }
                     },
                     {
@@ -492,7 +603,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "key_hash", "expected_fingerprint", "actual_fingerprint"],
-                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "key_hash": { "$ref": "#/$defs/hash" }, "expected_fingerprint": { "$ref": "#/$defs/hash" }, "actual_fingerprint": { "$ref": "#/$defs/hash" } }
+                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_forward", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "key_hash": { "$ref": "#/$defs/hash" }, "expected_fingerprint": { "$ref": "#/$defs/hash" }, "actual_fingerprint": { "$ref": "#/$defs/hash" } }
                 }
               }
             },
@@ -506,7 +617,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "key_hash", "fingerprint", "invocation_id", "temporary_message_ids"],
-                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "key_hash": { "$ref": "#/$defs/hash" }, "fingerprint": { "$ref": "#/$defs/hash" }, "invocation_id": { "$ref": "#/$defs/hex32" }, "temporary_message_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/int53" } } }
+                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_forward", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "key_hash": { "$ref": "#/$defs/hash" }, "fingerprint": { "$ref": "#/$defs/hash" }, "invocation_id": { "$ref": "#/$defs/hex32" }, "temporary_message_ids": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "$ref": "#/$defs/int53" } } }
                 }
               }
             },
@@ -534,7 +645,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["account", "path", "mutation_state", "completed_stages"],
-                  "properties": { "account": { "$ref": "#/$defs/account" }, "path": { "type": "string", "pattern": "^/" }, "mutation_state": { "enum": ["none", "possible", "confirmed"] }, "completed_stages": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/v2Stage" } } }
+                  "properties": { "account": { "$ref": "#/$defs/account" }, "path": { "type": "string", "pattern": "^/" }, "mutation_state": { "enum": ["none", "possible", "confirmed"] }, "completed_stages": { "type": "array", "maxItems": 5, "uniqueItems": true, "items": { "$ref": "#/$defs/v2Stage" } } }
                 }
               }
             },
@@ -562,7 +673,7 @@
                 "details": {
                   "type": "object", "additionalProperties": false,
                   "required": ["operation", "path", "reason"],
-                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "path": { "const": "spool/" }, "reason": { "$ref": "#/$defs/durabilityReason" } }
+                  "properties": { "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_forward", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] }, "path": { "const": "spool/" }, "reason": { "$ref": "#/$defs/durabilityReason" } }
                 }
               }
             },
@@ -579,7 +690,7 @@
                       "type": "object", "additionalProperties": false,
                       "required": ["operation", "phase", "state", "outcome", "idempotency"],
                       "properties": {
-                        "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] },
+                        "operation": { "enum": ["send", "msg_edit", "msg_delete", "msg_forward", "msg_react", "msg_pin", "msg_unpin", "chat_mark_read", "chat_mute", "chat_unmute", "chat_pin", "chat_unpin", "chat_archive", "chat_unarchive", "chat_join", "chat_leave"] },
                         "phase": { "const": "preflight" },
                         "state": { "const": "ready" },
                         "outcome": { "const": "not_started" },
@@ -596,6 +707,18 @@
                         "outcome": { "const": "unknown" },
                         "idempotency": { "enum": ["not_requested", "pending"] },
                         "temporary_message_id": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/int53" }] }
+                      }
+                    },
+                    {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["operation", "phase", "state", "outcome", "idempotency", "items"],
+                      "properties": {
+                        "operation": { "const": "msg_forward" },
+                        "phase": { "const": "confirmation" },
+                        "state": { "const": "ready" },
+                        "outcome": { "const": "unknown" },
+                        "idempotency": { "enum": ["not_requested", "pending"] },
+                        "items": { "oneOf": [{ "type": "array", "maxItems": 0 }, { "$ref": "#/$defs/forwardItems" }] }
                       }
                     },
                     {
@@ -640,6 +763,50 @@
                       }
                     }
                   ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "FORWARD_PARTIAL" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "from_chat_id", "to_chat_id", "items"],
+                  "properties": {
+                    "operation": { "const": "msg_forward" },
+                    "from_chat_id": { "$ref": "#/$defs/int53" },
+                    "to_chat_id": { "$ref": "#/$defs/int53" },
+                    "items": {
+                      "allOf": [
+                        { "$ref": "#/$defs/forwardTerminalItems" },
+                        { "contains": { "$ref": "#/$defs/forwardSentItem" } },
+                        { "contains": { "$ref": "#/$defs/forwardFailedItem" } }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "details"],
+              "properties": {
+                "message": { "type": "string" },
+                "code": { "const": "FORWARD_FAILED" },
+                "details": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["operation", "from_chat_id", "to_chat_id", "items"],
+                  "properties": {
+                    "operation": { "const": "msg_forward" },
+                    "from_chat_id": { "$ref": "#/$defs/int53" },
+                    "to_chat_id": { "$ref": "#/$defs/int53" },
+                    "items": { "$ref": "#/$defs/forwardFailedItems" }
+                  }
                 }
               }
             },

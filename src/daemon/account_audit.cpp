@@ -1522,6 +1522,11 @@ bool terminal_proves_mutation(AccountAuditOperation operation, const json& termi
     }
     const auto& code = terminal["code"].get_ref<const std::string&>();
     if (operation == AccountAuditOperation::MsgForward) {
+        if (code == "TIMEOUT") {
+            const auto& items = terminal["details"]["items"];
+            return std::any_of(items.begin(), items.end(),
+                               [](const json& item) { return item["status"] == "sent"; });
+        }
         return code == "FORWARD_PARTIAL" || code == "INTERNAL";
     }
     return code == "INTERNAL" && (operation == AccountAuditOperation::Send ||
@@ -2653,8 +2658,8 @@ bool terminal_matches_latest_forward(const AccountAuditOpenGroup& group, const j
     }
     const auto* durable_items = final_forward_items(group);
     if (durable_items == nullptr) {
-        return terminal["kind"] == "error" && terminal["code"] == "RATE_LIMITED" &&
-               terminal_items->empty();
+        return terminal["kind"] == "error" && terminal_items->empty() &&
+               (terminal["code"] == "RATE_LIMITED" || terminal["code"] == "TIMEOUT");
     }
     if (!canonical_json_equal(*terminal_items, *durable_items)) {
         return false;
@@ -2847,9 +2852,16 @@ bool consume_v2(const json& document, ScanState& state, std::string& error,
             checkpoint.operation == AccountAuditOperation::MsgForward) {
             const bool oversized_internal = checkpoint.data["terminal"]["kind"] == "error" &&
                                             checkpoint.data["terminal"]["code"] == "INTERNAL";
+            const bool pending_timeout = checkpoint.data["terminal"]["kind"] == "error" &&
+                                         checkpoint.data["terminal"]["code"] == "TIMEOUT";
             if (oversized_internal) {
                 if (final_forward_items(*state.open) != nullptr) {
                     error = "forward oversized terminal follows a persisted vector";
+                    return false;
+                }
+            } else if (pending_timeout) {
+                if (state.open->forward_complete) {
+                    error = "forward timeout mutation proof follows a complete vector";
                     return false;
                 }
             } else if (!state.open->forward_complete) {

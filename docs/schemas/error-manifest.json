@@ -67,6 +67,9 @@
     "msg edit": {
       "error": "m3-write.error.schema.json"
     },
+    "msg forward": {
+      "error": "m3-write.error.schema.json"
+    },
     "msg pin": {
       "error": "m3-write.error.schema.json"
     },

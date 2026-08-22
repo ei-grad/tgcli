@@ -932,6 +932,26 @@
         }
       }
     },
+    "forwardPendingItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "status",
+        "temporary_message_id"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/messageId"
+        },
+        "status": {
+          "const": "pending"
+        },
+        "temporary_message_id": {
+          "$ref": "#/$defs/messageId"
+        }
+      }
+    },
     "forwardFailedItem": {
       "oneOf": [
         {
@@ -1070,24 +1090,7 @@
     "forwardItem": {
       "oneOf": [
         {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "source_id",
-            "status",
-            "temporary_message_id"
-          ],
-          "properties": {
-            "source_id": {
-              "$ref": "#/$defs/messageId"
-            },
-            "status": {
-              "const": "pending"
-            },
-            "temporary_message_id": {
-              "$ref": "#/$defs/messageId"
-            }
-          }
+          "$ref": "#/$defs/forwardPendingItem"
         },
         {
           "$ref": "#/$defs/forwardSentItem"
@@ -2354,6 +2357,88 @@
                     },
                     "exit_code": {
                       "const": 1
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "details",
+                    "exit_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "error"
+                    },
+                    "code": {
+                      "const": "TIMEOUT"
+                    },
+                    "message": {
+                      "enum": [
+                        "request timed out"
+                      ]
+                    },
+                    "details": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "operation",
+                        "phase",
+                        "state",
+                        "outcome",
+                        "idempotency",
+                        "items"
+                      ],
+                      "properties": {
+                        "operation": {
+                          "const": "msg_forward"
+                        },
+                        "phase": {
+                          "const": "confirmation"
+                        },
+                        "state": {
+                          "$ref": "#/$defs/nullableState"
+                        },
+                        "outcome": {
+                          "const": "unknown"
+                        },
+                        "idempotency": {
+                          "enum": [
+                            "not_requested",
+                            "pending"
+                          ]
+                        },
+                        "items": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 100,
+                          "uniqueItems": true,
+                          "items": {
+                            "$ref": "#/$defs/forwardItem"
+                          },
+                          "allOf": [
+                            {
+                              "contains": {
+                                "$ref": "#/$defs/forwardSentItem"
+                              },
+                              "minContains": 1
+                            },
+                            {
+                              "contains": {
+                                "$ref": "#/$defs/forwardPendingItem"
+                              },
+                              "minContains": 1
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "exit_code": {
+                      "const": 7
                     }
                   }
                 }

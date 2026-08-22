@@ -4,6 +4,7 @@
 #include "core/td_client.hpp"
 #include "daemon/direct_rpc.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/forward.hpp"
 #include "daemon/idempotency_reconciliation.hpp"
 #include "daemon/single_send.hpp"
 
@@ -16,6 +17,7 @@ namespace tgcli::daemon {
 namespace testing {
 struct WriteCoordinatorHooks {
     SingleSendHooks single_send;
+    ForwardHooks forward;
     DirectRpcHooks direct_rpc;
 };
 } // namespace testing
@@ -29,6 +31,7 @@ class WriteCoordinator final {
 
     void send(const proto::Request& request, RequestSession& session);
     void edit_message(const proto::Request& request, RequestSession& session);
+    void forward_messages(const proto::Request& request, RequestSession& session);
     void delete_messages(const proto::Request& request, RequestSession& session);
     void react_to_message(const proto::Request& request, RequestSession& session);
     void pin_message(const proto::Request& request, RequestSession& session, bool pinned);

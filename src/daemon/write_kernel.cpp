@@ -873,7 +873,10 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             return audit_fatal();
         }
         if (dispatch->terminal.operation() != request.operation ||
-            !write_contract::terminal_matches_plan(dispatch->terminal, proposed_plan)) {
+            !write_contract::terminal_matches_plan(dispatch->terminal, proposed_plan) ||
+            (dispatch->retain_pending &&
+             (request.operation != proto::M3Operation::MsgForward ||
+              dispatch->mutation_state == AccountAuditMutationState::None))) {
             return audit_fatal();
         }
         const bool suppress_terminal = cancelled(request);
@@ -895,7 +898,8 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             if (dispatch->mutation_state == AccountAuditMutationState::None) {
                 transition = foundation_->store().remove_owned(*request.idempotency_key_hash,
                                                                request.invocation_id, epoch);
-            } else if (dispatch->mutation_state == AccountAuditMutationState::Confirmed) {
+            } else if (dispatch->mutation_state == AccountAuditMutationState::Confirmed &&
+                       !dispatch->retain_pending) {
                 transition = foundation_->store().complete(*request.idempotency_key_hash,
                                                            request.invocation_id,
                                                            dispatch->terminal.value(), epoch);
@@ -906,7 +910,8 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                 return audit_fatal();
             }
         }
-        if (dispatch->mutation_state != AccountAuditMutationState::Possible) {
+        if (dispatch->mutation_state != AccountAuditMutationState::Possible &&
+            !dispatch->retain_pending) {
             static_cast<void>(cleanup_current_spool(dispatch->mutation_state ==
                                                     AccountAuditMutationState::Confirmed));
         }

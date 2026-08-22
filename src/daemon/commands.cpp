@@ -53,12 +53,12 @@ bool uses_account_removal_preflight(std::string_view command) {
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
-           command == "msg delete" || command == "msg react" || command == "msg pin" ||
-           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
-           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
-           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
-           command == "chat leave" || command == "daemon status" || command == "daemon stop" ||
-           command == "daemon restart";
+           command == "msg delete" || command == "msg forward" || command == "msg react" ||
+           command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
+           command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
+           command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
+           command == "chat join" || command == "chat leave" || command == "daemon status" ||
+           command == "daemon stop" || command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
@@ -66,11 +66,11 @@ bool uses_logout_preflight(std::string_view command) {
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
-           command == "msg delete" || command == "msg react" || command == "msg pin" ||
-           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
-           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
-           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
-           command == "chat leave";
+           command == "msg delete" || command == "msg forward" || command == "msg react" ||
+           command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
+           command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
+           command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
+           command == "chat join" || command == "chat leave";
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
@@ -95,11 +95,12 @@ void configure_request_preflight(Dispatcher& dispatcher, const DaemonContext& co
                 const bool persistence_free_m3 =
                     session.request().context.dry_run &&
                     (command == "send" || command == "msg edit" || command == "msg delete" ||
-                     command == "msg react" || command == "msg pin" || command == "msg unpin" ||
-                     command == "chat mark-read" || command == "chat mute" ||
-                     command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
-                     command == "chat archive" || command == "chat unarchive" ||
-                     command == "chat join" || command == "chat leave");
+                     command == "msg forward" || command == "msg react" || command == "msg pin" ||
+                     command == "msg unpin" || command == "chat mark-read" ||
+                     command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
+                     command == "chat unpin" || command == "chat archive" ||
+                     command == "chat unarchive" || command == "chat join" ||
+                     command == "chat leave");
                 if (context.logout != nullptr &&
                     !(persistence_free_m3 ? context.logout->preflight_read_only(session)
                                           : context.logout->preflight(session))) {

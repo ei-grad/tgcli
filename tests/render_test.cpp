@@ -364,6 +364,38 @@ TEST_CASE("public M3 write renderers preserve complete results and plans", "[m3]
     CHECK_THAT(delete_dry, tgcli::test::matches_json_schema("msg-delete.result.schema.json"));
     CHECK(tgcli::cli::render_human("msg delete", delete_dry) == golden("msg-delete-dry-run.txt"));
 
+    const json forward_result{
+        {"from_chat_id", -1001},
+        {"to_chat_id", -1002},
+        {"items", json::array({json{{"source_id", -5},
+                                    {"status", "sent"},
+                                    {"message", json{{"id", 322},
+                                                     {"chat_id", -1002},
+                                                     {"date", "2026-08-05T10:00:01Z"},
+                                                     {"sender", {{"type", "user"}, {"id", 42}}},
+                                                     {"is_outgoing", true},
+                                                     {"topic", nullptr},
+                                                     {"type", "text"},
+                                                     {"text", "forwarded"},
+                                                     {"scheduled", false}}}}})}};
+    CHECK_THAT(forward_result, tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg forward", forward_result) == golden("msg-forward.txt"));
+    auto forward_to = chat;
+    forward_to["id"] = -1002;
+    forward_to["title"] = "Destination";
+    forward_to["usernames"] = json::array({"destination"});
+    const json forward_plan{{"operation", "msg_forward"},
+                            {"account", "main"},
+                            {"tdlib_request", "forwardMessages"},
+                            {"from", chat},
+                            {"to", forward_to},
+                            {"message_ids", json::array({-5, 7})},
+                            {"drop_author", true}};
+    const json forward_dry{{"dry_run", true}, {"plan", forward_plan}};
+    CHECK_THAT(forward_dry, tgcli::test::matches_json_schema("msg-forward.result.schema.json"));
+    CHECK(tgcli::cli::render_human("msg forward", forward_dry) ==
+          golden("msg-forward-dry-run.txt"));
+
     const json& edit_result = send_result;
     CHECK_THAT(edit_result, tgcli::test::matches_json_schema("msg-edit.result.schema.json"));
     CHECK(tgcli::cli::render_human("msg edit", edit_result) == golden("msg-edit.txt"));

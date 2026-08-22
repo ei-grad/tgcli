@@ -5,6 +5,7 @@
 #include "common/secure_wipe.hpp"
 #include "common/utf8.hpp"
 #include "daemon/direct_rpc.hpp"
+#include "daemon/forward.hpp"
 #include "daemon/message_summary.hpp"
 #include "daemon/rate_limit.hpp"
 #include "daemon/request_fingerprint.hpp"
@@ -56,6 +57,13 @@ struct DeleteInput {
     std::string chat;
     std::vector<std::int64_t> message_ids;
     bool for_all = false;
+};
+
+struct ForwardInput {
+    std::string from;
+    std::string to;
+    std::vector<std::int64_t> message_ids;
+    bool drop_author = false;
 };
 
 struct EditInput {
@@ -111,6 +119,16 @@ struct DeleteState {
     std::optional<ResolvedChatTarget> target;
     std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
     std::unique_ptr<DirectRpcCoordinator> coordinator;
+};
+
+struct ForwardState {
+    ForwardInput input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> source;
+    std::optional<ResolvedChatTarget> destination;
+    std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
+    std::unique_ptr<ForwardCoordinator> coordinator;
+    WriteDurableObservationSink* observations = nullptr;
 };
 
 struct DirectDispatchState {
@@ -234,6 +252,17 @@ json timeout(proto::M3Operation operation, std::string_view phase, std::string_v
         details["temporary_message_id"] = temporary ? json(*temporary) : json(nullptr);
     }
     return terminal("TIMEOUT", "request timed out", std::move(details), kTimeout);
+}
+
+json forward_timeout(std::string_view idempotency, json items) {
+    return terminal("TIMEOUT", "request timed out",
+                    {{"operation", "msg_forward"},
+                     {"phase", "confirmation"},
+                     {"state", "ready"},
+                     {"outcome", "unknown"},
+                     {"idempotency", idempotency},
+                     {"items", std::move(items)}},
+                    kTimeout);
 }
 
 std::string_view pre_intent_idempotency(const proto::Request& request) {
@@ -428,6 +457,34 @@ std::optional<DeleteInput> parse_delete_input(const json& args, json& failure) {
         const auto id = integer64(item);
         if (!id || !nonzero_int53(*id) || (previous && *id <= *previous)) {
             failure = usage("msg delete ids must be unique ascending nonzero int53 values", "id");
+            return std::nullopt;
+        }
+        result.message_ids.push_back(*id);
+        previous = id;
+    }
+    return result;
+}
+
+std::optional<ForwardInput> parse_forward_input(const json& args, json& failure) {
+    if (!exact_fields(args, {"from", "to", "message_ids", "drop_author"}) ||
+        !args["from"].is_string() || !args["to"].is_string() || !args["message_ids"].is_array() ||
+        !args["drop_author"].is_boolean()) {
+        failure = usage("msg forward received malformed arguments", nullptr);
+        return std::nullopt;
+    }
+    if (args["message_ids"].empty() || args["message_ids"].size() > 100) {
+        failure = usage("msg forward requires between 1 and 100 message ids", "id");
+        return std::nullopt;
+    }
+    ForwardInput result{.from = args["from"].get<std::string>(),
+                        .to = args["to"].get<std::string>(),
+                        .message_ids = {},
+                        .drop_author = args["drop_author"].get<bool>()};
+    std::optional<std::int64_t> previous;
+    for (const auto& item : args["message_ids"]) {
+        const auto id = integer64(item);
+        if (!id || !nonzero_int53(*id) || (previous && *id <= *previous)) {
+            failure = usage("msg forward ids must be unique ascending nonzero int53 values", "id");
             return std::nullopt;
         }
         result.message_ids.push_back(*id);
@@ -957,6 +1014,70 @@ json message_write_result_json(const core::TdMessageWriteResult& value) {
     return result;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): strict closed item union mapping.
+std::optional<json> forward_item_json(const ForwardItem& item) {
+    return std::visit(
+        [](const auto& value) -> std::optional<json> {
+            using Item = std::decay_t<decltype(value)>;
+            if (!nonzero_int53(value.source_id)) {
+                return std::nullopt;
+            }
+            if constexpr (std::is_same_v<Item, ForwardPending>) {
+                if (!nonzero_int53(value.temporary_message_id)) {
+                    return std::nullopt;
+                }
+                return json{{"source_id", value.source_id},
+                            {"status", "pending"},
+                            {"temporary_message_id", value.temporary_message_id}};
+            } else if constexpr (std::is_same_v<Item, ForwardSent>) {
+                auto message = message_write_result_json(value.message);
+                if (!message.is_object()) {
+                    return std::nullopt;
+                }
+                return json{{"source_id", value.source_id},
+                            {"status", "sent"},
+                            {"message", std::move(message)}};
+            } else {
+                const char* reason = "upstream_null";
+                if (value.reason == ForwardFailureReason::TdlibError) {
+                    reason = "tdlib_error";
+                } else if (value.reason == ForwardFailureReason::DeletedBeforeConfirmation) {
+                    reason = "deleted_before_confirmation";
+                }
+                if ((value.reason == ForwardFailureReason::TdlibError) !=
+                        value.tdlib_code.has_value() ||
+                    (value.retry_after &&
+                     (!value.tdlib_code || *value.tdlib_code != 429 || *value.retry_after < 0))) {
+                    return std::nullopt;
+                }
+                return json{
+                    {"source_id", value.source_id},
+                    {"status", "failed"},
+                    {"failure_reason", reason},
+                    {"tdlib_code", value.tdlib_code ? json(*value.tdlib_code) : json(nullptr)},
+                    {"retry_after", value.retry_after ? json(*value.retry_after) : json(nullptr)}};
+            }
+        },
+        item);
+}
+
+std::optional<json> forward_items_json(const std::vector<ForwardItem>& items,
+                                       std::int64_t destination_chat_id) {
+    json result = json::array();
+    std::optional<std::int64_t> previous;
+    for (const auto& item : items) {
+        auto materialized = forward_item_json(item);
+        if (!materialized || (previous && (*materialized)["source_id"] <= *previous) ||
+            ((*materialized)["status"] == "sent" &&
+             (*materialized)["message"]["chat_id"] != destination_chat_id)) {
+            return std::nullopt;
+        }
+        previous = (*materialized)["source_id"].get<std::int64_t>();
+        result.push_back(std::move(*materialized));
+    }
+    return result;
+}
+
 AccountAuditMutationState audit_state(SingleSendMutationState state) {
     switch (state) {
     case SingleSendMutationState::None:
@@ -964,6 +1085,18 @@ AccountAuditMutationState audit_state(SingleSendMutationState state) {
     case SingleSendMutationState::Possible:
         return AccountAuditMutationState::Possible;
     case SingleSendMutationState::Confirmed:
+        return AccountAuditMutationState::Confirmed;
+    }
+    return AccountAuditMutationState::Possible;
+}
+
+AccountAuditMutationState audit_state(ForwardMutationState state) {
+    switch (state) {
+    case ForwardMutationState::None:
+        return AccountAuditMutationState::None;
+    case ForwardMutationState::Possible:
+        return AccountAuditMutationState::Possible;
+    case ForwardMutationState::Confirmed:
         return AccountAuditMutationState::Confirmed;
     }
     return AccountAuditMutationState::Possible;
@@ -3273,6 +3406,381 @@ void WriteCoordinator::delete_messages(const proto::Request& request, RequestSes
 }
 // NOLINTEND(readability-function-cognitive-complexity)
 
+// NOLINTBEGIN(readability-function-cognitive-complexity): exact ordered forward transaction.
+void WriteCoordinator::forward_messages(const proto::Request& request, RequestSession& session) {
+    constexpr auto operation = proto::M3Operation::MsgForward;
+    json parse_failure;
+    auto input = parse_forward_input(request.args, parse_failure);
+    if (!input) {
+        emit_terminal(session, parse_failure);
+        return;
+    }
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "operation is unavailable for bot accounts",
+                      {{"operation", "msg_forward"}}, kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    if (!request.context.dry_run &&
+        session.begin_audited_terminal() != AuditedTerminalStatus::Designated) {
+        return;
+    }
+    auto hash = key_hash(request);
+    if (request.context.idempotency_key && !hash) {
+        session.error("INTERNAL", "cannot hash idempotency key",
+                      {{"operation", "msg_forward"}, {"reason", "internal_error"}}, kGeneric);
+        return;
+    }
+    auto state = std::make_shared<ForwardState>(ForwardState{.input = std::move(*input),
+                                                             .principal = principal,
+                                                             .source = std::nullopt,
+                                                             .destination = std::nullopt,
+                                                             .dispatch_authorization = nullptr,
+                                                             .coordinator = nullptr,
+                                                             .observations = nullptr});
+    auto invocation = request.context.dry_run ? std::string{} : random_hex32();
+    if (!request.context.dry_run && invocation.empty()) {
+        session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
+                      {{"account", account_},
+                       {"path", foundation_ ? foundation_->audit().path() : std::string{}},
+                       {"reason", "open_failed"}},
+                      kDenied);
+        return;
+    }
+    const WriteKernel kernel(foundation_);
+    auto kernel_input = kernel_request(request, session, operation, *authority, std::move(hash),
+                                       std::move(invocation), config_store_.path());
+    WriteKernelHooks hooks;
+    hooks.admit = [state, this]() -> WriteAdmissionOutcome {
+        const auto fingerprint_value =
+            fingerprint(account_, state->principal,
+                        MsgForwardFingerprintPayload{.from_selector = state->input.from,
+                                                     .to_selector = state->input.to,
+                                                     .message_ids = state->input.message_ids,
+                                                     .drop_author = state->input.drop_author});
+        std::string error;
+        auto arguments = write_contract::make_arguments(operation,
+                                                        {{"from", state->input.from},
+                                                         {"to", state->input.to},
+                                                         {"message_ids", state->input.message_ids},
+                                                         {"drop_author", state->input.drop_author}},
+                                                        error);
+        if (!fingerprint_value || !arguments) {
+            return internal(operation);
+        }
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = nullptr,
+                              .invite_redactions = {}};
+    };
+    hooks.plan = [state, &resolver, &session, &request,
+                  this](const WriteAdmission&) -> WritePlanningOutcome {
+        auto source = resolver.resolve_exact_chat(state->input.from);
+        if (const auto* error = std::get_if<ResolverError>(&source)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(source)) {
+            return json(nullptr);
+        }
+        state->source = std::get<ResolvedChatTarget>(std::move(source));
+        auto destination = resolver.resolve_exact_chat(state->input.to);
+        if (const auto* error = std::get_if<ResolverError>(&destination)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(destination)) {
+            return json(nullptr);
+        }
+        state->destination = std::get<ResolvedChatTarget>(std::move(destination));
+        for (const auto message_id : state->input.message_ids) {
+            auto facts = read_message_planning_facts(resolver, client_.get(), session, operation,
+                                                     request, state->source->chat.id, message_id);
+            if (auto* failure = std::get_if<json>(&facts)) {
+                return std::move(*failure);
+            }
+            const auto& properties = std::get<MessagePlanningFacts>(facts).properties;
+            if (state->input.drop_author ? !properties.can_be_copied
+                                         : !properties.can_be_forwarded) {
+                return precondition(operation, state->source->chat.id, message_id,
+                                    state->input.drop_author ? "not_copyable" : "not_forwardable");
+            }
+        }
+        std::string error;
+        auto plan = write_contract::make_plan(operation, account_,
+                                              {{"operation", "msg_forward"},
+                                               {"account", account_},
+                                               {"tdlib_request", "forwardMessages"},
+                                               {"from", chat_identity_json(state->source->chat)},
+                                               {"to", chat_identity_json(state->destination->chat)},
+                                               {"message_ids", state->input.message_ids},
+                                               {"drop_author", state->input.drop_author}},
+                                              error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(operation)};
+    };
+    hooks.verify_config_grant = [this](std::string_view expected, std::string_view account,
+                                       const config::MutationControl& control) {
+        return config_store_.verify_write_grant(expected, account, control);
+    };
+    hooks.revalidate_auth_and_schedule =
+        [state, &session, &request,
+         this](const write_contract::Plan&) -> WriteDispatchAdmissionOutcome {
+        if (deadline_expired(session.deadline())) {
+            return stored_from_terminal(
+                operation, timeout(operation, "preflight",
+                                   request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (session.cancellation_requested()) {
+            return WriteDispatchStopped{};
+        }
+        auto current = client_.get().auth_state();
+        if (!current || current->data.state != core::AuthState::Ready) {
+            return stored_from_terminal(
+                operation, not_authed_terminal(account_, current ? current->data.state
+                                                                 : core::AuthState::Unknown));
+        }
+        if (!state->source || !state->destination) {
+            throw std::logic_error("forward planning state is incomplete");
+        }
+        const auto sending_id = random_sending_id();
+        if (sending_id == 0) {
+            throw std::runtime_error("cannot create sending id");
+        }
+        state->dispatch_authorization = std::move(current);
+        ForwardHooks forward_hooks = hooks_ ? hooks_->forward : ForwardHooks{};
+        auto temporary_observer = std::move(forward_hooks.on_temporary_ids);
+        auto progress_observer = std::move(forward_hooks.on_progress);
+        auto* const state_pointer = state.get();
+        forward_hooks.on_temporary_ids =
+            [state_pointer, observer = std::move(temporary_observer)](const auto& ids) {
+                if (state_pointer->observations == nullptr ||
+                    !state_pointer->observations->temporary_message_ids(ids)) {
+                    throw std::runtime_error("forward temporary ids were not durable");
+                }
+                if (observer) {
+                    observer(ids);
+                }
+            };
+        forward_hooks.on_progress = [state_pointer,
+                                     observer = std::move(progress_observer)](const auto& items) {
+            if (!state_pointer->destination || state_pointer->observations == nullptr) {
+                throw std::runtime_error("forward progress state is unavailable");
+            }
+            auto value = forward_items_json(items, state_pointer->destination->chat.id);
+            if (!value || !state_pointer->observations->forward_progress(std::move(*value))) {
+                throw std::runtime_error("forward progress was not durable");
+            }
+            if (observer) {
+                observer(items);
+            }
+        };
+        state->coordinator =
+            std::make_unique<ForwardCoordinator>(client_.get(), session, std::move(forward_hooks));
+        auto preparation = state->coordinator->prepare({.from_chat_id = state->source->chat.id,
+                                                        .to_chat_id = state->destination->chat.id,
+                                                        .message_ids = state->input.message_ids,
+                                                        .sending_id = sending_id,
+                                                        .drop_author = state->input.drop_author},
+                                                       state->dispatch_authorization);
+        if (std::holds_alternative<ForwardTimedOut>(preparation)) {
+            return stored_from_terminal(
+                operation, timeout(operation, "preflight",
+                                   request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (std::holds_alternative<ForwardCancelled>(preparation)) {
+            return WriteDispatchStopped{};
+        }
+        if (const auto* lost = std::get_if<ForwardAuthorizationLost>(&preparation)) {
+            return stored_from_terminal(operation, not_authed_terminal(account_, lost->state));
+        }
+        if (std::holds_alternative<ForwardGenerationClosed>(preparation)) {
+            return stored_from_terminal(operation,
+                                        not_authed_terminal(account_, core::AuthState::Closed));
+        }
+        if (std::holds_alternative<ForwardRejected>(preparation)) {
+            return stored_from_terminal(operation, internal(operation));
+        }
+        const auto token = random_hex32();
+        if (token.empty()) {
+            throw std::runtime_error("cannot create dispatch token");
+        }
+        return WriteDispatchPreparation{
+            .proof = {{"tdlib_function", "forwardMessages"},
+                      {"dispatch_token", token},
+                      {"client_generation", state->dispatch_authorization->client_generation}}};
+    };
+    hooks.dispatch = [state, &request,
+                      this](const write_contract::Plan&, const WriteDispatchPreparation&,
+                            WriteDurableObservationSink& observations) -> WriteDispatchOutcome {
+        if (!state->source || !state->destination || !state->dispatch_authorization ||
+            !state->coordinator) {
+            throw std::logic_error("forward dispatch state is incomplete");
+        }
+        state->observations = &observations;
+        auto selected = state->coordinator->execute_prepared();
+        state->observations = nullptr;
+        return std::visit(
+            [&](auto&& outcome) -> WriteDispatchOutcome {
+                using Outcome = std::decay_t<decltype(outcome)>;
+                if constexpr (std::is_same_v<Outcome, ForwardCompleted>) {
+                    auto items = forward_items_json(outcome.items, state->destination->chat.id);
+                    if (!items || items->size() != state->input.message_ids.size()) {
+                        return {.terminal = stored_from_terminal(operation, internal(operation)),
+                                .mutation_state = audit_state(outcome.mutation_state),
+                                .mutation_confirmed =
+                                    outcome.mutation_state == ForwardMutationState::Confirmed};
+                    }
+                    for (std::size_t index = 0; index < items->size(); ++index) {
+                        if ((*items)[index]["source_id"] != state->input.message_ids[index]) {
+                            return {.terminal =
+                                        stored_from_terminal(operation, internal(operation)),
+                                    .mutation_state = audit_state(outcome.mutation_state),
+                                    .mutation_confirmed =
+                                        outcome.mutation_state == ForwardMutationState::Confirmed};
+                        }
+                    }
+                    const auto sent = std::ranges::count_if(
+                        *items, [](const json& item) { return item["status"] == "sent"; });
+                    std::optional<write_contract::StoredTerminal> terminal_value;
+                    if (sent == static_cast<std::ptrdiff_t>(items->size())) {
+                        terminal_value =
+                            stored_result(operation, {{"from_chat_id", state->source->chat.id},
+                                                      {"to_chat_id", state->destination->chat.id},
+                                                      {"items", *items}});
+                    } else if (sent > 0) {
+                        terminal_value = stored_error(operation, "FORWARD_PARTIAL",
+                                                      "some messages could not be forwarded",
+                                                      {{"operation", "msg_forward"},
+                                                       {"from_chat_id", state->source->chat.id},
+                                                       {"to_chat_id", state->destination->chat.id},
+                                                       {"items", *items}},
+                                                      kGeneric);
+                    } else {
+                        const bool all_rate_limited =
+                            std::ranges::all_of(*items, [](const json& item) {
+                                return item["failure_reason"] == "tdlib_error" &&
+                                       item["tdlib_code"] == 429 && !item["retry_after"].is_null();
+                            });
+                        if (all_rate_limited) {
+                            std::int32_t retry_after = 0;
+                            for (const auto& item : *items) {
+                                retry_after = std::max(
+                                    retry_after, item["retry_after"].template get<std::int32_t>());
+                            }
+                            terminal_value = stored_error(operation, "RATE_LIMITED",
+                                                          "Telegram rate limit exceeded",
+                                                          {{"operation", "msg_forward"},
+                                                           {"tdlib_code", 429},
+                                                           {"retry_after", retry_after},
+                                                           {"items", *items}},
+                                                          kRateLimited);
+                        } else {
+                            terminal_value = stored_error(
+                                operation, "FORWARD_FAILED", "messages could not be forwarded",
+                                {{"operation", "msg_forward"},
+                                 {"from_chat_id", state->source->chat.id},
+                                 {"to_chat_id", state->destination->chat.id},
+                                 {"items", *items}},
+                                kGeneric);
+                        }
+                    }
+                    return {.terminal = std::move(*terminal_value),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed =
+                                outcome.mutation_state == ForwardMutationState::Confirmed};
+                } else if constexpr (std::is_same_v<Outcome, ForwardTopLevelError>) {
+                    json value;
+                    if (outcome.error.code == 429) {
+                        value = terminal(
+                            "RATE_LIMITED", "Telegram rate limit exceeded",
+                            {{"operation", "msg_forward"},
+                             {"tdlib_code", 429},
+                             {"retry_after", parse_retry_after_seconds(outcome.error.message)},
+                             {"items", json::array()}},
+                            kRateLimited);
+                    } else {
+                        value = td_error_terminal(operation, outcome.error);
+                    }
+                    return {.terminal = stored_from_terminal(operation, value),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, ForwardTimedOut>) {
+                    auto items = forward_items_json(outcome.items, state->destination->chat.id);
+                    const bool retain_pending =
+                        items && std::ranges::any_of(outcome.items, [](const auto& item) {
+                            return std::holds_alternative<ForwardPending>(item);
+                        });
+                    return {.terminal = stored_from_terminal(
+                                operation, items ? forward_timeout(post_intent_idempotency(request),
+                                                                   std::move(*items))
+                                                 : internal(operation)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed =
+                                outcome.mutation_state == ForwardMutationState::Confirmed,
+                            .retain_pending = retain_pending};
+                } else if constexpr (std::is_same_v<Outcome, ForwardAuthorizationLost>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, not_authed_terminal(account_, outcome.state)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false,
+                            .retain_pending =
+                                std::ranges::any_of(outcome.items, [](const auto& item) {
+                                    return std::holds_alternative<ForwardPending>(item);
+                                })};
+                } else if constexpr (std::is_same_v<Outcome, ForwardGenerationClosed>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, not_authed_terminal(account_, core::AuthState::Closed)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false,
+                            .retain_pending =
+                                std::ranges::any_of(outcome.items, [](const auto& item) {
+                                    return std::holds_alternative<ForwardPending>(item);
+                                })};
+                } else if constexpr (std::is_same_v<Outcome, ForwardCancelled>) {
+                    return {.terminal = stored_from_terminal(operation, shutdown_terminal()),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else {
+                    return {.terminal = stored_from_terminal(operation, internal(operation)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed =
+                                outcome.mutation_state == ForwardMutationState::Confirmed};
+                }
+            },
+            std::move(selected));
+    };
+    hooks.timestamp = timestamp;
+    hooks.audit_fatal_shutdown = [&session, this] {
+        session.audit_fatal();
+        if (audit_fatal_shutdown_) {
+            audit_fatal_shutdown_();
+        }
+    };
+    const auto result = kernel.run(kernel_input, hooks);
+    if (result.status == WriteKernelStatus::DryRunPlanned && result.plan) {
+        session.result({{"dry_run", true}, {"plan", result.plan->value()}});
+    } else if (result.terminal) {
+        emit_terminal(session, *result.terminal);
+        if (result.status == WriteKernelStatus::DurabilityFatal && audit_fatal_shutdown_) {
+            audit_fatal_shutdown_();
+        }
+    }
+}
+// NOLINTEND(readability-function-cognitive-complexity)
+
 void register_write_commands(Dispatcher& dispatcher, WriteCoordinator& coordinator) {
     dispatcher.register_command(
         "send", {Tier::Write,
@@ -3292,6 +3800,12 @@ void register_write_commands(Dispatcher& dispatcher, WriteCoordinator& coordinat
                            coordinator.delete_messages(request, session);
                        },
                        false, proto::M3Operation::MsgDelete});
+    dispatcher.register_command(
+        "msg forward", {Tier::Write,
+                        [&coordinator](const proto::Request& request, RequestSession& session) {
+                            coordinator.forward_messages(request, session);
+                        },
+                        false, proto::M3Operation::MsgForward});
     dispatcher.register_command(
         "msg react", {Tier::Write,
                       [&coordinator](const proto::Request& request, RequestSession& session) {

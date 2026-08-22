@@ -99,6 +99,11 @@ class ForwardCoordinator::Impl {
         record_auth(client_.auth_state());
     }
 
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(Impl&&) = delete;
+
     ~Impl() {
         settle_in_flight();
         client_.unsubscribe_send_updates(update_subscription_);
@@ -382,7 +387,9 @@ class ForwardCoordinator::Impl {
             temporaries.reserve(source_ids_.size());
             for (std::size_t index = 0; index < source_ids_.size(); ++index) {
                 const auto source_id = source_ids_[index];
-                if (!messages->messages[index]) {
+                const bool message_present = messages->messages[index].has_value();
+                auto message = messages->messages[index].value_or(core::TdWriteMessage{});
+                if (!message_present) {
                     parsed.emplace_back(ForwardFailed{.source_id = source_id,
                                                       .reason = ForwardFailureReason::UpstreamNull,
                                                       .tdlib_code = std::nullopt,
@@ -391,7 +398,7 @@ class ForwardCoordinator::Impl {
                     continue;
                 }
                 auto classified = send_arbitration::classify_immediate(
-                    *messages->messages[index], sent.client_generation, to_chat_id_, sending_id_);
+                    message, sent.client_generation, to_chat_id_, sending_id_);
                 if (const auto* pending = std::get_if<SingleSendImmediatePending>(&classified)) {
                     if (!unique_temporary_ids.emplace(pending->temporary.temporary_message_id)
                              .second) {
@@ -470,12 +477,14 @@ class ForwardCoordinator::Impl {
             return std::nullopt;
         }
         for (std::size_t index = 0; index < temporaries_.size(); ++index) {
-            if (!temporaries_[index] || !std::holds_alternative<ForwardPending>(items_[index])) {
+            const bool temporary_present = temporaries_[index].has_value();
+            const auto temporary = temporaries_[index].value_or(SingleSendTemporaryId{});
+            if (!temporary_present || !std::holds_alternative<ForwardPending>(items_[index])) {
                 continue;
             }
             auto value = std::visit([](const auto& update) { return core::TdValue::from(update); },
                                     stamped.update);
-            if (send_arbitration::classify_update(value, *temporaries_[index])) {
+            if (send_arbitration::classify_update(value, temporary)) {
                 return index;
             }
         }
@@ -497,12 +506,14 @@ class ForwardCoordinator::Impl {
         processed_update_sequences_.insert(stamped.sequence);
         bool changed = false;
         for (std::size_t index = 0; index < temporaries_.size(); ++index) {
-            if (!temporaries_[index] || !std::holds_alternative<ForwardPending>(items_[index])) {
+            const bool temporary_present = temporaries_[index].has_value();
+            const auto temporary = temporaries_[index].value_or(SingleSendTemporaryId{});
+            if (!temporary_present || !std::holds_alternative<ForwardPending>(items_[index])) {
                 continue;
             }
             auto value = std::visit([](const auto& update) { return core::TdValue::from(update); },
                                     stamped.update);
-            auto classified = send_arbitration::classify_update(value, *temporaries_[index]);
+            auto classified = send_arbitration::classify_update(value, temporary);
             if (!classified) {
                 continue;
             }
@@ -567,6 +578,7 @@ class ForwardCoordinator::Impl {
         }
     }
 
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity): exact event-order arbitration.
     ForwardOutcome wait_for_terminal(std::future<core::TdValue>& response,
                                      const core::AuthStateSnapshot& sent) {
         std::optional<std::uint64_t> response_sequence;
