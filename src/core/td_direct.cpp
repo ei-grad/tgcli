@@ -34,6 +34,25 @@ bool valid_send_text(std::string_view text) {
     return true;
 }
 
+bool valid_send_caption(std::string_view text) {
+    if (text.size() > 4'096 || text.find('\0') != std::string_view::npos ||
+        !common::valid_utf8(text)) {
+        return false;
+    }
+    std::size_t scalar_count = 0;
+    for (const auto byte : text) {
+        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalar_count > 1'024) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_local_document_path(std::string_view value) {
+    return !value.empty() && value.size() <= 4'096 && value.starts_with('/') &&
+           value.find('\0') == std::string_view::npos && common::valid_utf8(value);
+}
+
 std::optional<std::size_t> utf16_code_units(std::string_view text) {
     if (!common::valid_utf8(text)) {
         return std::nullopt;
@@ -207,7 +226,7 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
     if (!valid_td_chat_id(request.chat_id) || !valid_send_topic(request.topic) ||
         (request.reply_to_message_id &&
          !valid_td_nonzero_int53(request.reply_to_message_id.value_or(0))) ||
-        request.options.sending_id == 0 || !valid_send_text(formatted.text)) {
+        request.options.sending_id == 0) {
         return false;
     }
     switch (request.options.schedule.kind) {
@@ -223,6 +242,18 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
         }
         break;
     }
+    if (request.document) {
+        return request.reply_to_message_id.has_value() && !request.options.disable_notification &&
+               request.options.schedule.kind == TdSendScheduleKind::Immediate && request.topic &&
+               request.topic->kind == TdTopicKind::Saved && !request.content.parsed &&
+               formatted.entities.empty() && !formatted.capability.has_value() &&
+               valid_send_caption(formatted.text) &&
+               request.document->disable_content_type_detection &&
+               valid_local_document_path(request.document->local_path);
+    }
+    if (!valid_send_text(formatted.text)) {
+        return false;
+    }
     if (request.content.parsed) {
         return formatted.capability.has_value() && valid_td_formatted_text_facts(formatted);
     }
@@ -230,6 +261,7 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
 }
 
 TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& request) {
+    const auto content_kind = request.document ? "document" : "text";
     return TdFunctionData{
         TdFunctionKind::SendMessage,
         {{"chat_id", request.chat_id},
@@ -253,10 +285,15 @@ TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& requ
          {"sending_id", static_cast<std::int64_t>(request.options.sending_id)},
          {"only_preview", false},
          {"reply_markup_is_null", true},
+         {"content_kind", std::string{content_kind}},
          {"text", request.content.formatted_text.text},
          {"entities_count",
           static_cast<std::int64_t>(request.content.formatted_text.entities.size())},
          {"parsed", request.content.parsed},
+         {"document_local_path", request.document ? request.document->local_path : std::string{}},
+         {"thumbnail_is_null", true},
+         {"disable_content_type_detection",
+          request.document && request.document->disable_content_type_detection},
          {"link_preview_options_is_null", true},
          {"clear_draft", false}}};
 }

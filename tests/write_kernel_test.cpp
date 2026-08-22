@@ -1152,7 +1152,11 @@ TEST_CASE("write kernel closes pass2 input changes without requiring a spool ref
         return daemon::WritePlanningOutcome{attach_plan()};
     };
     hooks.post_intent = [](const daemon::write_contract::Plan&, const daemon::WriteAdmission&) {
-        return daemon::WritePostIntentPreparation{std::nullopt, attach_input_changed()};
+        return daemon::WritePostIntentPreparation{.spool = std::nullopt,
+                                                  .terminal_without_dispatch =
+                                                      attach_input_changed(),
+                                                  .complete_without_mutation = false,
+                                                  .stop_without_dispatch = false};
     };
     hooks.revalidate_auth_and_schedule = [](const daemon::write_contract::Plan&) {
         return daemon::WriteDispatchPreparation{};

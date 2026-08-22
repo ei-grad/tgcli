@@ -261,6 +261,20 @@ class ResolverRun {
         return materialize_result(std::move(*result));
     }
 
+    ResolverOutcome resolve_saved_messages() {
+        caller_ = M2Operation::Resolve;
+        error_.reset();
+        if (!principal_) {
+            internal_error();
+            return take_resolve_error_or_stop();
+        }
+        auto result = resolve_saved_messages_link();
+        if (!result) {
+            return take_resolve_error_or_stop();
+        }
+        return materialize_result(std::move(*result));
+    }
+
     ResolverOutcome materialize_result(ResolveResult result) {
         if (!principal_) {
             internal_error();
@@ -1000,6 +1014,10 @@ class ResolverConsumer::Impl {
         return result;
     }
 
+    ResolverOutcome resolve_saved_messages() {
+        return run_.resolve_saved_messages();
+    }
+
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const {
         return run_.cached_saved_messages_chat();
     }
@@ -1062,6 +1080,10 @@ ResolverOutcome ResolverConsumer::resolve_chat(std::string selector, ResolverSco
 
 ResolverOutcome ResolverConsumer::resolve_exact_chat(std::string selector, std::string argument) {
     return impl_->resolve_exact_chat(std::move(selector), std::move(argument));
+}
+
+ResolverOutcome ResolverConsumer::resolve_saved_messages() {
+    return impl_->resolve_saved_messages();
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {

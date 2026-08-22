@@ -5,6 +5,7 @@
 #include "common/secure_wipe.hpp"
 #include "common/utf8.hpp"
 #include "daemon/direct_rpc.hpp"
+#include "daemon/file_spool.hpp"
 #include "daemon/forward.hpp"
 #include "daemon/message_summary.hpp"
 #include "daemon/rate_limit.hpp"
@@ -51,6 +52,13 @@ struct SendInput {
     std::optional<TopicRef> requested_topic;
     bool silent = false;
     std::optional<SendSchedule> schedule;
+};
+
+struct SavedAttachInput {
+    std::int64_t message_id = 0;
+    std::string path;
+    std::string caption;
+    std::string display_path;
 };
 
 struct DeleteInput {
@@ -108,6 +116,18 @@ struct SendState {
     ResolverPrincipal principal;
     std::optional<ResolvedChatTarget> target;
     std::optional<core::TdFormattedText> formatted_text;
+    std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
+    std::unique_ptr<SingleSendCoordinator> coordinator;
+    WriteDurableObservationSink* observations = nullptr;
+};
+
+struct SavedAttachState {
+    json arguments;
+    std::optional<SavedAttachInput> input;
+    ResolverPrincipal principal;
+    std::optional<ResolvedChatTarget> target;
+    std::string invocation_id;
+    std::string spool_local_path;
     std::shared_ptr<const core::AuthStateSnapshot> dispatch_authorization;
     std::unique_ptr<SingleSendCoordinator> coordinator;
     WriteDurableObservationSink* observations = nullptr;
@@ -219,6 +239,20 @@ bool nonzero_int53(std::int64_t value) {
     return value != 0 && value >= -kMaximumInt53 && value <= kMaximumInt53;
 }
 
+bool valid_caption(std::string_view value) {
+    if (value.size() > 4'096 || value.find('\0') != std::string_view::npos ||
+        !common::valid_utf8(value)) {
+        return false;
+    }
+    std::size_t scalars = 0;
+    for (const auto byte : value) {
+        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalars > 1'024) {
+            return false;
+        }
+    }
+    return true;
+}
+
 json terminal(std::string code, std::string message, json details, int exit_code) {
     return {{"kind", "error"},
             {"code", std::move(code)},
@@ -248,10 +282,73 @@ json timeout(proto::M3Operation operation, std::string_view phase, std::string_v
                  {"state", "ready"},
                  {"outcome", outcome},
                  {"idempotency", idempotency}};
-    if (phase == "confirmation" && operation == proto::M3Operation::Send) {
+    if (phase == "confirmation" &&
+        (operation == proto::M3Operation::Send || operation == proto::M3Operation::SavedAttach)) {
         details["temporary_message_id"] = temporary ? json(*temporary) : json(nullptr);
     }
     return terminal("TIMEOUT", "request timed out", std::move(details), kTimeout);
+}
+
+std::string_view source_reason_name(SourceFileReason reason) {
+    switch (reason) {
+    case SourceFileReason::Missing:
+        return "missing";
+    case SourceFileReason::Symlink:
+        return "symlink";
+    case SourceFileReason::WrongType:
+        return "wrong_type";
+    case SourceFileReason::Empty:
+        return "empty";
+    case SourceFileReason::Unreadable:
+        return "unreadable";
+    }
+    return "unreadable";
+}
+
+std::string_view spool_reason_name(DurabilityReason reason) {
+    switch (reason) {
+    case DurabilityReason::PathInvalid:
+        return "path_invalid";
+    case DurabilityReason::WrongOwner:
+        return "wrong_owner";
+    case DurabilityReason::WrongType:
+        return "wrong_type";
+    case DurabilityReason::WrongMode:
+        return "wrong_mode";
+    case DurabilityReason::WrongLinkCount:
+        return "wrong_link_count";
+    case DurabilityReason::TooLarge:
+        return "too_large";
+    case DurabilityReason::CapacityExhausted:
+        return "capacity_exhausted";
+    case DurabilityReason::OpenFailed:
+        return "open_failed";
+    case DurabilityReason::LockFailed:
+        return "lock_failed";
+    case DurabilityReason::ReadFailed:
+        return "read_failed";
+    case DurabilityReason::WriteFailed:
+        return "write_failed";
+    case DurabilityReason::SyncFailed:
+        return "sync_failed";
+    case DurabilityReason::RenameFailed:
+        return "rename_failed";
+    case DurabilityReason::DirectorySyncFailed:
+        return "directory_sync_failed";
+    case DurabilityReason::ParseError:
+        return "parse_error";
+    case DurabilityReason::SchemaError:
+        return "schema_error";
+    case DurabilityReason::Contradiction:
+        return "contradiction";
+    }
+    return "contradiction";
+}
+
+json file_snapshot_json(const FileSnapshot& file) {
+    return {{"path", file.path},         {"name", file.name},        {"size", file.size},
+            {"sha256", file.sha256},     {"device", file.device},    {"inode", file.inode},
+            {"mtime_ns", file.mtime_ns}, {"ctime_ns", file.ctime_ns}};
 }
 
 json forward_timeout(std::string_view idempotency, json items) {
@@ -437,6 +534,36 @@ std::optional<SendInput> parse_send_input(const json& args, json& failure) {
         }
     }
     return result;
+}
+
+std::optional<SavedAttachInput>
+parse_saved_attach_input(const json& args, std::string_view frozen_cwd, json& failure) {
+    if (!exact_fields(args, {"message_id", "path", "caption"}) || !args["path"].is_string() ||
+        !args["caption"].is_string()) {
+        failure = usage("saved attach received malformed arguments", nullptr);
+        return std::nullopt;
+    }
+    const auto message_id = integer64(args["message_id"]);
+    if (!message_id || !nonzero_int53(*message_id)) {
+        failure = usage("saved attach message id must be a nonzero int53 value", "message-id");
+        return std::nullopt;
+    }
+    SavedAttachInput input{.message_id = *message_id,
+                           .path = args["path"].get<std::string>(),
+                           .caption = args["caption"].get<std::string>(),
+                           .display_path = {}};
+    if (!valid_caption(input.caption)) {
+        failure =
+            usage("saved attach caption must contain at most 1024 Unicode scalars", "--caption");
+        return std::nullopt;
+    }
+    auto display = canonical_source_display_path(input.path, frozen_cwd);
+    if (!display) {
+        failure = usage("saved attach path is invalid", "PATH");
+        return std::nullopt;
+    }
+    input.display_path = std::move(*display);
+    return input;
 }
 
 std::optional<DeleteInput> parse_delete_input(const json& args, json& failure) {
@@ -1812,7 +1939,8 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
                         .schedule = schedule,
                         .sending_id = sending_id},
             .content = {.formatted_text = std::move(*state->formatted_text),
-                        .parsed = state->input.parse_mode != FingerprintParseMode::Plain}};
+                        .parsed = state->input.parse_mode != FingerprintParseMode::Plain},
+            .document = std::nullopt};
         SingleSendHooks send_hooks = hooks_ ? hooks_->single_send : SingleSendHooks{};
         auto* state_pointer = state.get();
         send_hooks.on_temporary_id = [state_pointer](const SingleSendTemporaryId& temporary) {
@@ -1958,6 +2086,431 @@ void WriteCoordinator::send(const proto::Request& request, RequestSession& sessi
             audit_fatal_shutdown_();
         }
     };
+    const auto result = kernel.run(kernel_input, hooks);
+    if (result.status == WriteKernelStatus::DryRunPlanned && result.plan) {
+        session.result({{"dry_run", true}, {"plan", result.plan->value()}});
+    } else if (result.terminal) {
+        emit_terminal(session, *result.terminal);
+        if (result.status == WriteKernelStatus::DurabilityFatal && audit_fatal_shutdown_) {
+            audit_fatal_shutdown_();
+        }
+    }
+}
+// NOLINTEND(readability-function-cognitive-complexity)
+
+// NOLINTBEGIN(readability-function-cognitive-complexity): exact two-pass Saved attachment write.
+void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestSession& session) {
+    constexpr auto operation = proto::M3Operation::SavedAttach;
+    ResolverConsumer resolver(client_.get(), account_, session);
+    const auto principal_outcome = resolver.bind_principal(operation);
+    if (const auto* error = std::get_if<ResolverError>(&principal_outcome)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(principal_outcome)) {
+        return;
+    }
+    const auto principal = std::get<ResolverPrincipal>(principal_outcome);
+    if (evaluate_m3_bot_admission(operation, principal.is_bot, M3ScheduleKind::None) !=
+        M3BotAdmission::Allowed) {
+        session.error("BOT_UNSUPPORTED", "saved commands require a user account", json::object(),
+                      kUsage);
+        return;
+    }
+    const auto authority = authorize(request, session, account_, operation);
+    if (!authority) {
+        return;
+    }
+    if (!request.context.dry_run &&
+        session.begin_audited_terminal() != AuditedTerminalStatus::Designated) {
+        return;
+    }
+    auto hash = key_hash(request);
+    if (request.context.idempotency_key && !hash) {
+        session.error("INTERNAL", "cannot hash idempotency key",
+                      {{"operation", "saved_attach"}, {"reason", "internal_error"}}, kGeneric);
+        return;
+    }
+    auto invocation = request.context.dry_run ? std::string{} : random_hex32();
+    if (!request.context.dry_run && invocation.empty()) {
+        session.error("AUDIT_UNAVAILABLE", "cannot create audit identity",
+                      {{"account", account_},
+                       {"path", foundation_ ? foundation_->audit().path() : std::string{}},
+                       {"reason", "open_failed"}},
+                      kDenied);
+        return;
+    }
+    auto state =
+        std::make_shared<SavedAttachState>(SavedAttachState{.arguments = request.args,
+                                                            .input = std::nullopt,
+                                                            .principal = principal,
+                                                            .target = std::nullopt,
+                                                            .invocation_id = invocation,
+                                                            .spool_local_path = {},
+                                                            .dispatch_authorization = nullptr,
+                                                            .coordinator = nullptr,
+                                                            .observations = nullptr});
+    const WriteKernel kernel(foundation_);
+    auto kernel_input = kernel_request(request, session, operation, *authority, std::move(hash),
+                                       std::move(invocation), config_store_.path());
+    WriteKernelHooks hooks;
+    hooks.admit = [state, &request, &session, this]() -> WriteAdmissionOutcome {
+        json failure;
+        auto input = parse_saved_attach_input(state->arguments, request.context.cwd, failure);
+        if (!input) {
+            return failure;
+        }
+        const FileSpoolControl control{session.deadline().expires_at, session.cancellation_token(),
+                                       [&session] { return session.cancellation_requested(); }};
+        auto prepared = prepare_spool_source(
+            input->path, request.context.cwd, control,
+            hooks_ ? hooks_->file_spool : std::shared_ptr<const testing::FileSpoolHooks>{});
+        if (auto* error = std::get_if<FileSpoolError>(&prepared)) {
+            switch (error->kind) {
+            case FileSpoolErrorKind::TimedOut:
+                return timeout(operation, "preflight", pre_intent_idempotency(request));
+            case FileSpoolErrorKind::Cancelled:
+                return json(nullptr);
+            case FileSpoolErrorKind::SourceUnavailable:
+                return terminal("NOT_FOUND", "input file is unavailable",
+                                {{"operation", "saved_attach"},
+                                 {"path", input->display_path},
+                                 {"reason", source_reason_name(error->source_reason.value_or(
+                                                SourceFileReason::Unreadable))}},
+                                kNotFound);
+            case FileSpoolErrorKind::InputChanged:
+                return terminal("INPUT_CHANGED", "input file changed while being read",
+                                {{"operation", "saved_attach"}, {"path", input->display_path}},
+                                kGeneric);
+            case FileSpoolErrorKind::InvalidInput:
+                return usage("saved attach path is invalid", "PATH");
+            case FileSpoolErrorKind::DurabilityFailure:
+            case FileSpoolErrorKind::Contradiction:
+                return internal(operation);
+            }
+        }
+        auto source =
+            std::make_shared<PreparedSource>(std::get<PreparedSource>(std::move(prepared)));
+        const auto& snapshot = source->snapshot();
+        const auto fingerprint_value = fingerprint(
+            account_, state->principal,
+            FingerprintPayload{SavedAttachFingerprintPayload{.message_id = input->message_id,
+                                                             .name = snapshot.name,
+                                                             .size = snapshot.size,
+                                                             .sha256 = snapshot.sha256,
+                                                             .caption = input->caption}});
+        std::string contract_error;
+        auto arguments = write_contract::make_arguments(
+            operation,
+            {{"message_id", input->message_id}, {"path", input->path}, {"caption", input->caption}},
+            contract_error);
+        if (!fingerprint_value || !arguments) {
+            return internal(operation);
+        }
+        state->input = std::move(*input);
+        return WriteAdmission{.arguments = std::move(*arguments),
+                              .request_fingerprint = *fingerprint_value,
+                              .pass1_source = std::move(source),
+                              .invite_redactions = {}};
+    };
+    hooks.plan = [state, &resolver, &session, &request,
+                  this](const WriteAdmission& admission) -> WritePlanningOutcome {
+        if (!state->input || !admission.pass1_source) {
+            return internal(operation);
+        }
+        auto resolved = resolver.resolve_saved_messages();
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
+        auto facts =
+            read_message_planning_facts(resolver, client_.get(), session, operation, request,
+                                        state->target->chat.id, state->input->message_id);
+        if (auto* failure = std::get_if<json>(&facts)) {
+            return std::move(*failure);
+        }
+        auto& planning = std::get<MessagePlanningFacts>(facts);
+        if (!planning.properties.can_be_replied ||
+            planning.message.content_kind != core::TdMessageContentKind::Text) {
+            return precondition(operation, state->target->chat.id, state->input->message_id,
+                                "wrong_content_type");
+        }
+        std::optional<TopicRef> effective_topic;
+        if (planning.message.topic) {
+            effective_topic = materialize_topic_ref(*planning.message.topic);
+            if (!effective_topic || effective_topic->kind != TopicKind::Saved) {
+                return precondition(operation, state->target->chat.id, state->input->message_id,
+                                    "wrong_topic");
+            }
+        }
+        std::string contract_error;
+        auto plan = write_contract::make_plan(
+            operation, account_,
+            {{"operation", "saved_attach"},
+             {"account", account_},
+             {"tdlib_request", "sendMessage"},
+             {"chat", chat_identity_json(state->target->chat)},
+             {"message_id", state->input->message_id},
+             {"effective_topic", topic_json(effective_topic)},
+             {"caption", state->input->caption},
+             {"file", file_snapshot_json(admission.pass1_source->snapshot())}},
+            contract_error);
+        return plan ? WritePlanningOutcome{std::move(*plan)}
+                    : WritePlanningOutcome{internal(operation)};
+    };
+    hooks.verify_config_grant = [this](std::string_view expected, std::string_view account,
+                                       const config::MutationControl& control) {
+        return config_store_.verify_write_grant(expected, account, control);
+    };
+    hooks.post_intent = [state, &session, &request,
+                         this](const write_contract::Plan&,
+                               const WriteAdmission& admission) -> WritePostIntentPreparation {
+        if (!state->input || !admission.pass1_source || !foundation_) {
+            throw std::logic_error("saved attachment pass-one state is incomplete");
+        }
+        const auto spool_hooks =
+            hooks_ ? hooks_->file_spool : std::shared_ptr<const testing::FileSpoolHooks>{};
+        const FileSpoolControl control{session.deadline().expires_at, session.cancellation_token(),
+                                       [&session] { return session.cancellation_requested(); }};
+        auto created = create_spool_file(*admission.pass1_source, foundation_->state_directory(),
+                                         state->invocation_id, foundation_->expected_uid(), control,
+                                         spool_hooks);
+        if (auto* error = std::get_if<FileSpoolError>(&created)) {
+            if (error->cleanup_reference) {
+                auto cleanup =
+                    cleanup_spool_file(foundation_->state_directory(), *error->cleanup_reference,
+                                       foundation_->expected_uid(), {}, spool_hooks);
+                if (std::holds_alternative<FileSpoolError>(cleanup)) {
+                    throw std::runtime_error("saved attachment spool cleanup failed");
+                }
+            }
+            write_contract::StoredTerminal stored =
+                stored_from_terminal(operation, internal(operation));
+            bool stopped = false;
+            switch (error->kind) {
+            case FileSpoolErrorKind::TimedOut:
+                stored = stored_from_terminal(
+                    operation,
+                    timeout(operation, "preflight",
+                            request.context.idempotency_key ? "removed" : "not_requested"));
+                break;
+            case FileSpoolErrorKind::Cancelled:
+                stored = stored_from_terminal(operation, shutdown_terminal());
+                stopped = true;
+                break;
+            case FileSpoolErrorKind::InputChanged:
+            case FileSpoolErrorKind::SourceUnavailable:
+                stored = stored_from_terminal(
+                    operation,
+                    terminal("INPUT_CHANGED", "input file changed while being read",
+                             {{"operation", "saved_attach"}, {"path", state->input->display_path}},
+                             kGeneric));
+                break;
+            case FileSpoolErrorKind::DurabilityFailure:
+            case FileSpoolErrorKind::Contradiction:
+                stored = stored_from_terminal(
+                    operation,
+                    terminal("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
+                             {{"operation", "saved_attach"},
+                              {"path", state->input->display_path},
+                              {"reason", spool_reason_name(error->durability_reason.value_or(
+                                             DurabilityReason::Contradiction))}},
+                             kGeneric));
+                break;
+            case FileSpoolErrorKind::InvalidInput:
+                break;
+            }
+            return {.spool = std::nullopt,
+                    .terminal_without_dispatch = std::move(stored),
+                    .complete_without_mutation = false,
+                    .stop_without_dispatch = stopped};
+        }
+        auto& spool = std::get<CreatedSpool>(created);
+        state->spool_local_path = std::move(spool.local_path);
+        return {.spool = std::move(spool.reference),
+                .terminal_without_dispatch = std::nullopt,
+                .complete_without_mutation = false,
+                .stop_without_dispatch = false};
+    };
+    hooks.revalidate_auth_and_schedule =
+        [state, &session, &request,
+         this](const write_contract::Plan& plan) -> WriteDispatchAdmissionOutcome {
+        auto current = client_.get().auth_state();
+        if (!current || current->data.state != core::AuthState::Ready) {
+            return stored_from_terminal(
+                operation, not_authed_terminal(account_, current ? current->data.state
+                                                                 : core::AuthState::Unknown));
+        }
+        if (deadline_expired(session.deadline())) {
+            return stored_from_terminal(
+                operation, timeout(operation, "preflight",
+                                   request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (!state->input || !state->target || state->spool_local_path.empty()) {
+            throw std::logic_error("saved attachment dispatch state is incomplete");
+        }
+        const auto sending_id = random_sending_id();
+        if (sending_id == 0) {
+            throw std::runtime_error("cannot create sending id");
+        }
+        std::optional<core::TdTopic> topic;
+        if (!plan.value()["effective_topic"].is_null()) {
+            topic = core::TdTopic{.kind = core::TdTopicKind::Saved,
+                                  .id = plan.value()["effective_topic"]["id"].get<std::int64_t>(),
+                                  .tdlib_type_id = 0};
+        }
+        core::TdSendMessageRequest td_request{
+            .chat_id = state->target->chat.id,
+            .topic = topic,
+            .reply_to_message_id = state->input->message_id,
+            .options = {.disable_notification = false, .schedule = {}, .sending_id = sending_id},
+            .content = {.formatted_text = {.text = state->input->caption,
+                                           .entities = {},
+                                           .capability = {}},
+                        .parsed = false},
+            .document = core::TdSendDocumentContent{.local_path = state->spool_local_path,
+                                                    .disable_content_type_detection = true}};
+        SingleSendHooks send_hooks = hooks_ ? hooks_->single_send : SingleSendHooks{};
+        auto* state_pointer = state.get();
+        send_hooks.on_temporary_id = [state_pointer](const SingleSendTemporaryId& temporary) {
+            if (state_pointer->observations == nullptr ||
+                !state_pointer->observations->temporary_message_ids(
+                    json::array({temporary.temporary_message_id}))) {
+                throw std::runtime_error("temporary id was not durable");
+            }
+        };
+        state->coordinator =
+            std::make_unique<SingleSendCoordinator>(client_.get(), session, std::move(send_hooks));
+        state->dispatch_authorization = std::move(current);
+        auto preparation =
+            state->coordinator->prepare(std::move(td_request), state->dispatch_authorization);
+        if (std::holds_alternative<SingleSendTimedOut>(preparation)) {
+            return stored_from_terminal(
+                operation, timeout(operation, "preflight",
+                                   request.context.idempotency_key ? "removed" : "not_requested"));
+        }
+        if (std::holds_alternative<SingleSendCancelled>(preparation)) {
+            return WriteDispatchStopped{};
+        }
+        if (const auto* lost = std::get_if<SingleSendAuthorizationLost>(&preparation)) {
+            return stored_from_terminal(operation, not_authed_terminal(account_, lost->state));
+        }
+        if (std::holds_alternative<SingleSendGenerationClosed>(preparation)) {
+            return stored_from_terminal(operation,
+                                        not_authed_terminal(account_, core::AuthState::Closed));
+        }
+        if (std::holds_alternative<SingleSendRejected>(preparation)) {
+            return stored_from_terminal(operation, internal(operation));
+        }
+        const auto token = random_hex32();
+        if (token.empty()) {
+            throw std::runtime_error("cannot create dispatch token");
+        }
+        return WriteDispatchPreparation{
+            .proof = {{"tdlib_function", "sendMessage"},
+                      {"dispatch_token", token},
+                      {"client_generation", state->dispatch_authorization->client_generation}}};
+    };
+    hooks.dispatch = [state, &request,
+                      this](const write_contract::Plan&, const WriteDispatchPreparation&,
+                            WriteDurableObservationSink& observations) -> WriteDispatchOutcome {
+        if (!state->target || !state->dispatch_authorization || !state->coordinator) {
+            throw std::logic_error("saved attachment coordinator state is incomplete");
+        }
+        state->observations = &observations;
+        auto selected = state->coordinator->execute_prepared();
+        state->observations = nullptr;
+        return std::visit(
+            [&](auto&& outcome) -> WriteDispatchOutcome {
+                using Outcome = std::decay_t<decltype(outcome)>;
+                if constexpr (std::is_same_v<Outcome, SingleSendSucceeded>) {
+                    auto result = message_write_result_json(outcome.result);
+                    if (!result.is_object() || result["chat_id"] != state->target->chat.id) {
+                        return {.terminal = stored_from_terminal(
+                                    operation,
+                                    internal(operation, "TDLib returned data outside the supported "
+                                                        "persistence bounds")),
+                                .mutation_state = AccountAuditMutationState::Confirmed,
+                                .mutation_confirmed = true};
+                    }
+                    return {.terminal = stored_result(operation, std::move(result)),
+                            .mutation_state = AccountAuditMutationState::Confirmed,
+                            .mutation_confirmed = true};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendFailed>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, td_error_terminal(operation, outcome.error)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendRateLimited>) {
+                    auto value = terminal("RATE_LIMITED", "Telegram rate limit exceeded",
+                                          {{"operation", "saved_attach"},
+                                           {"tdlib_code", 429},
+                                           {"retry_after", outcome.retry_after}},
+                                          kRateLimited);
+                    return {.terminal = stored_from_terminal(operation, value),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendDeletedBeforeConfirmation>) {
+                    auto value =
+                        terminal("SEND_FAILED", "message was deleted before confirmation",
+                                 {{"operation", "saved_attach"},
+                                  {"chat_id", outcome.temporary.chat_id},
+                                  {"temporary_message_id", outcome.temporary.temporary_message_id},
+                                  {"reason", "deleted_before_confirmation"}},
+                                 kGeneric);
+                    return {.terminal = stored_from_terminal(operation, value),
+                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendTimedOut>) {
+                    auto value = timeout(
+                        operation, "confirmation", post_intent_idempotency(request), "unknown",
+                        outcome.temporary
+                            ? std::optional<std::int64_t>{outcome.temporary->temporary_message_id}
+                            : std::nullopt);
+                    return {.terminal = stored_from_terminal(operation, value),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendAuthorizationLost>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, not_authed_terminal(account_, outcome.state)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendGenerationClosed>) {
+                    return {.terminal = stored_from_terminal(
+                                operation, not_authed_terminal(account_, core::AuthState::Closed)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendCancelled>) {
+                    return {.terminal = stored_from_terminal(operation, shutdown_terminal()),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, SingleSendRejected>) {
+                    return {.terminal = stored_from_terminal(operation, internal(operation)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false};
+                } else {
+                    return {.terminal = stored_from_terminal(
+                                operation,
+                                internal(operation,
+                                         "TDLib returned data outside the supported persistence "
+                                         "bounds")),
+                            .mutation_state = AccountAuditMutationState::Possible,
+                            .mutation_confirmed = false};
+                }
+            },
+            std::move(selected));
+    };
+    hooks.timestamp = timestamp;
+    hooks.audit_fatal_shutdown = [&session, this] {
+        session.audit_fatal();
+        if (audit_fatal_shutdown_) {
+            audit_fatal_shutdown_();
+        }
+    };
+    hooks.spool_hooks = hooks_ ? hooks_->file_spool : nullptr;
     const auto result = kernel.run(kernel_input, hooks);
     if (result.status == WriteKernelStatus::DryRunPlanned && result.plan) {
         session.result({{"dry_run", true}, {"plan", result.plan->value()}});
@@ -3816,6 +4369,12 @@ void register_write_commands(Dispatcher& dispatcher, WriteCoordinator& coordinat
                             coordinator.forward_messages(request, session);
                         },
                         false, proto::M3Operation::MsgForward});
+    dispatcher.register_command(
+        "saved attach", {Tier::Write,
+                         [&coordinator](const proto::Request& request, RequestSession& session) {
+                             coordinator.attach_saved_file(request, session);
+                         },
+                         false, proto::M3Operation::SavedAttach});
     dispatcher.register_command(
         "msg react", {Tier::Write,
                       [&coordinator](const proto::Request& request, RequestSession& session) {

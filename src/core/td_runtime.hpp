@@ -1175,12 +1175,20 @@ struct TdSendTextContent {
     bool parsed = false;
 };
 
+struct TdSendDocumentContent {
+    std::string local_path;
+    bool disable_content_type_detection = true;
+
+    bool operator==(const TdSendDocumentContent&) const = default;
+};
+
 struct TdSendMessageRequest {
     std::int64_t chat_id = 0;
     std::optional<TdTopic> topic;
     std::optional<std::int64_t> reply_to_message_id;
     TdMessageSendOptions options;
     TdSendTextContent content;
+    std::optional<TdSendDocumentContent> document;
 };
 
 [[nodiscard]] bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept;

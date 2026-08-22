@@ -99,7 +99,8 @@ constexpr bool publicly_active_m3(const std::optional<M3Operation>& operation) n
            operation == M3Operation::ChatMute || operation == M3Operation::ChatUnmute ||
            operation == M3Operation::ChatPin || operation == M3Operation::ChatUnpin ||
            operation == M3Operation::ChatArchive || operation == M3Operation::ChatUnarchive ||
-           operation == M3Operation::ChatJoin || operation == M3Operation::ChatLeave;
+           operation == M3Operation::ChatJoin || operation == M3Operation::ChatLeave ||
+           operation == M3Operation::SavedAttach;
 }
 
 } // namespace

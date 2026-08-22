@@ -773,10 +773,14 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                                     proposed_plan.value()["tdlib_request"].is_null() &&
                                     proposed_plan.value()["last_message_id"].is_null() &&
                                     post_intent.terminal_without_dispatch->success();
-            if (post_intent.complete_without_mutation != valid_noop) {
+            const bool valid_stop = post_intent.stop_without_dispatch &&
+                                    request.operation == proto::M3Operation::SavedAttach &&
+                                    !post_intent.complete_without_mutation;
+            if (post_intent.complete_without_mutation != valid_noop ||
+                post_intent.stop_without_dispatch != valid_stop) {
                 return audit_fatal();
             }
-            return finish_without_dispatch(*post_intent.terminal_without_dispatch, true,
+            return finish_without_dispatch(*post_intent.terminal_without_dispatch, !valid_stop,
                                            valid_noop);
         }
 

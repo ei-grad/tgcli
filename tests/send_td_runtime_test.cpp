@@ -43,7 +43,19 @@ TdSendMessageRequest plain_request(TdSendSchedule schedule = {}) {
             .reply_to_message_id = 77,
             .options = {.disable_notification = true, .schedule = schedule, .sending_id = 12345},
             .content = {.formatted_text = {.text = "send 🧪", .entities = {}, .capability = {}},
-                        .parsed = false}};
+                        .parsed = false},
+            .document = std::nullopt};
+}
+
+TdSendMessageRequest document_request() {
+    return {.chat_id = 42,
+            .topic = TdTopic{.kind = TdTopicKind::Saved, .id = 19, .tdlib_type_id = 0},
+            .reply_to_message_id = -77,
+            .options = {.disable_notification = false, .schedule = {}, .sending_id = 54321},
+            .content = {.formatted_text = {.text = "caption 🧪", .entities = {}, .capability = {}},
+                        .parsed = false},
+            .document = TdSendDocumentContent{.local_path = "/private/spool/item.bin",
+                                              .disable_content_type_detection = true}};
 }
 
 TdForwardMessagesRequest forward_request() {
@@ -145,6 +157,27 @@ TEST_CASE("sendMessage native and scripted factories share every pinned default"
     CHECK(detail::production_send_message_matches_for_test(native, expected));
 }
 
+TEST_CASE("saved document send preserves the local file and frozen document defaults",
+          "[core][tdlib][send][saved-attach][factory]") {
+    tgcli::test::ScriptedTdRuntime scripted;
+    const auto expected = document_request();
+    auto native = detail::make_production_send_message_for_test(document_request(), 7);
+    auto fake = scripted.make_send_message(document_request(), 7);
+
+    REQUIRE(native.function_data());
+    REQUIRE(fake.function_data());
+    CHECK(*native.function_data() == *fake.function_data());
+    CHECK(function_field(*native.function_data(), "content_kind") != nullptr);
+    CHECK(std::get<std::string>(*function_field(*native.function_data(), "content_kind")) ==
+          "document");
+    CHECK(std::get<std::string>(*function_field(*native.function_data(), "document_local_path")) ==
+          "/private/spool/item.bin");
+    CHECK(std::get<bool>(*function_field(*native.function_data(), "thumbnail_is_null")));
+    CHECK(
+        std::get<bool>(*function_field(*native.function_data(), "disable_content_type_detection")));
+    CHECK(detail::production_send_message_matches_for_test(native, expected));
+}
+
 TEST_CASE("forwardMessages native and scripted factories preserve the frozen request",
           "[core][tdlib][forward][factory]") {
     tgcli::test::ScriptedTdRuntime scripted;
@@ -204,23 +237,25 @@ TEST_CASE("parsed formattedText capability is exact generation-bound and one-sho
         .topic = std::nullopt,
         .reply_to_message_id = std::nullopt,
         .options = {.disable_notification = false, .schedule = {}, .sending_id = 9},
-        .content = {.formatted_text = std::move(*formatted), .parsed = true}};
+        .content = {.formatted_text = std::move(*formatted), .parsed = true},
+        .document = std::nullopt};
     const TdSendMessageRequest expected{
         .chat_id = -1001,
         .topic = std::nullopt,
         .reply_to_message_id = std::nullopt,
         .options = {.disable_notification = false, .schedule = {}, .sending_id = 9},
-        .content = {
-            .formatted_text = {.text = "bold",
-                               .entities = {{.offset = 0,
-                                             .length = 4,
-                                             .kind = TdTextEntityKind::Bold,
-                                             .value = {},
-                                             .numeric_value = 0,
-                                             .tdlib_type_id = td_api::textEntityTypeBold::ID,
-                                             .date_time_formatting = std::nullopt}},
-                               .capability = {}},
-            .parsed = true}};
+        .content = {.formatted_text = {.text = "bold",
+                                       .entities = {{.offset = 0,
+                                                     .length = 4,
+                                                     .kind = TdTextEntityKind::Bold,
+                                                     .value = {},
+                                                     .numeric_value = 0,
+                                                     .tdlib_type_id =
+                                                         td_api::textEntityTypeBold::ID,
+                                                     .date_time_formatting = std::nullopt}},
+                                       .capability = {}},
+                    .parsed = true},
+        .document = std::nullopt};
     auto native = detail::make_production_send_message_for_test(std::move(parsed), 1);
     CHECK(detail::production_send_message_matches_for_test(native, expected));
 

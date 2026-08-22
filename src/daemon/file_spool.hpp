@@ -201,6 +201,9 @@ prepare_spool_source(std::string_view caller_path, std::string_view frozen_cwd,
                      const FileSpoolControl& control = {},
                      const std::shared_ptr<const testing::FileSpoolHooks>& hooks = {});
 
+[[nodiscard]] std::optional<std::string> canonical_source_display_path(std::string_view caller_path,
+                                                                       std::string_view frozen_cwd);
+
 struct CreatedSpool {
     SpoolRef reference;
     std::string local_path;

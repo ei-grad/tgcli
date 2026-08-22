@@ -88,6 +88,18 @@ class WriteTree final {
         return account_state() + "/idempotency.db";
     }
 
+    [[nodiscard]] std::string source_path(std::string_view name = "attachment.bin") const {
+        return account_state() + "/" + std::string(name);
+    }
+
+    void write_source(std::string_view bytes, std::string_view name = "attachment.bin") const {
+        std::ofstream output(source_path(name), std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        REQUIRE(::chmod(source_path(name).c_str(), 0600) == 0);
+    }
+
   private:
     std::string root_;
 };
@@ -223,6 +235,16 @@ core::TdWriteMessage online_message() {
     return message;
 }
 
+core::TdWriteMessage saved_document_message(std::string caption = "experiment result") {
+    auto message = stable_message(std::move(caption));
+    message.message.id = 202;
+    message.message.chat_id = 42;
+    message.message.content_kind = core::TdMessageContentKind::Document;
+    message.message.topic =
+        core::TdTopic{.kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1};
+    return message;
+}
+
 core::TdWriteMessage forwarded_message(std::int64_t id) {
     auto message = stable_message("forwarded");
     message.message.id = id;
@@ -241,6 +263,16 @@ core::TdPlanningMessage planning_message(std::int64_t id) {
             .text = "cleanup",
             .has_scheduling_state = false,
             .has_reply_markup = false};
+}
+
+core::TdPlanningMessage
+saved_planning_message(std::int64_t id,
+                       std::optional<core::TdTopic> topic = core::TdTopic{
+                           .kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1}) {
+    auto message = planning_message(id);
+    message.chat_id = 42;
+    message.topic = std::move(topic);
+    return message;
 }
 
 template <typename T>
@@ -471,6 +503,10 @@ class FakeWrites final {
         return foundation_;
     }
 
+    void file_spool_hooks(std::shared_ptr<const daemon::testing::FileSpoolHooks> hooks) {
+        coordinator_hooks_->file_spool = std::move(hooks);
+    }
+
     void reject_before_request(core::TdFunctionKind kind) {
         auto advance_authorization = [this] {
             const auto sequence = client_->auth_state()->auth_sequence;
@@ -577,6 +613,20 @@ proto::Request send_request(std::string text = "hello", bool dry_run = false,
                     {"silent", false},
                     {"schedule", scheduled_at ? json{{"kind", "at"}, {"send_date", *scheduled_at}}
                                               : json(nullptr)}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.dry_run = dry_run;
+    request.context.idempotency_key = std::move(key);
+    return request;
+}
+
+proto::Request saved_attach_request(const WriteTree& tree, bool dry_run = false,
+                                    std::optional<std::string> key = "saved-attach-key") {
+    proto::Request request("main");
+    request.id = 49;
+    request.command = {"saved", "attach"};
+    request.args = {
+        {"message_id", -77}, {"path", tree.source_path()}, {"caption", "experiment result"}};
     request.context.cwd = "/";
     request.context.timeout_seconds = 2.0;
     request.context.dry_run = dry_run;
@@ -757,6 +807,15 @@ void bind_principal(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
 }
 
+void plan_saved_attachment(FakeWrites& fake, core::TdMessageProperties properties = {}) {
+    bind_principal(fake);
+    fake.respond(core::TdFunctionKind::CreatePrivateChat, private_chat(42));
+    fake.respond(core::TdFunctionKind::GetUser, self());
+    fake.respond(core::TdFunctionKind::GetMessage, saved_planning_message(-77));
+    properties.can_be_replied = true;
+    fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+}
+
 void plan_forward(FakeWrites& fake, bool drop_author = false,
                   core::TdMessageProperties properties = {}) {
     bind_principal(fake);
@@ -876,6 +935,162 @@ void check_open_dispatch_with_pending(FakeWrites& fake, bool exercise_next_gate 
 }
 
 } // namespace
+
+TEST_CASE("saved attach materializes one private spool document and cleans it after success",
+          "[write-command][saved-attach][spool][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("attachment bytes\n");
+    const auto source_path = fake.tree().source_path();
+    auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+    plan_saved_attachment(fake);
+    const auto descriptor =
+        fake.respond(core::TdFunctionKind::SendMessage, saved_document_message());
+    const auto outcome = pending.get();
+
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["id"] == 202);
+    CHECK((*outcome.result)["chat_id"] == 42);
+    CHECK((*outcome.result)["type"] == "doc");
+    CHECK(function_field<std::string>(descriptor, "content_kind") == "document");
+    CHECK(function_field<std::string>(descriptor, "text") == "experiment result");
+    const auto& local_path = function_field<std::string>(descriptor, "document_local_path");
+    CHECK(local_path != source_path);
+    CHECK(local_path.starts_with(fake.tree().account_state() + "/spool/"));
+    CHECK(function_field<bool>(descriptor, "thumbnail_is_null"));
+    CHECK(function_field<bool>(descriptor, "disable_content_type_detection"));
+    CHECK(read_bytes(source_path) == "attachment bytes\n");
+    std::size_t spooled_files = 0;
+    const auto spool_root = fake.tree().account_state() + "/spool";
+    if (std::filesystem::exists(spool_root)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(spool_root)) {
+            spooled_files += entry.is_regular_file() ? 1U : 0U;
+        }
+    }
+    CHECK(spooled_files == 0);
+}
+
+TEST_CASE("saved attach dry-run hashes and plans without creating durable state",
+          "[write-command][saved-attach][dry-run][spool][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("dry bytes");
+    auto pending = fake.dispatch(saved_attach_request(fake.tree(), true, std::nullopt));
+    plan_saved_attachment(fake);
+    const auto outcome = pending.get();
+
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["dry_run"] == true);
+    CHECK((*outcome.result)["plan"]["operation"] == "saved_attach");
+    CHECK((*outcome.result)["plan"]["message_id"] == -77);
+    CHECK((*outcome.result)["plan"]["effective_topic"] == json{{"kind", "saved"}, {"id", 19}});
+    CHECK((*outcome.result)["plan"]["file"]["size"] == 9);
+    CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+    CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+}
+
+TEST_CASE("saved attach rejects bots and missing input before Saved materialization",
+          "[write-command][saved-attach][preflight][fake-boundary]") {
+    SECTION("bot") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        fake.respond(core::TdFunctionKind::GetMe, peer(core::TdUserPresence::Online, true, 42));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "BOT_UNSUPPORTED");
+        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+
+    SECTION("missing source") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_principal(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
+        CHECK((*outcome.error)["error"]["message"] == "input file is unavailable");
+        CHECK((*outcome.error)["error"]["details"] == json{{"operation", "saved_attach"},
+                                                           {"path", fake.tree().source_path()},
+                                                           {"reason", "missing"}});
+        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+}
+
+TEST_CASE("saved attach closes a keyed pass-two source race without dispatch",
+          "[write-command][saved-attach][input-changed][spool][idempotency][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("first bytes");
+    auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+    auto changed = std::make_shared<std::atomic<bool>>(false);
+    const auto source_path = fake.tree().source_path();
+    hooks->read = [changed, source_path](daemon::FileSpoolIo operation, int descriptor, void* bytes,
+                                         std::size_t size) {
+        if (operation == daemon::FileSpoolIo::Pass2Read && !changed->exchange(true)) {
+            std::ofstream output(source_path, std::ios::binary | std::ios::trunc);
+            output << "second bytes";
+        }
+        return ::read(descriptor, bytes, size);
+    };
+    fake.file_spool_hooks(hooks);
+    auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+    plan_saved_attachment(fake);
+    const auto outcome = pending.get();
+
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "INPUT_CHANGED");
+    CHECK((*outcome.error)["error"]["details"] ==
+          json{{"operation", "saved_attach"}, {"path", source_path}});
+    CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+    check_closed_without_pending(fake);
+}
+
+TEST_CASE("saved attach closes cancelled and unsynced pass-two materialization",
+          "[write-command][saved-attach][spool][cancel][fault][idempotency][fake-boundary]") {
+    SECTION("cancelled") {
+        FakeWrites fake;
+        fake.tree().write_source("cancel bytes");
+        std::shared_ptr<daemon::RequestSession> session;
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->at_stage = [&session](daemon::FileSpoolStage stage) {
+            if (stage == daemon::FileSpoolStage::DuringPass2Read) {
+                session->disconnect();
+            }
+        };
+        fake.file_spool_hooks(hooks);
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()), &session);
+        plan_saved_attachment(fake);
+        const auto outcome = pending.get();
+        CHECK_FALSE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        check_closed_without_pending(fake);
+    }
+
+    SECTION("file sync failure") {
+        FakeWrites fake;
+        fake.tree().write_source("sync bytes");
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->should_fail = [](daemon::FileSpoolStage stage) {
+            return stage == daemon::FileSpoolStage::BeforeFileSync;
+        };
+        fake.file_spool_hooks(hooks);
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        plan_saved_attachment(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"] == json{{"code", "SPOOL_UNAVAILABLE"},
+                                                {"message", "attachment spool is unavailable"},
+                                                {"details",
+                                                 {{"operation", "saved_attach"},
+                                                  {"path", fake.tree().source_path()},
+                                                  {"reason", "sync_failed"}}}});
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        check_closed_without_pending(fake);
+    }
+}
 
 TEST_CASE("send text topic and RFC3339 schedule normalization is closed at boundaries",
           "[write-command][send][domain]") {

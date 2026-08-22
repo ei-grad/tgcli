@@ -125,7 +125,8 @@ tgcli::core::TdSendMessageRequest send_request() {
             .reply_to_message_id = std::nullopt,
             .options = {.disable_notification = false, .schedule = {}, .sending_id = 12345},
             .content = {.formatted_text = {.text = "send", .entities = {}, .capability = {}},
-                        .parsed = false}};
+                        .parsed = false},
+            .document = std::nullopt};
 }
 
 class SendHarness {

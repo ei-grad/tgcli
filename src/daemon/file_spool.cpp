@@ -1591,6 +1591,12 @@ prepare_spool_source(std::string_view caller_path, std::string_view frozen_cwd,
     return PreparedSource(std::move(implementation));
 }
 
+std::optional<std::string> canonical_source_display_path(std::string_view caller_path,
+                                                         std::string_view frozen_cwd) {
+    auto locator = make_locator(caller_path, frozen_cwd);
+    return locator ? std::optional<std::string>{std::move(locator->display_path)} : std::nullopt;
+}
+
 CreateSpoolFileResult
 create_spool_file(PreparedSource& source, std::string account_state, std::string_view invocation_id,
                   uid_t expected_uid, const FileSpoolControl& control,

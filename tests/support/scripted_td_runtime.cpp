@@ -395,7 +395,7 @@ core::TdValue ScriptedTdRuntime::make_send_message(core::TdSendMessageRequest re
         throw std::invalid_argument("scripted sendMessage request is invalid");
     }
     auto description = core::describe_td_send_message_request(request);
-    if (request.content.parsed) {
+    if (request.content.parsed && !request.document) {
         const auto capability =
             request.content.formatted_text.capability
                 .consume<core::TdScriptedFormattedTextCapability>(client_generation);

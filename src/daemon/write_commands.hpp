@@ -19,6 +19,7 @@ struct WriteCoordinatorHooks {
     SingleSendHooks single_send;
     ForwardHooks forward;
     DirectRpcHooks direct_rpc;
+    std::shared_ptr<const FileSpoolHooks> file_spool;
 };
 } // namespace testing
 
@@ -30,6 +31,7 @@ class WriteCoordinator final {
                      std::shared_ptr<const testing::WriteCoordinatorHooks> hooks = {});
 
     void send(const proto::Request& request, RequestSession& session);
+    void attach_saved_file(const proto::Request& request, RequestSession& session);
     void edit_message(const proto::Request& request, RequestSession& session);
     void forward_messages(const proto::Request& request, RequestSession& session);
     void delete_messages(const proto::Request& request, RequestSession& session);

@@ -2085,7 +2085,16 @@ TdValue make_native_send_message(TdSendMessageRequest request, std::uint64_t cli
     auto options = td_api::make_object<td_api::messageSendOptions>(
         nullptr, request.options.disable_notification, false, false, false, 0, false,
         std::move(schedule), 0, request.options.sending_id, false);
-    auto content = td_api::make_object<td_api::inputMessageText>(std::move(text), nullptr, false);
+    td_api::object_ptr<td_api::InputMessageContent> content;
+    if (request.document) {
+        auto local = td_api::make_object<td_api::inputFileLocal>(request.document->local_path);
+        auto document = td_api::make_object<td_api::inputDocument>(
+            std::move(local), nullptr, request.document->disable_content_type_detection);
+        content =
+            td_api::make_object<td_api::inputMessageDocument>(std::move(document), std::move(text));
+    } else {
+        content = td_api::make_object<td_api::inputMessageText>(std::move(text), nullptr, false);
+    }
     auto topic = make_send_topic(request.topic);
     auto reply = make_send_reply(request.reply_to_message_id);
     NativeFunctionPtr native = td_api::make_object<td_api::sendMessage>(
@@ -3486,8 +3495,7 @@ bool production_send_message_matches_for_test(const TdValue& function,
         !native_send_topic_matches(actual.topic_id_.get(), expected.topic) ||
         !native_send_reply_matches(actual.reply_to_.get(), expected.reply_to_message_id) ||
         actual.options_ == nullptr || actual.reply_markup_ != nullptr ||
-        actual.input_message_content_ == nullptr ||
-        actual.input_message_content_->get_id() != td_api::inputMessageText::ID) {
+        actual.input_message_content_ == nullptr) {
         return false;
     }
     const auto& options = *actual.options_;
@@ -3500,13 +3508,37 @@ bool production_send_message_matches_for_test(const TdValue& function,
         options.only_preview_) {
         return false;
     }
-    const auto& content =
-        static_cast<const td_api::inputMessageText&>(*actual.input_message_content_);
-    if (content.text_ == nullptr || content.link_preview_options_ != nullptr ||
-        content.clear_draft_) {
-        return false;
+    const td_api::formattedText* text = nullptr;
+    if (expected.document) {
+        if (actual.input_message_content_->get_id() != td_api::inputMessageDocument::ID) {
+            return false;
+        }
+        const auto& content =
+            static_cast<const td_api::inputMessageDocument&>(*actual.input_message_content_);
+        if (content.caption_ == nullptr || content.document_ == nullptr ||
+            content.document_->thumbnail_ != nullptr ||
+            content.document_->disable_content_type_detection_ !=
+                expected.document->disable_content_type_detection ||
+            content.document_->document_ == nullptr ||
+            content.document_->document_->get_id() != td_api::inputFileLocal::ID ||
+            static_cast<const td_api::inputFileLocal&>(*content.document_->document_).path_ !=
+                expected.document->local_path) {
+            return false;
+        }
+        text = content.caption_.get();
+    } else {
+        if (actual.input_message_content_->get_id() != td_api::inputMessageText::ID) {
+            return false;
+        }
+        const auto& content =
+            static_cast<const td_api::inputMessageText&>(*actual.input_message_content_);
+        if (content.text_ == nullptr || content.link_preview_options_ != nullptr ||
+            content.clear_draft_) {
+            return false;
+        }
+        text = content.text_.get();
     }
-    const auto neutral = neutral_formatted_text(*content.text_);
+    const auto neutral = neutral_formatted_text(*text);
     return neutral && *neutral == expected.content.formatted_text;
 }
 
