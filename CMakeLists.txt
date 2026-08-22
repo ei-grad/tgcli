@@ -263,6 +263,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/write_kernel.cpp
     src/daemon/saved_commands.cpp
     src/daemon/single_send.cpp
+    src/daemon/forward.cpp
     src/daemon/stream_metadata.cpp
     src/daemon/stream_model.cpp
     src/daemon/commands.cpp

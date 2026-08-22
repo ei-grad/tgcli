@@ -261,4 +261,30 @@ TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& requ
          {"clear_draft", false}}};
 }
 
+bool valid_td_forward_messages_request(const TdForwardMessagesRequest& request) noexcept {
+    return valid_td_chat_id(request.from_chat_id) && valid_td_chat_id(request.to_chat_id) &&
+           request.sending_id != 0 && valid_message_ids(request.message_ids, 100, true);
+}
+
+TdFunctionData describe_td_forward_messages_request(const TdForwardMessagesRequest& request) {
+    return TdFunctionData{TdFunctionKind::ForwardMessages,
+                          {{"chat_id", request.to_chat_id},
+                           {"topic_id_is_null", true},
+                           {"from_chat_id", request.from_chat_id},
+                           {"message_ids", request.message_ids},
+                           {"suggested_post_info_is_null", true},
+                           {"disable_notification", false},
+                           {"from_background", false},
+                           {"protect_content", false},
+                           {"allow_paid_broadcast", false},
+                           {"paid_message_star_count", std::int64_t{0}},
+                           {"update_order_of_installed_sticker_sets", false},
+                           {"scheduling_state_is_null", true},
+                           {"effect_id", std::int64_t{0}},
+                           {"sending_id", static_cast<std::int64_t>(request.sending_id)},
+                           {"only_preview", false},
+                           {"send_copy", request.drop_author},
+                           {"remove_caption", false}}};
+}
+
 } // namespace tgcli::core

@@ -25,6 +25,7 @@ add_executable(tgcli_unit_tests
     direct_td_runtime_test.cpp
     direct_rpc_test.cpp
     send_td_runtime_test.cpp
+    forward_test.cpp
     single_send_test.cpp
     destructive_plan_test.cpp
     file_spool_test.cpp

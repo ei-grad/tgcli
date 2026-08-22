@@ -94,6 +94,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_parse_text_entities(std::string text, core::TdTextParseMode mode) override;
     core::TdValue make_send_message(core::TdSendMessageRequest request,
                                     std::uint64_t client_generation) override;
+    core::TdValue make_forward_messages(core::TdForwardMessagesRequest request) override;
     core::TdValue make_edit_message_text(core::TdEditMessageTextRequest request) override;
     core::TdValue make_delete_messages(core::TdDeleteMessagesRequest request) override;
     core::TdValue make_message_reaction(core::TdMessageReactionRequest request) override;

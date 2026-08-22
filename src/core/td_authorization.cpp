@@ -64,6 +64,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::ParseTextEntities:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::SendMessage:
+    case TdFunctionKind::ForwardMessages:
     case TdFunctionKind::EditMessageText:
     case TdFunctionKind::AddMessageReaction:
     case TdFunctionKind::RemoveMessageReaction:

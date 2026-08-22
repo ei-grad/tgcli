@@ -1728,6 +1728,27 @@ TdValue convert_send_message_response(const NativeObjectPtr& object) {
     return TdValue::from(std::move(converted));
 }
 
+TdValue convert_forward_messages_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::messages::ID) {
+        return unexpected_direct_response(object);
+    }
+    const auto& source = static_cast<const td_api::messages&>(*object);
+    TdForwardMessages converted;
+    converted.messages.reserve(source.messages_.size());
+    for (const auto& message : source.messages_) {
+        if (message == nullptr) {
+            converted.messages.emplace_back(std::nullopt);
+            continue;
+        }
+        auto item = convert_write_message_details(*message);
+        if (!valid_persistable_message_text(item.message.text)) {
+            return unexpected_direct_response(object);
+        }
+        converted.messages.emplace_back(std::move(item));
+    }
+    return TdValue::from(std::move(converted));
+}
+
 TdValue convert_join_response(const NativeObjectPtr& object) {
     switch (object->get_id()) {
     case td_api::chatJoinResultSuccess::ID:
@@ -1755,6 +1776,8 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
         return convert_write_message_response(object);
     case TdFunctionKind::SendMessage:
         return convert_send_message_response(object);
+    case TdFunctionKind::ForwardMessages:
+        return convert_forward_messages_response(object);
     case TdFunctionKind::GetMessageProperties:
         if (object->get_id() == td_api::messageProperties::ID) {
             return TdValue::from(
@@ -1886,6 +1909,8 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::parseTextEntities::ID;
     case TdFunctionKind::SendMessage:
         return function.get_id() == td_api::sendMessage::ID;
+    case TdFunctionKind::ForwardMessages:
+        return function.get_id() == td_api::forwardMessages::ID;
     case TdFunctionKind::EditMessageText:
         return function.get_id() == td_api::editMessageText::ID;
     case TdFunctionKind::DeleteMessages:
@@ -2066,6 +2091,19 @@ TdValue make_native_send_message(TdSendMessageRequest request, std::uint64_t cli
     NativeFunctionPtr native = td_api::make_object<td_api::sendMessage>(
         request.chat_id, std::move(topic), std::move(reply), std::move(options), nullptr,
         std::move(content));
+    return TdValue::function(std::move(native), std::move(description));
+}
+
+TdValue make_native_forward_messages(TdForwardMessagesRequest request) {
+    if (!valid_td_forward_messages_request(request)) {
+        throw std::invalid_argument("forwardMessages request is invalid");
+    }
+    auto description = describe_td_forward_messages_request(request);
+    auto options = td_api::make_object<td_api::messageSendOptions>(
+        nullptr, false, false, false, false, 0, false, nullptr, 0, request.sending_id, false);
+    NativeFunctionPtr native = td_api::make_object<td_api::forwardMessages>(
+        request.to_chat_id, nullptr, request.from_chat_id, std::move(request.message_ids),
+        std::move(options), request.drop_author, false);
     return TdValue::function(std::move(native), std::move(description));
 }
 
@@ -2837,6 +2875,10 @@ class ProductionTdRuntime final : public TdRuntime {
         return make_native_send_message(std::move(request), client_generation);
     }
 
+    TdValue make_forward_messages(TdForwardMessagesRequest request) override {
+        return make_native_forward_messages(std::move(request));
+    }
+
     TdValue make_edit_message_text(TdEditMessageTextRequest request) override {
         return make_native_edit_message_text(std::move(request));
     }
@@ -3116,6 +3158,10 @@ TdValue make_production_send_message_for_test(TdSendMessageRequest request,
     return make_native_send_message(std::move(request), client_generation);
 }
 
+TdValue make_production_forward_messages_for_test(TdForwardMessagesRequest request) {
+    return make_native_forward_messages(std::move(request));
+}
+
 TdValue make_production_direct_request_for_test(const TdDirectRequest& request) {
     return std::visit(
         [](const auto& value) {
@@ -3160,6 +3206,16 @@ TdValue convert_production_send_response_for_test(TdValue object, std::uint64_t 
         return TdValue::from(TdDirectConversionError{});
     }
     return convert_response_for(TdFunctionKind::SendMessage, std::move(*native), client_generation);
+}
+
+TdValue convert_production_forward_response_for_test(TdValue object,
+                                                     std::uint64_t client_generation) {
+    auto* native = object.get_if<NativeObjectPtr>();
+    if (native == nullptr) {
+        return TdValue::from(TdDirectConversionError{});
+    }
+    return convert_response_for(TdFunctionKind::ForwardMessages, std::move(*native),
+                                client_generation);
 }
 
 TdValue convert_production_update_for_test(TdValue object, std::uint64_t client_generation) {
@@ -3452,6 +3508,29 @@ bool production_send_message_matches_for_test(const TdValue& function,
     }
     const auto neutral = neutral_formatted_text(*content.text_);
     return neutral && *neutral == expected.content.formatted_text;
+}
+
+bool production_forward_messages_matches_for_test(const TdValue& function,
+                                                  const TdForwardMessagesRequest& expected) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::forwardMessages::ID) {
+        return false;
+    }
+    const auto& actual = static_cast<const td_api::forwardMessages&>(**native);
+    if (actual.chat_id_ != expected.to_chat_id || actual.topic_id_ != nullptr ||
+        actual.from_chat_id_ != expected.from_chat_id ||
+        actual.message_ids_ != expected.message_ids || actual.options_ == nullptr ||
+        actual.send_copy_ != expected.drop_author || actual.remove_caption_) {
+        return false;
+    }
+    const auto& options = *actual.options_;
+    return options.suggested_post_info_ == nullptr && !options.disable_notification_ &&
+           !options.from_background_ && !options.protect_content_ &&
+           !options.allow_paid_broadcast_ && options.paid_message_star_count_ == 0 &&
+           !options.update_order_of_installed_sticker_sets_ &&
+           options.scheduling_state_ == nullptr && options.effect_id_ == 0 &&
+           options.sending_id_ == expected.sending_id && !options.only_preview_;
 }
 
 bool native_direct_chat_list_matches(const td_api::ChatList* list, TdDirectChatList expected) {

@@ -60,6 +60,7 @@ TdClosedDecisionStatus terminal_decision(TdLifecycleClaimStatus claim) {
 std::optional<DescriptorKind> direct_mutation_tier(TdFunctionKind function) {
     switch (function) {
     case TdFunctionKind::SendMessage:
+    case TdFunctionKind::ForwardMessages:
     case TdFunctionKind::EditMessageText:
     case TdFunctionKind::AddMessageReaction:
     case TdFunctionKind::RemoveMessageReaction:
@@ -586,6 +587,21 @@ class TdClient::Impl {
             return prepare_write(
                 authorization, TdFunctionKind::SendMessage, DescriptorKind::Write,
                 runtime_->make_send_message(std::move(request), authorization->client_generation));
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+
+    TdPreparedWrite
+    prepare_forward_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             TdForwardMessagesRequest request) {
+        if (!authorization || !valid_td_forward_messages_request(request)) {
+            return {};
+        }
+        try {
+            return prepare_write(authorization, TdFunctionKind::ForwardMessages,
+                                 DescriptorKind::Write,
+                                 runtime_->make_forward_messages(std::move(request)));
         } catch (const std::exception&) {
             return {};
         }
@@ -2014,6 +2030,12 @@ TdPreparedWrite
 TdClient::prepare_send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                TdSendMessageRequest request) {
     return impl_->prepare_send_message(authorization, std::move(request));
+}
+
+TdPreparedWrite
+TdClient::prepare_forward_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                   TdForwardMessagesRequest request) {
+    return impl_->prepare_forward_messages(authorization, std::move(request));
 }
 
 TdPreparedWrite

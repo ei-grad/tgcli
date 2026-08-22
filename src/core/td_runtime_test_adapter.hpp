@@ -56,9 +56,12 @@ TdValue make_production_get_unix_time_for_test();
 TdValue make_production_parse_text_entities_for_test(std::string text, TdTextParseMode mode);
 TdValue make_production_send_message_for_test(TdSendMessageRequest request,
                                               std::uint64_t client_generation);
+TdValue make_production_forward_messages_for_test(TdForwardMessagesRequest request);
 TdValue make_production_direct_request_for_test(const TdDirectRequest& request);
 TdValue convert_production_direct_response_for_test(TdFunctionKind function, TdValue object);
 TdValue convert_production_send_response_for_test(TdValue object, std::uint64_t client_generation);
+TdValue convert_production_forward_response_for_test(TdValue object,
+                                                     std::uint64_t client_generation);
 TdValue convert_production_update_for_test(TdValue object, std::uint64_t client_generation);
 bool production_function_matches_for_test(const TdValue& function, TdFunctionKind kind);
 bool production_get_chat_history_matches_for_test(const TdValue& function, std::int64_t chat_id,
@@ -106,6 +109,8 @@ bool production_parse_text_entities_matches_for_test(const TdValue& function, st
                                                      TdTextParseMode mode);
 bool production_send_message_matches_for_test(const TdValue& function,
                                               const TdSendMessageRequest& expected);
+bool production_forward_messages_matches_for_test(const TdValue& function,
+                                                  const TdForwardMessagesRequest& expected);
 bool production_direct_request_matches_for_test(const TdValue& function,
                                                 const TdDirectRequest& request);
 

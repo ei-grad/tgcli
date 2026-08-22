@@ -409,6 +409,15 @@ core::TdValue ScriptedTdRuntime::make_send_message(core::TdSendMessageRequest re
     return core::TdValue::scripted_function(std::move(description));
 }
 
+core::TdValue ScriptedTdRuntime::make_forward_messages(core::TdForwardMessagesRequest request) {
+    if (!core::valid_td_forward_messages_request(request)) {
+        throw std::invalid_argument("scripted forwardMessages request is invalid");
+    }
+    auto description = core::describe_td_forward_messages_request(request);
+    before_make(core::TdFunctionKind::ForwardMessages);
+    return core::TdValue::scripted_function(std::move(description));
+}
+
 core::TdValue ScriptedTdRuntime::make_edit_message_text(core::TdEditMessageTextRequest request) {
     require_direct_request(request);
     before_make(core::TdFunctionKind::EditMessageText);

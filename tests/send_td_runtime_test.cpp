@@ -46,6 +46,14 @@ TdSendMessageRequest plain_request(TdSendSchedule schedule = {}) {
                         .parsed = false}};
 }
 
+TdForwardMessagesRequest forward_request() {
+    return {.from_chat_id = -1001,
+            .to_chat_id = -1002,
+            .message_ids = {1, 2},
+            .sending_id = 24680,
+            .drop_author = true};
+}
+
 const TdFieldValue* function_field(const TdFunctionData& function, std::string_view name) {
     const auto found =
         std::ranges::find_if(function.fields(), [&](const TdFunctionField& candidate) {
@@ -135,6 +143,39 @@ TEST_CASE("sendMessage native and scripted factories share every pinned default"
     expected.options.disable_notification = false;
     auto native = detail::make_production_send_message_for_test(std::move(saved), 7);
     CHECK(detail::production_send_message_matches_for_test(native, expected));
+}
+
+TEST_CASE("forwardMessages native and scripted factories preserve the frozen request",
+          "[core][tdlib][forward][factory]") {
+    tgcli::test::ScriptedTdRuntime scripted;
+    const auto expected = forward_request();
+    auto native = detail::make_production_forward_messages_for_test(forward_request());
+    auto fake = scripted.make_forward_messages(forward_request());
+
+    REQUIRE(native.function_data());
+    REQUIRE(fake.function_data());
+    CHECK(*native.function_data() == *fake.function_data());
+    CHECK(detail::production_function_matches_for_test(native, TdFunctionKind::ForwardMessages));
+    CHECK(detail::production_forward_messages_matches_for_test(native, expected));
+}
+
+TEST_CASE("forwardMessages conversion retains null positions and sending states",
+          "[core][tdlib][forward][conversion]") {
+    std::vector<td_api::object_ptr<td_api::message>> items;
+    items.push_back(
+        native_message(-77, td_api::make_object<td_api::messageSendingStatePending>(24680)));
+    items.emplace_back(nullptr);
+    auto converted = detail::convert_production_forward_response_for_test(
+        TdValue::from(NativeObjectPtr{td_api::make_object<td_api::messages>(2, std::move(items))}),
+        7);
+
+    const auto* messages = converted.get_if<TdForwardMessages>();
+    REQUIRE(messages != nullptr);
+    REQUIRE(messages->messages.size() == 2);
+    REQUIRE(messages->messages.front());
+    CHECK(messages->messages.front()->sending_state.kind == TdMessageSendingStateKind::Pending);
+    CHECK(messages->messages.front()->sending_state.sending_id == 24680);
+    CHECK_FALSE(messages->messages.back());
 }
 
 TEST_CASE("parsed formattedText capability is exact generation-bound and one-shot",

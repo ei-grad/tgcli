@@ -272,6 +272,9 @@ class TdClient {
     prepare_send_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                          TdSendMessageRequest request);
     [[nodiscard]] TdPreparedWrite
+    prepare_forward_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                             TdForwardMessagesRequest request);
+    [[nodiscard]] TdPreparedWrite
     prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                             TdDirectRequest request, TdQueryLifetime lifetime = {});
     std::future<TdValue> send(TdPreparedWrite&& prepared);

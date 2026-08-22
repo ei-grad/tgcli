@@ -111,6 +111,24 @@ using SingleSendOutcome =
                  SingleSendAuthorizationLost, SingleSendGenerationClosed, SingleSendCancelled,
                  SingleSendRejected, SingleSendMalformed>;
 
+struct SingleSendImmediatePending {
+    SingleSendTemporaryId temporary;
+
+    bool operator==(const SingleSendImmediatePending&) const = default;
+};
+
+using SingleSendImmediateOutcome = std::variant<SingleSendImmediatePending, SingleSendOutcome>;
+
+namespace send_arbitration {
+
+SingleSendImmediateOutcome classify_immediate(const core::TdWriteMessage& message,
+                                              std::uint64_t client_generation, std::int64_t chat_id,
+                                              std::int32_t sending_id);
+std::optional<SingleSendOutcome> classify_update(const core::TdValue& value,
+                                                 const SingleSendTemporaryId& temporary);
+
+} // namespace send_arbitration
+
 struct SingleSendPrepared {};
 using SingleSendPreparationOutcome =
     std::variant<SingleSendPrepared, SingleSendAuthorizationLost, SingleSendGenerationClosed,

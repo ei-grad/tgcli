@@ -62,6 +62,7 @@ enum class TdFunctionKind {
     GetMessageAvailableReactions,
     ParseTextEntities,
     SendMessage,
+    ForwardMessages,
     EditMessageText,
     DeleteMessages,
     AddMessageReaction,
@@ -163,6 +164,8 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "parseTextEntities";
     case TdFunctionKind::SendMessage:
         return "sendMessage";
+    case TdFunctionKind::ForwardMessages:
+        return "forwardMessages";
     case TdFunctionKind::EditMessageText:
         return "editMessageText";
     case TdFunctionKind::DeleteMessages:
@@ -1183,6 +1186,26 @@ struct TdSendMessageRequest {
 [[nodiscard]] bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept;
 TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& request);
 
+struct TdForwardMessagesRequest {
+    std::int64_t from_chat_id = 0;
+    std::int64_t to_chat_id = 0;
+    std::vector<std::int64_t> message_ids;
+    std::int32_t sending_id = 0;
+    bool drop_author = false;
+
+    bool operator==(const TdForwardMessagesRequest&) const = default;
+};
+
+[[nodiscard]] bool
+valid_td_forward_messages_request(const TdForwardMessagesRequest& request) noexcept;
+TdFunctionData describe_td_forward_messages_request(const TdForwardMessagesRequest& request);
+
+struct TdForwardMessages {
+    std::vector<std::optional<TdWriteMessage>> messages;
+
+    bool operator==(const TdForwardMessages&) const = default;
+};
+
 struct TdUpdateMessageSendSucceeded {
     std::uint64_t client_generation = 0;
     std::int64_t old_message_id = 0;
@@ -1570,6 +1593,7 @@ class TdRuntime {
     virtual TdValue make_parse_text_entities(std::string text, TdTextParseMode mode) = 0;
     virtual TdValue make_send_message(TdSendMessageRequest request,
                                       std::uint64_t client_generation) = 0;
+    virtual TdValue make_forward_messages(TdForwardMessagesRequest request) = 0;
     virtual TdValue make_edit_message_text(TdEditMessageTextRequest request) = 0;
     virtual TdValue make_delete_messages(TdDeleteMessagesRequest request) = 0;
     virtual TdValue make_message_reaction(TdMessageReactionRequest request) = 0;

@@ -241,6 +241,55 @@ std::optional<SingleSendOutcome> outcome_from_update(const core::TdUpdateDeleteM
 
 } // namespace
 
+SingleSendImmediateOutcome send_arbitration::classify_immediate(const core::TdWriteMessage& message,
+                                                                std::uint64_t client_generation,
+                                                                std::int64_t chat_id,
+                                                                std::int32_t sending_id) {
+    switch (message.sending_state.kind) {
+    case core::TdMessageSendingStateKind::Pending:
+        if (!valid_pending_message(message, chat_id, sending_id)) {
+            return SingleSendOutcome{SingleSendMalformed{
+                .temporary = std::nullopt, .tdlib_type_id = unsupported_type_id(message)}};
+        }
+        return SingleSendImmediatePending{.temporary = {.client_generation = client_generation,
+                                                        .chat_id = chat_id,
+                                                        .temporary_message_id = message.message.id,
+                                                        .sending_id = sending_id}};
+    case core::TdMessageSendingStateKind::Failed:
+        if (!valid_failed_message(message, chat_id) || !message.sending_state.error) {
+            return SingleSendOutcome{SingleSendMalformed{
+                .temporary = std::nullopt, .tdlib_type_id = unsupported_type_id(message)}};
+        }
+        return failure_from(*message.sending_state.error, std::nullopt,
+                            SingleSendMutationState::None, message.sending_state.retry_after);
+    case core::TdMessageSendingStateKind::Stable: {
+        auto success = success_from(message, std::nullopt, chat_id);
+        return success ? SingleSendImmediateOutcome{SingleSendOutcome{std::move(*success)}}
+                       : SingleSendImmediateOutcome{SingleSendOutcome{SingleSendMalformed{}}};
+    }
+    case core::TdMessageSendingStateKind::Unknown:
+        return SingleSendOutcome{
+            SingleSendMalformed{.temporary = std::nullopt,
+                                .tdlib_type_id = message.sending_state.unsupported_tdlib_type_id}};
+    }
+    return SingleSendOutcome{SingleSendMalformed{}};
+}
+
+std::optional<SingleSendOutcome>
+send_arbitration::classify_update(const core::TdValue& value,
+                                  const SingleSendTemporaryId& temporary) {
+    if (const auto* succeeded = value.get_if<core::TdUpdateMessageSendSucceeded>()) {
+        return outcome_from_update(*succeeded, temporary);
+    }
+    if (const auto* failed = value.get_if<core::TdUpdateMessageSendFailed>()) {
+        return outcome_from_update(*failed, temporary);
+    }
+    if (const auto* deleted = value.get_if<core::TdUpdateDeleteMessages>()) {
+        return outcome_from_update(*deleted, temporary);
+    }
+    return std::nullopt;
+}
+
 class SingleSendCoordinator::Impl {
   public:
     Impl(core::TdClient& client, RequestSession& session, SingleSendHooks hooks)
