@@ -561,7 +561,8 @@ parse_chat_join_input(const json& args, const secure::WipeObserver& wipe_observe
     }
     input.invite = true;
     input.invite_hash = *canonical;
-    input.redaction = redaction::InviteLinkRegistry::instance().register_link(input.target.value());
+    input.redaction =
+        redaction::InviteLinkRegistry::instance().register_link(input.target.view(), wipe_observer);
     if (!input.redaction.valid()) {
         failure = internal(proto::M3Operation::ChatJoin);
         return std::nullopt;
@@ -2740,12 +2741,13 @@ void WriteCoordinator::join_chat(const proto::Request& request, RequestSession& 
                                                      .tdlib_code = error.code}},
                     M2Operation::Resolve);
             };
-            auto classified = read_value(
-                resolver, client_.get(), session, proto::M3Operation::ChatJoin, request,
-                [&](const auto& current) {
-                    return client_.get().get_internal_link_type(
-                        current, state->input.target.value(), state->input.redaction.protection());
-                });
+            auto classified =
+                read_value(resolver, client_.get(), session, proto::M3Operation::ChatJoin, request,
+                           [&](const auto& current) {
+                               return client_.get().get_internal_link_type(
+                                   current, state->input.target.view(),
+                                   state->input.redaction.protection(), request.wipe_observer());
+                           });
             if (auto* failure = std::get_if<json>(&classified)) {
                 return std::move(*failure);
             }
@@ -2753,27 +2755,28 @@ void WriteCoordinator::join_chat(const proto::Request& request, RequestSession& 
             if (auto* error = classified_value.get_if<core::TdError>()) {
                 return read_error(*error);
             }
-            const auto* link = classified_value.get_if<core::TdInternalLink>();
+            auto* link = classified_value.get_if<core::TdInternalLink>();
             if (link == nullptr) {
                 return resolver_error_terminal(
                     ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}},
                     M2Operation::Resolve);
             }
-            if (link->kind != core::TdInternalLinkKind::ChatInvite) {
+            const auto link_kind = link->kind;
+            secure::wipe(link->url, request.wipe_observer(), "td_internal_link_url");
+            if (link_kind != core::TdInternalLinkKind::ChatInvite) {
                 return resolver_error_terminal(
                     ResolverError{
                         ResolverUsageError{.argument = "invite-link|@username",
                                            .reason = ResolverUsageReason::UnsupportedLinkType}},
                     M2Operation::Resolve);
             }
-            auto* mutable_link = classified_value.get_if<core::TdInternalLink>();
-            secure::wipe(mutable_link->url, request.wipe_observer(), "td_internal_link_url");
-            auto checked = read_value(
-                resolver, client_.get(), session, proto::M3Operation::ChatJoin, request,
-                [&](const auto& current) {
-                    return client_.get().check_chat_invite_link(
-                        current, state->input.target.value(), state->input.redaction.protection());
-                });
+            auto checked =
+                read_value(resolver, client_.get(), session, proto::M3Operation::ChatJoin, request,
+                           [&](const auto& current) {
+                               return client_.get().check_chat_invite_link(
+                                   current, state->input.target.view(),
+                                   state->input.redaction.protection(), request.wipe_observer());
+                           });
             if (auto* failure = std::get_if<json>(&checked)) {
                 return std::move(*failure);
             }
@@ -2813,10 +2816,11 @@ void WriteCoordinator::join_chat(const proto::Request& request, RequestSession& 
                 }
                 state->chat = std::get<ChatIdentity>(std::move(identity));
             }
-            state->dispatch->request =
-                core::TdJoinChatRequest{std::nullopt, std::string(state->input.target.view()),
-                                        state->chat ? std::optional{state->chat->id} : std::nullopt,
-                                        request.wipe_observer()};
+            state->dispatch->request = core::TdJoinChatRequest{
+                std::nullopt,
+                std::optional<secure::SensitiveString>{std::in_place, state->input.target.view(),
+                                                       request.wipe_observer(), "td_join_invite"},
+                state->chat ? std::optional{state->chat->id} : std::nullopt};
             state->dispatch->lifetime = state->input.redaction.protection();
         }
         std::string error;

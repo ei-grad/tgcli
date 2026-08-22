@@ -1,7 +1,8 @@
 #pragma once
 
+#include "common/secure_wipe.hpp"
+
 #include <algorithm>
-#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -46,19 +47,31 @@ inline bool is_exact_telegram_invite_link(std::string_view link) noexcept {
     return telegram_invite_token(link).has_value();
 }
 
-inline std::vector<std::string> exact_telegram_invite_aliases(std::string_view link) {
+inline std::vector<secure::SensitiveString>
+exact_telegram_invite_aliases(std::string_view link,
+                              const secure::WipeObserver& wipe_observer = {}) {
     const auto token = telegram_invite_token(link);
     if (!token) {
         return {};
     }
-    const std::array candidates{
-        std::string(link), "https://t.me/+" + std::string(*token), "t.me/+" + std::string(*token),
-        "https://t.me/joinchat/" + std::string(*token), "t.me/joinchat/" + std::string(*token)};
-    std::vector<std::string> aliases;
+    std::vector<secure::SensitiveString> candidates;
+    candidates.reserve(5);
+    candidates.emplace_back(std::string(link), wipe_observer, "invite_alias");
+    for (const auto prefix :
+         {std::string_view{"https://t.me/+"}, std::string_view{"t.me/+"},
+          std::string_view{"https://t.me/joinchat/"}, std::string_view{"t.me/joinchat/"}}) {
+        std::string candidate(prefix);
+        candidate.append(*token);
+        candidates.emplace_back(std::move(candidate), wipe_observer, "invite_alias");
+    }
+
+    std::vector<secure::SensitiveString> aliases;
     aliases.reserve(candidates.size());
-    for (const auto& candidate : candidates) {
-        if (std::ranges::find(aliases, candidate) == aliases.end()) {
-            aliases.push_back(candidate);
+    for (auto& candidate : candidates) {
+        if (std::ranges::none_of(aliases, [&](const auto& retained) {
+                return retained.view() == candidate.view();
+            })) {
+            aliases.push_back(std::move(candidate));
         }
     }
     return aliases;

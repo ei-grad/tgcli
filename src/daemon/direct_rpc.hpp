@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/deadline.hpp"
+#include "common/secure_wipe.hpp"
 #include "core/td_client.hpp"
 
 #include <cstdint>
@@ -105,8 +106,21 @@ struct DirectSuccess {
 };
 
 struct DirectTdError {
-    core::TdError error;
+    DirectTdError(core::TdError& source, secure::WipeObserver wipe_observer = {});
+    ~DirectTdError();
+    DirectTdError(const DirectTdError&) = delete;
+    DirectTdError& operator=(const DirectTdError&) = delete;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    DirectTdError(DirectTdError&& other);
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    DirectTdError& operator=(DirectTdError&& other);
+
+    core::TdError error; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+    // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
     DirectMutationState mutation_state = DirectMutationState::Possible;
+
+  private:
+    secure::WipeObserver wipe_observer_;
 };
 
 struct DirectAuthorizationLost {

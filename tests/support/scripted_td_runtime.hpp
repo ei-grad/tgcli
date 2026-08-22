@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace tgcli::test {
@@ -73,9 +74,13 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_get_chats(core::TdChatList list, std::int32_t limit) override;
     core::TdValue make_load_chats(core::TdChatList list, std::int32_t limit) override;
     core::TdValue make_search_public_chat(std::string username) override;
-    core::TdValue make_get_internal_link_type(std::string link, bool sensitive = false) override;
+    core::TdValue
+    make_get_internal_link_type(std::string_view link, bool sensitive = false,
+                                const secure::WipeObserver& wipe_observer = {}) override;
     core::TdValue make_get_message_link_info(std::string url) override;
-    core::TdValue make_check_chat_invite_link(std::string link) override;
+    core::TdValue
+    make_check_chat_invite_link(std::string_view link,
+                                const secure::WipeObserver& wipe_observer = {}) override;
     core::TdValue make_get_user(std::int64_t user_id) override;
     core::TdValue make_get_supergroup(std::int64_t supergroup_id) override;
     core::TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) override;

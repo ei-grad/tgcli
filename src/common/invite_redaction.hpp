@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/secure_wipe.hpp"
+
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -39,12 +41,13 @@ class InviteLinkRegistry final {
   public:
     static InviteLinkRegistry& instance();
 
-    [[nodiscard]] CorrelatedInviteLink register_link(std::string invite_link);
+    [[nodiscard]] CorrelatedInviteLink
+    register_link(std::string_view invite_link, const secure::WipeObserver& wipe_observer = {});
     [[nodiscard]] std::string redact(std::string_view value) const;
 
   private:
     struct Entry {
-        std::vector<std::string> aliases;
+        std::vector<secure::SensitiveString> aliases;
     };
 
     void release(std::uint64_t registration);

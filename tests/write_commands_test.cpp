@@ -13,6 +13,7 @@
 #include "support/scripted_td_runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -2133,6 +2134,7 @@ TEST_CASE("invite ownership wipes request handler response and direct DTO copies
                       (bot ? "BOT_UNSUPPORTED" : "WRITE_DENIED"));
             }
             CHECK(trace.saw("chat_join_input", invite.size()));
+            CHECK(trace.saw("invite_alias", invite.size()));
             CHECK(trace.saw("request_args", invite.size()));
             CHECK(trace.saw("request_facts_args", invite.size()));
         }
@@ -2171,8 +2173,11 @@ TEST_CASE("invite ownership wipes request handler response and direct DTO copies
                 }
             }
             CHECK(trace.saw("chat_join_input", invite.size()));
+            CHECK(trace.saw("invite_alias", invite.size()));
+            CHECK(trace.saw("td_internal_link_request_source", invite.size()));
             CHECK(trace.saw(succeeds ? "td_internal_link_url" : "td_invite_error", invite.size()));
             if (succeeds) {
+                CHECK(trace.saw("td_check_invite_request_source", invite.size()));
                 CHECK((trace.saw("td_join_invite", invite.size()) ||
                        trace.saw("td_join_invite_move_source", invite.size())));
             }
@@ -2180,6 +2185,58 @@ TEST_CASE("invite ownership wipes request handler response and direct DTO copies
             CHECK(trace.saw("request_facts_args", invite.size()));
         }
     }
+}
+
+TEST_CASE("invite alias ownership covers exact forms and short strings through final release",
+          "[write-command][chat][join][secrecy][redaction][wipe][sso][fake-boundary]") {
+    const std::string invite = "t.me/+x";
+    const std::array aliases{
+        std::string_view{invite}, std::string_view{"https://t.me/+x"}, std::string_view{"t.me/+x"},
+        std::string_view{"https://t.me/joinchat/x"}, std::string_view{"t.me/joinchat/x"}};
+    WipeTrace trace;
+    {
+        FakeWrites fake;
+        auto pending =
+            fake.dispatch(chat_join_request(invite, std::nullopt, false, 2.0, trace.observer()));
+        bind_principal(fake);
+        const auto query_id = fake.observe_query(core::TdFunctionKind::GetInternalLinkType);
+        for (const auto alias : aliases) {
+            CAPTURE(alias);
+            CHECK(redaction::InviteLinkRegistry::instance().redact(alias) != alias);
+        }
+        fake.push_response(query_id, core::TdError{.code = 404, .message = invite});
+        REQUIRE(pending.get().error);
+    }
+    for (const auto alias : aliases) {
+        CAPTURE(alias);
+        CHECK(redaction::InviteLinkRegistry::instance().redact(alias) == alias);
+        CHECK(trace.saw("invite_alias", alias.size()));
+    }
+    CHECK(trace.saw("sensitive_string_constructor_source", invite.size()));
+    CHECK(trace.saw("sensitive_string_move_source", invite.size()));
+    CHECK(trace.saw("td_internal_link_request_source", invite.size()));
+}
+
+TEST_CASE("unsupported invite classification wipes every returned link URL before terminal",
+          "[write-command][chat][join][secrecy][wipe][fake-boundary]") {
+    const std::string invite = "t.me/joinchat/UnsupportedUrlSentinel123";
+    const std::string canonical = "https://t.me/+UnsupportedUrlSentinel123";
+    WipeTrace trace;
+    FakeWrites fake;
+    auto pending =
+        fake.dispatch(chat_join_request(invite, std::nullopt, false, 2.0, trace.observer()));
+    bind_principal(fake);
+    fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                 core::TdInternalLink{.kind = core::TdInternalLinkKind::Message,
+                                      .username = {},
+                                      .url = canonical,
+                                      .tdlib_type_id = 1});
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "USAGE");
+    CHECK(outcome.error->dump().find(invite) == std::string::npos);
+    CHECK(outcome.error->dump().find(canonical) == std::string::npos);
+    CHECK(trace.saw("td_internal_link_url", canonical.size()));
 }
 
 TEST_CASE("late invite planning response retains exact log redaction after timeout",
@@ -2357,6 +2414,23 @@ TEST_CASE("post-dispatch invite query redaction survives terminal races until co
         CHECK(trace.saw("chat_join_input", invite.size()));
         CHECK((trace.saw("td_join_invite", invite.size()) ||
                trace.saw("td_join_invite_move_source", invite.size())));
+        wait_for_invite_release(invite);
+    }
+
+    SECTION("TD error terminal wipes response and direct outcome owners") {
+        const std::string invite = "t.me/+e";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "dispatch-error-invite", false, 2.0, trace.observer()));
+        const auto query_id = reach_invite_dispatch(fake, invite);
+        fake.push_response(query_id, core::TdError{.code = 400, .message = invite});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TDLIB_ERROR");
+        CHECK(outcome.error->dump().find(invite) == std::string::npos);
+        CHECK(trace.saw("direct_td_error_source", invite.size()));
+        CHECK(trace.saw("direct_td_error", invite.size()));
         wait_for_invite_release(invite);
     }
 }

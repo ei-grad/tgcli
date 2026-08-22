@@ -1,10 +1,13 @@
 #include "core/td_runtime_test_adapter.hpp"
 #include "support/scripted_td_runtime.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -19,6 +22,12 @@ namespace td_api = td::td_api;
 namespace {
 
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
+
+std::optional<tgcli::secure::SensitiveString>
+invite_owner(std::string_view value, tgcli::secure::WipeObserver observer = {}) {
+    return std::optional<tgcli::secure::SensitiveString>{std::in_place, value, std::move(observer),
+                                                         "td_join_invite"};
+}
 
 class UnsupportedTextEntityType final : public td_api::TextEntityType {
   public:
@@ -135,8 +144,8 @@ std::vector<TdDirectRequest> direct_requests() {
         TdAddChatToListRequest{.chat_id = -1001, .list = TdDirectChatList::Archive},
         TdAddChatToListRequest{.chat_id = -1001, .list = TdDirectChatList::Main},
         TdJoinChatRequest{-1001, std::nullopt, std::nullopt},
-        TdJoinChatRequest{std::nullopt, "https://t.me/+private-token", std::nullopt},
-        TdJoinChatRequest{std::nullopt, "https://t.me/+known-private-token", -1001},
+        TdJoinChatRequest{std::nullopt, invite_owner("https://t.me/+private-token"), std::nullopt},
+        TdJoinChatRequest{std::nullopt, invite_owner("https://t.me/+known-private-token"), -1001},
         TdLeaveChatRequest{.chat_id = -1001},
     };
 }
@@ -219,6 +228,49 @@ TEST_CASE("direct native factories match the scripted descriptor boundary exactl
         REQUIRE(fake.function_data());
         CHECK(*native.function_data() == *fake.function_data());
         CHECK(detail::production_direct_request_matches_for_test(native, request));
+    }
+}
+
+TEST_CASE("abandoned native invite request wipes its tgcli-owned payload",
+          "[core][tdlib][direct][factory][secret][wipe]") {
+    struct Observation {
+        std::string stage;
+        std::size_t size = 0;
+        bool all_zero = false;
+    };
+    std::vector<Observation> observations;
+    const auto observer = [&observations](std::string_view stage, const char* bytes,
+                                          std::size_t size) {
+        observations.push_back(
+            {.stage = std::string(stage),
+             .size = size,
+             .all_zero = size == 0 || std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                                  [](char value) { return value == '\0'; })});
+    };
+    const std::string invite = "t.me/+x";
+    {
+        const TdDirectRequest request =
+            TdJoinChatRequest{std::nullopt, invite_owner(invite, observer), std::nullopt};
+        auto native = detail::make_production_direct_request_for_test(request);
+        REQUIRE(native.function_data());
+        CHECK(native.function_data()->kind() == TdFunctionKind::JoinChatByInviteLink);
+    }
+    {
+        auto classified =
+            detail::make_production_get_internal_link_type_for_test(invite, true, observer);
+        auto checked = detail::make_production_check_chat_invite_link_for_test(invite, observer);
+        REQUIRE(classified.function_data());
+        REQUIRE(checked.function_data());
+    }
+    CHECK(std::ranges::any_of(observations, [&](const Observation& item) {
+        return item.stage == "td_join_native" && item.size == invite.size() && item.all_zero;
+    }));
+    for (const auto* stage : {"td_internal_link_request_source", "td_internal_link_native",
+                              "td_check_invite_request_source", "td_check_invite_native"}) {
+        CAPTURE(stage);
+        CHECK(std::ranges::any_of(observations, [&](const Observation& item) {
+            return item.stage == stage && item.size == invite.size() && item.all_zero;
+        }));
     }
 }
 
@@ -578,10 +630,10 @@ TEST_CASE("production and scripted direct factories reject the same invalid requ
         TdViewMessagesRequest{.chat_id = -1001, .message_ids = {10, 11}},
         TdSetChatNotificationSettingsRequest{
             .chat_id = -1001, .settings = {.use_default_mute_for = false, .mute_for = -1}},
-        TdJoinChatRequest{-1001, "https://t.me/+token", std::nullopt},
+        TdJoinChatRequest{-1001, invite_owner("https://t.me/+token"), std::nullopt},
         TdJoinChatRequest{std::nullopt, std::nullopt, std::nullopt},
-        TdJoinChatRequest{std::nullopt, std::string{}, std::nullopt},
-        TdJoinChatRequest{std::nullopt, "https://t.me/+token", 0},
+        TdJoinChatRequest{std::nullopt, invite_owner(""), std::nullopt},
+        TdJoinChatRequest{std::nullopt, invite_owner("https://t.me/+token"), 0},
         TdLeaveChatRequest{.chat_id = 0},
     };
     tgcli::test::ScriptedTdRuntime runtime;

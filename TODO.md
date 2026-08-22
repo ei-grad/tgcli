@@ -274,7 +274,7 @@ before the milestone is closed.
 - [ ] Implement the ordered `tgcli msg forward` vector coordinator with one
       strict `ForwardItem` across success/error/timeout/audit/store, partial
       outcomes, deleted-before-confirmation handling and 429 aggregation
-- [x] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
+- [ ] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
       with exact direct-call state machines, invite secrecy and
       notification-setting plans
 - [ ] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel

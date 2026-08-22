@@ -66,7 +66,8 @@ InviteLinkRegistry& InviteLinkRegistry::instance() {
     return registry;
 }
 
-CorrelatedInviteLink InviteLinkRegistry::register_link(std::string invite_link) {
+CorrelatedInviteLink InviteLinkRegistry::register_link(std::string_view invite_link,
+                                                       const secure::WipeObserver& wipe_observer) {
     if (invite_link.empty()) {
         return {};
     }
@@ -76,11 +77,9 @@ CorrelatedInviteLink InviteLinkRegistry::register_link(std::string invite_link) 
         return {};
     }
     const auto registration = next_registration_++;
-    auto aliases = common::exact_telegram_invite_aliases(invite_link);
+    auto aliases = common::exact_telegram_invite_aliases(invite_link, wipe_observer);
     if (aliases.empty()) {
-        aliases.push_back(std::move(invite_link));
-    } else {
-        secure::wipe(invite_link);
+        aliases.emplace_back(invite_link, wipe_observer, "invite_alias");
     }
     links_.emplace(registration, Entry{.aliases = std::move(aliases)});
     return CorrelatedInviteLink(std::make_shared<CorrelatedInviteLink::State>(this, registration));
@@ -91,7 +90,7 @@ std::string InviteLinkRegistry::redact(std::string_view value) const {
     if (links_.empty()) {
         return std::string(value);
     }
-    std::vector<const std::string*> ordered;
+    std::vector<const secure::SensitiveString*> ordered;
     ordered.reserve(links_.size());
     for (const auto& [registration, entry] : links_) {
         static_cast<void>(registration);
@@ -99,8 +98,8 @@ std::string InviteLinkRegistry::redact(std::string_view value) const {
             ordered.push_back(&alias);
         }
     }
-    std::ranges::sort(ordered, [](const std::string* left, const std::string* right) {
-        return left->size() > right->size();
+    std::ranges::sort(ordered, [](const auto* left, const auto* right) {
+        return left->view().size() > right->view().size();
     });
 
     std::string result;
@@ -108,11 +107,11 @@ std::string InviteLinkRegistry::redact(std::string_view value) const {
     std::size_t offset = 0;
     while (offset < value.size()) {
         std::size_t next = std::string_view::npos;
-        const std::string* matched = nullptr;
+        const secure::SensitiveString* matched = nullptr;
         for (const auto* link : ordered) {
-            const auto found = value.find(*link, offset);
-            if (found < next ||
-                (found == next && matched != nullptr && link->size() > matched->size())) {
+            const auto found = value.find(link->view(), offset);
+            if (found < next || (found == next && matched != nullptr &&
+                                 link->view().size() > matched->view().size())) {
                 next = found;
                 matched = link;
             }
@@ -123,7 +122,7 @@ std::string InviteLinkRegistry::redact(std::string_view value) const {
         }
         result.append(value.substr(offset, next - offset));
         result.append(kInviteLinkReplacement);
-        offset = next + matched->size();
+        offset = next + matched->view().size();
     }
     return result;
 }
@@ -133,9 +132,6 @@ void InviteLinkRegistry::release(std::uint64_t registration) {
     const auto found = links_.find(registration);
     if (found == links_.end()) {
         return;
-    }
-    for (auto& alias : found->second.aliases) {
-        secure::wipe(alias);
     }
     links_.erase(found);
 }

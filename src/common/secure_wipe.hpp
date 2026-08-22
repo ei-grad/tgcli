@@ -80,23 +80,33 @@ class SensitiveString {
     explicit SensitiveString(std::string_view value, WipeObserver observer = {},
                              std::string stage = "sensitive_string")
         : value_(value), observer_(std::move(observer)), stage_(std::move(stage)) {}
+    // Copying precedes source wiping so short-string bytes remain addressable.
+    // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
+    explicit SensitiveString(std::string&& value, WipeObserver observer = {},
+                             std::string stage = "sensitive_string")
+        : observer_(std::move(observer)), stage_(std::move(stage)) {
+        const StringWiper source_wiper(value, observer_, "sensitive_string_constructor_source");
+        value_.assign(value);
+    }
     ~SensitiveString() {
         wipe(value_, observer_, stage_);
     }
     SensitiveString(const SensitiveString&) = delete;
     SensitiveString& operator=(const SensitiveString&) = delete;
-    SensitiveString(SensitiveString&& other) noexcept
-        : value_(std::move(other.value_)), observer_(std::move(other.observer_)),
-          stage_(std::move(other.stage_)) {
-        wipe(other.value_, observer_, "sensitive_string_move_source");
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    SensitiveString(SensitiveString&& other)
+        : observer_(std::move(other.observer_)), stage_(std::move(other.stage_)) {
+        const StringWiper source_wiper(other.value_, observer_, "sensitive_string_move_source");
+        value_.assign(other.value_);
     }
-    SensitiveString& operator=(SensitiveString&& other) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    SensitiveString& operator=(SensitiveString&& other) {
         if (this != &other) {
             wipe(value_, observer_, stage_);
-            value_ = std::move(other.value_);
             observer_ = std::move(other.observer_);
             stage_ = std::move(other.stage_);
-            wipe(other.value_, observer_, "sensitive_string_move_source");
+            const StringWiper source_wiper(other.value_, observer_, "sensitive_string_move_source");
+            value_.assign(other.value_);
         }
         return *this;
     }
@@ -111,6 +121,10 @@ class SensitiveString {
 
     [[nodiscard]] bool empty() const noexcept {
         return value_.empty();
+    }
+
+    [[nodiscard]] const WipeObserver& wipe_observer() const noexcept {
+        return observer_;
     }
 
   private:

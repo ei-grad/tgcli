@@ -13,6 +13,12 @@ TdValue convert_production_response_for_test(TdValue object);
 TdValue convert_production_sessions_for_test(TdValue object);
 TdValue make_production_get_active_sessions_for_test();
 TdValue make_production_terminate_session_for_test(std::int64_t session_id);
+TdValue
+make_production_get_internal_link_type_for_test(std::string_view link, bool sensitive,
+                                                const secure::WipeObserver& wipe_observer = {});
+TdValue
+make_production_check_chat_invite_link_for_test(std::string_view link,
+                                                const secure::WipeObserver& wipe_observer = {});
 TdValue make_production_get_chat_history_for_test(std::int64_t chat_id,
                                                   std::int64_t from_message_id, std::int32_t offset,
                                                   std::int32_t limit, bool only_local);

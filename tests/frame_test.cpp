@@ -840,3 +840,31 @@ TEST_CASE("invite request and admitted fact copies are wiped with their owning f
         return item.stage == "admitted_request_source" && item.size != 0 && item.all_zero;
     }));
 }
+
+TEST_CASE("sensitive string transfer wipes a short-string move source",
+          "[proto][secret][invite][wipe][sso]") {
+    struct Observation {
+        std::string stage;
+        std::size_t size = 0;
+        bool all_zero = false;
+    };
+    std::vector<Observation> observations;
+    const auto observer = [&observations](std::string_view stage, const char* bytes,
+                                          std::size_t size) {
+        observations.push_back(
+            {.stage = std::string(stage),
+             .size = size,
+             .all_zero = size == 0 || std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                                  [](char value) { return value == '\0'; })});
+    };
+    constexpr std::string_view short_invite = "t.me/+x";
+    {
+        tgcli::secure::SensitiveString source(short_invite, observer, "short_invite_owner");
+        const tgcli::secure::SensitiveString destination(std::move(source));
+        CHECK(destination.view() == short_invite);
+    }
+    CHECK(std::ranges::any_of(observations, [](const Observation& item) {
+        return item.stage == "sensitive_string_move_source" &&
+               item.size == std::string_view{"t.me/+x"}.size() && item.all_zero;
+    }));
+}

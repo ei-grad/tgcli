@@ -103,8 +103,8 @@ TdFunctionKind direct_request_kind(const TdDirectRequest& request) {
             } else if constexpr (std::is_same_v<Request, TdAddChatToListRequest>) {
                 return TdFunctionKind::AddChatToList;
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
-                return value.invite_link ? TdFunctionKind::JoinChatByInviteLink
-                                         : TdFunctionKind::JoinChat;
+                return value.is_invite_request() ? TdFunctionKind::JoinChatByInviteLink
+                                                 : TdFunctionKind::JoinChat;
             } else {
                 static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
                 return TdFunctionKind::LeaveChat;
@@ -371,9 +371,10 @@ class TdClient::Impl {
 
     std::future<TdValue>
     get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                           std::string link, TdQueryLifetime lifetime) {
+                           std::string_view link, TdQueryLifetime lifetime,
+                           const secure::WipeObserver& wipe_observer) {
         const bool sensitive = lifetime != nullptr;
-        auto request = runtime_->make_get_internal_link_type(std::move(link), sensitive);
+        auto request = runtime_->make_get_internal_link_type(link, sensitive, wipe_observer);
         return send_read(authorization, TdFunctionKind::GetInternalLinkType, std::move(request),
                          std::move(lifetime));
     }
@@ -387,9 +388,10 @@ class TdClient::Impl {
 
     std::future<TdValue>
     check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                           std::string link, TdQueryLifetime lifetime) {
+                           std::string_view link, TdQueryLifetime lifetime,
+                           const secure::WipeObserver& wipe_observer) {
         return send_read(authorization, TdFunctionKind::CheckChatInviteLink,
-                         runtime_->make_check_chat_invite_link(std::move(link)),
+                         runtime_->make_check_chat_invite_link(link, wipe_observer),
                          std::move(lifetime));
     }
 
@@ -1918,8 +1920,9 @@ TdClient::search_public_chat(const std::shared_ptr<const AuthStateSnapshot>& aut
 
 std::future<TdValue>
 TdClient::get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                 std::string link, TdQueryLifetime lifetime) {
-    return impl_->get_internal_link_type(authorization, std::move(link), std::move(lifetime));
+                                 std::string_view link, TdQueryLifetime lifetime,
+                                 const secure::WipeObserver& wipe_observer) {
+    return impl_->get_internal_link_type(authorization, link, std::move(lifetime), wipe_observer);
 }
 
 std::future<TdValue>
@@ -1930,8 +1933,9 @@ TdClient::get_message_link_info(const std::shared_ptr<const AuthStateSnapshot>& 
 
 std::future<TdValue>
 TdClient::check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                 std::string link, TdQueryLifetime lifetime) {
-    return impl_->check_chat_invite_link(authorization, std::move(link), std::move(lifetime));
+                                 std::string_view link, TdQueryLifetime lifetime,
+                                 const secure::WipeObserver& wipe_observer) {
+    return impl_->check_chat_invite_link(authorization, link, std::move(lifetime), wipe_observer);
 }
 
 std::future<TdValue>

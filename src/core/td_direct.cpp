@@ -178,13 +178,14 @@ bool valid_td_direct_request(const TdAddChatToListRequest& request) noexcept {
 
 bool valid_td_direct_request(const TdJoinChatRequest& request) {
     if (request.chat_id.has_value()) {
-        return !request.invite_link.has_value() && !request.expected_invite_chat_id.has_value() &&
+        return !request.is_invite_request() && !request.has_invite_link() &&
+               !request.expected_invite_chat_id.has_value() &&
                valid_td_chat_id(request.chat_id.value_or(0));
     }
-    if (!request.invite_link.has_value()) {
+    if (!request.is_invite_request() || !request.has_invite_link()) {
         return false;
     }
-    const auto& invite_link = request.invite_link.value();
+    const auto invite_link = request.invite_link().value_or(std::string_view{});
     return !invite_link.empty() && common::valid_utf8(invite_link) &&
            (!request.expected_invite_chat_id ||
             valid_td_chat_id(request.expected_invite_chat_id.value_or(0)));

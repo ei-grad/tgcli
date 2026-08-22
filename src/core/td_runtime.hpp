@@ -1304,28 +1304,35 @@ struct TdAddChatToListRequest {
 
 struct TdJoinChatRequest {
     TdJoinChatRequest(std::optional<std::int64_t> chat_id_value = {},
-                      std::optional<std::string> invite_link_value = {},
-                      std::optional<std::int64_t> expected_invite_chat_id_value = {},
-                      secure::WipeObserver wipe_observer_value = {});
-    ~TdJoinChatRequest();
-    TdJoinChatRequest(const TdJoinChatRequest& other) = default;
+                      std::optional<secure::SensitiveString> invite_link_value = {},
+                      std::optional<std::int64_t> expected_invite_chat_id_value = {});
+    ~TdJoinChatRequest() = default;
+    TdJoinChatRequest(const TdJoinChatRequest& other);
     TdJoinChatRequest& operator=(const TdJoinChatRequest& other);
-    TdJoinChatRequest(TdJoinChatRequest&& other) noexcept;
-    TdJoinChatRequest& operator=(TdJoinChatRequest&& other) noexcept;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    TdJoinChatRequest(TdJoinChatRequest&& other);
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    TdJoinChatRequest& operator=(TdJoinChatRequest&& other);
 
     std::optional<std::int64_t>
         chat_id; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
-    std::optional<std::string>
-        invite_link; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
     // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
     std::optional<std::int64_t> expected_invite_chat_id;
 
+    [[nodiscard]] bool is_invite_request() const noexcept;
+    [[nodiscard]] bool has_invite_link() const noexcept;
+    [[nodiscard]] std::optional<std::string_view> invite_link() const noexcept;
+    [[nodiscard]] const secure::WipeObserver& wipe_observer() const noexcept;
+    void clear_invite_link();
+
     bool operator==(const TdJoinChatRequest& other) const {
-        return chat_id == other.chat_id && invite_link == other.invite_link &&
+        return chat_id == other.chat_id && invite_link() == other.invite_link() &&
                expected_invite_chat_id == other.expected_invite_chat_id;
     }
 
   private:
+    std::optional<secure::SensitiveString> invite_link_;
+    bool invite_request_ = false;
     secure::WipeObserver wipe_observer_;
 };
 
@@ -1546,9 +1553,11 @@ class TdRuntime {
     virtual TdValue make_get_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_load_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_search_public_chat(std::string username) = 0;
-    virtual TdValue make_get_internal_link_type(std::string link, bool sensitive = false) = 0;
+    virtual TdValue make_get_internal_link_type(std::string_view link, bool sensitive = false,
+                                                const secure::WipeObserver& wipe_observer = {}) = 0;
     virtual TdValue make_get_message_link_info(std::string url) = 0;
-    virtual TdValue make_check_chat_invite_link(std::string link) = 0;
+    virtual TdValue make_check_chat_invite_link(std::string_view link,
+                                                const secure::WipeObserver& wipe_observer = {}) = 0;
     virtual TdValue make_get_user(std::int64_t user_id) = 0;
     virtual TdValue make_get_supergroup(std::int64_t supergroup_id) = 0;
     virtual TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) = 0;

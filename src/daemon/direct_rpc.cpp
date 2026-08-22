@@ -14,6 +14,40 @@
 
 namespace tgcli::daemon {
 
+DirectTdError::DirectTdError(core::TdError& source, secure::WipeObserver wipe_observer)
+    : error{.code = source.code, .message = {}}, wipe_observer_(std::move(wipe_observer)) {
+    const secure::StringWiper source_wiper(source.message, wipe_observer_,
+                                           "direct_td_error_source");
+    error.message.assign(source.message);
+}
+
+DirectTdError::~DirectTdError() {
+    secure::wipe(error.message, wipe_observer_, "direct_td_error");
+}
+
+// NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+DirectTdError::DirectTdError(DirectTdError&& other)
+    : error{.code = other.error.code, .message = {}}, mutation_state(other.mutation_state),
+      wipe_observer_(std::move(other.wipe_observer_)) {
+    const secure::StringWiper source_wiper(other.error.message, wipe_observer_,
+                                           "direct_td_error_move_source");
+    error.message.assign(other.error.message);
+}
+
+// NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+DirectTdError& DirectTdError::operator=(DirectTdError&& other) {
+    if (this != &other) {
+        secure::wipe(error.message, wipe_observer_, "direct_td_error");
+        error.code = other.error.code;
+        mutation_state = other.mutation_state;
+        wipe_observer_ = std::move(other.wipe_observer_);
+        const secure::StringWiper source_wiper(other.error.message, wipe_observer_,
+                                               "direct_td_error_move_source");
+        error.message.assign(other.error.message);
+    }
+    return *this;
+}
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -204,9 +238,14 @@ DirectOutcome direct_result_from(const core::TdLeaveChatRequest& input,
     return DirectSuccess{.result = DirectLeaveResult{.chat_id = input.chat_id}};
 }
 
-DirectOutcome success_from(const core::TdDirectRequest& request, const core::TdValue& value) {
-    if (const auto* error = value.get_if<core::TdError>()) {
-        return DirectTdError{.error = *error};
+DirectOutcome success_from(const core::TdDirectRequest& request, core::TdValue& value) {
+    if (auto* error = value.get_if<core::TdError>()) {
+        secure::WipeObserver wipe_observer;
+        if (const auto* join = std::get_if<core::TdJoinChatRequest>(&request);
+            join != nullptr && join->is_invite_request()) {
+            wipe_observer = join->wipe_observer();
+        }
+        return DirectTdError(*error, std::move(wipe_observer));
     }
     if (const auto* malformed = value.get_if<core::TdDirectConversionError>()) {
         return DirectMalformed{.tdlib_type_id = malformed->tdlib_type_id};
@@ -216,9 +255,8 @@ DirectOutcome success_from(const core::TdDirectRequest& request, const core::TdV
 
 void wipe_invite(core::TdDirectRequest& request) {
     if (auto* join = std::get_if<core::TdJoinChatRequest>(&request);
-        join != nullptr && join->invite_link) {
-        secure::wipe(*join->invite_link);
-        join->invite_link.reset();
+        join != nullptr && join->has_invite_link()) {
+        join->clear_invite_link();
     }
 }
 

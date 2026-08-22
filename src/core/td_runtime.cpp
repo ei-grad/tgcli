@@ -24,57 +24,71 @@ namespace tgcli::core {
 namespace td_api = td::td_api;
 
 TdJoinChatRequest::TdJoinChatRequest(std::optional<std::int64_t> chat_id_value,
-                                     std::optional<std::string> invite_link_value,
-                                     std::optional<std::int64_t> expected_invite_chat_id_value,
-                                     secure::WipeObserver wipe_observer_value)
-    : chat_id(chat_id_value), invite_link(std::move(invite_link_value)),
-      expected_invite_chat_id(expected_invite_chat_id_value),
-      wipe_observer_(std::move(wipe_observer_value)) {}
+                                     std::optional<secure::SensitiveString> invite_link_value,
+                                     std::optional<std::int64_t> expected_invite_chat_id_value)
+    : chat_id(chat_id_value), expected_invite_chat_id(expected_invite_chat_id_value),
+      invite_link_(std::move(invite_link_value)), invite_request_(invite_link_.has_value()),
+      wipe_observer_(invite_link_ ? invite_link_->wipe_observer() : secure::WipeObserver{}) {}
 
-TdJoinChatRequest::~TdJoinChatRequest() {
-    if (invite_link) {
-        secure::wipe(*invite_link, wipe_observer_, "td_join_invite");
+TdJoinChatRequest::TdJoinChatRequest(const TdJoinChatRequest& other)
+    : chat_id(other.chat_id), expected_invite_chat_id(other.expected_invite_chat_id),
+      invite_request_(other.invite_request_), wipe_observer_(other.wipe_observer_) {
+    if (const auto link = other.invite_link()) {
+        invite_link_.emplace(*link, wipe_observer_, "td_join_invite");
     }
 }
 
 TdJoinChatRequest& TdJoinChatRequest::operator=(const TdJoinChatRequest& other) {
     if (this != &other) {
-        if (invite_link) {
-            secure::wipe(*invite_link, wipe_observer_, "td_join_invite");
-        }
+        invite_link_.reset();
         chat_id = other.chat_id;
-        invite_link = other.invite_link;
         expected_invite_chat_id = other.expected_invite_chat_id;
+        invite_request_ = other.invite_request_;
         wipe_observer_ = other.wipe_observer_;
+        if (const auto link = other.invite_link()) {
+            invite_link_.emplace(*link, wipe_observer_, "td_join_invite");
+        }
     }
     return *this;
 }
 
-TdJoinChatRequest::TdJoinChatRequest(TdJoinChatRequest&& other) noexcept
-    : chat_id(other.chat_id), invite_link(std::move(other.invite_link)),
-      expected_invite_chat_id(other.expected_invite_chat_id),
-      wipe_observer_(std::move(other.wipe_observer_)) {
-    if (other.invite_link) {
-        secure::wipe(*other.invite_link, wipe_observer_, "td_join_invite_move_source");
-        other.invite_link.reset();
-    }
-}
+// NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+TdJoinChatRequest::TdJoinChatRequest(TdJoinChatRequest&& other)
+    : chat_id(other.chat_id), expected_invite_chat_id(other.expected_invite_chat_id),
+      invite_link_(std::move(other.invite_link_)), invite_request_(other.invite_request_),
+      wipe_observer_(std::move(other.wipe_observer_)) {}
 
-TdJoinChatRequest& TdJoinChatRequest::operator=(TdJoinChatRequest&& other) noexcept {
+// NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+TdJoinChatRequest& TdJoinChatRequest::operator=(TdJoinChatRequest&& other) {
     if (this != &other) {
-        if (invite_link) {
-            secure::wipe(*invite_link, wipe_observer_, "td_join_invite");
-        }
+        invite_link_.reset();
         chat_id = other.chat_id;
-        invite_link = std::move(other.invite_link);
+        invite_link_ = std::move(other.invite_link_);
         expected_invite_chat_id = other.expected_invite_chat_id;
+        invite_request_ = other.invite_request_;
         wipe_observer_ = std::move(other.wipe_observer_);
-        if (other.invite_link) {
-            secure::wipe(*other.invite_link, wipe_observer_, "td_join_invite_move_source");
-            other.invite_link.reset();
-        }
     }
     return *this;
+}
+
+bool TdJoinChatRequest::is_invite_request() const noexcept {
+    return invite_request_;
+}
+
+bool TdJoinChatRequest::has_invite_link() const noexcept {
+    return invite_link_.has_value();
+}
+
+std::optional<std::string_view> TdJoinChatRequest::invite_link() const noexcept {
+    return invite_link_ ? std::optional{invite_link_->view()} : std::nullopt;
+}
+
+const secure::WipeObserver& TdJoinChatRequest::wipe_observer() const noexcept {
+    return wipe_observer_;
+}
+
+void TdJoinChatRequest::clear_invite_link() {
+    invite_link_.reset();
 }
 
 namespace {
@@ -82,24 +96,27 @@ namespace {
 using NativeFunctionPtr = td_api::object_ptr<td_api::Function>;
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
 
-void wipe_get_internal_link_type(NativeFunctionPtr& native) noexcept {
+void wipe_get_internal_link_type(NativeFunctionPtr& native,
+                                 const secure::WipeObserver& wipe_observer) noexcept {
     if (native != nullptr && native->get_id() == td_api::getInternalLinkType::ID) {
         auto* request = static_cast<td_api::getInternalLinkType*>(native.get());
-        secure::wipe(request->link_);
+        secure::wipe(request->link_, wipe_observer, "td_internal_link_native");
     }
 }
 
-void wipe_check_chat_invite_link(NativeFunctionPtr& native) noexcept {
+void wipe_check_chat_invite_link(NativeFunctionPtr& native,
+                                 const secure::WipeObserver& wipe_observer) noexcept {
     if (native != nullptr && native->get_id() == td_api::checkChatInviteLink::ID) {
         auto* request = static_cast<td_api::checkChatInviteLink*>(native.get());
-        secure::wipe(request->invite_link_);
+        secure::wipe(request->invite_link_, wipe_observer, "td_check_invite_native");
     }
 }
 
-void wipe_join_chat_by_invite_link(NativeFunctionPtr& native) noexcept {
+void wipe_join_chat_by_invite_link(NativeFunctionPtr& native,
+                                   const secure::WipeObserver& wipe_observer) noexcept {
     if (native != nullptr && native->get_id() == td_api::joinChatByInviteLink::ID) {
         auto* request = static_cast<td_api::joinChatByInviteLink*>(native.get());
-        secure::wipe(request->invite_link_);
+        secure::wipe(request->invite_link_, wipe_observer, "td_join_native");
     }
 }
 
@@ -2207,13 +2224,20 @@ TdValue make_native_join_chat(TdJoinChatRequest request) {
             std::move(native),
             TdFunctionData{TdFunctionKind::JoinChat, {{"chat_id", *request.chat_id}}});
     }
-    NativeFunctionPtr native = td_api::make_object<td_api::joinChatByInviteLink>(
-        request.invite_link.value_or(std::string{}));
+    const auto invite_link = request.invite_link();
+    if (!invite_link) {
+        throw std::invalid_argument("join invite request has no invite link");
+    }
+    NativeFunctionPtr native = td_api::make_object<td_api::joinChatByInviteLink>();
+    static_cast<td_api::joinChatByInviteLink*>(native.get())->invite_link_.assign(*invite_link);
+    auto wipe_observer = request.wipe_observer();
     return TdValue::sensitive_function(
         std::move(native),
         TdFunctionData{TdFunctionKind::JoinChatByInviteLink,
                        {{"invite_link", TdRedactedValue::InviteLink}}},
-        wipe_join_chat_by_invite_link);
+        [wipe_observer = std::move(wipe_observer)](NativeFunctionPtr& value) {
+            wipe_join_chat_by_invite_link(value, wipe_observer);
+        });
 }
 
 TdValue make_native_leave_chat(TdLeaveChatRequest request) {
@@ -2720,21 +2744,23 @@ class ProductionTdRuntime final : public TdRuntime {
             TdFunctionData{TdFunctionKind::SearchPublicChat, {{"username", std::move(username)}}});
     }
 
-    TdValue make_get_internal_link_type(std::string link, bool sensitive) override {
-        NativeFunctionPtr native =
-            td_api::make_object<td_api::getInternalLinkType>(std::move(link));
+    TdValue make_get_internal_link_type(std::string_view link, bool sensitive,
+                                        const secure::WipeObserver& wipe_observer) override {
+        const secure::SensitiveString source(link, wipe_observer,
+                                             "td_internal_link_request_source");
+        NativeFunctionPtr native = td_api::make_object<td_api::getInternalLinkType>();
+        static_cast<td_api::getInternalLinkType*>(native.get())->link_.assign(source.view());
         if (!sensitive) {
-            const auto* request = static_cast<const td_api::getInternalLinkType*>(native.get());
-            auto descriptor_link = request->link_;
             return TdValue::function(std::move(native),
                                      TdFunctionData{TdFunctionKind::GetInternalLinkType,
-                                                    {{"link", std::move(descriptor_link)}}});
+                                                    {{"link", std::string(source.view())}}});
         }
-        secure::wipe(link);
         return TdValue::sensitive_function(std::move(native),
                                            TdFunctionData{TdFunctionKind::GetInternalLinkType,
                                                           {{"link", TdRedactedValue::InviteLink}}},
-                                           wipe_get_internal_link_type);
+                                           [wipe_observer](NativeFunctionPtr& value) {
+                                               wipe_get_internal_link_type(value, wipe_observer);
+                                           });
     }
 
     TdValue make_get_message_link_info(std::string url) override {
@@ -2744,14 +2770,17 @@ class ProductionTdRuntime final : public TdRuntime {
             TdFunctionData{TdFunctionKind::GetMessageLinkInfo, {{"url", std::move(url)}}});
     }
 
-    TdValue make_check_chat_invite_link(std::string link) override {
-        NativeFunctionPtr native =
-            td_api::make_object<td_api::checkChatInviteLink>(std::move(link));
-        secure::wipe(link);
+    TdValue make_check_chat_invite_link(std::string_view link,
+                                        const secure::WipeObserver& wipe_observer) override {
+        const secure::SensitiveString source(link, wipe_observer, "td_check_invite_request_source");
+        NativeFunctionPtr native = td_api::make_object<td_api::checkChatInviteLink>();
+        static_cast<td_api::checkChatInviteLink*>(native.get())->invite_link_.assign(source.view());
         return TdValue::sensitive_function(std::move(native),
                                            TdFunctionData{TdFunctionKind::CheckChatInviteLink,
                                                           {{"link", TdRedactedValue::InviteLink}}},
-                                           wipe_check_chat_invite_link);
+                                           [wipe_observer](NativeFunctionPtr& value) {
+                                               wipe_check_chat_invite_link(value, wipe_observer);
+                                           });
     }
 
     TdValue make_get_user(std::int64_t user_id) override {
@@ -2987,6 +3016,18 @@ TdValue make_production_get_active_sessions_for_test() {
 
 TdValue make_production_terminate_session_for_test(std::int64_t session_id) {
     return make_native_terminate_session(session_id);
+}
+
+TdValue make_production_get_internal_link_type_for_test(std::string_view link, bool sensitive,
+                                                        const secure::WipeObserver& wipe_observer) {
+    ProductionTdRuntime runtime;
+    return runtime.make_get_internal_link_type(link, sensitive, wipe_observer);
+}
+
+TdValue make_production_check_chat_invite_link_for_test(std::string_view link,
+                                                        const secure::WipeObserver& wipe_observer) {
+    ProductionTdRuntime runtime;
+    return runtime.make_check_chat_invite_link(link, wipe_observer);
 }
 
 TdValue make_production_get_chat_history_for_test(std::int64_t chat_id,
@@ -3562,7 +3603,7 @@ bool native_direct_request_matches(const td_api::Function& function,
     }
     return function.get_id() == td_api::joinChatByInviteLink::ID &&
            static_cast<const td_api::joinChatByInviteLink&>(function).invite_link_ ==
-               expected.invite_link.value_or(std::string{});
+               expected.invite_link().value_or(std::string_view{});
 }
 
 bool native_direct_request_matches(const td_api::Function& function,
