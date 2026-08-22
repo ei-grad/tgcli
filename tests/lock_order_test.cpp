@@ -121,11 +121,11 @@ TEST_CASE("query detachment releases reentrant correlation lifetimes outside its
         final_release.store(true, std::memory_order_release);
 
         if (operation == "take") {
-            auto detached = queries.take(id);
-            if (!detached) {
+            auto detached = queries.take(id).value_or(core::QueryRegistry<Payload>::Detached{});
+            if (!detached.lifetime) {
                 throw std::runtime_error("query take failed");
             }
-            detached.reset();
+            detached.lifetime.reset();
         } else if (operation == "fail") {
             if (!queries.fail(id, std::make_exception_ptr(std::runtime_error("failed")))) {
                 throw std::runtime_error("query fail failed");
