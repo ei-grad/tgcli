@@ -188,21 +188,26 @@ TEST_CASE("abandoned prepared invite write releases locks before observer callba
             nested_preparations.fetch_add(1, std::memory_order_relaxed);
         }
     };
-    auto redaction = redaction::InviteLinkRegistry::instance().register_link(invite, observer);
-    REQUIRE(redaction.valid());
-    auto prepared =
-        client.prepare_direct_mutation(authorization,
-                                       core::TdDirectRequest{core::TdJoinChatRequest{
-                                           std::nullopt,
-                                           std::optional<secure::SensitiveString>{
-                                               std::in_place, invite, observer, "td_join_invite"},
-                                           std::nullopt}},
-                                       redaction.protection());
-    REQUIRE(prepared);
-    redaction.release();
-    armed.store(true, std::memory_order_release);
-
-    require_bounded_completion([prepared = std::move(prepared)]() mutable { prepared = {}; });
+    require_bounded_completion([&] {
+        auto redaction = redaction::InviteLinkRegistry::instance().register_link(invite, observer);
+        if (!redaction.valid()) {
+            throw std::runtime_error("invite registration failed");
+        }
+        auto prepared = client.prepare_direct_mutation(
+            authorization,
+            core::TdDirectRequest{
+                core::TdJoinChatRequest{std::nullopt,
+                                        std::optional<secure::SensitiveString>{
+                                            std::in_place, invite, observer, "td_join_invite"},
+                                        std::nullopt}},
+            redaction.protection());
+        if (!prepared) {
+            throw std::runtime_error("prepared invite write was rejected");
+        }
+        redaction.release();
+        armed.store(true, std::memory_order_release);
+        prepared = {};
+    });
 
     CHECK(nested_preparations.load(std::memory_order_relaxed) > 0);
     client.close();
