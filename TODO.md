@@ -263,7 +263,7 @@ before the milestone is closed.
 - [x] Implement `tgcli send` text/Markdown/HTML/reply/forum-topic/silent/
       schedule paths, wait for authoritative final send state, and return the
       exact `MessageWriteResult`
-- [ ] Implement `tgcli msg edit|react|pin|unpin` with exact property
+- [x] Implement `tgcli msg edit|react|pin|unpin` with exact property
       validation, reaction availability, plan, audit, timeout and idempotency
       behavior
 - [x] Implement destructive `tgcli msg delete`, including confirmation of the
@@ -274,7 +274,7 @@ before the milestone is closed.
 - [ ] Implement the ordered `tgcli msg forward` vector coordinator with one
       strict `ForwardItem` across success/error/timeout/audit/store, partial
       outcomes, deleted-before-confirmation handling and 429 aggregation
-- [ ] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
+- [x] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
       with exact direct-call state machines, invite secrecy and
       notification-setting plans
 - [ ] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel
