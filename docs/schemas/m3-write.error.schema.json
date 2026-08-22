@@ -718,7 +718,17 @@
                         "state": { "const": "ready" },
                         "outcome": { "const": "unknown" },
                         "idempotency": { "enum": ["not_requested", "pending"] },
-                        "items": { "oneOf": [{ "type": "array", "maxItems": 0 }, { "$ref": "#/$defs/forwardItems" }] }
+                        "items": {
+                          "oneOf": [
+                            { "type": "array", "maxItems": 0 },
+                            {
+                              "allOf": [
+                                { "$ref": "#/$defs/forwardItems" },
+                                { "contains": { "$ref": "#/$defs/forwardPendingItem" }, "minContains": 1 }
+                              ]
+                            }
+                          ]
+                        }
                       }
                     },
                     {

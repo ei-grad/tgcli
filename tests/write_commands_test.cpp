@@ -418,8 +418,28 @@ class FakeWrites final {
         runtime_->push_update(client_id_, {}, std::move(state));
     }
 
-    void push_forward_success(std::int64_t temporary_id, core::TdWriteMessage message) {
+    void push_forward_success(std::int64_t temporary_id,
+                              std::optional<core::TdWriteMessage> message) {
         runtime_->push_message_send_succeeded(client_id_, temporary_id, std::move(message));
+    }
+
+    void push_forward_failure(std::int64_t temporary_id,
+                              std::optional<core::TdWriteMessage> message,
+                              std::optional<core::TdError> error) {
+        runtime_->push_message_send_failed(client_id_, temporary_id, std::move(message),
+                                           std::move(error));
+    }
+
+    std::future<void> observe_forward_progress() {
+        auto observed = std::make_shared<std::promise<void>>();
+        auto future = observed->get_future();
+        auto delivered = std::make_shared<std::atomic<bool>>(false);
+        coordinator_hooks_->forward.on_progress = [observed, delivered](const auto&) {
+            if (!delivered->exchange(true)) {
+                observed->set_value();
+            }
+        };
+        return future;
     }
 
     template <typename T>
@@ -1951,6 +1971,54 @@ TEST_CASE("msg forward separates pre-proof and post-proof deadline cuts",
         const auto audit = read_bytes(fake.tree().audit_path());
         CHECK(audit.find(R"("mutation_state":"confirmed")") != std::string::npos);
         CHECK(audit.find(R"("stage":"mutation_confirmed")") != std::string::npos);
+    }
+}
+
+TEST_CASE("msg forward malformed late updates retain confirmed pending recovery",
+          "[write-command][forward][malformed][recovery][idempotency]") {
+    for (const bool success_update : {true, false}) {
+        CAPTURE(success_update);
+        FakeWrites fake;
+        auto progress = fake.observe_forward_progress();
+        auto pending = fake.dispatch(forward_request("forward-malformed-late-key"));
+        plan_forward(fake);
+        const auto [descriptor, query_id] =
+            fake.observe_call(core::TdFunctionKind::ForwardMessages);
+        const auto sending_id =
+            static_cast<std::int32_t>(function_field<std::int64_t>(descriptor, "sending_id"));
+        core::TdForwardMessages forwarded;
+        forwarded.messages.emplace_back(forwarded_message(101));
+        forwarded.messages.emplace_back(pending_forward_message(-77, sending_id));
+        fake.push_response(query_id, std::move(forwarded));
+        REQUIRE(progress.wait_for(2s) == std::future_status::ready);
+        if (success_update) {
+            fake.push_forward_success(-77, std::nullopt);
+        } else {
+            fake.push_forward_failure(-77, std::nullopt, std::nullopt);
+        }
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        {
+            auto guard = fake.foundation()->acquire_epoch();
+            CHECK(fake.foundation()->audit().inspect(guard).status ==
+                  daemon::AccountAuditInspectionStatus::Clean);
+            const auto store = fake.foundation()->store().inspect(guard);
+            REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+            REQUIRE(store.snapshot.entries.size() == 1);
+            CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Pending);
+        }
+        const auto audit = read_bytes(fake.tree().audit_path());
+        CHECK(audit.find(R"("mutation_state":"confirmed")") != std::string::npos);
+        CHECK(audit.find(R"("stage":"mutation_confirmed")") == std::string::npos);
+
+        auto replay = fake.dispatch(forward_request("forward-malformed-late-key"));
+        bind_principal(fake);
+        const auto replay_outcome = replay.get();
+        REQUIRE(replay_outcome.error);
+        INFO(replay_outcome.error->dump());
+        CHECK((*replay_outcome.error)["error"]["code"] == "IDEMPOTENCY_PENDING");
+        CHECK(fake.count(core::TdFunctionKind::ForwardMessages) == 1);
     }
 }
 

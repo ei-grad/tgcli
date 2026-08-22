@@ -101,6 +101,26 @@ bool contains_reserved_full(int argc, char** argv) noexcept {
     return false;
 }
 
+bool parse_signed_decimal(std::string_view raw, std::int64_t& value) noexcept {
+    if (raw.empty()) {
+        return false;
+    }
+    auto digits = raw;
+    if (digits.front() == '+' || digits.front() == '-') {
+        digits.remove_prefix(1);
+    }
+    if (digits.empty() || !std::ranges::all_of(digits, [](char character) {
+            return character >= '0' && character <= '9';
+        })) {
+        return false;
+    }
+    if (raw.front() == '+') {
+        raw.remove_prefix(1);
+    }
+    const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+    return error == std::errc{} && end == raw.data() + raw.size();
+}
+
 bool targets_schema_command(int argc, char** argv) noexcept {
     constexpr std::array<std::string_view, 4> value_options{"--account", "--idempotency-key",
                                                             "--timeout", "--cursor"};
@@ -1436,14 +1456,8 @@ int run(int argc, char** argv) {
         messages.forward_to = messages.forward_positionals.back();
         for (const auto& raw : std::span(messages.forward_positionals)
                                    .subspan(1, messages.forward_positionals.size() - 2)) {
-            std::string_view value = raw;
-            if (value.starts_with('+')) {
-                value.remove_prefix(1);
-            }
             std::int64_t id = 0;
-            const auto [end, error] =
-                std::from_chars(value.data(), value.data() + value.size(), id);
-            if (error != std::errc{} || end != value.data() + value.size() || value.empty()) {
+            if (!parse_signed_decimal(raw, id)) {
                 messages.forward_ids_valid = false;
                 break;
             }

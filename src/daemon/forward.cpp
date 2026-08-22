@@ -50,6 +50,11 @@ ForwardMutationState mutation_state(const std::vector<ForwardItem>& items) {
     return ForwardMutationState::None;
 }
 
+ForwardMutationState unknown_mutation_state(const std::vector<ForwardItem>& items) {
+    const auto state = mutation_state(items);
+    return state == ForwardMutationState::None ? ForwardMutationState::Possible : state;
+}
+
 bool complete(const std::vector<ForwardItem>& items) {
     return std::ranges::none_of(items, [](const ForwardItem& item) {
         return std::holds_alternative<ForwardPending>(item);
@@ -383,6 +388,7 @@ class ForwardCoordinator::Impl {
             std::vector<ForwardItem> parsed;
             std::vector<std::optional<SingleSendTemporaryId>> temporaries;
             std::set<std::int64_t> unique_temporary_ids;
+            std::set<std::int64_t> unique_final_ids;
             parsed.reserve(source_ids_.size());
             temporaries.reserve(source_ids_.size());
             for (std::size_t index = 0; index < source_ids_.size(); ++index) {
@@ -416,6 +422,13 @@ class ForwardCoordinator::Impl {
                 }
                 auto& outcome = std::get<SingleSendOutcome>(classified);
                 if (const auto* success = std::get_if<SingleSendSucceeded>(&outcome)) {
+                    if (!unique_final_ids.emplace(success->result.id).second) {
+                        return {.sequence = sequence,
+                                .terminal = ForwardMalformed{.items = {},
+                                                             .tdlib_type_id = std::nullopt,
+                                                             .mutation_state =
+                                                                 ForwardMutationState::Possible}};
+                    }
                     parsed.emplace_back(
                         ForwardSent{.source_id = source_id, .message = success->result});
                     temporaries.emplace_back(std::nullopt);
@@ -519,6 +532,15 @@ class ForwardCoordinator::Impl {
             }
             const auto source_id = source_ids_[index];
             if (const auto* success = std::get_if<SingleSendSucceeded>(&*classified)) {
+                const bool duplicate = std::ranges::any_of(items_, [&](const ForwardItem& item) {
+                    const auto* sent = std::get_if<ForwardSent>(&item);
+                    return sent != nullptr && sent->message.id == success->result.id;
+                });
+                if (duplicate) {
+                    return ForwardMalformed{.items = items_,
+                                            .tdlib_type_id = std::nullopt,
+                                            .mutation_state = unknown_mutation_state(items_)};
+                }
                 items_[index] = ForwardSent{.source_id = source_id, .message = success->result};
             } else if (std::holds_alternative<SingleSendFailed>(*classified) ||
                        std::holds_alternative<SingleSendRateLimited>(*classified)) {
@@ -532,7 +554,7 @@ class ForwardCoordinator::Impl {
             } else {
                 return ForwardMalformed{.items = items_,
                                         .tdlib_type_id = tdlib_type_id(*classified),
-                                        .mutation_state = ForwardMutationState::Possible};
+                                        .mutation_state = unknown_mutation_state(items_)};
             }
             temporaries_[index].reset();
             changed = true;
@@ -547,7 +569,7 @@ class ForwardCoordinator::Impl {
         } catch (const std::exception&) {
             return ForwardMalformed{.items = items_,
                                     .tdlib_type_id = std::nullopt,
-                                    .mutation_state = ForwardMutationState::Possible};
+                                    .mutation_state = unknown_mutation_state(items_)};
         }
         if (complete(items_)) {
             return ForwardCompleted{.items = items_, .mutation_state = mutation_state(items_)};

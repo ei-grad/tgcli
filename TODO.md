@@ -273,7 +273,8 @@ before the milestone is closed.
       confirmation, replay, timeout, audit, and idempotency guarantees
 - [x] Implement the ordered `tgcli msg forward` vector coordinator with one
       strict `ForwardItem` across success/error/timeout/audit/store, partial
-      outcomes, deleted-before-confirmation handling and 429 aggregation
+      outcomes, deleted-before-confirmation handling, 429 aggregation, and the
+      legal initial plus 100 terminal-transition progress sequence
 - [x] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
       with exact direct-call state machines, invite secrecy and
       notification-setting plans

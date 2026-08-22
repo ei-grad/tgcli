@@ -2592,6 +2592,9 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
         {"forward-order", {"--json", "msg", "forward", "-1001", "2", "1", "-1002"}},
         {"forward-duplicate", {"--json", "msg", "forward", "-1001", "1", "1", "-1002"}},
         {"forward-zero", {"--json", "msg", "forward", "-1001", "0", "-1002"}},
+        {"forward-double-sign", {"--json", "msg", "forward", "-1001", "+-7", "-1002"}},
+        {"forward-double-sign-no-daemon",
+         {"--json", "--no-daemon", "msg", "forward", "-1001", "+-7", "-1002"}},
         {"edit-zero", {"--json", "msg", "edit", "-1001", "0", "revised"}},
         {"edit-empty", {"--json", "msg", "edit", "-1001", "1", ""}},
         {"react-zero", {"--json", "msg", "react", "-1001", "0", "👍"}},
@@ -2612,6 +2615,12 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
         too_many.push_back(std::to_string(id));
     }
     invalid.emplace_back("delete-too-many", std::move(too_many));
+    std::vector<std::string> too_many_forward{"--json", "msg", "forward", "-1001"};
+    for (int id = 1; id <= 101; ++id) {
+        too_many_forward.push_back(std::to_string(id));
+    }
+    too_many_forward.emplace_back("-1002");
+    invalid.emplace_back("forward-too-many", std::move(too_many_forward));
     for (const auto& [stem, arguments] : invalid) {
         const auto outcome = run_binary_captured(arguments, env, stem);
         INFO(stem);
@@ -2673,7 +2682,7 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
          {"msg", "edit"},
          {{"chat", "-1001"}, {"message_id", -7}, {"text", "revised"}}},
         {"forward-frame",
-         {"--json", "msg", "forward", "-1001", "-7", "9", "@destination", "--drop-author"},
+         {"--json", "msg", "forward", "-1001", "-7", "+9", "@destination", "--drop-author"},
          std::nullopt,
          {"msg", "forward"},
          {{"from", "-1001"},

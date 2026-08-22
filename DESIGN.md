@@ -2257,16 +2257,21 @@ arithmetic true; they are not inferred producer bounds.
 Exact record ceilings excluding LF are: intent 134,217,728; non-vector
 checkpoint 65,536; terminal/vector payload 4,194,304; fixed canonical
 proof/outcome envelope 4,096; vector/proof/outcome record 4,198,400. Including
-LF they are 134,217,729, 65,537, and 4,198,401. Forward progress advances at
-least one of at most 100 items and repeats at most 100 times. Thus the exact
-maximal group is
-`134,217,729 + 3*65,537 + 102*4,198,401 = 562,651,242` bytes. Its tail is
-`428,433,513`; a nonrotating segment is at most
-`33,554,432 + 428,433,513 = 461,987,945`; a fresh maximal group is
-562,651,242. The exact segment ceiling is therefore 562,651,242 and five
-segments are 2,813,256,210 bytes. Oversized prospective intent is
+LF they are 134,217,729, 65,537, and 4,198,401. Forward progress first persists
+the immediate full vector, then persists every terminal transition before a
+later TD event. A 100-item all-pending vector can therefore advance 100 times
+and uses at most 101 progress records. Thus the exact maximal group is
+`134,217,729 + 3*65,537 + 103*4,198,401 = 566,849,643` bytes. Its tail is
+`432,631,914`; a nonrotating segment is at most
+`33,554,432 + 432,631,914 = 466,186,346`; a fresh maximal group is
+566,849,643. The exact segment ceiling is therefore 566,849,643 and five
+segments are 2,834,248,215 bytes. Oversized prospective intent is
 AUDIT_UNAVAILABLE/too_large. Only unreachable internal factory overflow after
 intent is audit-fatal schema_error.
+
+This monotone v2 widening does not change the schema or store version. A binary
+that enforces the former 100-progress-record ceiling cannot read a group using
+the legal 101st record, so downgrading to such a binary is unsupported.
 
 The limits are intentionally high relative to ordinary Telegram DTOs but
 finite. They preserve valid UTF-8 and existing public DTO/error shapes, use
@@ -2274,7 +2279,7 @@ the transport's actual request ceiling, and convert an extreme producer value
 to a stable bounded terminal rather than allocation-dependent failure. This is
 the safety/interoperability justification; producer compliance is not assumed.
 
-A stored segment above 562,651,242 or a first line above the intent ceiling is
+A stored segment above 566,849,643 or a first line above the intent ceiling is
 preclassification path_invalid for every version. A bounded complete JSON
 object is positively v2-recognized as soon as it has exactly one top-level
 integer `schema_version:2`, before phase, extra-field, intent, or group
@@ -2866,14 +2871,17 @@ exactly one branch:
 
 ```json
 {"operation":"msg_forward","phase":"confirmation","state":"ready",
- "outcome":"unknown","idempotency":"not_requested|pending","items":[]}
+ "outcome":"unknown","idempotency":"not_requested|pending",
+ "items":[]|ForwardItem[1..100 containing at least one pending]}
 ```
 
 `<any>` means the closed §4.5.1 operation enum. `direct-op` is exactly
 `msg_edit,msg_delete,msg_react,msg_pin,msg_unpin,chat_mark_read,chat_mute,
 chat_unmute,chat_pin,chat_unpin,chat_archive,chat_unarchive,chat_join,
 chat_leave`.
-Single temp is null или one int53. Forward items length 0…100 in input order.
+Single temp is null или one int53. Forward items are either empty before the
+immediate vector exists or a nonempty input-order vector containing at least
+one pending item.
 Post-dispatch keyed timeout всегда `pending`; pre-dispatch keyed pending,
 если уже создан, удаляется durable и reports `removed`; keyed request до
 insert reports `not_created`; no key = `not_requested`.

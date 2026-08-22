@@ -30,15 +30,18 @@ inline constexpr std::uint64_t kIntentLineBytes = kIntentJsonBytes + 1;
 inline constexpr std::uint64_t kNonVectorLineBytes = kNonVectorJsonBytes + 1;
 inline constexpr std::uint64_t kVectorLineBytes = kVectorJsonBytes + 1;
 
-inline constexpr std::size_t kMaximumForwardProgressRecords = 100;
-inline constexpr std::uint64_t kMaximumGroupBytes =
-    kIntentLineBytes + 3 * kNonVectorLineBytes + 102 * kVectorLineBytes;
+inline constexpr std::size_t kMaximumForwardProgressRecords = 101;
+inline constexpr std::uint64_t kMaximumVectorLinesPerGroup =
+    std::uint64_t{kMaximumForwardProgressRecords} + std::uint64_t{2};
+inline constexpr std::uint64_t kMaximumGroupBytes = kIntentLineBytes +
+                                                    std::uint64_t{3} * kNonVectorLineBytes +
+                                                    kMaximumVectorLinesPerGroup * kVectorLineBytes;
 inline constexpr std::uint64_t kMaximumGroupTailBytes = kMaximumGroupBytes - kIntentLineBytes;
 inline constexpr std::uint64_t kRotationBytes = 33'554'432;
 inline constexpr std::uint64_t kMaximumNonRotatingSegmentBytes =
     kRotationBytes + kMaximumGroupTailBytes;
 inline constexpr std::uint64_t kMaximumSegmentBytes = kMaximumGroupBytes;
-inline constexpr std::uint64_t kMaximumAuditBytes = 5 * kMaximumSegmentBytes;
+inline constexpr std::uint64_t kMaximumAuditBytes = std::uint64_t{5} * kMaximumSegmentBytes;
 inline constexpr std::uint64_t kLegacySegmentBytes = 64ULL * 1024 * 1024;
 
 inline constexpr std::uint64_t kMaximumEscapedChatIdentityBytes =
@@ -54,10 +57,11 @@ static_assert(kMaximumIntentProofBytes == 130'490'195);
 static_assert(kMaximumIntentProofBytes < kIntentJsonBytes);
 static_assert(kMaximumSessionIntentProofBytes == 48'300'031);
 static_assert(kVectorJsonBytes == 4'198'400);
-static_assert(kMaximumGroupBytes == 562'651'242);
-static_assert(kMaximumGroupTailBytes == 428'433'513);
-static_assert(kMaximumNonRotatingSegmentBytes == 461'987'945);
-static_assert(kMaximumSegmentBytes == 562'651'242);
-static_assert(kMaximumAuditBytes == 2'813'256'210ULL);
+static_assert(kMaximumVectorLinesPerGroup == 103);
+static_assert(kMaximumGroupBytes == 566'849'643);
+static_assert(kMaximumGroupTailBytes == 432'631'914);
+static_assert(kMaximumNonRotatingSegmentBytes == 466'186'346);
+static_assert(kMaximumSegmentBytes == 566'849'643);
+static_assert(kMaximumAuditBytes == 2'834'248'215ULL);
 
 } // namespace tgcli::daemon::account_audit_limits

@@ -1065,11 +1065,13 @@ std::optional<json> forward_items_json(const std::vector<ForwardItem>& items,
                                        std::int64_t destination_chat_id) {
     json result = json::array();
     std::optional<std::int64_t> previous;
+    std::set<std::int64_t> final_ids;
     for (const auto& item : items) {
         auto materialized = forward_item_json(item);
         if (!materialized || (previous && (*materialized)["source_id"] <= *previous) ||
             ((*materialized)["status"] == "sent" &&
-             (*materialized)["message"]["chat_id"] != destination_chat_id)) {
+             ((*materialized)["message"]["chat_id"] != destination_chat_id ||
+              !final_ids.emplace((*materialized)["message"]["id"].get<std::int64_t>()).second))) {
             return std::nullopt;
         }
         previous = (*materialized)["source_id"].get<std::int64_t>();
@@ -3753,6 +3755,14 @@ void WriteCoordinator::forward_messages(const proto::Request& request, RequestSe
                     return {.terminal = stored_from_terminal(operation, shutdown_terminal()),
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
+                } else if constexpr (std::is_same_v<Outcome, ForwardMalformed>) {
+                    return {.terminal = stored_from_terminal(operation, internal(operation)),
+                            .mutation_state = audit_state(outcome.mutation_state),
+                            .mutation_confirmed = false,
+                            .retain_pending =
+                                std::ranges::any_of(outcome.items, [](const auto& item) {
+                                    return std::holds_alternative<ForwardPending>(item);
+                                })};
                 } else {
                     return {.terminal = stored_from_terminal(operation, internal(operation)),
                             .mutation_state = audit_state(outcome.mutation_state),

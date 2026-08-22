@@ -820,6 +820,7 @@ TEST_CASE("msg forward schemas share one strict ordered item contract", "[schema
                        {"text", "forwarded"},
                        {"scheduled", false}};
     const json sent{{"source_id", 1}, {"status", "sent"}, {"message", message}};
+    const json pending{{"source_id", 2}, {"status", "pending"}, {"temporary_message_id", -2}};
     const json failed{{"source_id", 2},
                       {"status", "failed"},
                       {"failure_reason", "upstream_null"},
@@ -874,7 +875,19 @@ TEST_CASE("msg forward schemas share one strict ordered item contract", "[schema
                                    {"state", "ready"},
                                    {"outcome", "unknown"},
                                    {"idempotency", "pending"},
-                                   {"items", json::array({sent, failed})}})};
+                                   {"items", json::array()}}),
+        terminal_error("TIMEOUT", {{"operation", "msg_forward"},
+                                   {"phase", "confirmation"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"},
+                                   {"items", json::array({pending})}}),
+        terminal_error("TIMEOUT", {{"operation", "msg_forward"},
+                                   {"phase", "confirmation"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"},
+                                   {"items", json::array({sent, pending})}})};
     for (const auto& error : errors) {
         INFO(error.dump());
         CHECK_THAT(error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
@@ -885,9 +898,14 @@ TEST_CASE("msg forward schemas share one strict ordered item contract", "[schema
     invalid_error = errors[3];
     invalid_error["error"]["details"]["items"] = json::array({sent});
     CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
-    invalid_error = errors[5];
-    invalid_error["error"]["details"]["items"][0]["status"] = "pending";
-    CHECK_THAT(invalid_error, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    const auto complete_timeout =
+        terminal_error("TIMEOUT", {{"operation", "msg_forward"},
+                                   {"phase", "confirmation"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"},
+                                   {"items", json::array({sent, failed})}});
+    CHECK_THAT(complete_timeout, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
 }
 
 TEST_CASE("chat write schemas pair exact real and dry-run relations", "[schema][m3][chat-write]") {

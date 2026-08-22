@@ -117,6 +117,20 @@ json forward_terminal() {
              {{"from_chat_id", -1001}, {"to_chat_id", -1002}, {"items", sent_forward_progress()}}}};
 }
 
+json forward_timeout_terminal(json items) {
+    return {{"kind", "error"},
+            {"code", "TIMEOUT"},
+            {"message", "request timed out"},
+            {"details",
+             {{"operation", "msg_forward"},
+              {"phase", "confirmation"},
+              {"state", "ready"},
+              {"outcome", "unknown"},
+              {"idempotency", "pending"},
+              {"items", std::move(items)}}},
+            {"exit_code", 7}};
+}
+
 class StoreTree final {
   public:
     explicit StoreTree(std::shared_ptr<const daemon::testing::IdempotencyStoreHooks> hooks = {},
@@ -1181,6 +1195,85 @@ TEST_CASE("idempotency core gate advances store lag to the latest durable forwar
     CHECK_FALSE(stored.terminal);
 }
 
+TEST_CASE("confirmed incomplete forward timeout recovery retains the pending incumbent",
+          "[idempotency-store][reconciliation][forward][timeout][crash-cut]") {
+    for (const bool durable_outcome : {false, true}) {
+        CAPTURE(durable_outcome);
+        StoreTree tree;
+        auto guard = tree.guard();
+        constexpr std::string_view invocation = "0123456789abcdef0123456789abcdef";
+        const auto receipt =
+            append_intent(tree, guard, forward_audit_intent(std::string(invocation)));
+        auto entry_result = daemon::make_idempotency_pending_entry(
+            {key_hash('d'), fingerprint('e'), daemon::AccountAuditOperation::MsgForward,
+             std::string(invocation), receipt.audit_generation, 1'700'000'000, forward_plan()},
+            "main", tree.final_path());
+        REQUIRE(std::holds_alternative<daemon::IdempotencyEntry>(entry_result));
+        const auto entry = std::get<daemon::IdempotencyEntry>(std::move(entry_result));
+        REQUIRE(tree.store().insert_if_absent(entry, guard).status ==
+                daemon::IdempotencyInsertStatus::Inserted);
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::MsgForward, invocation, 1,
+                              daemon::AccountAuditStage::IdempotencyPending,
+                              {{"key_hash", entry.key_hash.value()},
+                               {"request_fingerprint", entry.request_fingerprint.value()},
+                               {"expires_at", entry.expires_at},
+                               {"reserved_terminal_bytes", entry.reserved_terminal_bytes}});
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::MsgForward, invocation, 2,
+                              daemon::AccountAuditStage::DispatchStarted,
+                              {{"tdlib_function", "forwardMessages"},
+                               {"dispatch_token", "11111111111111111111111111111111"},
+                               {"client_generation", std::uint64_t{1}}});
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::MsgForward, invocation, 3,
+                              daemon::AccountAuditStage::TemporaryIdsObserved,
+                              {{"temporary_message_ids", json::array({102})}});
+        REQUIRE(
+            tree.store()
+                .update_temporary_message_ids(entry.key_hash, invocation, json::array({102}), guard)
+                .status == daemon::IdempotencyWriteStatus::Applied);
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::MsgForward, invocation, 4,
+                              daemon::AccountAuditStage::ForwardProgress,
+                              {{"items", partial_forward_progress()}});
+        REQUIRE(tree.store()
+                    .update_forward_progress(entry.key_hash, invocation, partial_forward_progress(),
+                                             guard)
+                    .status == daemon::IdempotencyWriteStatus::Applied);
+        const auto terminal = forward_timeout_terminal(partial_forward_progress());
+        append_checkpoint_for(tree, guard, daemon::AccountAuditOperation::MsgForward, invocation, 5,
+                              daemon::AccountAuditStage::MutationConfirmed,
+                              {{"terminal", terminal}});
+        const std::vector stages{daemon::AccountAuditStage::IdempotencyPending,
+                                 daemon::AccountAuditStage::DispatchStarted,
+                                 daemon::AccountAuditStage::TemporaryIdsObserved,
+                                 daemon::AccountAuditStage::ForwardProgress,
+                                 daemon::AccountAuditStage::MutationConfirmed};
+        if (durable_outcome) {
+            append_outcome_for(tree, guard, daemon::AccountAuditOperation::MsgForward, invocation,
+                               stages, daemon::AccountAuditMutationState::Confirmed, terminal);
+        }
+
+        const auto recovered = tree.foundation().run_core_gate(
+            guard, 1'700'000'001, [] { return "2026-08-20T12:00:03Z"; });
+        REQUIRE(recovered.status == daemon::IdempotencyCoreGateStatus::Clean);
+        REQUIRE(recovered.snapshot.entries.size() == 1);
+        const auto& stored = recovered.snapshot.entries.front();
+        CHECK(stored.state == daemon::IdempotencyEntryState::Pending);
+        CHECK(stored.forward_progress == partial_forward_progress());
+        CHECK_FALSE(stored.terminal);
+        const auto lookup = daemon::IdempotencyStore::lookup(recovered.snapshot, entry.key_hash,
+                                                             entry.request_fingerprint);
+        CHECK(lookup.status == daemon::IdempotencyLookupStatus::Pending);
+        CHECK(lookup.incumbent == &stored);
+        CHECK(tree.audit().inspect(guard).status == daemon::AccountAuditInspectionStatus::Clean);
+
+        const auto next = tree.foundation().run_core_gate(guard, 1'700'000'002,
+                                                          [] { return "2026-08-20T12:00:04Z"; });
+        REQUIRE(next.status == daemon::IdempotencyCoreGateStatus::Clean);
+        CHECK(daemon::IdempotencyStore::lookup(next.snapshot, entry.key_hash,
+                                               entry.request_fingerprint)
+                  .status == daemon::IdempotencyLookupStatus::Pending);
+    }
+}
+
 TEST_CASE("idempotency core gate emits the durable prior terminal for ambiguous dispatch",
           "[idempotency-store][reconciliation][audit-incomplete][dispatch]") {
     StoreTree tree;
@@ -2070,6 +2163,12 @@ TEST_CASE("idempotency forward progress consumes one reservation and completion 
         entry.key_hash, entry.invocation_id, pending_forward_progress(), guard);
     CHECK(regressed_progress.status == daemon::IdempotencyWriteStatus::Failed);
     CHECK(regressed_progress.failure.reason == daemon::AccountAuditDurabilityReason::SchemaError);
+    auto duplicate_final_ids = sent_forward_progress();
+    duplicate_final_ids[1]["message"]["id"] = 201;
+    const auto duplicate_progress = tree.store().update_forward_progress(
+        entry.key_hash, entry.invocation_id, std::move(duplicate_final_ids), guard);
+    CHECK(duplicate_progress.status == daemon::IdempotencyWriteStatus::Failed);
+    CHECK(duplicate_progress.failure.reason == daemon::AccountAuditDurabilityReason::SchemaError);
     auto sent_progress = tree.store().update_forward_progress(entry.key_hash, entry.invocation_id,
                                                               sent_forward_progress(), guard);
     REQUIRE(sent_progress.status == daemon::IdempotencyWriteStatus::Applied);

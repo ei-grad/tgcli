@@ -10231,13 +10231,25 @@
                           ]
                         },
                         "items": {
-                          "type": "array",
-                          "minItems": 0,
-                          "maxItems": 100,
-                          "uniqueItems": true,
-                          "items": {
-                            "$ref": "#/$defs/forwardItem"
-                          }
+                          "oneOf": [
+                            {
+                              "type": "array",
+                              "maxItems": 0
+                            },
+                            {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 100,
+                              "uniqueItems": true,
+                              "items": {
+                                "$ref": "#/$defs/forwardItem"
+                              },
+                              "contains": {
+                                "$ref": "#/$defs/forwardPendingItem"
+                              },
+                              "minContains": 1
+                            }
+                          ]
                         }
                       }
                     }
@@ -11194,13 +11206,25 @@
                           ]
                         },
                         "items": {
-                          "type": "array",
-                          "minItems": 0,
-                          "maxItems": 100,
-                          "uniqueItems": true,
-                          "items": {
-                            "$ref": "#/$defs/forwardItem"
-                          }
+                          "oneOf": [
+                            {
+                              "type": "array",
+                              "maxItems": 0
+                            },
+                            {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 100,
+                              "uniqueItems": true,
+                              "items": {
+                                "$ref": "#/$defs/forwardItem"
+                              },
+                              "contains": {
+                                "$ref": "#/$defs/forwardPendingItem"
+                              },
+                              "minContains": 1
+                            }
+                          ]
                         }
                       }
                     }
@@ -12185,13 +12209,25 @@
                           ]
                         },
                         "items": {
-                          "type": "array",
-                          "minItems": 0,
-                          "maxItems": 100,
-                          "uniqueItems": true,
-                          "items": {
-                            "$ref": "#/$defs/forwardItem"
-                          }
+                          "oneOf": [
+                            {
+                              "type": "array",
+                              "maxItems": 0
+                            },
+                            {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 100,
+                              "uniqueItems": true,
+                              "items": {
+                                "$ref": "#/$defs/forwardItem"
+                              },
+                              "contains": {
+                                "$ref": "#/$defs/forwardPendingItem"
+                              },
+                              "minContains": 1
+                            }
+                          ]
                         }
                       }
                     }

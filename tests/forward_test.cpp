@@ -350,3 +350,137 @@ TEST_CASE("forward coordinator rejects duplicate temporary correlations",
     CHECK(malformed->mutation_state == tgcli::daemon::ForwardMutationState::Possible);
     CHECK(malformed->items.empty());
 }
+
+TEST_CASE("forward coordinator rejects duplicate final destination ids before persistence",
+          "[daemon][forward][arbitration][malformed][duplicate][final-id]") {
+    SECTION("duplicate immediate stable ids") {
+        ForwardHarness harness;
+        std::atomic<std::size_t> progress_count{0};
+        tgcli::daemon::ForwardHooks hooks;
+        hooks.on_progress = [&](const auto&) {
+            progress_count.fetch_add(1, std::memory_order_relaxed);
+        };
+        auto outcome = harness.execute(std::move(hooks));
+        const auto sent = harness.await_forward();
+        tgcli::core::TdForwardMessages immediate;
+        immediate.messages.emplace_back(stable(101));
+        immediate.messages.emplace_back(stable(101));
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(std::move(immediate)));
+        const auto result = outcome.get();
+        const auto* malformed = std::get_if<tgcli::daemon::ForwardMalformed>(&result);
+        REQUIRE(malformed != nullptr);
+        CHECK(malformed->items.empty());
+        CHECK(progress_count.load(std::memory_order_relaxed) == 0);
+    }
+
+    SECTION("stable and pending collision") {
+        ForwardHarness harness;
+        std::mutex progress_mutex;
+        std::vector<std::vector<tgcli::daemon::ForwardItem>> progress;
+        tgcli::daemon::ForwardHooks hooks;
+        hooks.on_progress = [&](const auto& items) {
+            const std::lock_guard lock(progress_mutex);
+            progress.push_back(items);
+        };
+        auto outcome = harness.execute(std::move(hooks));
+        const auto sent = harness.await_forward();
+        tgcli::core::TdForwardMessages immediate;
+        immediate.messages.emplace_back(stable(101));
+        immediate.messages.emplace_back(pending(-77));
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(std::move(immediate)));
+        REQUIRE(eventually([&] {
+            const std::lock_guard lock(progress_mutex);
+            return progress.size() == 1;
+        }));
+        harness.runtime().push_message_send_succeeded(harness.first(), -77, stable(101));
+        const auto result = outcome.get();
+        const auto* malformed = std::get_if<tgcli::daemon::ForwardMalformed>(&result);
+        REQUIRE(malformed != nullptr);
+        CHECK(malformed->mutation_state == tgcli::daemon::ForwardMutationState::Confirmed);
+        REQUIRE(malformed->items.size() == 2);
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardSent>(malformed->items[0]));
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardPending>(malformed->items[1]));
+        const std::lock_guard lock(progress_mutex);
+        CHECK(progress.size() == 1);
+    }
+
+    SECTION("two update-derived successes collide") {
+        ForwardHarness harness;
+        std::mutex progress_mutex;
+        std::vector<std::vector<tgcli::daemon::ForwardItem>> progress;
+        tgcli::daemon::ForwardHooks hooks;
+        hooks.on_progress = [&](const auto& items) {
+            const std::lock_guard lock(progress_mutex);
+            progress.push_back(items);
+        };
+        auto outcome = harness.execute(std::move(hooks));
+        const auto sent = harness.await_forward();
+        tgcli::core::TdForwardMessages immediate;
+        immediate.messages.emplace_back(pending(-77));
+        immediate.messages.emplace_back(pending(-78));
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(std::move(immediate)));
+        REQUIRE(eventually([&] {
+            const std::lock_guard lock(progress_mutex);
+            return progress.size() == 1;
+        }));
+        harness.runtime().push_message_send_succeeded(harness.first(), -77, stable(101));
+        REQUIRE(eventually([&] {
+            const std::lock_guard lock(progress_mutex);
+            return progress.size() == 2;
+        }));
+        harness.runtime().push_message_send_succeeded(harness.first(), -78, stable(101));
+        const auto result = outcome.get();
+        const auto* malformed = std::get_if<tgcli::daemon::ForwardMalformed>(&result);
+        REQUIRE(malformed != nullptr);
+        CHECK(malformed->mutation_state == tgcli::daemon::ForwardMutationState::Confirmed);
+        REQUIRE(malformed->items.size() == 2);
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardSent>(malformed->items[0]));
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardPending>(malformed->items[1]));
+        const std::lock_guard lock(progress_mutex);
+        CHECK(progress.size() == 2);
+    }
+}
+
+TEST_CASE("forward malformed late updates retain the last durable confirmed vector",
+          "[daemon][forward][arbitration][malformed][durability]") {
+    for (const bool success_update : {true, false}) {
+        CAPTURE(success_update);
+        ForwardHarness harness;
+        std::mutex progress_mutex;
+        std::vector<std::vector<tgcli::daemon::ForwardItem>> progress;
+        tgcli::daemon::ForwardHooks hooks;
+        hooks.on_progress = [&](const auto& items) {
+            const std::lock_guard lock(progress_mutex);
+            progress.push_back(items);
+        };
+        auto outcome = harness.execute(std::move(hooks));
+        const auto sent = harness.await_forward();
+        tgcli::core::TdForwardMessages immediate;
+        immediate.messages.emplace_back(stable(101));
+        immediate.messages.emplace_back(pending(-77));
+        harness.runtime().push_response(harness.first(), sent.query_id,
+                                        tgcli::core::TdValue::from(std::move(immediate)));
+        REQUIRE(eventually([&] {
+            const std::lock_guard lock(progress_mutex);
+            return progress.size() == 1;
+        }));
+        if (success_update) {
+            harness.runtime().push_message_send_succeeded(harness.first(), -77, std::nullopt);
+        } else {
+            harness.runtime().push_message_send_failed(harness.first(), -77, std::nullopt,
+                                                       std::nullopt);
+        }
+        const auto result = outcome.get();
+        const auto* malformed = std::get_if<tgcli::daemon::ForwardMalformed>(&result);
+        REQUIRE(malformed != nullptr);
+        CHECK(malformed->mutation_state == tgcli::daemon::ForwardMutationState::Confirmed);
+        REQUIRE(malformed->items.size() == 2);
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardSent>(malformed->items[0]));
+        CHECK(std::holds_alternative<tgcli::daemon::ForwardPending>(malformed->items[1]));
+        const std::lock_guard lock(progress_mutex);
+        CHECK(progress.size() == 1);
+    }
+}

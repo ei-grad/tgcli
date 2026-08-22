@@ -890,6 +890,16 @@ const storedForwardItems = (minimum = 1, item = 'forwardTerminalItem') => ({
   type: 'array', minItems: minimum, maxItems: 100, uniqueItems: true,
   items: reference(item),
 });
+const storedForwardTimeoutItems = () => ({
+  oneOf: [
+    { type: 'array', maxItems: 0 },
+    {
+      ...storedForwardItems(1, 'forwardItem'),
+      contains: reference('forwardPendingItem'),
+      minContains: 1,
+    },
+  ],
+});
 const storedTimeoutDetails = (operation) => {
   if (operation === 'session_terminate') {
     return {
@@ -924,7 +934,7 @@ const storedTimeoutDetails = (operation) => {
       operation, ['phase', 'state', 'outcome', 'idempotency', 'items'], {
         phase: { const: 'confirmation' }, state: reference('nullableState'),
         outcome: { const: 'unknown' }, idempotency: { enum: ['not_requested', 'pending'] },
-        items: storedForwardItems(0, 'forwardItem'),
+        items: storedForwardTimeoutItems(),
       },
     ));
   } else {

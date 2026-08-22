@@ -1112,6 +1112,7 @@ bool valid_forward_items(const json& items, bool allow_empty, bool require_termi
     }
     std::optional<std::int64_t> previous;
     std::set<std::int64_t> temporary_ids;
+    std::set<std::int64_t> final_ids;
     for (const auto& item : items) {
         if (!valid_forward_item(item)) {
             return false;
@@ -1127,9 +1128,21 @@ bool valid_forward_items(const json& items, bool allow_empty, bool require_termi
             if (!temporary || !temporary_ids.emplace(*temporary).second) {
                 return false;
             }
+        } else if (item["status"] == "sent") {
+            const auto final_id = json_int64(item["message"]["id"]);
+            if (!final_id || !final_ids.emplace(*final_id).second) {
+                return false;
+            }
         }
     }
     return true;
+}
+
+bool valid_forward_timeout_items(const json& items) {
+    return valid_forward_items(items, true, false) &&
+           (items.empty() || std::ranges::any_of(items, [](const json& item) {
+                return item["status"] == "pending";
+            }));
 }
 
 bool legal_completed_stages( // NOLINT(readability-function-cognitive-complexity)
@@ -1259,7 +1272,7 @@ bool valid_timeout_details(AccountAuditOperation operation, const json& details)
     if (operation == AccountAuditOperation::MsgForward) {
         return exact_fields(details,
                             {"operation", "phase", "state", "outcome", "idempotency", "items"}) &&
-               valid_forward_items(details["items"], true, false);
+               valid_forward_timeout_items(details["items"]);
     }
     return (operation == AccountAuditOperation::Send ||
             operation == AccountAuditOperation::SavedAttach) &&
@@ -3572,6 +3585,12 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
                                 std::string_view audit_path, const AccountAuditPinSource& pins,
                                 std::string& error) {
     AccountAuditRecoveryPlan result;
+    const auto operation =
+        parse_account_audit_operation(group.intent["command"].get_ref<const std::string&>());
+    if (!operation) {
+        error = "audit recovery group has an invalid operation";
+        return std::nullopt;
+    }
     if (std::holds_alternative<UnavailableAccountAuditPins>(pins)) {
         error = "audit pin provider is unavailable";
         return std::nullopt;
@@ -3583,8 +3602,6 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
     }
     if (!group.dispatch_started) {
         result.mutation_state = AccountAuditMutationState::None;
-        const auto operation =
-            parse_account_audit_operation(group.intent["command"].get_ref<const std::string&>());
         const bool mark_read_noop = operation == AccountAuditOperation::ChatMarkRead &&
                                     group.intent["plan"]["tdlib_request"].is_null() &&
                                     group.intent["plan"]["last_message_id"].is_null();
@@ -3642,11 +3659,16 @@ classify_account_audit_recovery(const AccountAuditOpenGroup& group, std::string_
         }
         result.terminal = (*found)["data"]["terminal"];
     }
+    const bool retain_incomplete_forward = *operation == AccountAuditOperation::MsgForward &&
+                                           group.mutation_confirmed && !group.forward_complete &&
+                                           final_forward_items(group) != nullptr;
+    result.retain_store = group.keyed && retain_incomplete_forward;
+    result.retain_spool = group.has_spool && retain_incomplete_forward;
     result.boundaries.push_back(AccountAuditRecoveryBoundary::AppendOutcomeAndSync);
     if (group.keyed) {
         result.boundaries.push_back(AccountAuditRecoveryBoundary::TransitionStoreAndSync);
     }
-    if (group.has_spool) {
+    if (group.has_spool && !retain_incomplete_forward) {
         result.boundaries.push_back(AccountAuditRecoveryBoundary::CleanupSpoolAndSyncRoot);
     }
     result.continue_current_request = true;

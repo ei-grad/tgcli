@@ -724,9 +724,15 @@ TEST_CASE("account audit limits preserve the accepted equations", "[account-audi
     CHECK(kMaximumIntentProofBytes == 130'490'195);
     CHECK(kMaximumSessionIntentProofBytes == 48'300'031);
     CHECK(kVectorJsonBytes == 4'198'400);
-    CHECK(kMaximumGroupBytes == 562'651'242);
-    CHECK(kMaximumNonRotatingSegmentBytes == 461'987'945);
-    CHECK(kMaximumAuditBytes == 2'813'256'210ULL);
+    CHECK(kMaximumForwardProgressRecords == 101);
+    CHECK(kMaximumVectorLinesPerGroup == 103);
+    CHECK(kMaximumGroupBytes == 566'849'643);
+    CHECK(kMaximumGroupTailBytes == 432'631'914);
+    CHECK(kMaximumNonRotatingSegmentBytes == 466'186'346);
+    CHECK(kMaximumSegmentBytes == 566'849'643);
+    CHECK(kMaximumAuditBytes == 2'834'248'215ULL);
+    CHECK(daemon::account_audit_terminal_reservation(daemon::AccountAuditOperation::MsgForward) ==
+          4'194'304);
 }
 
 TEST_CASE("account audit intent factories cover the closed operation enum",
@@ -828,6 +834,197 @@ TEST_CASE("account audit stage automata reject repeats regressions and nonadvanc
     };
     CHECK_FALSE(
         daemon::validate_account_audit_stage_history(O::SessionTerminate, session_history, error));
+}
+
+TEST_CASE("account audit admits the complete 99 and 100-item forward progress sequences",
+          "[account-audit][forward][limits][progress]") {
+    using O = daemon::AccountAuditOperation;
+    using S = daemon::AccountAuditStage;
+    for (const std::int64_t item_count : {99, 100}) {
+        CAPTURE(item_count);
+        const auto identity = daemon::AccountAuditRecordIdentity{"0123456789abcdef0123456789abcdef",
+                                                                 "2026-08-19T12:00:01Z"};
+        const json dispatch{{"tdlib_function", "forwardMessages"},
+                            {"dispatch_token", "11111111111111111111111111111111"},
+                            {"client_generation", std::uint64_t{1}}};
+        json items = json::array();
+        for (std::int64_t id = 1; id <= item_count; ++id) {
+            items.push_back(
+                {{"source_id", id}, {"status", "pending"}, {"temporary_message_id", -id}});
+        }
+        std::vector<daemon::AccountAuditCheckpointInput> history;
+        history.reserve(static_cast<std::size_t>(item_count + 3));
+        history.push_back({identity, "main", O::MsgForward, 1, S::DispatchStarted, dispatch});
+        history.push_back(
+            {identity, "main", O::MsgForward, 2, S::ForwardProgress, {{"items", items}}});
+        for (std::size_t index = 0; index < static_cast<std::size_t>(item_count); ++index) {
+            auto message = message_write();
+            message["id"] = static_cast<std::int64_t>(1'000 + index);
+            message["chat_id"] = -1002;
+            items[index] = {{"source_id", static_cast<std::int64_t>(index + 1)},
+                            {"status", "sent"},
+                            {"message", std::move(message)}};
+            history.push_back({identity,
+                               "main",
+                               O::MsgForward,
+                               static_cast<std::uint32_t>(history.size() + 1),
+                               S::ForwardProgress,
+                               {{"items", items}}});
+        }
+
+        std::string error;
+        INFO(error);
+        CHECK(daemon::validate_account_audit_stage_history(O::MsgForward, history, error));
+
+        history.push_back({identity,
+                           "main",
+                           O::MsgForward,
+                           static_cast<std::uint32_t>(history.size() + 1),
+                           S::ForwardProgress,
+                           {{"items", items}}});
+        CHECK_FALSE(daemon::validate_account_audit_stage_history(O::MsgForward, history, error));
+        CHECK(error == (item_count == 100 ? "too many forward progress records"
+                                          : "forward progress did not advance"));
+    }
+}
+
+TEST_CASE("account audit appends and rescans every legal 100-item forward transition",
+          "[account-audit][forward][limits][progress][scanner][crash]") {
+    using M = daemon::AccountAuditMutationState;
+    using O = daemon::AccountAuditOperation;
+    using S = daemon::AccountAuditStage;
+    const std::string invocation = "1123456789abcdef0123456789abcdef";
+    json message_ids = json::array();
+    json temporary_ids = json::array();
+    json items = json::array();
+    for (std::int64_t id = 1; id <= 100; ++id) {
+        message_ids.push_back(id);
+        temporary_ids.push_back(-id);
+        items.push_back({{"source_id", id}, {"status", "pending"}, {"temporary_message_id", -id}});
+    }
+    auto forward_arguments = arguments(O::MsgForward);
+    forward_arguments["message_ids"] = message_ids;
+    auto forward_plan = plan(O::MsgForward);
+    forward_plan["message_ids"] = message_ids;
+    std::string error;
+    auto intent = daemon::make_account_audit_intent({{invocation, "2026-08-19T12:00:00Z"},
+                                                     "main",
+                                                     O::MsgForward,
+                                                     std::move(forward_arguments),
+                                                     std::move(forward_plan),
+                                                     std::string(kFingerprint),
+                                                     std::string(kSnapshot),
+                                                     "request",
+                                                     std::nullopt,
+                                                     std::nullopt,
+                                                     100},
+                                                    error);
+    INFO(error);
+    REQUIRE(intent);
+
+    std::vector<json> records{
+        intent->document(),
+        checkpoint_record(O::MsgForward, S::DispatchStarted, 1,
+                          {{"tdlib_function", "forwardMessages"},
+                           {"dispatch_token", "11111111111111111111111111111111"},
+                           {"client_generation", std::uint64_t{1}}},
+                          invocation),
+        checkpoint_record(O::MsgForward, S::TemporaryIdsObserved, 2,
+                          {{"temporary_message_ids", temporary_ids}}, invocation),
+        checkpoint_record(O::MsgForward, S::ForwardProgress, 3, {{"items", items}}, invocation)};
+    for (std::size_t index = 0; index < 99; ++index) {
+        auto message = message_write(static_cast<std::int64_t>(1'000 + index));
+        message["chat_id"] = -1002;
+        items[index] = {{"source_id", static_cast<std::int64_t>(index + 1)},
+                        {"status", "sent"},
+                        {"message", std::move(message)}};
+        records.push_back(checkpoint_record(O::MsgForward, S::ForwardProgress,
+                                            static_cast<std::uint32_t>(4 + index),
+                                            {{"items", items}}, invocation));
+    }
+
+    AuditTree tree;
+    tree.write({}, json_lines(records));
+    daemon::AccountAuditLog log(tree.state(), "main", ::getuid());
+    auto guard = tree.coordinator().lock();
+    daemon::AccountAuditFailure failure;
+    daemon::AccountAuditLog after_progress_100(tree.state(), "main", ::getuid());
+    CHECK(after_progress_100.inspect(guard).status == daemon::AccountAuditInspectionStatus::Open);
+    const auto append = [&](std::uint32_t sequence, S stage, json data) {
+        auto checkpoint =
+            daemon::make_account_audit_checkpoint({{invocation, "2026-08-19T12:00:01Z"},
+                                                   "main",
+                                                   O::MsgForward,
+                                                   sequence,
+                                                   stage,
+                                                   std::move(data)},
+                                                  error);
+        INFO(error);
+        REQUIRE(checkpoint);
+        REQUIRE(log.append_checkpoint(*checkpoint, guard, failure));
+    };
+
+    auto final_message = message_write(1'099);
+    final_message["chat_id"] = -1002;
+    items[99] = {{"source_id", 100}, {"status", "sent"}, {"message", std::move(final_message)}};
+    append(103, S::ForwardProgress, {{"items", items}});
+    daemon::AccountAuditLog after_progress_101(tree.state(), "main", ::getuid());
+    CHECK(after_progress_101.inspect(guard).status == daemon::AccountAuditInspectionStatus::Open);
+
+    const json terminal{
+        {"kind", "result"},
+        {"data", {{"from_chat_id", -1001}, {"to_chat_id", -1002}, {"items", items}}}};
+    append(104, S::MutationConfirmed, {{"terminal", terminal}});
+    daemon::AccountAuditLog after_proof(tree.state(), "main", ::getuid());
+    CHECK(after_proof.inspect(guard).status == daemon::AccountAuditInspectionStatus::Open);
+
+    auto outcome = daemon::make_account_audit_outcome(
+        {{invocation, "2026-08-19T12:00:06Z"},
+         "main",
+         O::MsgForward,
+         true,
+         M::Confirmed,
+         {S::DispatchStarted, S::TemporaryIdsObserved, S::ForwardProgress, S::MutationConfirmed},
+         terminal},
+        error);
+    INFO(error);
+    REQUIRE(outcome);
+    REQUIRE(log.append_outcome(*outcome, guard, failure));
+    daemon::AccountAuditLog after_outcome(tree.state(), "main", ::getuid());
+    CHECK(after_outcome.inspect(guard).status == daemon::AccountAuditInspectionStatus::Clean);
+}
+
+TEST_CASE("account audit enforces the widened sparse segment ceiling before scanning",
+          "[account-audit][limits][filesystem][scanner]") {
+    struct SegmentAccepted {};
+    AuditTree accepted;
+    accepted.write({}, {});
+    std::filesystem::resize_file(accepted.audit(),
+                                 daemon::account_audit_limits::kMaximumSegmentBytes);
+    auto accepted_hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+    bool scan_started = false;
+    accepted_hooks->before_segment_scan = [&](std::string_view) {
+        scan_started = true;
+        throw SegmentAccepted{};
+    };
+    daemon::AccountAuditLog accepted_log(accepted.state(), "main", ::getuid(), accepted_hooks);
+    auto accepted_guard = accepted.coordinator().lock();
+    CHECK_THROWS_AS(accepted_log.inspect(accepted_guard), SegmentAccepted);
+    CHECK(scan_started);
+
+    AuditTree oversized;
+    oversized.write({}, {});
+    std::filesystem::resize_file(oversized.audit(),
+                                 daemon::account_audit_limits::kMaximumSegmentBytes + 1);
+    auto oversized_hooks = std::make_shared<daemon::testing::AccountAuditHooks>();
+    bool oversized_scan_started = false;
+    oversized_hooks->before_segment_scan = [&](std::string_view) { oversized_scan_started = true; };
+    daemon::AccountAuditLog oversized_log(oversized.state(), "main", ::getuid(), oversized_hooks);
+    auto oversized_guard = oversized.coordinator().lock();
+    const auto inspection = oversized_log.inspect(oversized_guard);
+    CHECK(inspection.status == daemon::AccountAuditInspectionStatus::Unavailable);
+    CHECK(inspection.failure.reason == daemon::AccountAuditDurabilityReason::PathInvalid);
+    CHECK_FALSE(oversized_scan_started);
 }
 
 TEST_CASE("account audit checkpoint and outcome factories enforce exact envelopes",
@@ -1123,6 +1320,56 @@ TEST_CASE("account audit recovery freezes sent proof and cleanup ordering",
     REQUIRE_FALSE(plan->boundaries.empty());
     CHECK(plan->boundaries.front() ==
           daemon::AccountAuditRecoveryBoundary::AppendMutationProofAndSync);
+
+    auto incomplete = daemon::AccountAuditOpenGroup{};
+    incomplete.intent = make_intent(daemon::AccountAuditOperation::MsgForward,
+                                    "2123456789abcdef0123456789abcdef", std::string(kKeyHash))
+                            .document();
+    incomplete.intent["arguments"]["message_ids"] = json::array({1, 2});
+    incomplete.intent["plan"]["message_ids"] = json::array({1, 2});
+    incomplete.keyed = true;
+    incomplete.dispatch_started = true;
+    incomplete.mutation_confirmed = true;
+    incomplete.any_forward_sent = true;
+    incomplete.forward_complete = false;
+    incomplete.completed_stages = {
+        daemon::AccountAuditStage::IdempotencyPending, daemon::AccountAuditStage::DispatchStarted,
+        daemon::AccountAuditStage::ForwardProgress, daemon::AccountAuditStage::MutationConfirmed};
+    auto forwarded_message = message_write();
+    forwarded_message["chat_id"] = -1002;
+    const json incomplete_items = json::array(
+        {json{{"source_id", 1}, {"status", "sent"}, {"message", std::move(forwarded_message)}},
+         json{{"source_id", 2}, {"status", "pending"}, {"temporary_message_id", -2}}});
+    const json timeout{{"kind", "error"},
+                       {"code", "TIMEOUT"},
+                       {"message", "request timed out"},
+                       {"details",
+                        {{"operation", "msg_forward"},
+                         {"phase", "confirmation"},
+                         {"state", "ready"},
+                         {"outcome", "unknown"},
+                         {"idempotency", "pending"},
+                         {"items", incomplete_items}}},
+                       {"exit_code", 7}};
+    incomplete.checkpoints.push_back(checkpoint(daemon::AccountAuditOperation::MsgForward,
+                                                daemon::AccountAuditStage::ForwardProgress, 3,
+                                                {{"items", incomplete_items}})
+                                         .document());
+    incomplete.checkpoints.push_back(checkpoint(daemon::AccountAuditOperation::MsgForward,
+                                                daemon::AccountAuditStage::MutationConfirmed, 4,
+                                                {{"terminal", timeout}})
+                                         .document());
+
+    plan = daemon::classify_account_audit_recovery(incomplete, "main", "/state/audit.log", known,
+                                                   error);
+    REQUIRE(plan);
+    CHECK(plan->mutation_state == daemon::AccountAuditMutationState::Confirmed);
+    CHECK(plan->retain_store);
+    CHECK_FALSE(plan->complete_store);
+    CHECK(plan->terminal == timeout);
+    CHECK(plan->boundaries ==
+          std::vector{daemon::AccountAuditRecoveryBoundary::AppendOutcomeAndSync,
+                      daemon::AccountAuditRecoveryBoundary::TransitionStoreAndSync});
 }
 
 TEST_CASE("account audit streams mixed history and applies recognition precedence",
@@ -1865,6 +2112,20 @@ TEST_CASE("account audit v2 accepts signed message ids and the mute default sent
     document = progress->document();
     document["data"]["items"][0]["source_id"] = 0;
     rejects_checkpoint_document(document);
+
+    auto duplicate_final_ids =
+        checkpoint(
+            O::MsgForward, S::ForwardProgress, 1,
+            {{"items",
+              json::array(
+                  {json{{"source_id", 1}, {"status", "sent"}, {"message", message_write(101)}},
+                   json{{"source_id", 2}, {"status", "sent"}, {"message", message_write(102)}}})}})
+            .document();
+    duplicate_final_ids["data"]["items"][1]["message"]["id"] = 101;
+    CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json")
+              .match(duplicate_final_ids));
+    std::string duplicate_error;
+    CHECK_FALSE(daemon::validate_account_audit_checkpoint(duplicate_final_ids, duplicate_error));
 
     const json precondition_terminal{{"kind", "error"},
                                      {"code", "PRECONDITION_FAILED"},
@@ -2962,23 +3223,16 @@ TEST_CASE("account audit preserves confirmed forward timeout with pending items"
                              {"retry_after", nullptr}};
     auto complete_timeout = timeout;
     complete_timeout["details"]["items"] = complete_items;
-    const std::vector<S> complete_stages{S::DispatchStarted, S::ForwardProgress,
-                                         S::MutationConfirmed};
-    const std::vector<json> complete_records{
-        intent, checkpoint_record(O::MsgForward, S::DispatchStarted, 1, dispatch, invocation),
-        checkpoint_record(O::MsgForward, S::ForwardProgress, 2, {{"items", complete_items}},
-                          invocation),
-        checkpoint_record(O::MsgForward, S::MutationConfirmed, 3, {{"terminal", complete_timeout}},
-                          invocation),
-        outcome_record(O::MsgForward, invocation, M::Confirmed, complete_stages, complete_timeout)};
-    CHECK_FALSE(tgcli::test::matches_json_schema("audit-checkpoint.schema.json")
-                    .match(complete_records[3]));
-    AuditTree complete_tree;
-    complete_tree.write({}, json_lines(complete_records));
-    daemon::AccountAuditLog complete_log(complete_tree.state(), "main", ::getuid());
-    auto complete_guard = complete_tree.coordinator().lock();
-    CHECK(complete_log.inspect(complete_guard).status ==
-          daemon::AccountAuditInspectionStatus::Contradiction);
+    auto complete_proof = records[4];
+    complete_proof["data"]["terminal"] = complete_timeout;
+    CHECK_FALSE(daemon::validate_account_audit_checkpoint(complete_proof, error));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("audit-checkpoint.schema.json").match(complete_proof));
+    auto complete_outcome = records[5];
+    complete_outcome["terminal"] = complete_timeout;
+    CHECK_FALSE(daemon::validate_account_audit_outcome(complete_outcome, error));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("audit-outcome.schema.json").match(complete_outcome));
 }
 
 TEST_CASE("account audit stores spool failures only at saved attach spool prefixes",
