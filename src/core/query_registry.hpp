@@ -17,6 +17,11 @@ namespace tgcli::core {
 // id, the receive loop fulfills it. Thread-safe.
 template <typename Response> class QueryRegistry {
   public:
+    struct Detached {
+        std::promise<Response> promise;
+        std::shared_ptr<const void> lifetime;
+    };
+
     std::pair<std::uint64_t, std::future<Response>>
     reserve(const std::shared_ptr<const void>& lifetime = {}) {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -29,39 +34,38 @@ template <typename Response> class QueryRegistry {
     // Returns false for an id the registry is not tracking (never reserved,
     // already fulfilled, or failed).
     bool fulfill(std::uint64_t id, Response response) {
-        auto promise = take(id);
-        if (!promise) {
+        auto detached = take(id);
+        if (!detached) {
             return false;
         }
-        promise->set_value(std::move(response));
+        detached->promise.set_value(std::move(response));
         return true;
     }
 
-    // Detaches a tracked promise so callers can acquire the registry mutex
-    // before entering a narrower publication critical section.
-    std::optional<std::promise<Response>> take(std::uint64_t id) {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        auto it = pending_.find(id);
-        if (it == pending_.end()) {
-            return std::nullopt;
-        }
-        std::optional<std::promise<Response>> promise(std::in_place, std::move(it->second.promise));
-        pending_.erase(it);
-        return promise;
-    }
-
-    bool fail(std::uint64_t id, std::exception_ptr error) {
-        std::promise<Response> promise;
+    // Detaches promise and lifetime so callers can enter a narrower
+    // publication critical section without running lifetime callbacks under
+    // this registry mutex.
+    std::optional<Detached> take(std::uint64_t id) {
+        std::optional<Detached> detached;
         {
             const std::lock_guard<std::mutex> lock(mutex_);
             auto it = pending_.find(id);
             if (it == pending_.end()) {
-                return false;
+                return std::nullopt;
             }
-            promise = std::move(it->second.promise);
+            detached.emplace(Detached{.promise = std::move(it->second.promise),
+                                      .lifetime = std::move(it->second.lifetime)});
             pending_.erase(it);
         }
-        promise.set_exception(std::move(error));
+        return detached;
+    }
+
+    bool fail(std::uint64_t id, std::exception_ptr error) {
+        auto detached = take(id);
+        if (!detached) {
+            return false;
+        }
+        detached->promise.set_exception(std::move(error));
         return true;
     }
 
@@ -85,10 +89,7 @@ template <typename Response> class QueryRegistry {
     }
 
   private:
-    struct Entry {
-        std::promise<Response> promise;
-        std::shared_ptr<const void> lifetime;
-    };
+    using Entry = Detached;
 
     mutable std::mutex mutex_;
     std::uint64_t next_id_ = 1;

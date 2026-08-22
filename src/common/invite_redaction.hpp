@@ -53,7 +53,7 @@ class InviteLinkRegistry final {
     void release(std::uint64_t registration);
 
     mutable std::mutex mutex_;
-    std::map<std::uint64_t, Entry> links_;
+    std::map<std::uint64_t, std::shared_ptr<Entry>> links_;
     std::uint64_t next_registration_ = 1;
 
     friend class CorrelatedInviteLink;

@@ -1582,7 +1582,7 @@ class TdRuntime {
     virtual TdValue make_join_chat(TdJoinChatRequest request) = 0;
     virtual TdValue make_leave_chat(TdLeaveChatRequest request) = 0;
     virtual void send(std::int32_t client_id, std::uint64_t client_generation,
-                      std::uint64_t query_id, TdValue function) = 0;
+                      std::uint64_t query_id, TdValue& function) = 0;
     virtual std::optional<TdRuntimeEvent> receive(std::chrono::milliseconds timeout) = 0;
 };
 

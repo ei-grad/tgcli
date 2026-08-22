@@ -106,7 +106,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_join_chat(core::TdJoinChatRequest request) override;
     core::TdValue make_leave_chat(core::TdLeaveChatRequest request) override;
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
-              core::TdValue function) override;
+              core::TdValue& function) override;
     std::optional<core::TdRuntimeEvent> receive(std::chrono::milliseconds timeout) override;
 
     void push_response(ScriptedClient client, std::uint64_t query_id, core::TdValue object = {},

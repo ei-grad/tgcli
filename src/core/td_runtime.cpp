@@ -2879,7 +2879,7 @@ class ProductionTdRuntime final : public TdRuntime {
     }
 
     void send(std::int32_t client_id, std::uint64_t client_generation, std::uint64_t query_id,
-              TdValue function) override {
+              TdValue& function) override {
         static_cast<void>(client_generation);
         auto* native_function = function.get_if<NativeFunctionPtr>();
         if (native_function == nullptr || *native_function == nullptr) {

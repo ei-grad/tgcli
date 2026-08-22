@@ -543,7 +543,7 @@ core::TdValue ScriptedTdRuntime::make_leave_chat(core::TdLeaveChatRequest reques
 }
 
 void ScriptedTdRuntime::send(std::int32_t client_id, std::uint64_t client_generation,
-                             std::uint64_t query_id, core::TdValue function) {
+                             std::uint64_t query_id, core::TdValue& function) {
     if (!function.function_data().has_value()) {
         throw std::invalid_argument("scripted TDLib function lacks neutral data");
     }

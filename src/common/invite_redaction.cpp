@@ -71,30 +71,39 @@ CorrelatedInviteLink InviteLinkRegistry::register_link(std::string_view invite_l
     if (invite_link.empty()) {
         return {};
     }
-    const std::lock_guard lock(mutex_);
-    if (next_registration_ == 0 ||
-        next_registration_ == std::numeric_limits<std::uint64_t>::max()) {
-        return {};
-    }
-    const auto registration = next_registration_++;
     auto aliases = common::exact_telegram_invite_aliases(invite_link, wipe_observer);
     if (aliases.empty()) {
         aliases.emplace_back(invite_link, wipe_observer, "invite_alias");
     }
-    links_.emplace(registration, Entry{.aliases = std::move(aliases)});
-    return CorrelatedInviteLink(std::make_shared<CorrelatedInviteLink::State>(this, registration));
+    auto entry = std::make_shared<Entry>(Entry{.aliases = std::move(aliases)});
+    std::shared_ptr<CorrelatedInviteLink::State> state;
+    {
+        const std::lock_guard lock(mutex_);
+        if (next_registration_ == 0 ||
+            next_registration_ == std::numeric_limits<std::uint64_t>::max()) {
+            return {};
+        }
+        const auto registration = next_registration_++;
+        state = std::make_shared<CorrelatedInviteLink::State>(this, registration);
+        links_.emplace(registration, entry);
+    }
+    return CorrelatedInviteLink(std::move(state));
 }
 
 std::string InviteLinkRegistry::redact(std::string_view value) const {
-    const std::lock_guard lock(mutex_);
-    if (links_.empty()) {
-        return std::string(value);
+    std::vector<std::shared_ptr<const Entry>> entries;
+    {
+        const std::lock_guard lock(mutex_);
+        entries.reserve(links_.size());
+        for (const auto& [registration, entry] : links_) {
+            static_cast<void>(registration);
+            entries.push_back(entry);
+        }
     }
     std::vector<const secure::SensitiveString*> ordered;
-    ordered.reserve(links_.size());
-    for (const auto& [registration, entry] : links_) {
-        static_cast<void>(registration);
-        for (const auto& alias : entry.aliases) {
+    for (const auto& entry : entries) {
+        ordered.reserve(ordered.size() + entry->aliases.size());
+        for (const auto& alias : entry->aliases) {
             ordered.push_back(&alias);
         }
     }
@@ -128,12 +137,17 @@ std::string InviteLinkRegistry::redact(std::string_view value) const {
 }
 
 void InviteLinkRegistry::release(std::uint64_t registration) {
-    const std::lock_guard lock(mutex_);
-    const auto found = links_.find(registration);
-    if (found == links_.end()) {
-        return;
+    std::shared_ptr<Entry> released;
+    {
+        const std::lock_guard lock(mutex_);
+        const auto found = links_.find(registration);
+        if (found == links_.end()) {
+            return;
+        }
+        released = std::move(found->second);
+        links_.erase(found);
     }
-    links_.erase(found);
+    released.reset();
 }
 
 } // namespace tgcli::redaction

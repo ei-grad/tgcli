@@ -187,7 +187,7 @@ class TdClient::Impl {
             if (!generation->initial_state_installed) {
                 return failed_future(TdAuthorizationFailure::AuthStateMismatch);
             }
-            return submit_locked(generation, descriptor, std::move(request), lifetime).future;
+            return submit_locked(generation, descriptor, request, lifetime).future;
         });
     }
 
@@ -479,29 +479,27 @@ class TdClient::Impl {
                                           .client_generation = authorization->client_generation,
                                           .auth_sequence = authorization->auth_sequence,
                                           .auth_state = authorization->data.state};
-        return generation->lifecycle.send(
-            [this, generation, descriptor, request = std::move(request)]() mutable {
-                const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
-                if (!generation->initial_state_installed) {
-                    return failed_future(TdAuthorizationFailure::AuthStateMismatch);
-                }
-                if (const auto failure = authorization_failure_locked(
-                        generation, descriptor, TdFunctionData{TdFunctionKind::SendMessage})) {
-                    return failed_future(*failure);
-                }
-                if (request.content.parsed &&
-                    !request.content.formatted_text.capability.valid_for(generation->number)) {
-                    return failed_future("parsed formattedText capability expired");
-                }
-                try {
-                    return submit_admitted_locked(
-                               generation, descriptor,
-                               runtime_->make_send_message(std::move(request), generation->number))
-                        .future;
-                } catch (const std::exception& error) {
-                    return failed_future(error.what());
-                }
-            });
+        return generation->lifecycle.send([this, generation, descriptor,
+                                           request = std::move(request)]() mutable {
+            const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
+            if (!generation->initial_state_installed) {
+                return failed_future(TdAuthorizationFailure::AuthStateMismatch);
+            }
+            if (const auto failure = authorization_failure_locked(
+                    generation, descriptor, TdFunctionData{TdFunctionKind::SendMessage})) {
+                return failed_future(*failure);
+            }
+            if (request.content.parsed &&
+                !request.content.formatted_text.capability.valid_for(generation->number)) {
+                return failed_future("parsed formattedText capability expired");
+            }
+            try {
+                auto function = runtime_->make_send_message(std::move(request), generation->number);
+                return submit_admitted_locked(generation, descriptor, function).future;
+            } catch (const std::exception& error) {
+                return failed_future(error.what());
+            }
+        });
     }
 
     TdPreparedWrite prepare_write(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -544,23 +542,24 @@ class TdClient::Impl {
                 rejection = failure;
                 return;
             }
-            auto request = std::make_shared<std::optional<TdValue>>(std::move(request_value));
             auto resources = std::make_shared<PreparedWriteResources>();
             resources->owner = std::move(owner);
             resources->held = std::move(held);
+            resources->request.emplace(std::move(request_value));
+            resources->lifetime = std::move(lifetime);
             auto state = std::make_shared<TdPreparedWrite::State>();
-            state->submit = [this, generation, descriptor, resources = std::move(resources),
-                             request = std::move(request),
-                             lifetime = std::move(lifetime)]() mutable {
-                if (!request || !request->has_value()) {
+            state->submit = [this, generation, descriptor,
+                             resources = std::move(resources)]() mutable {
+                if (!resources->request.has_value()) {
                     return failed_future(TdAuthorizationFailure::AuthStateMismatch);
                 }
-                auto value = std::move(request->value());
-                request->reset();
+                auto value = std::move(resources->request.value());
+                resources->request.reset();
                 auto submission =
-                    submit_admitted_locked(generation, descriptor, std::move(value), lifetime);
-                resources->held.reset();
-                resources->owner.reset();
+                    submit_admitted_locked(generation, descriptor, value, resources->lifetime);
+                resources->release_locks_and_owner();
+                value = {};
+                resources->lifetime.reset();
                 return std::move(submission.future);
             };
             prepared = TdPreparedWrite(std::move(state));
@@ -814,8 +813,7 @@ class TdClient::Impl {
                 decision_state->query_id = query_id;
             }
             try {
-                runtime_->send(generation->client_id, generation->number, query_id,
-                               std::move(function));
+                runtime_->send(generation->client_id, generation->number, query_id, function);
             } catch (const std::exception&) {
                 {
                     const std::lock_guard decision_lock(decision_state->mutex);
@@ -917,9 +915,8 @@ class TdClient::Impl {
             auto state = std::make_shared<TdSendLease::State>();
             state->submit = [this, generation, descriptor,
                              held = std::move(held)](TdlibParameters parameters) mutable {
-                auto submission = submit_admitted_locked(
-                    generation, descriptor,
-                    runtime_->make_set_tdlib_parameters(std::move(parameters)));
+                auto function = runtime_->make_set_tdlib_parameters(std::move(parameters));
+                auto submission = submit_admitted_locked(generation, descriptor, function);
                 held.reset();
                 return std::move(submission.future);
             };
@@ -1108,8 +1105,26 @@ class TdClient::Impl {
     };
 
     struct PreparedWriteResources {
+        PreparedWriteResources() = default;
+        ~PreparedWriteResources() {
+            release_locks_and_owner();
+            request.reset();
+            lifetime.reset();
+        }
+        PreparedWriteResources(const PreparedWriteResources&) = delete;
+        PreparedWriteResources& operator=(const PreparedWriteResources&) = delete;
+        PreparedWriteResources(PreparedWriteResources&&) = delete;
+        PreparedWriteResources& operator=(PreparedWriteResources&&) = delete;
+
+        void release_locks_and_owner() {
+            held.reset();
+            owner.reset();
+        }
+
         std::shared_ptr<TdOwnerLease> owner;
         std::shared_ptr<LeaseLocks> held;
+        std::optional<TdValue> request;
+        TdQueryLifetime lifetime;
     };
 
     struct Generation {
@@ -1168,9 +1183,8 @@ class TdClient::Impl {
             .auth_sequence = 0,
             .auth_state = AuthState::Unknown,
         };
-        auto submission =
-            submit_locked(generation, descriptor,
-                          runtime_->make_function(TdBuiltinFunction::GetAuthorizationState));
+        auto function = runtime_->make_function(TdBuiltinFunction::GetAuthorizationState);
+        auto submission = submit_locked(generation, descriptor, function);
         if (submission.query_id != 1) {
             throw std::logic_error("authorization bootstrap must reserve query id 1");
         }
@@ -1183,14 +1197,14 @@ class TdClient::Impl {
     }
 
     Submission submit_locked(const std::shared_ptr<Generation>& generation,
-                             const TdSendDescriptor& descriptor, TdValue function,
+                             const TdSendDescriptor& descriptor, TdValue& function,
                              const TdQueryLifetime& lifetime = {}) {
         const auto& function_data = function.function_data();
         if (const auto failure = authorization_failure_locked(
                 generation, descriptor, function_data ? &*function_data : nullptr)) {
             return {0, failed_future(*failure)};
         }
-        return submit_admitted_locked(generation, descriptor, std::move(function), lifetime);
+        return submit_admitted_locked(generation, descriptor, function, lifetime);
     }
 
     std::optional<TdAuthorizationFailure>
@@ -1232,13 +1246,12 @@ class TdClient::Impl {
     }
 
     Submission submit_admitted_locked(const std::shared_ptr<Generation>& generation,
-                                      const TdSendDescriptor& admitted_descriptor, TdValue function,
-                                      const TdQueryLifetime& lifetime = {}) {
+                                      const TdSendDescriptor& admitted_descriptor,
+                                      TdValue& function, const TdQueryLifetime& lifetime = {}) {
         static_cast<void>(admitted_descriptor);
         auto [query_id, future] = generation->queries.reserve(lifetime);
         try {
-            runtime_->send(generation->client_id, generation->number, query_id,
-                           std::move(function));
+            runtime_->send(generation->client_id, generation->number, query_id, function);
         } catch (const std::exception&) {
             static_cast<void>(generation->queries.fail(query_id, std::current_exception()));
         }
@@ -1263,8 +1276,8 @@ class TdClient::Impl {
             .auth_sequence = snapshot->auth_sequence,
             .auth_state = snapshot->data.state,
         };
-        static_cast<void>(submit_locked(generation, descriptor,
-                                        runtime_->make_function(TdBuiltinFunction::Close)));
+        auto function = runtime_->make_function(TdBuiltinFunction::Close);
+        static_cast<void>(submit_locked(generation, descriptor, function));
     }
 
     static std::vector<std::shared_ptr<TdClosedDecision::State>>
@@ -1415,7 +1428,7 @@ class TdClient::Impl {
             return;
         }
 
-        auto response_promise = generation->queries.take(event.query_id);
+        auto response = generation->queries.take(event.query_id);
         std::optional<LeaseLocks> auth_locks;
         bool install_response = false;
         if (event.query_id == 1 && event.authorization_state.has_value()) {
@@ -1440,8 +1453,8 @@ class TdClient::Impl {
             if (install_response) {
                 commit_auth_state_locked(generation, *auth_publication, false);
             }
-            if (response_promise) {
-                response_promise->set_value(std::move(event.object));
+            if (response) {
+                response->promise.set_value(std::move(event.object));
             }
         }
         auth_locks.reset();
@@ -1451,7 +1464,7 @@ class TdClient::Impl {
                 handle_closed(generation);
             }
         }
-        if (response_promise) {
+        if (response) {
             response_completions_.publish(receive_event_sequence);
         }
     }
