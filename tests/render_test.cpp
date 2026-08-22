@@ -347,6 +347,57 @@ TEST_CASE("public M3 write renderers preserve complete results and plans", "[m3]
     CHECK_THAT(send_dry, tgcli::test::matches_json_schema("send.result.schema.json"));
     CHECK(tgcli::cli::render_human("send", send_dry) == golden("send-dry-run.txt"));
 
+    const json saved_chat{{"id", 42},
+                          {"title", "Ada"},
+                          {"type", "private"},
+                          {"is_bot", false},
+                          {"usernames", json::array({"ada"})}};
+    const json saved_result{{"id", 322},
+                            {"chat_id", 42},
+                            {"date", "2026-08-05T10:00:01Z"},
+                            {"sender", {{"type", "user"}, {"id", 42}}},
+                            {"is_outgoing", true},
+                            {"topic", {{"kind", "saved"}, {"id", 19}}},
+                            {"type", "doc"},
+                            {"text", "experiment result"},
+                            {"scheduled", false}};
+    CHECK_THAT(saved_result, tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
+    CHECK(tgcli::cli::render_human("saved attach", saved_result) == golden("saved-attach.txt"));
+    auto invalid_saved = saved_result;
+    invalid_saved["type"] = "text";
+    CHECK_THAT(invalid_saved, !tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
+    invalid_saved = saved_result;
+    invalid_saved["scheduled"] = true;
+    invalid_saved["date"] = nullptr;
+    CHECK_THAT(invalid_saved, !tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
+    invalid_saved = saved_result;
+    invalid_saved["topic"] = {{"kind", "forum"}, {"id", 19}};
+    CHECK_THAT(invalid_saved, !tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
+    const json saved_plan{{"operation", "saved_attach"},
+                          {"account", "main"},
+                          {"tdlib_request", "sendMessage"},
+                          {"chat", saved_chat},
+                          {"message_id", -77},
+                          {"effective_topic", {{"kind", "saved"}, {"id", 19}}},
+                          {"caption", "experiment result"},
+                          {"file",
+                           {{"path", "/private/input.bin"},
+                            {"name", "input.bin"},
+                            {"size", 17},
+                            {"sha256", "sha256:" + std::string(64, 'a')},
+                            {"device", 1},
+                            {"inode", 2},
+                            {"mtime_ns", 3},
+                            {"ctime_ns", 4}}}};
+    const json saved_dry{{"dry_run", true}, {"plan", saved_plan}};
+    CHECK_THAT(saved_dry, tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
+    CHECK(tgcli::cli::render_human("saved attach", saved_dry) ==
+          golden("saved-attach-dry-run.txt"));
+    auto invalid_saved_dry = saved_dry;
+    invalid_saved_dry["plan"]["file"]["sha256"] = std::string(64, 'a');
+    CHECK_THAT(invalid_saved_dry,
+               !tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
+
     const json delete_result{{"chat_id", -1001},
                              {"message_ids", json::array({-5, 7})},
                              {"for_all", true},

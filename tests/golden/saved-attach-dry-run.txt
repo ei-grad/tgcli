@@ -1,0 +1,2 @@
+dry_run	true
+plan	{"account":"main","caption":"experiment result","chat":{"id":42,"is_bot":false,"title":"Ada","type":"private","usernames":["ada"]},"effective_topic":{"id":19,"kind":"saved"},"file":{"ctime_ns":4,"device":1,"inode":2,"mtime_ns":3,"name":"input.bin","path":"/private/input.bin","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":17},"message_id":-77,"operation":"saved_attach","tdlib_request":"sendMessage"}

@@ -239,20 +239,6 @@ bool nonzero_int53(std::int64_t value) {
     return value != 0 && value >= -kMaximumInt53 && value <= kMaximumInt53;
 }
 
-bool valid_caption(std::string_view value) {
-    if (value.size() > 4'096 || value.find('\0') != std::string_view::npos ||
-        !common::valid_utf8(value)) {
-        return false;
-    }
-    std::size_t scalars = 0;
-    for (const auto byte : value) {
-        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalars > 1'024) {
-            return false;
-        }
-    }
-    return true;
-}
-
 json terminal(std::string code, std::string message, json details, int exit_code) {
     return {{"kind", "error"},
             {"code", std::move(code)},
@@ -552,7 +538,7 @@ parse_saved_attach_input(const json& args, std::string_view frozen_cwd, json& fa
                            .path = args["path"].get<std::string>(),
                            .caption = args["caption"].get<std::string>(),
                            .display_path = {}};
-    if (!valid_caption(input.caption)) {
+    if (!valid_saved_attach_caption(input.caption)) {
         failure =
             usage("saved attach caption must contain at most 1024 Unicode scalars", "--caption");
         return std::nullopt;
@@ -2415,7 +2401,7 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
                       {"client_generation", state->dispatch_authorization->client_generation}}};
     };
     hooks.dispatch = [state, &request,
-                      this](const write_contract::Plan&, const WriteDispatchPreparation&,
+                      this](const write_contract::Plan& plan, const WriteDispatchPreparation&,
                             WriteDurableObservationSink& observations) -> WriteDispatchOutcome {
         if (!state->target || !state->dispatch_authorization || !state->coordinator) {
             throw std::logic_error("saved attachment coordinator state is incomplete");
@@ -2428,7 +2414,10 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
                 using Outcome = std::decay_t<decltype(outcome)>;
                 if constexpr (std::is_same_v<Outcome, SingleSendSucceeded>) {
                     auto result = message_write_result_json(outcome.result);
-                    if (!result.is_object() || result["chat_id"] != state->target->chat.id) {
+                    if (!result.is_object() || result["chat_id"] != state->target->chat.id ||
+                        result["type"] != "doc" || result["text"] != state->input->caption ||
+                        result["scheduled"].template get<bool>() ||
+                        result["topic"] != plan.value()["effective_topic"]) {
                         return {.terminal = stored_from_terminal(
                                     operation,
                                     internal(operation, "TDLib returned data outside the supported "

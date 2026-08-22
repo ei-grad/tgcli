@@ -271,7 +271,7 @@ saved_planning_message(std::int64_t id,
                            .kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1}) {
     auto message = planning_message(id);
     message.chat_id = 42;
-    message.topic = std::move(topic);
+    message.topic = topic;
     return message;
 }
 
@@ -807,11 +807,13 @@ void bind_principal(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
 }
 
-void plan_saved_attachment(FakeWrites& fake, core::TdMessageProperties properties = {}) {
+void plan_saved_attachment(FakeWrites& fake, core::TdMessageProperties properties = {},
+                           std::optional<core::TdTopic> topic = core::TdTopic{
+                               .kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1}) {
     bind_principal(fake);
     fake.respond(core::TdFunctionKind::CreatePrivateChat, private_chat(42));
     fake.respond(core::TdFunctionKind::GetUser, self());
-    fake.respond(core::TdFunctionKind::GetMessage, saved_planning_message(-77));
+    fake.respond(core::TdFunctionKind::GetMessage, saved_planning_message(-77, topic));
     properties.can_be_replied = true;
     fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
 }
@@ -948,6 +950,8 @@ TEST_CASE("saved attach materializes one private spool document and cleans it af
     const auto outcome = pending.get();
 
     REQUIRE(outcome.result);
+    CHECK_THAT(*outcome.result,
+               tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
     CHECK((*outcome.result)["id"] == 202);
     CHECK((*outcome.result)["chat_id"] == 42);
     CHECK((*outcome.result)["type"] == "doc");
@@ -978,6 +982,8 @@ TEST_CASE("saved attach dry-run hashes and plans without creating durable state"
     const auto outcome = pending.get();
 
     REQUIRE(outcome.result);
+    CHECK_THAT(*outcome.result,
+               tgcli::test::matches_json_schema("saved-attach.result.schema.json"));
     CHECK((*outcome.result)["dry_run"] == true);
     CHECK((*outcome.result)["plan"]["operation"] == "saved_attach");
     CHECK((*outcome.result)["plan"]["message_id"] == -77);
@@ -989,6 +995,71 @@ TEST_CASE("saved attach dry-run hashes and plans without creating durable state"
     CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
 }
 
+TEST_CASE("saved attach preserves a null root Saved topic",
+          "[write-command][saved-attach][topic][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("root attachment");
+    auto pending = fake.dispatch(saved_attach_request(fake.tree(), false, std::nullopt));
+    plan_saved_attachment(fake, {}, std::nullopt);
+    auto written = saved_document_message();
+    written.message.topic.reset();
+    const auto descriptor = fake.respond(core::TdFunctionKind::SendMessage, std::move(written));
+    const auto outcome = pending.get();
+
+    REQUIRE(outcome.result);
+    CHECK((*outcome.result)["topic"] == nullptr);
+    CHECK(function_field<std::string>(descriptor, "topic_kind") == "none");
+}
+
+TEST_CASE("saved attach replays and conflicts after pass one without Saved materialization",
+          "[write-command][saved-attach][idempotency][replay][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("replay attachment");
+    const auto request = saved_attach_request(fake.tree());
+    auto first_pending = fake.dispatch(request);
+    plan_saved_attachment(fake);
+    fake.respond(core::TdFunctionKind::SendMessage, saved_document_message());
+    const auto first = first_pending.get();
+    REQUIRE(first.result);
+
+    auto replay_pending = fake.dispatch(request);
+    bind_principal(fake);
+    const auto replay = replay_pending.get();
+    REQUIRE(replay.result);
+    CHECK(replay.result == first.result);
+
+    auto conflict_request = request;
+    conflict_request.args["caption"] = "different caption";
+    auto conflict_pending = fake.dispatch(conflict_request);
+    bind_principal(fake);
+    const auto conflict = conflict_pending.get();
+    REQUIRE(conflict.error);
+    CHECK((*conflict.error)["error"]["code"] == "IDEMPOTENCY_CONFLICT");
+    CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 1);
+    CHECK(fake.count(core::TdFunctionKind::SendMessage) == 1);
+}
+
+TEST_CASE("saved attach rejects a malformed authoritative document result after mutation proof",
+          "[write-command][saved-attach][result][idempotency][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("attachment bytes");
+    auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+    plan_saved_attachment(fake);
+    fake.respond(core::TdFunctionKind::SendMessage, saved_document_message("wrong caption"));
+    const auto outcome = pending.get();
+
+    REQUIRE(outcome.error);
+    CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+    auto guard = fake.foundation()->acquire_epoch();
+    const auto store = fake.foundation()->store().inspect(guard);
+    REQUIRE(store.status == daemon::IdempotencyInspectionStatus::Clean);
+    REQUIRE(store.snapshot.entries.size() == 1);
+    CHECK(store.snapshot.entries.front().state == daemon::IdempotencyEntryState::Completed);
+    REQUIRE(store.snapshot.entries.front().terminal);
+    CHECK((*store.snapshot.entries.front().terminal)["code"] == "INTERNAL");
+}
+
 TEST_CASE("saved attach rejects bots and missing input before Saved materialization",
           "[write-command][saved-attach][preflight][fake-boundary]") {
     SECTION("bot") {
@@ -997,6 +1068,7 @@ TEST_CASE("saved attach rejects bots and missing input before Saved materializat
         fake.respond(core::TdFunctionKind::GetMe, peer(core::TdUserPresence::Online, true, 42));
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
         CHECK((*outcome.error)["error"]["code"] == "BOT_UNSUPPORTED");
         CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
         CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
@@ -1008,6 +1080,7 @@ TEST_CASE("saved attach rejects bots and missing input before Saved materializat
         bind_principal(fake);
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
         CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
         CHECK((*outcome.error)["error"]["message"] == "input file is unavailable");
         CHECK((*outcome.error)["error"]["details"] == json{{"operation", "saved_attach"},
@@ -1039,6 +1112,7 @@ TEST_CASE("saved attach closes a keyed pass-two source race without dispatch",
     const auto outcome = pending.get();
 
     REQUIRE(outcome.error);
+    CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     CHECK((*outcome.error)["error"]["code"] == "INPUT_CHANGED");
     CHECK((*outcome.error)["error"]["details"] ==
           json{{"operation", "saved_attach"}, {"path", source_path}});
@@ -1081,6 +1155,7 @@ TEST_CASE("saved attach closes cancelled and unsynced pass-two materialization",
         plan_saved_attachment(fake);
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
         CHECK((*outcome.error)["error"] == json{{"code", "SPOOL_UNAVAILABLE"},
                                                 {"message", "attachment spool is unavailable"},
                                                 {"details",
@@ -1107,6 +1182,15 @@ TEST_CASE("send text topic and RFC3339 schedule normalization is closed at bound
     CHECK_FALSE(daemon::valid_send_text(emoji));
     CHECK_FALSE(daemon::valid_send_text(std::string("a\0b", 3)));
     CHECK_FALSE(daemon::valid_send_text(std::string("\xF0\x28\x8C\x28", 4)));
+    CHECK(daemon::valid_saved_attach_caption(""));
+    std::string caption;
+    for (std::size_t index = 0; index < 1'024; ++index) {
+        caption.append("\xF0\x9F\x98\x80", 4);
+    }
+    CHECK(daemon::valid_saved_attach_caption(caption));
+    caption.append("\xF0\x9F\x98\x80", 4);
+    CHECK_FALSE(daemon::valid_saved_attach_caption(caption));
+    CHECK_FALSE(daemon::valid_saved_attach_caption(std::string("a\0b", 3)));
 
     const auto bare_topic = daemon::parse_send_topic("2147483647");
     REQUIRE(bare_topic);

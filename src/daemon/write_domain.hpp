@@ -18,6 +18,7 @@ struct SendSchedule {
 };
 
 [[nodiscard]] bool valid_send_text(std::string_view text);
+[[nodiscard]] bool valid_saved_attach_caption(std::string_view text);
 [[nodiscard]] bool valid_message_reaction(std::string_view reaction);
 [[nodiscard]] std::optional<std::int32_t> parse_mute_duration(std::string_view duration);
 [[nodiscard]] std::optional<TopicRef> parse_send_topic(std::string_view value);

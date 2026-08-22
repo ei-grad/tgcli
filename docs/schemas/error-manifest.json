@@ -82,6 +82,9 @@
     "resolve": {
       "error": "resolve.error.schema.json"
     },
+    "saved attach": {
+      "error": "m3-write.error.schema.json"
+    },
     "saved search": {
       "error": "saved.error.schema.json"
     },

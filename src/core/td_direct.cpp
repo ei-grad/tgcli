@@ -244,10 +244,10 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
     }
     if (request.document) {
         return request.reply_to_message_id.has_value() && !request.options.disable_notification &&
-               request.options.schedule.kind == TdSendScheduleKind::Immediate && request.topic &&
-               request.topic->kind == TdTopicKind::Saved && !request.content.parsed &&
-               formatted.entities.empty() && !formatted.capability.has_value() &&
-               valid_send_caption(formatted.text) &&
+               request.options.schedule.kind == TdSendScheduleKind::Immediate &&
+               (!request.topic || request.topic->kind == TdTopicKind::Saved) &&
+               !request.content.parsed && formatted.entities.empty() &&
+               !formatted.capability.has_value() && valid_send_caption(formatted.text) &&
                request.document->disable_content_type_detection &&
                valid_local_document_path(request.document->local_path);
     }
@@ -261,7 +261,7 @@ bool valid_td_send_message_request(const TdSendMessageRequest& request) noexcept
 }
 
 TdFunctionData describe_td_send_message_request(const TdSendMessageRequest& request) {
-    const auto content_kind = request.document ? "document" : "text";
+    const auto* const content_kind = request.document ? "document" : "text";
     return TdFunctionData{
         TdFunctionKind::SendMessage,
         {{"chat_id", request.chat_id},

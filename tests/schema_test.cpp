@@ -373,6 +373,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"msg unpin", {{"result", "msg-unpin.result.schema.json"}}},
           {"read", {{"result", "read.result.schema.json"}}},
           {"resolve", {{"result", "resolve.result.schema.json"}}},
+          {"saved attach", {{"result", "saved-attach.result.schema.json"}}},
           {"saved search", {{"result", "saved-search.result.schema.json"}}},
           {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
           {"send", {{"result", "send.result.schema.json"}}},
@@ -382,7 +383,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
           {"version", {{"result", "version.result.schema.json"}}},
           {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 41);
+    CHECK(manifest["commands"].size() == 42);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -679,7 +680,11 @@ TEST_CASE("public M3 write errors close resolver durability and timeout branches
     invalid = errors[13];
     invalid["error"]["details"].erase("temporary_message_id");
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
-    invalid = errors[10];
+    auto saved_incomplete = errors[10];
+    saved_incomplete["error"]["details"]["completed_stages"] =
+        json::array({"idempotency_pending", "spool_ready", "dispatch_started"});
+    CHECK_THAT(saved_incomplete, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = saved_incomplete;
     invalid["error"]["details"]["completed_stages"].push_back("spool_ready");
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     invalid = errors[11];
@@ -717,6 +722,63 @@ TEST_CASE("Saved Messages errors have exact command-specific shapes", "[schema][
     auto unknown = errors.front();
     unknown["error"]["details"]["extra"] = true;
     CHECK_THAT(unknown, !tgcli::test::matches_json_schema("saved.error.schema.json"));
+}
+
+TEST_CASE("saved attachment errors are strict public M4 branches",
+          "[schema][saved-attach][error]") {
+    const auto exact_error = [](std::string code, std::string message, json details) {
+        return json{{"error",
+                     {{"code", std::move(code)},
+                      {"message", std::move(message)},
+                      {"details", std::move(details)}}}};
+    };
+    const std::vector<json> errors{
+        exact_error("BOT_UNSUPPORTED", "saved commands require a user account", json::object()),
+        exact_error(
+            "NOT_FOUND", "input file is unavailable",
+            {{"operation", "saved_attach"}, {"path", "/private/input.bin"}, {"reason", "missing"}}),
+        exact_error("INPUT_CHANGED", "input file changed while being read",
+                    {{"operation", "saved_attach"}, {"path", "/private/input.bin"}}),
+        exact_error("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
+                    {{"operation", "saved_attach"},
+                     {"path", "/private/input.bin"},
+                     {"reason", "sync_failed"}}),
+        terminal_error("PRECONDITION_FAILED", {{"operation", "saved_attach"},
+                                               {"chat_id", 42},
+                                               {"message_id", -77},
+                                               {"reason", "wrong_topic"}}),
+        terminal_error("TIMEOUT", {{"operation", "saved_attach"},
+                                   {"phase", "confirmation"},
+                                   {"state", "ready"},
+                                   {"outcome", "unknown"},
+                                   {"idempotency", "pending"},
+                                   {"temporary_message_id", -7}}),
+        terminal_error("SEND_FAILED", {{"operation", "saved_attach"},
+                                       {"chat_id", 42},
+                                       {"temporary_message_id", -7},
+                                       {"reason", "deleted_before_confirmation"}}),
+        terminal_error("TDLIB_ERROR", {{"operation", "saved_attach"}, {"tdlib_code", 400}}),
+    };
+    for (const auto& error : errors) {
+        INFO(error.dump());
+        CHECK_THAT(error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    }
+
+    auto invalid = errors[1];
+    invalid["error"]["message"] = "message was not found";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[2];
+    invalid["error"]["details"]["path"] = "relative";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[3];
+    invalid["error"]["details"]["reason"] = "unreadable";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[4];
+    invalid["error"]["details"]["reason"] = "not_replyable";
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    invalid = errors[5];
+    invalid["error"]["details"].erase("temporary_message_id");
+    CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
 }
 
 TEST_CASE("direct message write schemas pair exact result plans and operation errors",

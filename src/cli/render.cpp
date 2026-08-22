@@ -634,7 +634,7 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     if (command_key == "msg link") {
         return render_msg_link(data);
     }
-    if (command_key == "send" || command_key == "msg edit") {
+    if (command_key == "send" || command_key == "msg edit" || command_key == "saved attach") {
         return render_message_write(data);
     }
     if (command_key == "msg delete") {

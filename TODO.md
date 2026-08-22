@@ -308,7 +308,7 @@ before the milestone is closed.
 
 - [ ] `tgcli download` with progress frames (stderr bar / NDJSON); transfers
       unlimited by default, `--timeout` opt-in
-- [ ] Add the dormant two-pass file snapshot/spool foundation: exact
+- [x] Add the dormant two-pass file snapshot/spool foundation: exact
       no-follow frozen-locator replay and post-pass entry/FD revalidation,
       strict source errors, pass-1 full identity/digest, winner-only
       post-intent pass 2, total private-root classification, fsynced one-file
@@ -317,15 +317,15 @@ before the milestone is closed.
       prior-group/current-invocation persistence distinctions, Linux/macOS
       portability, and all filesystem/deadline/crash cutpoints; do not register
       `saved attach` or mark the adapter complete in this slice
-- [ ] Implement `tgcli saved attach <message-id> <PATH> [--caption TEXT]` as a
+- [x] Implement `tgcli saved attach <message-id> <PATH> [--caption TEXT]` as a
       user-only, single-file Saved reply adapter preserving the original;
       enforce saved/null topic inheritance and the shared plan/audit/timeout/
       idempotency contract, and return the exact `MessageWriteResult`
-- [ ] Add `saved attach` result-only manifest/schema and contract coverage for
+- [x] Add `saved attach` result-only manifest/schema and contract coverage for
       final id, NOT_AUTHED/BOT_UNSUPPORTED, NOT_FOUND/USAGE, gate/dry-run,
       two-pass source races, quota/CAS cutpoints, audit, timeout and replay
 - [ ] `TGCLI_MEDIA_DIR` handling
-- [ ] Add a supported M4 media flow to the test-DC E2E milestone gate
+- [x] Add a supported M4 media flow to the test-DC E2E milestone gate
 - [ ] Review gate: M4 diff vs DESIGN.md
 
 ## M5 — Streaming

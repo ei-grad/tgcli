@@ -133,6 +133,20 @@ bool valid_send_text(std::string_view text) {
     return true;
 }
 
+bool valid_saved_attach_caption(std::string_view text) {
+    if (text.size() > 4'096 || text.find('\0') != std::string_view::npos ||
+        !common::valid_utf8(text)) {
+        return false;
+    }
+    std::size_t scalars = 0;
+    for (const auto byte : text) {
+        if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U && ++scalars > 1'024) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool valid_message_reaction(std::string_view reaction) {
     return !reaction.empty() && reaction.size() <= 64 &&
            reaction.find('\0') == std::string_view::npos && common::valid_utf8(reaction);

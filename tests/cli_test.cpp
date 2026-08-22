@@ -807,6 +807,8 @@ class ChildProtocolDaemon {
                                                       daemon::M3Operation::ChatJoin});
             dispatcher.register_command("chat leave", {daemon::Tier::Destructive, normalized, false,
                                                        daemon::M3Operation::ChatLeave});
+            dispatcher.register_command("saved attach", {daemon::Tier::Write, normalized, false,
+                                                         daemon::M3Operation::SavedAttach});
         }
         if (!server.start(error)) {
             if (!ready_reported) {
@@ -2574,6 +2576,13 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
          {"mark-read", "mute", "unmute", "pin", "unpin", "archive", "unarchive", "join", "leave"}) {
         CHECK(chat_surface.find(command) != std::string::npos);
     }
+    const auto saved_help = run_binary_captured({"saved", "--help"}, env, "m4-saved-help");
+    REQUIRE(saved_help.exit_code == kOk);
+    CHECK((saved_help.out + saved_help.err).find("attach") != std::string::npos);
+    const auto attach_help =
+        run_binary_captured({"saved", "attach", "--help"}, env, "m4-saved-attach-help");
+    REQUIRE(attach_help.exit_code == kOk);
+    CHECK((attach_help.out + attach_help.err).find("--caption") != std::string::npos);
 
     std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
         {"send-format-exclusive", {"--json", "send", "-1001", "hello", "--md", "--html"}},
@@ -2609,6 +2618,13 @@ TEST_CASE("public M3 parser exposes flat send and direct message mutations with 
         {"chat-join-title", {"--json", "chat", "join", "Project"}},
         {"chat-join-empty-username", {"--json", "chat", "join", "@"}},
         {"chat-pin-invalid", {"--json", "chat", "pin", "@"}},
+        {"saved-attach-zero", {"--json", "saved", "attach", "0", "/tmp/input"}},
+        {"saved-attach-double-sign", {"--json", "saved", "attach", "+-7", "/tmp/input"}},
+        {"saved-attach-over-int53",
+         {"--json", "saved", "attach", "9007199254740992", "/tmp/input"}},
+        {"saved-attach-trailing-slash", {"--json", "saved", "attach", "7", "/tmp/input/"}},
+        {"saved-attach-caption-scalars",
+         {"--json", "saved", "attach", "7", "/tmp/input", "--caption", std::string(1025, 'x')}},
     };
     std::vector<std::string> too_many{"--json", "msg", "delete", "-1001"};
     for (int id = 1; id <= 101; ++id) {
@@ -2708,6 +2724,16 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
          std::nullopt,
          {"msg", "unpin"},
          {{"chat", "-1001"}, {"message_id", -11}}},
+        {"saved-attach-frame",
+         {"--json", "saved", "attach", "+7", "/tmp/input.bin", "--caption", "caption"},
+         std::nullopt,
+         {"saved", "attach"},
+         {{"message_id", 7}, {"path", "/tmp/input.bin"}, {"caption", "caption"}}},
+        {"saved-attach-negative-frame",
+         {"--json", "saved", "attach", "-7", "./input.bin"},
+         std::nullopt,
+         {"saved", "attach"},
+         {{"message_id", -7}, {"path", "./input.bin"}, {"caption", ""}}},
     };
     for (const auto& test_case : cases) {
         const auto outcome =
@@ -2810,6 +2836,56 @@ TEST_CASE("msg forward socket and no-daemon dispatch preserve the same normalize
                     {"drop_author", true}};
     request.context.json = true;
     request.context.cwd = "/";
+
+    cli::RunOptions direct_options;
+    direct_options.account = "main";
+    direct_options.json = true;
+    direct_options.no_daemon = true;
+    direct_options.in_process_dispatcher = &dispatcher;
+    const auto direct = run_request_captured(request, direct_options, env);
+
+    const auto real_env = paths::real_environment();
+    std::string error;
+    REQUIRE(paths::ensure_private_dir(paths::runtime_dir(real_env), real_env.uid, error));
+    const auto socket_path = paths::socket_path("main", real_env, error);
+    REQUIRE(socket_path);
+    daemon::Server server({"main", *socket_path, kVersion, proto::kProtocolVersion, {}, {}},
+                          dispatcher);
+    REQUIRE(server.start(error));
+    cli::RunOptions socket_options;
+    socket_options.account = "main";
+    socket_options.json = true;
+    socket_options.auto_spawn = false;
+    const auto socket = run_request_captured(request, socket_options, env);
+    server.stop();
+
+    REQUIRE(direct.exit_code == kOk);
+    CHECK(socket.exit_code == direct.exit_code);
+    CHECK(socket.out == direct.out);
+    CHECK(socket.err == direct.err);
+    const auto normalized = json::parse(direct.out);
+    CHECK(normalized["command"] == request.command);
+    CHECK(normalized["args"] == request.args);
+}
+
+TEST_CASE("saved attach socket and no-daemon dispatch preserve the same normalized frame",
+          "[cli][m4][saved-attach][parity][no-daemon][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    daemon::Dispatcher dispatcher;
+    dispatcher.register_command(
+        "saved attach", {daemon::Tier::Write,
+                         [](const proto::Request& request, daemon::RequestSession& session) {
+                             session.result({{"command", request.command}, {"args", request.args}});
+                         },
+                         false, daemon::M3Operation::SavedAttach});
+
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"saved", "attach"};
+    request.args = {{"message_id", -7}, {"path", "./fixture.bin"}, {"caption", "caption"}};
+    request.context.json = true;
+    request.context.cwd = env.root();
 
     cli::RunOptions direct_options;
     direct_options.account = "main";

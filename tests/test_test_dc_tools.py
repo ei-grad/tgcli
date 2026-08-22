@@ -371,6 +371,8 @@ SUBCOMMANDS:
   send send text
   msg message commands
   delete delete messages
+  saved Saved Messages operations
+  attach attach a file
 """
 
     def setUp(self) -> None:
@@ -726,7 +728,9 @@ class HarnessInvariantTests(unittest.TestCase):
                 [acceptance.USER_ACCOUNT],
             )
 
-    def test_m3_flow_registers_cleanup_before_reads_and_runs_it_on_success(self) -> None:
+    def test_m3_flow_registers_cleanup_before_reads_and_runs_it_on_success(
+        self,
+    ) -> None:
         sent = {
             "id": 101,
             "chat_id": 42,
@@ -736,6 +740,17 @@ class HarnessInvariantTests(unittest.TestCase):
             "topic": None,
             "type": "text",
             "text": "",
+            "scheduled": False,
+        }
+        attached = {
+            "id": 102,
+            "chat_id": 42,
+            "date": "2026-08-21T12:00:01Z",
+            "sender": {"type": "user", "id": 42},
+            "is_outgoing": True,
+            "topic": None,
+            "type": "doc",
+            "text": "tgcli M4 attachment",
             "scheduled": False,
         }
 
@@ -761,7 +776,27 @@ class HarnessInvariantTests(unittest.TestCase):
                     return acceptance.CommandResult(
                         {
                             "items": [
-                                {name: value for name, value in sent.items() if name != "scheduled"}
+                                {
+                                    name: value
+                                    for name, value in sent.items()
+                                    if name != "scheduled"
+                                }
+                            ],
+                            "next": None,
+                        },
+                        frozenset(),
+                    )
+                if label in {"m4-saved-attach", "m4-saved-attach-replay"}:
+                    return acceptance.CommandResult(dict(attached), frozenset())
+                if label == "m4-saved-attach-get":
+                    return acceptance.CommandResult(
+                        {
+                            "items": [
+                                {
+                                    name: value
+                                    for name, value in attached.items()
+                                    if name != "scheduled"
+                                }
                             ],
                             "next": None,
                         },
@@ -807,6 +842,12 @@ class HarnessInvariantTests(unittest.TestCase):
                 "m3-get",
                 "m3-send-replay",
                 "m3-send-conflict",
+                "m4-saved-attach",
+                "register-cleanup",
+                "m4-saved-attach-get",
+                "m4-saved-attach-replay",
+                "m4-saved-attach-conflict",
+                "cleanup",
                 "cleanup",
             ],
         )
@@ -852,11 +893,13 @@ class HarnessInvariantTests(unittest.TestCase):
         runner = FailedFlowRunner(
             acceptance.Captures(self.tree.directory("failed-m3-captures"))
         )
-        with self.assertRaisesRegex(acceptance.AcceptanceError, "M3 cleanup failed"):
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "M3/M4 cleanup failed"):
             acceptance._m3_write_flow(runner)
         self.assertTrue(runner.cleaned)
 
-    def test_registered_cleanup_accepts_delete_success_and_verifies_absence(self) -> None:
+    def test_registered_cleanup_accepts_delete_success_and_verifies_absence(
+        self,
+    ) -> None:
         runner = acceptance.Runner.__new__(acceptance.Runner)
         calls: list[tuple[str, list[str]]] = []
 
@@ -890,7 +933,10 @@ class HarnessInvariantTests(unittest.TestCase):
         cleanup = acceptance.MessageCleanup(acceptance.USER_ACCOUNT, 42, 101)
         acceptance.Runner.cleanup_message(runner, cleanup)
         self.assertTrue(cleanup.completed)
-        self.assertEqual([label for label, _ in calls], ["m3-cleanup-delete-101", "m3-cleanup-absence-101"])
+        self.assertEqual(
+            [label for label, _ in calls],
+            ["m3-cleanup-delete-101", "m3-cleanup-absence-101"],
+        )
         self.assertIn("--yes", calls[0][1])
         self.assertEqual(calls[0][1][-4:], ["msg", "delete", "42", "101"])
 
@@ -925,9 +971,7 @@ class HarnessInvariantTests(unittest.TestCase):
             with self.subTest(artifact=artifact.relative_to(run_root)):
                 artifact.write_bytes(b"prefix-" + sentinel + b"-suffix")
                 with self.assertRaises(acceptance.AcceptanceError) as raised:
-                    acceptance._scan_m3_key_artifacts(
-                        run_root, captures, [sentinel]
-                    )
+                    acceptance._scan_m3_key_artifacts(run_root, captures, [sentinel])
                 self.assertNotIn(sentinel.decode(), str(raised.exception))
                 artifact.write_bytes(b"safe\n")
 
@@ -947,9 +991,7 @@ class HarnessInvariantTests(unittest.TestCase):
             artifact.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             artifact.write_bytes(b"safe\n")
             artifact.chmod(0o600)
-        acceptance._scan_m3_key_artifacts(
-            run_root, captures, [b"raw-m3-key-sentinel"]
-        )
+        acceptance._scan_m3_key_artifacts(run_root, captures, [b"raw-m3-key-sentinel"])
 
     def test_selector_registration_failure_reaps_the_interactive_child(self) -> None:
         pid_file = self.tree.root / "child.pid"

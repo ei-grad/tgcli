@@ -8,8 +8,8 @@ import json
 import os
 import pty
 import re
-import selectors
 import secrets
+import selectors
 import shlex
 import stat
 import subprocess
@@ -38,7 +38,7 @@ from test_dc_contract import (
 USER_ACCOUNT = "test-user"
 BOT_ACCOUNT = "test-bot"
 QR_ACCOUNT = "test-qr"
-REQUIRED_SUBCOMMANDS = ("logout", "chats", "send", "msg")
+REQUIRED_SUBCOMMANDS = ("logout", "chats", "send", "msg", "saved")
 REQUIRED_OPTIONS = (
     "--allow-write",
     "--yes",
@@ -208,9 +208,7 @@ class Runner:
     def _argv(self, arguments: Sequence[str]) -> list[str]:
         return [str(self.binary), *arguments]
 
-    def run_json_status(
-        self, label: str, arguments: Sequence[str]
-    ) -> JsonExecution:
+    def run_json_status(self, label: str, arguments: Sequence[str]) -> JsonExecution:
         stdout_path, stderr_path = self.captures.allocate(label)
         try:
             with (
@@ -290,7 +288,11 @@ class Runner:
         ).document
         if _error_code(absent) != "NOT_FOUND":
             raise AcceptanceError("M3 cleanup did not make the message absent")
-        details = absent.get("error", {}).get("details", {}) if isinstance(absent, dict) else {}
+        details = (
+            absent.get("error", {}).get("details", {})
+            if isinstance(absent, dict)
+            else {}
+        )
         if details != {"chat_id": cleanup.chat_id, "missing_ids": [cleanup.message_id]}:
             raise AcceptanceError("M3 cleanup absence result is invalid")
         cleanup.completed = True
@@ -606,11 +608,14 @@ def _surface_preflight(
 
     root_code, option_tokens, subcommands = inspect(["--help"])
     msg_code, _, msg_subcommands = inspect(["msg", "--help"])
+    saved_code, _, saved_subcommands = inspect(["saved", "--help"])
     missing = [token for token in REQUIRED_OPTIONS if token not in option_tokens]
     missing.extend(token for token in REQUIRED_SUBCOMMANDS if token not in subcommands)
     if "delete" not in msg_subcommands:
         missing.append("msg delete")
-    if root_code != 0 or msg_code != 0 or missing:
+    if "attach" not in saved_subcommands:
+        missing.append("saved attach")
+    if root_code != 0 or msg_code != 0 or saved_code != 0 or missing:
         raise AcceptanceError("tgcli is missing the test-DC runtime surface")
 
 
@@ -1021,7 +1026,9 @@ def _authoritative_send_ids(document: object) -> tuple[int, int]:
     return chat_id, message_id
 
 
-def _assert_send_result(document: object, chat_id: int, message_id: int, text: str) -> None:
+def _assert_send_result(
+    document: object, chat_id: int, message_id: int, text: str
+) -> None:
     fields = {
         "id",
         "chat_id",
@@ -1056,6 +1063,54 @@ def _assert_send_result(document: object, chat_id: int, message_id: int, text: s
         or document["scheduled"] is not False
     ):
         raise AcceptanceError("M3 send returned invalid message facts")
+
+
+def _assert_saved_attach_result(
+    document: object, chat_id: int, message_id: int, caption: str
+) -> None:
+    fields = {
+        "id",
+        "chat_id",
+        "date",
+        "sender",
+        "is_outgoing",
+        "topic",
+        "type",
+        "text",
+        "scheduled",
+    }
+    if not isinstance(document, dict) or set(document) != fields:
+        raise AcceptanceError("M4 saved attach returned an invalid result")
+    sender = document["sender"]
+    topic = document["topic"]
+    if (
+        document["id"] != message_id
+        or document["chat_id"] != chat_id
+        or not isinstance(document["date"], str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            document["date"],
+        )
+        is None
+        or not isinstance(sender, dict)
+        or set(sender) != {"type", "id"}
+        or sender["type"] != "user"
+        or not _int(sender["id"], 1, 9_007_199_254_740_991)
+        or document["is_outgoing"] is not True
+        or (
+            topic is not None
+            and (
+                not isinstance(topic, dict)
+                or set(topic) != {"kind", "id"}
+                or topic["kind"] != "saved"
+                or not _int(topic["id"], 1, 9_007_199_254_740_991)
+            )
+        )
+        or document["type"] != "doc"
+        or document["text"] != caption
+        or document["scheduled"] is not False
+    ):
+        raise AcceptanceError("M4 saved attach returned invalid message facts")
 
 
 def _assert_get_matches_send(document: object, sent: Mapping[str, object]) -> None:
@@ -1118,8 +1173,7 @@ def _m3_write_flow(runner: Runner, key_sentinels: list[bytes] | None = None) -> 
     ]
     sent = runner.run_json("m3-send", arguments).document
     chat_id, message_id = _authoritative_send_ids(sent)
-    cleanup = runner.register_message_cleanup(chat_id, message_id)
-    failure: BaseException | None = None
+    cleanups = [runner.register_message_cleanup(chat_id, message_id)]
     try:
         _assert_send_result(sent, chat_id, message_id, text)
         fetched = runner.run_json(
@@ -1144,18 +1198,71 @@ def _m3_write_flow(runner: Runner, key_sentinels: list[bytes] | None = None) -> 
             "m3-send-conflict", conflict_arguments
         ).document
         _assert_error(conflict, "IDEMPOTENCY_CONFLICT")
-    except BaseException as error:
-        # Cleanup must run for assertion, command, cancellation, and interpreter exits.
-        failure = error
-    cleanup_failure: BaseException | None = None
-    try:
-        runner.cleanup_message(cleanup)
-    except (AcceptanceError, OSError, subprocess.SubprocessError) as error:
-        cleanup_failure = error
-    if cleanup_failure is not None:
-        raise CleanupError("M3 cleanup failed") from cleanup_failure
-    if failure is not None:
-        raise failure
+
+        fixture_path = runner.captures.directory / "m4-saved-attachment.bin"
+        with _private_output(fixture_path) as output:
+            output.write(b"tgcli deterministic M4 attachment fixture\n")
+            output.flush()
+            os.fsync(output.fileno())
+        m4_key = f"tgcli-test-dc-m4-{secrets.token_hex(16)}"
+        if key_sentinels is not None:
+            key_sentinels.append(m4_key.encode())
+        caption = "tgcli M4 attachment"
+        attach_arguments = [
+            "--json",
+            "--allow-write",
+            "--account",
+            USER_ACCOUNT,
+            "--idempotency-key",
+            m4_key,
+            "saved",
+            "attach",
+            str(message_id),
+            str(fixture_path),
+            "--caption",
+            caption,
+        ]
+        attached = runner.run_json("m4-saved-attach", attach_arguments).document
+        attached_chat_id, attached_message_id = _authoritative_send_ids(attached)
+        cleanups.append(
+            runner.register_message_cleanup(attached_chat_id, attached_message_id)
+        )
+        _assert_saved_attach_result(
+            attached, attached_chat_id, attached_message_id, caption
+        )
+        attached_get = runner.run_json(
+            "m4-saved-attach-get",
+            [
+                "--json",
+                "--account",
+                USER_ACCOUNT,
+                "msg",
+                "get",
+                str(attached_chat_id),
+                str(attached_message_id),
+            ],
+        ).document
+        _assert_get_matches_send(attached_get, attached)
+        attach_replay = runner.run_json(
+            "m4-saved-attach-replay", attach_arguments
+        ).document
+        if attach_replay != attached:
+            raise AcceptanceError("M4 saved attach replay changed the stored result")
+        attach_conflict_arguments = [*attach_arguments]
+        attach_conflict_arguments[-1] = caption + " conflict"
+        attach_conflict = runner.run_json_error(
+            "m4-saved-attach-conflict", attach_conflict_arguments
+        ).document
+        _assert_error(attach_conflict, "IDEMPOTENCY_CONFLICT")
+    finally:
+        cleanup_failure: BaseException | None = None
+        for cleanup in reversed(cleanups):
+            try:
+                runner.cleanup_message(cleanup)
+            except (AcceptanceError, OSError, subprocess.SubprocessError) as error:
+                cleanup_failure = error
+        if cleanup_failure is not None:
+            raise CleanupError("M3/M4 cleanup failed") from cleanup_failure
 
 
 def _smoke(
@@ -1302,7 +1409,7 @@ def _skip_entries(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the tgcli M1/M2 and mandatory M3 send/delete acceptance flow on test DC"
+        description="Run the tgcli M1/M2 and mandatory M3/M4 write acceptance flows on test DC"
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)

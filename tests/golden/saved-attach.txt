@@ -1,0 +1,9 @@
+id	322
+chat_id	42
+date	"2026-08-05T10:00:01Z"
+sender	{"id":42,"type":"user"}
+is_outgoing	true
+topic	{"id":19,"kind":"saved"}
+type	"doc"
+text	"experiment result"
+scheduled	false

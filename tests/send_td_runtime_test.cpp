@@ -176,6 +176,13 @@ TEST_CASE("saved document send preserves the local file and frozen document defa
     CHECK(
         std::get<bool>(*function_field(*native.function_data(), "disable_content_type_detection")));
     CHECK(detail::production_send_message_matches_for_test(native, expected));
+
+    auto root_saved = document_request();
+    root_saved.topic.reset();
+    auto expected_without_topic = document_request();
+    expected_without_topic.topic.reset();
+    auto root_native = detail::make_production_send_message_for_test(std::move(root_saved), 7);
+    CHECK(detail::production_send_message_matches_for_test(root_native, expected_without_topic));
 }
 
 TEST_CASE("forwardMessages native and scripted factories preserve the frozen request",

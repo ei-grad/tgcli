@@ -8,6 +8,7 @@
 #include "daemon/chats_commands.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/fetch_domain.hpp"
+#include "daemon/file_spool.hpp"
 #include "daemon/local_selector.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_fingerprint.hpp"
@@ -488,6 +489,11 @@ struct SavedCliArguments {
     CLI::Option* tag_option = nullptr;
     CLI::Option* limit_option = nullptr;
     CLI::Option* cursor_option = nullptr;
+    std::string attach_message_id_raw;
+    std::int64_t attach_message_id = 0;
+    bool attach_message_id_valid = true;
+    std::string attach_path;
+    std::string attach_caption;
 };
 
 struct ChatsCliArguments {
@@ -593,6 +599,28 @@ bool is_saved_search(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "search"};
 }
 
+bool is_saved_attach(const std::vector<std::string>& command) {
+    return command == std::vector<std::string>{"saved", "attach"};
+}
+
+std::optional<int> validate_saved_attach_arguments(const SavedCliArguments& saved) {
+    constexpr std::int64_t maximum_int53 = 9007199254740991LL;
+    if (!saved.attach_message_id_valid || saved.attach_message_id == 0 ||
+        saved.attach_message_id < -maximum_int53 || saved.attach_message_id > maximum_int53) {
+        return report_usage("saved attach message id must be a nonzero int53 value", "message-id");
+    }
+    std::array<char, 4096> cwd{};
+    if (::getcwd(cwd.data(), cwd.size()) == nullptr ||
+        !tgcli::daemon::canonical_source_display_path(saved.attach_path, cwd.data())) {
+        return report_usage("saved attach path is invalid", "PATH");
+    }
+    if (!tgcli::daemon::valid_saved_attach_caption(saved.attach_caption)) {
+        return report_usage("saved attach caption must contain at most 1024 Unicode scalars",
+                            "--caption");
+    }
+    return std::nullopt;
+}
+
 std::optional<int> validate_saved_arguments(const std::vector<std::string>& command,
                                             const SavedCliArguments& saved) {
     if (saved.cursor_option->count() != 0 && is_saved_tags(command)) {
@@ -605,7 +633,10 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
                             "unsupported_mode");
     }
     if (!is_saved_search(command)) {
-        return std::nullopt;
+        if (!is_saved_attach(command)) {
+            return std::nullopt;
+        }
+        return validate_saved_attach_arguments(saved);
     }
     if (saved.cursor_option->count() != 0 && saved.limit_option->count() != 0) {
         return report_usage("-n is not accepted with a continuation cursor", "-n");
@@ -1018,6 +1049,11 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     if (is_saved_search(command)) {
         return saved_search_request_args(saved);
     }
+    if (is_saved_attach(command)) {
+        return {{"message_id", saved.attach_message_id},
+                {"path", saved.attach_path},
+                {"caption", saved.attach_caption}};
+    }
     if (command == std::vector<std::string>{"msg", "get"}) {
         return {{"chat", messages.get_chat}, {"message_ids", messages.get_ids}};
     }
@@ -1400,7 +1436,7 @@ int run(int argc, char** argv) {
         remove_cmd->add_option("--reassign-default", reassign_default,
                                "new default when removing the current default account");
 
-    CLI::App* saved_cmd = app.add_subcommand("saved", "Saved Messages reads");
+    CLI::App* saved_cmd = app.add_subcommand("saved", "Saved Messages operations");
     saved_cmd->require_subcommand(1);
     saved_cmd->add_subcommand("tags", "list Saved Messages reaction tags");
     CLI::App* saved_search_cmd =
@@ -1412,6 +1448,11 @@ int run(int argc, char** argv) {
         saved_search_cmd->add_option("--tag", saved.tag, "exact emoji or custom:<id> tag");
     saved.limit_option =
         saved_search_cmd->add_option("-n", saved.limit, "page size (1-100; default 20)");
+    CLI::App* saved_attach_cmd =
+        saved_cmd->add_subcommand("attach", "send a file as a Saved Messages reply");
+    saved_attach_cmd->add_option("message-id", saved.attach_message_id_raw)->required();
+    saved_attach_cmd->add_option("PATH", saved.attach_path)->required();
+    saved_attach_cmd->add_option("--caption", saved.attach_caption, "plain attachment caption");
 
     if (const auto parse_exit = parse_arguments(app, argc, argv); parse_exit.has_value()) {
         return parse_exit.value();
@@ -1463,6 +1504,10 @@ int run(int argc, char** argv) {
             }
             messages.forward_ids.push_back(id);
         }
+    }
+    if (is_saved_attach(command) &&
+        !parse_signed_decimal(saved.attach_message_id_raw, saved.attach_message_id)) {
+        saved.attach_message_id_valid = false;
     }
     const ReadCliArguments* selected_read = &read;
     if (command == std::vector<std::string>{"history"}) {
