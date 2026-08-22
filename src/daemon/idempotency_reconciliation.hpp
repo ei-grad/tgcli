@@ -80,6 +80,8 @@ class IdempotencyFoundation final {
     [[nodiscard]] IdempotencyStore& store();
     [[nodiscard]] AccountAuditLog& audit();
     [[nodiscard]] const std::shared_ptr<AccountAuditCoordinator>& coordinator() const;
+    [[nodiscard]] const std::string& state_directory() const noexcept;
+    [[nodiscard]] uid_t expected_uid() const noexcept;
 
   private:
     IdempotencyFoundation(std::string state_directory, std::string account, uid_t expected_uid,

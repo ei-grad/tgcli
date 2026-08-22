@@ -381,6 +381,13 @@ class KernelTree final {
     std::shared_ptr<daemon::IdempotencyFoundation> foundation_;
 };
 
+TEST_CASE("idempotency foundation exposes its frozen spool materialization context",
+          "[write-kernel][spool]") {
+    KernelTree tree;
+    CHECK(tree.foundation()->state_directory() == tree.state());
+    CHECK(tree.foundation()->expected_uid() == ::getuid());
+}
+
 daemon::WritePostIntentPreparation
 create_attachment_spool(const KernelTree& tree, const daemon::WriteKernelRequest& request) {
     const auto root = tree.state() + "/spool";

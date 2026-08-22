@@ -568,6 +568,14 @@ const std::shared_ptr<AccountAuditCoordinator>& IdempotencyFoundation::coordinat
     return coordinator_;
 }
 
+const std::string& IdempotencyFoundation::state_directory() const noexcept {
+    return state_directory_;
+}
+
+uid_t IdempotencyFoundation::expected_uid() const noexcept {
+    return expected_uid_;
+}
+
 IdempotencyUnexpectedIncumbentClosure
 IdempotencyFoundation::close_unexpected_incumbent(const AccountAuditAppendReceipt& intent_receipt,
                                                   const AccountAuditCoordinator::Guard& guard,
