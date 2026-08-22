@@ -1,6 +1,7 @@
 #include "daemon/request_fingerprint.hpp"
 
 #include "common/canonical_json.hpp"
+#include "common/invite_link.hpp"
 #include "common/paths.hpp"
 #include "common/sha256.hpp"
 #include "common/utf8.hpp"
@@ -94,13 +95,6 @@ std::optional<std::int64_t> decimal_selector(std::string_view value) {
     return parsed;
 }
 
-bool invite_token(std::string_view value) {
-    return !value.empty() && std::ranges::all_of(value, [](char character) {
-        return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') ||
-               (character >= '0' && character <= '9') || character == '_' || character == '-';
-    });
-}
-
 std::optional<std::string_view> global_link_remainder(std::string_view selector) {
     for (const auto prefix : {std::string_view{"https://t.me/"}, std::string_view{"t.me/"}}) {
         if (selector.starts_with(prefix)) {
@@ -108,14 +102,6 @@ std::optional<std::string_view> global_link_remainder(std::string_view selector)
         }
     }
     return std::nullopt;
-}
-
-bool exact_invite_link(std::string_view remainder) {
-    if (remainder.starts_with('+')) {
-        return invite_token(remainder.substr(1));
-    }
-    constexpr std::string_view joinchat = "joinchat/";
-    return remainder.starts_with(joinchat) && invite_token(remainder.substr(joinchat.size()));
 }
 
 bool valid_mute_duration(std::int32_t duration) {
@@ -444,8 +430,8 @@ std::optional<std::string> canonical_write_selector(std::string_view selector) {
     if (selector.starts_with('@')) {
         return selector.size() > 1 ? std::optional<std::string>{selector} : std::nullopt;
     }
-    if (const auto remainder = global_link_remainder(selector)) {
-        if (exact_invite_link(*remainder)) {
+    if (global_link_remainder(selector)) {
+        if (common::is_exact_telegram_invite_link(selector)) {
             return invite_link_hash(selector);
         }
         return std::string(selector);

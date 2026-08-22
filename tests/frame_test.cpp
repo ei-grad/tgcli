@@ -782,3 +782,61 @@ TEST_CASE("secret frame buffers are zeroed across serialization transport and pa
         return item.stage == "answer_payload" && item.all_zero;
     }));
 }
+
+TEST_CASE("invite request and admitted fact copies are wiped with their owning frame",
+          "[proto][secret][invite][wipe]") {
+    struct Observation {
+        std::string stage;
+        std::size_t size = 0;
+        bool all_zero = false;
+    };
+    std::vector<Observation> observations;
+    const auto observer = [&observations](std::string_view stage, const char* bytes,
+                                          std::size_t size) {
+        observations.push_back(
+            {.stage = std::string(stage),
+             .size = size,
+             .all_zero = size == 0 || std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                                  [](char value) { return value == '\0'; })});
+    };
+    const std::string invite = "t.me/joinchat/FrameInviteWipeSentinel123";
+    Request source("main");
+    source.id = 91;
+    source.command = {"chat", "join"};
+    source.args = {{"target", invite}};
+    source.context.cwd = "/";
+    source.context.timeout_seconds = 1.0;
+    const auto encoded = serialize(source);
+
+    std::string error;
+    {
+        auto parsed = parse(encoded, error, observer);
+        INFO(error);
+        REQUIRE(parsed);
+        auto& request = std::get<Request>(*parsed);
+        auto admitted = admit_request_source(request, error);
+        INFO(error);
+        REQUIRE(admitted);
+    }
+    {
+        Request programmatic("main", observer);
+        programmatic.id = 92;
+        programmatic.command = {"chat", "join"};
+        programmatic.args = {{"target", invite}};
+        programmatic.context.cwd = "/";
+        programmatic.context.timeout_seconds = 1.0;
+        auto admitted = admit_request_source(programmatic, error);
+        INFO(error);
+        REQUIRE(admitted);
+    }
+
+    for (const auto* const stage : {"request_args", "request_facts_args"}) {
+        INFO(stage);
+        CHECK(std::ranges::any_of(observations, [&](const Observation& item) {
+            return item.stage == stage && item.size == invite.size() && item.all_zero;
+        }));
+    }
+    CHECK(std::ranges::any_of(observations, [](const Observation& item) {
+        return item.stage == "admitted_request_source" && item.size != 0 && item.all_zero;
+    }));
+}

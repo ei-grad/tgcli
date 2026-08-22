@@ -1,10 +1,12 @@
 #pragma once
 
+#include "common/secure_wipe.hpp"
 #include "core/td_log.hpp"
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -286,6 +288,15 @@ class TdValue {
         return result;
     }
 
+    template <typename T, typename Wiper>
+    static TdValue sensitive_function(T value, TdFunctionData function, Wiper wiper) {
+        TdValue result;
+        result.value_ = std::make_unique<Holder<T>>(std::move(value),
+                                                    std::function<void(T&)>{std::move(wiper)});
+        result.function_ = std::move(function);
+        return result;
+    }
+
     static TdValue scripted_function(TdFunctionData function) {
         TdValue result;
         result.function_ = std::move(function);
@@ -335,7 +346,24 @@ class TdValue {
 
     template <typename T> struct Holder final : ValueBase {
         explicit Holder(T stored) : value(std::move(stored)) {}
+        Holder(T stored, std::function<void(T&)> stored_wiper)
+            : value(std::move(stored)), wiper(std::move(stored_wiper)) {}
+        Holder(const Holder&) = delete;
+        Holder& operator=(const Holder&) = delete;
+        Holder(Holder&&) = delete;
+        Holder& operator=(Holder&&) = delete;
+        ~Holder() override {
+            if (wiper) {
+                try {
+                    wiper(value);
+                } catch (...) {
+                    // A sensitive-value destructor cannot allow cleanup failures to escape.
+                    return;
+                }
+            }
+        }
         T value;
+        std::function<void(T&)> wiper;
     };
 
     std::unique_ptr<ValueBase> value_;
@@ -1275,11 +1303,30 @@ struct TdAddChatToListRequest {
 };
 
 struct TdJoinChatRequest {
-    std::optional<std::int64_t> chat_id;
-    std::optional<std::string> invite_link;
+    TdJoinChatRequest(std::optional<std::int64_t> chat_id_value = {},
+                      std::optional<std::string> invite_link_value = {},
+                      std::optional<std::int64_t> expected_invite_chat_id_value = {},
+                      secure::WipeObserver wipe_observer_value = {});
+    ~TdJoinChatRequest();
+    TdJoinChatRequest(const TdJoinChatRequest& other) = default;
+    TdJoinChatRequest& operator=(const TdJoinChatRequest& other);
+    TdJoinChatRequest(TdJoinChatRequest&& other) noexcept;
+    TdJoinChatRequest& operator=(TdJoinChatRequest&& other) noexcept;
+
+    std::optional<std::int64_t>
+        chat_id; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+    std::optional<std::string>
+        invite_link; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
+    // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
     std::optional<std::int64_t> expected_invite_chat_id;
 
-    bool operator==(const TdJoinChatRequest&) const = default;
+    bool operator==(const TdJoinChatRequest& other) const {
+        return chat_id == other.chat_id && invite_link == other.invite_link &&
+               expected_invite_chat_id == other.expected_invite_chat_id;
+    }
+
+  private:
+    secure::WipeObserver wipe_observer_;
 };
 
 struct TdLeaveChatRequest {
@@ -1499,7 +1546,7 @@ class TdRuntime {
     virtual TdValue make_get_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_load_chats(TdChatList list, std::int32_t limit) = 0;
     virtual TdValue make_search_public_chat(std::string username) = 0;
-    virtual TdValue make_get_internal_link_type(std::string link) = 0;
+    virtual TdValue make_get_internal_link_type(std::string link, bool sensitive = false) = 0;
     virtual TdValue make_get_message_link_info(std::string url) = 0;
     virtual TdValue make_check_chat_invite_link(std::string link) = 0;
     virtual TdValue make_get_user(std::int64_t user_id) = 0;

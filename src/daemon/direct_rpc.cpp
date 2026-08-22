@@ -256,8 +256,10 @@ class DirectRpcCoordinator::Impl {
     Impl& operator=(Impl&&) = delete;
 
     DirectOutcome execute(const core::TdDirectRequest& request,
-                          const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
-        auto preparation = prepare(core::TdDirectRequest{request}, authorization);
+                          const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                          core::TdQueryLifetime lifetime) {
+        auto preparation =
+            prepare(core::TdDirectRequest{request}, authorization, std::move(lifetime));
         return std::visit(
             [this](auto&& outcome) -> DirectOutcome {
                 using Outcome = std::decay_t<decltype(outcome)>;
@@ -272,7 +274,8 @@ class DirectRpcCoordinator::Impl {
 
     DirectPreparationOutcome
     prepare(core::TdDirectRequest request,
-            const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
+            const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+            core::TdQueryLifetime lifetime) {
         if (executed_ || !authorization || authorization->data.state != core::AuthState::Ready ||
             !core::valid_td_direct_request(request)) {
             return DirectRejected{};
@@ -303,7 +306,8 @@ class DirectRpcCoordinator::Impl {
             wipe_invite(*request_);
         }
         authorization_ = authorization;
-        prepared_write_ = client_.prepare_direct_mutation(authorization, std::move(request));
+        prepared_write_ =
+            client_.prepare_direct_mutation(authorization, std::move(request), std::move(lifetime));
         wipe_invite(request);
         if (!prepared_write_) {
             const auto failure = prepared_write_.authorization_failure();
@@ -544,14 +548,16 @@ DirectRpcCoordinator::~DirectRpcCoordinator() = default;
 
 DirectOutcome
 DirectRpcCoordinator::execute(const core::TdDirectRequest& request,
-                              const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
-    return impl_->execute(request, authorization);
+                              const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                              core::TdQueryLifetime lifetime) {
+    return impl_->execute(request, authorization, std::move(lifetime));
 }
 
 DirectPreparationOutcome
 DirectRpcCoordinator::prepare(core::TdDirectRequest request,
-                              const std::shared_ptr<const core::AuthStateSnapshot>& authorization) {
-    return impl_->prepare(std::move(request), authorization);
+                              const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                              core::TdQueryLifetime lifetime) {
+    return impl_->prepare(std::move(request), authorization, std::move(lifetime));
 }
 
 DirectOutcome DirectRpcCoordinator::execute_prepared() {

@@ -1,5 +1,7 @@
 #include "common/daemon_lock.hpp"
 #include "common/exit_codes.hpp"
+#include "common/invite_redaction.hpp"
+#include "core/td_log.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/idempotency_reconciliation.hpp"
@@ -18,6 +20,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -93,6 +96,35 @@ struct Outcome {
     std::optional<json> error;
     int exit_code = -1;
     int terminal_count = 0;
+};
+
+class WipeTrace final {
+  public:
+    [[nodiscard]] secure::WipeObserver observer() {
+        return [state = state_](std::string_view stage, const char* bytes, std::size_t size) {
+            const bool all_zero =
+                size == 0 || std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                         [](char value) { return value == '\0'; });
+            const std::lock_guard lock(state->mutex);
+            state->observations.emplace_back(std::string(stage), size, all_zero);
+        };
+    }
+
+    [[nodiscard]] bool saw(std::string_view stage, std::size_t size) const {
+        const std::lock_guard lock(state_->mutex);
+        return std::ranges::any_of(state_->observations, [&](const auto& observation) {
+            return std::get<0>(observation) == stage && std::get<1>(observation) == size &&
+                   std::get<2>(observation);
+        });
+    }
+
+  private:
+    struct State {
+        std::mutex mutex;
+        std::vector<std::tuple<std::string, std::size_t, bool>> observations;
+    };
+
+    std::shared_ptr<State> state_ = std::make_shared<State>();
 };
 
 std::string read_bytes(const std::string& filename) {
@@ -211,6 +243,14 @@ const T& function_field(const core::TdFunctionData& function, std::string_view n
     const auto* value = std::get_if<T>(&found->value());
     REQUIRE(value != nullptr);
     return *value;
+}
+
+template <typename T>
+bool function_field_holds(const core::TdFunctionData& function, std::string_view name) {
+    const auto found = std::ranges::find_if(
+        function.fields(), [name](const auto& field) { return field.has_name(name); });
+    REQUIRE(found != function.fields().end());
+    return std::holds_alternative<T>(found->value());
 }
 
 class FakeWrites final {
@@ -340,6 +380,39 @@ class FakeWrites final {
         CHECK(sent.back().function.kind() == expected);
         ++sent_count_;
         return sent.back().function;
+    }
+
+    std::uint64_t observe_query(core::TdFunctionKind expected) {
+        CAPTURE(core::td_function_name(expected), sent_count_);
+        REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
+        const auto sent = runtime_->sent_functions();
+        REQUIRE(sent.size() == sent_count_ + 1);
+        CHECK(sent.back().function.kind() == expected);
+        ++sent_count_;
+        return sent.back().query_id;
+    }
+
+    template <typename T> void push_response(std::uint64_t query_id, T value) {
+        runtime_->push_response(client_id_, query_id, core::TdValue::from(std::move(value)));
+    }
+
+    void push_authorization(core::AuthStateData state) {
+        runtime_->push_update(client_id_, {}, std::move(state));
+    }
+
+    template <typename T>
+    bool try_respond(core::TdFunctionKind expected, T value,
+                     std::chrono::milliseconds timeout = 100ms) {
+        if (!runtime_->wait_for_sent(sent_count_ + 1, timeout)) {
+            return false;
+        }
+        const auto sent = runtime_->sent_functions();
+        REQUIRE(sent.size() == sent_count_ + 1);
+        CHECK(sent.back().function.kind() == expected);
+        runtime_->push_response(client_id_, sent.back().query_id,
+                                core::TdValue::from(std::move(value)));
+        ++sent_count_;
+        return true;
     }
 
     [[nodiscard]] std::size_t count(core::TdFunctionKind kind) const {
@@ -525,13 +598,14 @@ proto::Request chat_mute_request(bool muted, std::int32_t duration,
 }
 
 proto::Request chat_join_request(std::string target, std::optional<std::string> key = std::nullopt,
-                                 bool dry_run = false) {
-    proto::Request request("main");
+                                 bool dry_run = false, double timeout_seconds = 2.0,
+                                 secure::WipeObserver wipe_observer = {}) {
+    proto::Request request("main", std::move(wipe_observer));
     request.id = 47;
     request.command = {"chat", "join"};
     request.args = {{"target", std::move(target)}};
     request.context.cwd = "/";
-    request.context.timeout_seconds = 2.0;
+    request.context.timeout_seconds = timeout_seconds;
     request.context.idempotency_key = std::move(key);
     request.context.dry_run = dry_run;
     return request;
@@ -570,6 +644,60 @@ void resolve_basic(FakeWrites& fake) {
 
 void bind_principal(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
+}
+
+std::uint64_t reach_invite_dispatch(FakeWrites& fake, const std::string& invite) {
+    bind_principal(fake);
+    fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                 core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                      .username = {},
+                                      .url = invite,
+                                      .tdlib_type_id = 1});
+    fake.respond(core::TdFunctionKind::CheckChatInviteLink,
+                 core::TdChatInviteLinkInfo{.chat_id = 0, .is_public = false});
+    return fake.observe_query(core::TdFunctionKind::JoinChatByInviteLink);
+}
+
+std::unique_ptr<core::TdLogSink> invite_log_sink(FakeWrites& fake) {
+    const auto log_directory = fake.tree().account_state() + "/logs";
+    REQUIRE(std::filesystem::create_directory(log_directory));
+    REQUIRE(::chmod(log_directory.c_str(), 0700) == 0);
+    std::string error;
+    auto sink = core::TdLogSink::create(
+        {.file_path = log_directory + "/tdlib.log", .max_file_size = 96}, ::getuid(), error);
+    INFO(error);
+    REQUIRE(sink);
+    return sink;
+}
+
+void append_invite_and_check_logs(core::TdLogSink& sink,
+                                  const std::vector<std::string>& protected_values) {
+    for (int index = 0; index < 8; ++index) {
+        std::string append_error;
+        std::string record;
+        for (const auto& value : protected_values) {
+            record.append(value);
+            record.push_back(':');
+        }
+        record.append("late\n");
+        REQUIRE(sink.append(1, record, append_error));
+        INFO(append_error);
+    }
+    for (const auto& filename : sink.log_paths()) {
+        const auto bytes = read_bytes(filename);
+        for (const auto& value : protected_values) {
+            CHECK(bytes.find(value) == std::string::npos);
+        }
+    }
+}
+
+void wait_for_invite_release(std::string_view invite) {
+    const auto release_deadline = std::chrono::steady_clock::now() + 2s;
+    while (redaction::InviteLinkRegistry::instance().redact(invite) != invite &&
+           std::chrono::steady_clock::now() < release_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(redaction::InviteLinkRegistry::instance().redact(invite) == invite);
 }
 
 void check_closed_without_pending(FakeWrites& fake) {
@@ -1414,6 +1542,69 @@ TEST_CASE("public msg react validates availability and exact add-remove options"
         CHECK(fake.count(core::TdFunctionKind::AddMessageReaction) == 0);
     }
 
+    SECTION("known unavailability reasons reject add even when the emoji is listed") {
+        for (const auto reason : {core::TdReactionUnavailabilityReason::AnonymousAdministrator,
+                                  core::TdReactionUnavailabilityReason::Guest,
+                                  core::TdReactionUnavailabilityReason::Restricted}) {
+            CAPTURE(static_cast<int>(reason));
+            FakeWrites fake;
+            auto pending = fake.dispatch(react_request());
+            resolve_basic(fake);
+            auto available = available_reactions();
+            available.unavailability_reason = reason;
+            fake.respond(core::TdFunctionKind::GetMessageAvailableReactions, std::move(available));
+            fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+            static_cast<void>(
+                fake.try_respond(core::TdFunctionKind::AddMessageReaction, core::TdOk{}));
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "PRECONDITION_FAILED");
+            CHECK((*outcome.error)["error"]["details"]["reason"] == "reaction_unavailable");
+            CHECK(fake.count(core::TdFunctionKind::AddMessageReaction) == 0);
+            CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+            CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+        }
+    }
+
+    SECTION("remove is independent of add availability for every known reason") {
+        for (const auto reason : {core::TdReactionUnavailabilityReason::None,
+                                  core::TdReactionUnavailabilityReason::AnonymousAdministrator,
+                                  core::TdReactionUnavailabilityReason::Guest,
+                                  core::TdReactionUnavailabilityReason::Restricted}) {
+            CAPTURE(static_cast<int>(reason));
+            FakeWrites fake;
+            auto pending = fake.dispatch(react_request(true));
+            resolve_basic(fake);
+            auto available = available_reactions();
+            available.top.clear();
+            available.unavailability_reason = reason;
+            fake.respond(core::TdFunctionKind::GetMessageAvailableReactions, std::move(available));
+            fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+            static_cast<void>(
+                fake.try_respond(core::TdFunctionKind::RemoveMessageReaction, core::TdOk{}));
+            const auto outcome = pending.get();
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["removed"] == true);
+            CHECK(fake.count(core::TdFunctionKind::RemoveMessageReaction) == 1);
+        }
+    }
+
+    SECTION("unknown unavailability fails closed before intent") {
+        FakeWrites fake;
+        auto pending = fake.dispatch(react_request());
+        resolve_basic(fake);
+        auto available = available_reactions();
+        available.unavailability_reason = core::TdReactionUnavailabilityReason::Unknown;
+        fake.respond(core::TdFunctionKind::GetMessageAvailableReactions, std::move(available));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK(fake.count(core::TdFunctionKind::GetMessageProperties) == 0);
+        CHECK(fake.count(core::TdFunctionKind::AddMessageReaction) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    }
+
     SECTION("a bot is rejected before reaction reads") {
         FakeWrites fake;
         auto pending = fake.dispatch(react_request());
@@ -1813,13 +2004,17 @@ TEST_CASE("chat join keeps invite bytes out of durable and TD descriptors",
         FakeWrites fake;
         auto pending = fake.dispatch(chat_join_request(invite, "join-invite-key"));
         bind_principal(fake);
-        fake.respond(core::TdFunctionKind::GetInternalLinkType,
-                     core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
-                                          .username = {},
-                                          .url = invite,
-                                          .tdlib_type_id = 1});
-        fake.respond(core::TdFunctionKind::CheckChatInviteLink,
-                     core::TdChatInviteLinkInfo{.chat_id = -1001, .is_public = false});
+        const auto classified =
+            fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                         core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                              .username = {},
+                                              .url = invite,
+                                              .tdlib_type_id = 1});
+        const auto checked =
+            fake.respond(core::TdFunctionKind::CheckChatInviteLink,
+                         core::TdChatInviteLinkInfo{.chat_id = -1001, .is_public = false});
+        CHECK(function_field_holds<core::TdRedactedValue>(classified, "link"));
+        CHECK(function_field_holds<core::TdRedactedValue>(checked, "link"));
         fake.respond(core::TdFunctionKind::GetChat, basic_chat());
         const auto descriptor =
             fake.respond(core::TdFunctionKind::JoinChatByInviteLink,
@@ -1900,6 +2095,269 @@ TEST_CASE("chat join keeps invite bytes out of durable and TD descriptors",
         CHECK(fake.count(core::TdFunctionKind::JoinChatByInviteLink) == 0);
         CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
         CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    }
+}
+
+TEST_CASE("invite ownership wipes request handler response and direct DTO copies",
+          "[write-command][chat][join][secrecy][wipe][fake-boundary]") {
+    SECTION("parse failure wipes protocol-owned copies") {
+        const std::string invite = "https://t.me/+ParseFailureWipeSentinel123";
+        WipeTrace trace;
+        {
+            FakeWrites fake;
+            auto request = chat_join_request(invite, std::nullopt, false, 2.0, trace.observer());
+            request.args["unexpected"] = true;
+            const auto outcome = fake.dispatch(request).get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "USAGE");
+        }
+        CHECK(trace.saw("request_args", invite.size()));
+        CHECK(trace.saw("request_facts_args", invite.size()));
+    }
+
+    SECTION("bot and authority denial wipe the extracted handler input") {
+        for (const bool bot : {true, false}) {
+            CAPTURE(bot);
+            const std::string invite = bot ? "https://t.me/+BotDenialWipeSentinel123"
+                                           : "https://t.me/+AuthorityDenialWipeSentinel123";
+            WipeTrace trace;
+            {
+                FakeWrites fake(bot);
+                auto pending = fake.dispatch(
+                    chat_join_request(invite, std::nullopt, false, 2.0, trace.observer()));
+                fake.respond(core::TdFunctionKind::GetMe,
+                             bot ? peer(core::TdUserPresence::Online, true, 42) : self());
+                const auto outcome = pending.get();
+                REQUIRE(outcome.error);
+                CHECK((*outcome.error)["error"]["code"] ==
+                      (bot ? "BOT_UNSUPPORTED" : "WRITE_DENIED"));
+            }
+            CHECK(trace.saw("chat_join_input", invite.size()));
+            CHECK(trace.saw("request_args", invite.size()));
+            CHECK(trace.saw("request_facts_args", invite.size()));
+        }
+    }
+
+    SECTION("planning error and success wipe TD response and mutation DTO copies") {
+        for (const bool succeeds : {false, true}) {
+            CAPTURE(succeeds);
+            const std::string invite = succeeds ? "https://t.me/+SuccessWipeSentinel123"
+                                                : "https://t.me/+PlanningErrorWipeSentinel123";
+            WipeTrace trace;
+            {
+                FakeWrites fake;
+                auto pending = fake.dispatch(
+                    chat_join_request(invite, std::nullopt, false, 2.0, trace.observer()));
+                bind_principal(fake);
+                if (!succeeds) {
+                    fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                                 core::TdError{.code = 404, .message = invite});
+                    REQUIRE(pending.get().error);
+                } else {
+                    fake.respond(core::TdFunctionKind::GetInternalLinkType,
+                                 core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                                      .username = {},
+                                                      .url = invite,
+                                                      .tdlib_type_id = 1});
+                    fake.respond(core::TdFunctionKind::CheckChatInviteLink,
+                                 core::TdChatInviteLinkInfo{.chat_id = 0, .is_public = false});
+                    fake.respond(core::TdFunctionKind::JoinChatByInviteLink,
+                                 core::TdChatJoinResult{.kind = core::TdChatJoinResultKind::Success,
+                                                        .chat_id = -1001,
+                                                        .guard_bot_user_id = std::nullopt,
+                                                        .guard_query_id = std::nullopt,
+                                                        .unsupported_tdlib_type_id = std::nullopt});
+                    REQUIRE(pending.get().result);
+                }
+            }
+            CHECK(trace.saw("chat_join_input", invite.size()));
+            CHECK(trace.saw(succeeds ? "td_internal_link_url" : "td_invite_error", invite.size()));
+            if (succeeds) {
+                CHECK((trace.saw("td_join_invite", invite.size()) ||
+                       trace.saw("td_join_invite_move_source", invite.size())));
+            }
+            CHECK(trace.saw("request_args", invite.size()));
+            CHECK(trace.saw("request_facts_args", invite.size()));
+        }
+    }
+}
+
+TEST_CASE("late invite planning response retains exact log redaction after timeout",
+          "[write-command][chat][join][secrecy][redaction][lifetime][fake-boundary]") {
+    const std::string invite = "t.me/joinchat/LatePlanningInviteSentinel123";
+    WipeTrace trace;
+    FakeWrites fake;
+    auto sink = invite_log_sink(fake);
+
+    auto pending = fake.dispatch(
+        chat_join_request(invite, "late-planning-key", false, 0.05, trace.observer()));
+    bind_principal(fake);
+    const auto query_id = fake.observe_query(core::TdFunctionKind::GetInternalLinkType);
+    const auto outcome = pending.get();
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+    CHECK(trace.saw("chat_join_input", invite.size()));
+    CHECK(redaction::InviteLinkRegistry::instance().redact(invite) != invite);
+
+    append_invite_and_check_logs(*sink, {invite, "https://t.me/+LatePlanningInviteSentinel123"});
+
+    fake.push_response(query_id, core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                                      .username = {},
+                                                      .url = invite,
+                                                      .tdlib_type_id = 1});
+    wait_for_invite_release(invite);
+}
+
+TEST_CASE(
+    "late invite planning response retains exact log redaction after cancellation or auth loss",
+    "[write-command][chat][join][secrecy][redaction][lifetime][fake-boundary]") {
+    SECTION("disconnect emits no terminal and retains protection until the late response") {
+        const std::string invite = "t.me/joinchat/LatePlanningCancelSentinel123";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto sink = invite_log_sink(fake);
+        std::shared_ptr<daemon::RequestSession> session;
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "late-planning-cancel", false, 2.0, trace.observer()),
+            &session);
+        bind_principal(fake);
+        const auto query_id = fake.observe_query(core::TdFunctionKind::GetInternalLinkType);
+        REQUIRE(session);
+        session->disconnect();
+        const auto outcome = pending.get();
+        CHECK_FALSE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 0);
+        CHECK(trace.saw("chat_join_input", invite.size()));
+        CHECK(redaction::InviteLinkRegistry::instance().redact(invite) != invite);
+        append_invite_and_check_logs(*sink,
+                                     {invite, "https://t.me/+LatePlanningCancelSentinel123"});
+
+        fake.push_response(query_id,
+                           core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                                .username = {},
+                                                .url = invite,
+                                                .tdlib_type_id = 1});
+        wait_for_invite_release(invite);
+    }
+
+    SECTION("auth loss terminal retains protection until the late response") {
+        const std::string invite = "t.me/joinchat/LatePlanningAuthSentinel123";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto sink = invite_log_sink(fake);
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "late-planning-auth", false, 2.0, trace.observer()));
+        bind_principal(fake);
+        const auto query_id = fake.observe_query(core::TdFunctionKind::GetInternalLinkType);
+        fake.push_authorization(core::AuthStateData{core::AuthState::WaitPhoneNumber});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(trace.saw("chat_join_input", invite.size()));
+        CHECK(redaction::InviteLinkRegistry::instance().redact(invite) != invite);
+        append_invite_and_check_logs(*sink, {invite, "https://t.me/+LatePlanningAuthSentinel123"});
+
+        fake.push_response(query_id,
+                           core::TdInternalLink{.kind = core::TdInternalLinkKind::ChatInvite,
+                                                .username = {},
+                                                .url = invite,
+                                                .tdlib_type_id = 1});
+        wait_for_invite_release(invite);
+    }
+}
+
+TEST_CASE("post-dispatch invite query redaction survives terminal races until correlation release",
+          "[write-command][chat][join][secrecy][redaction][lifetime][fake-boundary]") {
+    const auto joined = [] {
+        return core::TdChatJoinResult{.kind = core::TdChatJoinResultKind::Success,
+                                      .chat_id = -1001,
+                                      .guard_bot_user_id = std::nullopt,
+                                      .guard_query_id = std::nullopt,
+                                      .unsupported_tdlib_type_id = std::nullopt};
+    };
+
+    SECTION("deadline terminal retains protection until the late response") {
+        const std::string invite = "https://t.me/+LateDispatchTimeoutSentinel123";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto sink = invite_log_sink(fake);
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "late-dispatch-timeout", false, 0.1, trace.observer()));
+        const auto query_id = reach_invite_dispatch(fake, invite);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK(trace.saw("chat_join_input", invite.size()));
+        CHECK((trace.saw("td_join_invite", invite.size()) ||
+               trace.saw("td_join_invite_move_source", invite.size())));
+        CHECK(redaction::InviteLinkRegistry::instance().redact(invite) != invite);
+        append_invite_and_check_logs(*sink,
+                                     {invite, "t.me/joinchat/LateDispatchTimeoutSentinel123"});
+        fake.push_response(query_id, joined());
+        wait_for_invite_release(invite);
+    }
+
+    SECTION("disconnect emits no terminal and retains protection until the late response") {
+        const std::string invite = "https://t.me/+LateDispatchCancelSentinel123";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto sink = invite_log_sink(fake);
+        std::shared_ptr<daemon::RequestSession> session;
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "late-dispatch-cancel", false, 2.0, trace.observer()),
+            &session);
+        const auto query_id = reach_invite_dispatch(fake, invite);
+        REQUIRE(session);
+        session->disconnect();
+        const auto outcome = pending.get();
+        CHECK_FALSE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 0);
+        CHECK(trace.saw("chat_join_input", invite.size()));
+        CHECK((trace.saw("td_join_invite", invite.size()) ||
+               trace.saw("td_join_invite_move_source", invite.size())));
+        CHECK(redaction::InviteLinkRegistry::instance().redact(invite) != invite);
+        append_invite_and_check_logs(*sink,
+                                     {invite, "t.me/joinchat/LateDispatchCancelSentinel123"});
+        fake.push_response(query_id, joined());
+        wait_for_invite_release(invite);
+    }
+
+    SECTION("auth loss terminal retains protection until the late response") {
+        const std::string invite = "https://t.me/+LateDispatchAuthSentinel123";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto sink = invite_log_sink(fake);
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "late-dispatch-auth", false, 2.0, trace.observer()));
+        const auto query_id = reach_invite_dispatch(fake, invite);
+        fake.push_authorization(core::AuthStateData{core::AuthState::WaitPhoneNumber});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(trace.saw("chat_join_input", invite.size()));
+        CHECK((trace.saw("td_join_invite", invite.size()) ||
+               trace.saw("td_join_invite_move_source", invite.size())));
+        CHECK(redaction::InviteLinkRegistry::instance().redact(invite) != invite);
+        append_invite_and_check_logs(*sink, {invite, "t.me/joinchat/LateDispatchAuthSentinel123"});
+        fake.push_response(query_id, joined());
+        wait_for_invite_release(invite);
+    }
+
+    SECTION("generation close releases the pending correlation protection") {
+        const std::string invite = "https://t.me/+GenerationCloseInviteSentinel123";
+        WipeTrace trace;
+        FakeWrites fake;
+        auto pending = fake.dispatch(
+            chat_join_request(invite, "generation-close-invite", false, 2.0, trace.observer()));
+        static_cast<void>(reach_invite_dispatch(fake, invite));
+        fake.push_authorization(core::AuthStateData{core::AuthState::Closed});
+        static_cast<void>(pending.get());
+        CHECK(trace.saw("chat_join_input", invite.size()));
+        CHECK((trace.saw("td_join_invite", invite.size()) ||
+               trace.saw("td_join_invite_move_source", invite.size())));
+        wait_for_invite_release(invite);
     }
 }
 

@@ -1,5 +1,6 @@
 #include "proto/frame.hpp"
 
+#include "common/invite_link.hpp"
 #include "common/paths.hpp"
 #include "proto/destructive_plan.hpp"
 #include "proto/operation.hpp"
@@ -13,21 +14,69 @@
 
 namespace tgcli::proto {
 
+namespace {
+
+bool invite_request(const std::vector<std::string>& command, const nlohmann::json& args) noexcept {
+    try {
+        return command == std::vector<std::string>{"chat", "join"} && args.is_object() &&
+               args.contains("target") && args["target"].is_string() &&
+               common::is_exact_telegram_invite_link(args["target"].get_ref<const std::string&>());
+    } catch (...) {
+        return false;
+    }
+}
+
+void wipe_invite_request_args(const std::vector<std::string>& command, nlohmann::json& args,
+                              const secure::WipeObserver& observer,
+                              std::string_view stage) noexcept {
+    if (!invite_request(command, args)) {
+        return;
+    }
+    try {
+        secure::wipe(args["target"].get_ref<std::string&>(), observer, stage);
+    } catch (...) {
+        return;
+    }
+}
+
+} // namespace
+
 struct RequestFacts {
+    // References avoid transient raw invite-link owners during immutable-fact construction.
+    // NOLINTBEGIN(modernize-pass-by-value)
+    RequestFacts(std::uint64_t id_value, const std::string& account_value,
+                 const std::vector<std::string>& command_value, const nlohmann::json& args_value,
+                 const RequestContext& context_value, std::uint64_t source_bytes_value,
+                 const secure::WipeObserver& wipe_observer_value)
+        : id(id_value), account(account_value), command(command_value), args(args_value),
+          context(context_value), source_bytes(source_bytes_value),
+          wipe_observer(wipe_observer_value) {}
+    // NOLINTEND(modernize-pass-by-value)
+
     std::uint64_t id = 0;
     std::string account;
     std::vector<std::string> command;
     nlohmann::json args;
     RequestContext context;
     std::uint64_t source_bytes = 0;
+    secure::WipeObserver wipe_observer;
+
+    ~RequestFacts() {
+        wipe_invite_request_args(command, args, wipe_observer, "request_facts_args");
+    }
+
+    RequestFacts(const RequestFacts&) = delete;
+    RequestFacts& operator=(const RequestFacts&) = delete;
+    RequestFacts(RequestFacts&&) = delete;
+    RequestFacts& operator=(RequestFacts&&) = delete;
 };
 
 struct RequestSourceAccess {
     static void set(Request& request, std::uint64_t source_bytes) {
         request.source_bytes_ = source_bytes;
         request.admitted_facts_ = std::make_shared<const RequestFacts>(
-            RequestFacts{request.id, request.account, request.command, request.args,
-                         request.context, source_bytes});
+            request.id, request.account, request.command, request.args, request.context,
+            source_bytes, request.wipe_observer_);
     }
 
     static Request frozen(const Request& request) {
@@ -35,7 +84,7 @@ struct RequestSourceAccess {
             return request;
         }
         const auto& facts = *request.admitted_facts_;
-        Request frozen(facts.account);
+        Request frozen(facts.account, facts.wipe_observer);
         frozen.id = facts.id;
         frozen.command = facts.command;
         frozen.args = facts.args;
@@ -423,7 +472,7 @@ class Parser {
         if (command == nullptr || !command->is_array() || command->empty()) {
             return fail("request: 'command' must be a non-empty array");
         }
-        Request req(account_name);
+        Request req(account_name, wipe_observer_);
         req.id = *id;
         for (const auto& part : *command) {
             if (!part.is_string()) {
@@ -629,10 +678,54 @@ class Parser {
 
 Answer::Answer() = default;
 
-Request::Request(std::string account_value) : account(std::move(account_value)) {
+Request::Request(std::string account_value, secure::WipeObserver wipe_observer)
+    : account(std::move(account_value)), wipe_observer_(std::move(wipe_observer)) {
     if (!paths::valid_account_name(account)) {
         throw std::invalid_argument("request account is invalid");
     }
+}
+
+Request::~Request() {
+    wipe_invite_request_args(command, args, wipe_observer_, "request_args");
+}
+
+Request& Request::operator=(const Request& other) {
+    if (this != &other) {
+        wipe_invite_request_args(command, args, wipe_observer_, "request_args");
+        id = other.id;
+        account = other.account;
+        command = other.command;
+        args = other.args;
+        context = other.context;
+        source_bytes_ = other.source_bytes_;
+        admitted_facts_ = other.admitted_facts_;
+        wipe_observer_ = other.wipe_observer_;
+    }
+    return *this;
+}
+
+Request::Request(Request&& other) noexcept
+    : id(other.id), account(std::move(other.account)), command(std::move(other.command)),
+      args(std::move(other.args)), context(std::move(other.context)),
+      source_bytes_(other.source_bytes_), admitted_facts_(std::move(other.admitted_facts_)),
+      wipe_observer_(std::move(other.wipe_observer_)) {
+    wipe_invite_request_args(command, other.args, wipe_observer_, "request_args_move_source");
+}
+
+Request& Request::operator=(Request&& other) noexcept {
+    if (this != &other) {
+        wipe_invite_request_args(command, args, wipe_observer_, "request_args");
+        id = other.id;
+        account = std::move(other.account);
+        command = std::move(other.command);
+        args = std::move(other.args);
+        context = std::move(other.context);
+        source_bytes_ = other.source_bytes_;
+        admitted_facts_ = std::move(other.admitted_facts_);
+        wipe_observer_ = std::move(other.wipe_observer_);
+        wipe_invite_request_args(command, other.args, wipe_observer_, "request_args_move_source");
+    }
+    return *this;
 }
 
 // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
@@ -807,8 +900,11 @@ std::optional<Request> admit_request_source(const Request& request, std::string&
         return admitted;
     }
     auto document = FrameWriter{false}(admitted);
-    const secure::JsonWiper document_wiper(document, {}, "admitted_request_json");
-    const auto source = document.dump();
+    const secure::JsonWiper document_wiper(document, admitted.wipe_observer_,
+                                           "admitted_request_json");
+    auto source = document.dump();
+    const secure::StringWiper source_wiper(source, admitted.wipe_observer_,
+                                           "admitted_request_source");
     if (source.empty() || source.size() > kMaximumRequestSourceBytes) {
         error = "frame exceeds " + std::to_string(kMaximumRequestSourceBytes) + " bytes";
         return std::nullopt;

@@ -81,10 +81,19 @@ struct RequestContext {
 };
 
 struct Request {
-    explicit Request(std::string account_value);
+    explicit Request(std::string account_value, secure::WipeObserver wipe_observer = {});
+    ~Request();
+    Request(const Request& other) = default;
+    Request& operator=(const Request& other);
+    Request(Request&& other) noexcept;
+    Request& operator=(Request&& other) noexcept;
 
     [[nodiscard]] std::uint64_t source_bytes() const noexcept {
         return source_bytes_;
+    }
+
+    [[nodiscard]] const secure::WipeObserver& wipe_observer() const noexcept {
+        return wipe_observer_;
     }
 
     std::uint64_t id = 0; // NOLINT(cppcoreguidelines-non-private-member-variables-in-classes)
@@ -98,6 +107,7 @@ struct Request {
   private:
     std::uint64_t source_bytes_ = 0;
     std::shared_ptr<const RequestFacts> admitted_facts_;
+    secure::WipeObserver wipe_observer_;
 
     friend std::optional<Request> admit_request_source(const Request& request, std::string& error);
     friend struct RequestSourceAccess;

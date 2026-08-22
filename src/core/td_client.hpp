@@ -19,6 +19,8 @@ class LogoutCoordinator;
 
 namespace tgcli::core {
 
+using TdQueryLifetime = std::shared_ptr<const void>;
+
 class AuthBootstrap;
 
 struct TdClientEventHooks {
@@ -230,13 +232,13 @@ class TdClient {
                        std::string username);
     std::future<TdValue>
     get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                           std::string link);
+                           std::string link, TdQueryLifetime lifetime = {});
     std::future<TdValue>
     get_message_link_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                           std::string url);
     std::future<TdValue>
     check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                           std::string link);
+                           std::string link, TdQueryLifetime lifetime = {});
     std::future<TdValue> get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   std::int64_t user_id);
     std::future<TdValue>
@@ -269,7 +271,7 @@ class TdClient {
                          TdSendMessageRequest request);
     [[nodiscard]] TdPreparedWrite
     prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                            TdDirectRequest request);
+                            TdDirectRequest request, TdQueryLifetime lifetime = {});
     std::future<TdValue> send(TdPreparedWrite&& prepared);
 
     std::future<TdValue>

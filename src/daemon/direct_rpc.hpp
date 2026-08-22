@@ -189,10 +189,12 @@ class DirectRpcCoordinator {
     DirectRpcCoordinator& operator=(DirectRpcCoordinator&&) = delete;
 
     DirectOutcome execute(const core::TdDirectRequest& request,
-                          const std::shared_ptr<const core::AuthStateSnapshot>& authorization);
+                          const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                          core::TdQueryLifetime lifetime = {});
     DirectPreparationOutcome
     prepare(core::TdDirectRequest request,
-            const std::shared_ptr<const core::AuthStateSnapshot>& authorization);
+            const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+            core::TdQueryLifetime lifetime = {});
     DirectOutcome execute_prepared();
 
   private:

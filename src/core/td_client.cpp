@@ -169,7 +169,8 @@ class TdClient::Impl {
         close();
     }
 
-    std::future<TdValue> send(TdSendDescriptor descriptor, TdValue request) {
+    std::future<TdValue> send(TdSendDescriptor descriptor, TdValue request,
+                              TdQueryLifetime lifetime = {}) {
         std::shared_ptr<Generation> generation;
         {
             const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -180,12 +181,13 @@ class TdClient::Impl {
         }
 
         return generation->lifecycle.send([this, generation, descriptor = std::move(descriptor),
-                                           request = std::move(request)]() mutable {
+                                           request = std::move(request),
+                                           lifetime = std::move(lifetime)]() mutable {
             const std::lock_guard<std::mutex> lock(generation->outbound_mutex);
             if (!generation->initial_state_installed) {
                 return failed_future(TdAuthorizationFailure::AuthStateMismatch);
             }
-            return submit_locked(generation, descriptor, std::move(request)).future;
+            return submit_locked(generation, descriptor, std::move(request), lifetime).future;
         });
     }
 
@@ -195,7 +197,8 @@ class TdClient::Impl {
     }
 
     std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                   TdFunctionKind function, TdValue request) {
+                                   TdFunctionKind function, TdValue request,
+                                   TdQueryLifetime lifetime = {}) {
         if (!authorization ||
             (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
              function != TdFunctionKind::GetSavedMessagesTags &&
@@ -234,7 +237,7 @@ class TdClient::Impl {
                                      .client_generation = authorization->client_generation,
                                      .auth_sequence = authorization->auth_sequence,
                                      .auth_state = authorization->data.state},
-                    std::move(request));
+                    std::move(request), std::move(lifetime));
     }
 
     std::future<TdValue> get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
@@ -368,9 +371,11 @@ class TdClient::Impl {
 
     std::future<TdValue>
     get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                           std::string link) {
-        return send_read(authorization, TdFunctionKind::GetInternalLinkType,
-                         runtime_->make_get_internal_link_type(std::move(link)));
+                           std::string link, TdQueryLifetime lifetime) {
+        const bool sensitive = lifetime != nullptr;
+        auto request = runtime_->make_get_internal_link_type(std::move(link), sensitive);
+        return send_read(authorization, TdFunctionKind::GetInternalLinkType, std::move(request),
+                         std::move(lifetime));
     }
 
     std::future<TdValue>
@@ -382,9 +387,10 @@ class TdClient::Impl {
 
     std::future<TdValue>
     check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                           std::string link) {
+                           std::string link, TdQueryLifetime lifetime) {
         return send_read(authorization, TdFunctionKind::CheckChatInviteLink,
-                         runtime_->make_check_chat_invite_link(std::move(link)));
+                         runtime_->make_check_chat_invite_link(std::move(link)),
+                         std::move(lifetime));
     }
 
     std::future<TdValue> get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
@@ -498,7 +504,7 @@ class TdClient::Impl {
 
     TdPreparedWrite prepare_write(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   TdFunctionKind function, DescriptorKind tier,
-                                  TdValue request_value) {
+                                  TdValue request_value, TdQueryLifetime lifetime = {}) {
         const auto& function_data = request_value.function_data();
         if (!authorization || !function_data || function_data->kind() != function) {
             return {};
@@ -542,13 +548,15 @@ class TdClient::Impl {
             resources->held = std::move(held);
             auto state = std::make_shared<TdPreparedWrite::State>();
             state->submit = [this, generation, descriptor, resources = std::move(resources),
-                             request = std::move(request)]() mutable {
+                             request = std::move(request),
+                             lifetime = std::move(lifetime)]() mutable {
                 if (!request || !request->has_value()) {
                     return failed_future(TdAuthorizationFailure::AuthStateMismatch);
                 }
                 auto value = std::move(request->value());
                 request->reset();
-                auto submission = submit_admitted_locked(generation, descriptor, std::move(value));
+                auto submission =
+                    submit_admitted_locked(generation, descriptor, std::move(value), lifetime);
                 resources->held.reset();
                 resources->owner.reset();
                 return std::move(submission.future);
@@ -584,7 +592,7 @@ class TdClient::Impl {
 
     TdPreparedWrite
     prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                            TdDirectRequest request) {
+                            TdDirectRequest request, TdQueryLifetime lifetime) {
         if (!authorization || !valid_td_direct_request(request)) {
             return {};
         }
@@ -625,7 +633,8 @@ class TdClient::Impl {
                     }
                 },
                 std::move(request));
-            return prepare_write(authorization, function, *tier, std::move(value));
+            return prepare_write(authorization, function, *tier, std::move(value),
+                                 std::move(lifetime));
         } catch (const std::exception&) {
             return {};
         }
@@ -1172,13 +1181,14 @@ class TdClient::Impl {
     }
 
     Submission submit_locked(const std::shared_ptr<Generation>& generation,
-                             const TdSendDescriptor& descriptor, TdValue function) {
+                             const TdSendDescriptor& descriptor, TdValue function,
+                             const TdQueryLifetime& lifetime = {}) {
         const auto& function_data = function.function_data();
         if (const auto failure = authorization_failure_locked(
                 generation, descriptor, function_data ? &*function_data : nullptr)) {
             return {0, failed_future(*failure)};
         }
-        return submit_admitted_locked(generation, descriptor, std::move(function));
+        return submit_admitted_locked(generation, descriptor, std::move(function), lifetime);
     }
 
     std::optional<TdAuthorizationFailure>
@@ -1220,10 +1230,10 @@ class TdClient::Impl {
     }
 
     Submission submit_admitted_locked(const std::shared_ptr<Generation>& generation,
-                                      const TdSendDescriptor& admitted_descriptor,
-                                      TdValue function) {
+                                      const TdSendDescriptor& admitted_descriptor, TdValue function,
+                                      const TdQueryLifetime& lifetime = {}) {
         static_cast<void>(admitted_descriptor);
-        auto [query_id, future] = generation->queries.reserve();
+        auto [query_id, future] = generation->queries.reserve(lifetime);
         try {
             runtime_->send(generation->client_id, generation->number, query_id,
                            std::move(function));
@@ -1908,8 +1918,8 @@ TdClient::search_public_chat(const std::shared_ptr<const AuthStateSnapshot>& aut
 
 std::future<TdValue>
 TdClient::get_internal_link_type(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                 std::string link) {
-    return impl_->get_internal_link_type(authorization, std::move(link));
+                                 std::string link, TdQueryLifetime lifetime) {
+    return impl_->get_internal_link_type(authorization, std::move(link), std::move(lifetime));
 }
 
 std::future<TdValue>
@@ -1920,8 +1930,8 @@ TdClient::get_message_link_info(const std::shared_ptr<const AuthStateSnapshot>& 
 
 std::future<TdValue>
 TdClient::check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                 std::string link) {
-    return impl_->check_chat_invite_link(authorization, std::move(link));
+                                 std::string link, TdQueryLifetime lifetime) {
+    return impl_->check_chat_invite_link(authorization, std::move(link), std::move(lifetime));
 }
 
 std::future<TdValue>
@@ -1991,8 +2001,8 @@ TdClient::prepare_send_message(const std::shared_ptr<const AuthStateSnapshot>& a
 
 TdPreparedWrite
 TdClient::prepare_direct_mutation(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                  TdDirectRequest request) {
-    return impl_->prepare_direct_mutation(authorization, std::move(request));
+                                  TdDirectRequest request, TdQueryLifetime lifetime) {
+    return impl_->prepare_direct_mutation(authorization, std::move(request), std::move(lifetime));
 }
 
 std::future<TdValue> TdClient::send(TdPreparedWrite&& prepared) {

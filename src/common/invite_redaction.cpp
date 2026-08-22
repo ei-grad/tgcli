@@ -1,5 +1,6 @@
 #include "common/invite_redaction.hpp"
 
+#include "common/invite_link.hpp"
 #include "common/secure_wipe.hpp"
 
 #include <algorithm>
@@ -9,19 +10,33 @@
 
 namespace tgcli::redaction {
 
-CorrelatedInviteLink::CorrelatedInviteLink(InviteLinkRegistry* registry,
-                                           std::uint64_t registration) noexcept
-    : registry_(registry), registration_(registration) {}
+struct CorrelatedInviteLink::State {
+    State(InviteLinkRegistry* registry_value, std::uint64_t registration_value)
+        : registry(registry_value), registration(registration_value) {}
+
+    ~State() {
+        registry->release(registration);
+    }
+
+    State(const State&) = delete;
+    State& operator=(const State&) = delete;
+    State(State&&) = delete;
+    State& operator=(State&&) = delete;
+
+    InviteLinkRegistry* registry;
+    std::uint64_t registration;
+};
+
+CorrelatedInviteLink::CorrelatedInviteLink(std::shared_ptr<State> state) noexcept
+    : state_(std::move(state)) {}
 
 CorrelatedInviteLink::CorrelatedInviteLink(CorrelatedInviteLink&& other) noexcept
-    : registry_(std::exchange(other.registry_, nullptr)),
-      registration_(std::exchange(other.registration_, 0)) {}
+    : state_(std::move(other.state_)) {}
 
 CorrelatedInviteLink& CorrelatedInviteLink::operator=(CorrelatedInviteLink&& other) noexcept {
     if (this != &other) {
         release();
-        registry_ = std::exchange(other.registry_, nullptr);
-        registration_ = std::exchange(other.registration_, 0);
+        state_ = std::move(other.state_);
     }
     return *this;
 }
@@ -31,16 +46,19 @@ CorrelatedInviteLink::~CorrelatedInviteLink() {
 }
 
 bool CorrelatedInviteLink::valid() const noexcept {
-    return registry_ != nullptr && registration_ != 0;
+    return state_ != nullptr;
+}
+
+CorrelatedInviteLink CorrelatedInviteLink::retain() const {
+    return CorrelatedInviteLink(state_);
+}
+
+std::shared_ptr<const void> CorrelatedInviteLink::protection() const {
+    return state_;
 }
 
 void CorrelatedInviteLink::release() {
-    if (!valid()) {
-        return;
-    }
-    registry_->release(registration_);
-    registry_ = nullptr;
-    registration_ = 0;
+    state_.reset();
 }
 
 InviteLinkRegistry& InviteLinkRegistry::instance() {
@@ -58,8 +76,14 @@ CorrelatedInviteLink InviteLinkRegistry::register_link(std::string invite_link) 
         return {};
     }
     const auto registration = next_registration_++;
-    links_.emplace(registration, std::move(invite_link));
-    return {this, registration};
+    auto aliases = common::exact_telegram_invite_aliases(invite_link);
+    if (aliases.empty()) {
+        aliases.push_back(std::move(invite_link));
+    } else {
+        secure::wipe(invite_link);
+    }
+    links_.emplace(registration, Entry{.aliases = std::move(aliases)});
+    return CorrelatedInviteLink(std::make_shared<CorrelatedInviteLink::State>(this, registration));
 }
 
 std::string InviteLinkRegistry::redact(std::string_view value) const {
@@ -69,9 +93,11 @@ std::string InviteLinkRegistry::redact(std::string_view value) const {
     }
     std::vector<const std::string*> ordered;
     ordered.reserve(links_.size());
-    for (const auto& [registration, link] : links_) {
+    for (const auto& [registration, entry] : links_) {
         static_cast<void>(registration);
-        ordered.push_back(&link);
+        for (const auto& alias : entry.aliases) {
+            ordered.push_back(&alias);
+        }
     }
     std::ranges::sort(ordered, [](const std::string* left, const std::string* right) {
         return left->size() > right->size();
@@ -108,7 +134,9 @@ void InviteLinkRegistry::release(std::uint64_t registration) {
     if (found == links_.end()) {
         return;
     }
-    secure::wipe(found->second);
+    for (auto& alias : found->second.aliases) {
+        secure::wipe(alias);
+    }
     links_.erase(found);
 }
 

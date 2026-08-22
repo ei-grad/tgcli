@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -71,6 +72,51 @@ class StringWiper {
     std::string* value_;
     WipeObserver observer_;
     std::string_view stage_;
+};
+
+class SensitiveString {
+  public:
+    SensitiveString() = default;
+    explicit SensitiveString(std::string_view value, WipeObserver observer = {},
+                             std::string stage = "sensitive_string")
+        : value_(value), observer_(std::move(observer)), stage_(std::move(stage)) {}
+    ~SensitiveString() {
+        wipe(value_, observer_, stage_);
+    }
+    SensitiveString(const SensitiveString&) = delete;
+    SensitiveString& operator=(const SensitiveString&) = delete;
+    SensitiveString(SensitiveString&& other) noexcept
+        : value_(std::move(other.value_)), observer_(std::move(other.observer_)),
+          stage_(std::move(other.stage_)) {
+        wipe(other.value_, observer_, "sensitive_string_move_source");
+    }
+    SensitiveString& operator=(SensitiveString&& other) noexcept {
+        if (this != &other) {
+            wipe(value_, observer_, stage_);
+            value_ = std::move(other.value_);
+            observer_ = std::move(other.observer_);
+            stage_ = std::move(other.stage_);
+            wipe(other.value_, observer_, "sensitive_string_move_source");
+        }
+        return *this;
+    }
+
+    [[nodiscard]] std::string_view view() const noexcept {
+        return value_;
+    }
+
+    [[nodiscard]] const std::string& value() const noexcept {
+        return value_;
+    }
+
+    [[nodiscard]] bool empty() const noexcept {
+        return value_.empty();
+    }
+
+  private:
+    std::string value_;
+    WipeObserver observer_;
+    std::string stage_ = "sensitive_string";
 };
 
 class JsonWiper {

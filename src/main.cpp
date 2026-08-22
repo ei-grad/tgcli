@@ -2,7 +2,9 @@
 #include "cli/routing.hpp"
 #include "cli/schema_command.hpp"
 #include "common/exit_codes.hpp"
+#include "common/invite_link.hpp"
 #include "common/paths.hpp"
+#include "common/secure_wipe.hpp"
 #include "daemon/chats_commands.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/fetch_domain.hpp"
@@ -24,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unistd.h>
@@ -1362,6 +1365,17 @@ int run(int argc, char** argv) {
     }
 
     auto command = selected_command(app);
+    std::unique_ptr<tgcli::secure::StringWiper> join_invite_wiper;
+    if (command == std::vector<std::string>{"chat", "join"} &&
+        tgcli::common::is_exact_telegram_invite_link(chat.join)) {
+        join_invite_wiper = std::make_unique<tgcli::secure::StringWiper>(
+            chat.join, tgcli::secure::WipeObserver{}, "cli_join_argument");
+        for (int index = 1; index < argc; ++index) {
+            if (argv[index] != nullptr && std::string_view(argv[index]) == chat.join) {
+                wipe_argument(argv[index]);
+            }
+        }
+    }
     if (command == std::vector<std::string>{"send"}) {
         if (const auto stdin_exit = read_send_stdin(send); stdin_exit) {
             return *stdin_exit;
@@ -1479,6 +1493,9 @@ int run(int argc, char** argv) {
     request.command = command;
     request.args = std::move(request_args);
     request.context = std::move(request_context);
+    if (join_invite_wiper) {
+        tgcli::secure::wipe(chat.join, {}, "cli_join_argument");
+    }
 
     tgcli::cli::RunOptions options;
     options.account = resolved_account;

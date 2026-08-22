@@ -295,8 +295,14 @@ core::TdValue ScriptedTdRuntime::make_search_public_chat(std::string username) {
         core::TdFunctionKind::SearchPublicChat, {{"username", std::move(username)}}});
 }
 
-core::TdValue ScriptedTdRuntime::make_get_internal_link_type(std::string link) {
+core::TdValue ScriptedTdRuntime::make_get_internal_link_type(std::string link, bool sensitive) {
     before_make(core::TdFunctionKind::GetInternalLinkType);
+    if (sensitive) {
+        secure::wipe(link);
+        return core::TdValue::scripted_function(
+            core::TdFunctionData{core::TdFunctionKind::GetInternalLinkType,
+                                 {{"link", core::TdRedactedValue::InviteLink}}});
+    }
     return core::TdValue::scripted_function(core::TdFunctionData{
         core::TdFunctionKind::GetInternalLinkType, {{"link", std::move(link)}}});
 }
@@ -309,8 +315,9 @@ core::TdValue ScriptedTdRuntime::make_get_message_link_info(std::string url) {
 
 core::TdValue ScriptedTdRuntime::make_check_chat_invite_link(std::string link) {
     before_make(core::TdFunctionKind::CheckChatInviteLink);
+    secure::wipe(link);
     return core::TdValue::scripted_function(core::TdFunctionData{
-        core::TdFunctionKind::CheckChatInviteLink, {{"link", std::move(link)}}});
+        core::TdFunctionKind::CheckChatInviteLink, {{"link", core::TdRedactedValue::InviteLink}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_get_user(std::int64_t user_id) {
@@ -518,9 +525,7 @@ core::TdValue ScriptedTdRuntime::make_join_chat(core::TdJoinChatRequest request)
         return core::TdValue::scripted_function(core::TdFunctionData{
             core::TdFunctionKind::JoinChat, {{"chat_id", request.chat_id.value_or(0)}}});
     }
-    auto invite_link = std::move(request.invite_link).value_or(std::string{});
     before_make(core::TdFunctionKind::JoinChatByInviteLink);
-    secure::wipe(invite_link);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::JoinChatByInviteLink,
                              {{"invite_link", core::TdRedactedValue::InviteLink}}});
