@@ -383,7 +383,7 @@ class KernelTree final {
 
 TEST_CASE("idempotency foundation exposes its frozen spool materialization context",
           "[write-kernel][spool]") {
-    KernelTree tree;
+    const KernelTree tree;
     CHECK(tree.foundation()->state_directory() == tree.state());
     CHECK(tree.foundation()->expected_uid() == ::getuid());
 }
