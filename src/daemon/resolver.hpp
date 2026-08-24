@@ -98,10 +98,30 @@ struct ResolverInternalError {
     ResolverCaller operation;
 };
 
+struct UserIdentity {
+    std::int64_t id = 0;
+    std::string display_name;
+    std::vector<std::string> usernames;
+    bool is_bot = false;
+
+    bool operator==(const UserIdentity&) const = default;
+};
+
+struct ResolverUserAmbiguousError {
+    std::string selector;
+    std::vector<UserIdentity> candidates;
+    bool truncated = false;
+};
+
+struct ResolverPaginationInvalidError {
+    ResolverCaller operation;
+};
+
 using ResolverError =
     std::variant<ResolverUsageError, ResolverNotAuthenticatedError, ResolverBotUnsupportedError,
                  ResolverNotFoundError, ResolverAmbiguousError, ResolverRateLimitedError,
-                 ResolverTdlibError, ResolverTimeoutError, ResolverInternalError>;
+                 ResolverTdlibError, ResolverTimeoutError, ResolverInternalError,
+                 ResolverUserAmbiguousError, ResolverPaginationInvalidError>;
 
 struct ResolverPrincipal {
     std::int64_t id = 0;
@@ -124,6 +144,7 @@ struct ResolvedChatTarget {
 
 using ResolverPrincipalOutcome = std::variant<ResolverPrincipal, ResolverError, ResolverStop>;
 using ResolverOutcome = std::variant<ResolvedChatTarget, ResolverError, ResolverStop>;
+using UserResolverOutcome = std::variant<UserIdentity, ResolverError, ResolverStop>;
 
 enum class ExactWriteSelectorStatus { Exact, Invalid, Title, UnsupportedLink };
 
@@ -143,6 +164,8 @@ class ResolverConsumer {
     ResolverOutcome resolve_exact_chat(std::string selector, std::string argument = "chat");
     ResolverOutcome resolve_saved_messages();
     ResolverOutcome resolve_saved_messages_for_write();
+    UserResolverOutcome resolve_user(std::string selector,
+                                     const std::optional<core::TdChat>& domain = std::nullopt);
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const;
     ReadyReadResult read_target(const ReadyReadStart& start);
 

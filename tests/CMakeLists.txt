@@ -52,6 +52,7 @@ add_executable(tgcli_unit_tests
     request_fingerprint_test.cpp
     resolver_test.cpp
     resolver_consumer_test.cpp
+    user_resolver_test.cpp
     chats_commands_test.cpp
     routing_test.cpp
     server_test.cpp

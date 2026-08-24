@@ -27,6 +27,7 @@ using nlohmann::json;
 
 constexpr std::int64_t kMaximumInt53 = 9007199254740991LL;
 constexpr std::int32_t kDialogLoadBatch = 100;
+constexpr std::int32_t kUserMemberPageLimit = 200;
 constexpr std::size_t kMaximumAmbiguousCandidates = 20;
 
 enum class SelectorKind { Numeric, Username, Link, Title };
@@ -100,6 +101,53 @@ bool valid_int53(std::int64_t value) {
 
 bool valid_user_id(std::int64_t value) {
     return value > 0 && value <= kMaximumInt53;
+}
+
+char ascii_lower(char value) {
+    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+}
+
+std::string ascii_fold(std::string_view value) {
+    std::string folded(value);
+    std::ranges::transform(folded, folded.begin(), ascii_lower);
+    return folded;
+}
+
+bool valid_usernames(const std::vector<std::string>& usernames) {
+    std::unordered_set<std::string> seen;
+    for (const auto& username : usernames) {
+        if (username.empty() || !common::valid_utf8(username) ||
+            !seen.insert(ascii_fold(username)).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<UserIdentity> user_identity(const core::TdUserSummary& user) {
+    if (!valid_user_id(user.id) || !common::valid_utf8(user.first_name) ||
+        !common::valid_utf8(user.last_name) || !common::valid_utf8(user.phone_number) ||
+        !valid_usernames(user.usernames)) {
+        return std::nullopt;
+    }
+    std::string display_name = user.first_name;
+    if (!user.last_name.empty()) {
+        display_name.push_back(' ');
+        display_name.append(user.last_name);
+    }
+    return UserIdentity{.id = user.id,
+                        .display_name = std::move(display_name),
+                        .usernames = user.usernames,
+                        .is_bot = user.is_bot};
+}
+
+bool valid_domain_member(const core::TdChatMember& member) {
+    return member.member.kind == core::TdMessageSenderKind::User &&
+           valid_user_id(member.member.id) && common::valid_utf8(member.tag) &&
+           member.inviter_user_id >= 0 && member.inviter_user_id <= kMaximumInt53 &&
+           member.joined_chat_date >= 0 &&
+           member.status.kind != core::TdChatMemberStatusKind::Unknown &&
+           !member.status.unsupported_tdlib_type_id;
 }
 
 bool decimal_syntax(std::string_view selector) {
@@ -289,6 +337,53 @@ class ResolverRun {
         return materialize_result(std::move(*result));
     }
 
+    UserResolverOutcome resolve_user(std::string selector,
+                                     const std::optional<core::TdChat>& domain) {
+        caller_ = M2Operation::Resolve;
+        error_.reset();
+        selector_ = std::move(selector);
+        if (!principal_) {
+            internal_error();
+            return take_user_error_or_stop();
+        }
+        const auto classified = classify_local_selector(selector_);
+        if (!classified) {
+            usage("invalid user selector", "invalid_argument", "from");
+            return take_user_error_or_stop();
+        }
+        switch (classified->kind) {
+        case LocalSelectorKind::Numeric:
+            if (!valid_user_id(classified->chat_id)) {
+                usage("invalid user id", "invalid_argument", "from");
+                return take_user_error_or_stop();
+            }
+            if (auto identity = read_user_identity(classified->chat_id, true)) {
+                return std::move(*identity);
+            }
+            return take_user_error_or_stop();
+        case LocalSelectorKind::Username:
+        case LocalSelectorKind::PublicChatLink:
+            if (auto identity = resolve_public_user(classified->value)) {
+                return std::move(*identity);
+            }
+            return take_user_error_or_stop();
+        case LocalSelectorKind::Title:
+            return resolve_user_substring(classified->value, domain);
+        case LocalSelectorKind::InvalidLink:
+            usage("invalid user profile link", "invalid_argument", "from");
+            return take_user_error_or_stop();
+        case LocalSelectorKind::BotStartLink:
+        case LocalSelectorKind::MessageLink:
+        case LocalSelectorKind::ChatInviteLink:
+        case LocalSelectorKind::DirectMessagesChatLink:
+        case LocalSelectorKind::UnsupportedLink:
+            usage("unsupported user profile link", "unsupported_link_type", "from");
+            return take_user_error_or_stop();
+        }
+        internal_error();
+        return take_user_error_or_stop();
+    }
+
     ResolverOutcome materialize_result(ResolveResult result) {
         if (!principal_) {
             internal_error();
@@ -341,6 +436,235 @@ class ResolverRun {
             return *error_;
         }
         return ResolverStop::Cancelled;
+    }
+
+    UserResolverOutcome take_user_error_or_stop() {
+        if (error_) {
+            return *error_;
+        }
+        return ResolverStop::Cancelled;
+    }
+
+    std::optional<UserIdentity> read_user_identity(std::int64_t user_id,
+                                                   bool direct_selector = false) {
+        auto response =
+            read([&](const auto& current) { return client_.get_user(current, user_id); });
+        if (!response) {
+            return std::nullopt;
+        }
+        if (const auto* error = response->value.get_if<core::TdError>()) {
+            if (direct_selector && (error->code == 400 || error->code == 404)) {
+                not_found();
+            } else {
+                td_error(*error);
+            }
+            return std::nullopt;
+        }
+        const auto* user = response->value.get_if<core::TdUserSummary>();
+        if (user == nullptr || user->id != user_id) {
+            internal_error();
+            return std::nullopt;
+        }
+        auto identity = user_identity(*user);
+        if (!identity) {
+            internal_error();
+            return std::nullopt;
+        }
+        return identity;
+    }
+
+    std::optional<UserIdentity> resolve_public_user(const std::string& username) {
+        auto response = read(
+            [&](const auto& current) { return client_.search_public_chat(current, username); });
+        if (!response) {
+            return std::nullopt;
+        }
+        if (const auto* error = response->value.get_if<core::TdError>()) {
+            if (error->code == 400 && (error->message == "USERNAME_NOT_OCCUPIED" ||
+                                       error->message == "USERNAME_INVALID")) {
+                not_found();
+            } else {
+                td_error(*error);
+            }
+            return std::nullopt;
+        }
+        const auto* chat = response->value.get_if<core::TdChat>();
+        if (chat == nullptr || !valid_int53(chat->id) || chat->kind != core::TdChatKind::Private ||
+            !valid_user_id(chat->related_id)) {
+            internal_error();
+            return std::nullopt;
+        }
+        auto identity = read_user_identity(chat->related_id);
+        if (!identity) {
+            return std::nullopt;
+        }
+        const auto folded_username = ascii_fold(username);
+        if (!std::ranges::any_of(identity->usernames, [&](const std::string& candidate) {
+                return ascii_fold(candidate) == folded_username;
+            })) {
+            internal_error();
+            return std::nullopt;
+        }
+        return identity;
+    }
+
+    std::optional<std::vector<std::int64_t>> contact_user_ids() {
+        auto response = read([&](const auto& current) { return client_.get_contacts(current); });
+        if (!response) {
+            return std::nullopt;
+        }
+        if (const auto* error = response->value.get_if<core::TdError>()) {
+            td_error(*error);
+            return std::nullopt;
+        }
+        const auto* contacts = response->value.get_if<core::TdUsers>();
+        if (contacts == nullptr || contacts->total_count < 0 ||
+            static_cast<std::uint64_t>(contacts->total_count) != contacts->user_ids.size()) {
+            internal_error();
+            return std::nullopt;
+        }
+        std::unordered_set<std::int64_t> seen;
+        for (const auto id : contacts->user_ids) {
+            if (!valid_user_id(id) || !seen.insert(id).second) {
+                internal_error();
+                return std::nullopt;
+            }
+        }
+        return contacts->user_ids;
+    }
+
+    std::optional<std::vector<std::int64_t>> basic_group_user_ids(std::int64_t group_id) {
+        auto response = read([&](const auto& current) {
+            return client_.get_basic_group_full_info(current, group_id);
+        });
+        if (!response) {
+            return std::nullopt;
+        }
+        if (const auto* error = response->value.get_if<core::TdError>()) {
+            td_error(*error);
+            return std::nullopt;
+        }
+        const auto* full = response->value.get_if<core::TdBasicGroupFullInfo>();
+        if (full == nullptr || !common::valid_utf8(full->description) ||
+            (full->creator_user_id != 0 && !valid_user_id(full->creator_user_id))) {
+            internal_error();
+            return std::nullopt;
+        }
+        std::vector<std::int64_t> ids;
+        ids.reserve(full->members.size());
+        std::unordered_set<std::int64_t> seen;
+        for (const auto& member : full->members) {
+            if (!valid_domain_member(member) || !seen.insert(member.member.id).second) {
+                internal_error();
+                return std::nullopt;
+            }
+            ids.push_back(member.member.id);
+        }
+        return ids;
+    }
+
+    std::optional<std::vector<std::int64_t>> supergroup_user_ids(std::int64_t group_id,
+                                                                 const std::string& query) {
+        std::vector<std::int64_t> ids;
+        std::unordered_set<std::int64_t> seen;
+        std::int32_t offset = 0;
+        for (;;) {
+            auto response = read([&](const auto& current) {
+                return client_.get_supergroup_members(current, group_id, query, offset,
+                                                      kUserMemberPageLimit);
+            });
+            if (!response) {
+                return std::nullopt;
+            }
+            if (const auto* error = response->value.get_if<core::TdError>()) {
+                td_error(*error);
+                return std::nullopt;
+            }
+            const auto* page = response->value.get_if<core::TdChatMembers>();
+            if (page == nullptr || page->total_count < 0 ||
+                page->members.size() > static_cast<std::size_t>(kUserMemberPageLimit)) {
+                internal_error();
+                return std::nullopt;
+            }
+            if (page->members.empty()) {
+                return ids;
+            }
+            for (const auto& member : page->members) {
+                if (!valid_domain_member(member)) {
+                    internal_error();
+                    return std::nullopt;
+                }
+                if (!seen.insert(member.member.id).second) {
+                    pagination_invalid();
+                    return std::nullopt;
+                }
+                ids.push_back(member.member.id);
+            }
+            if (page->members.size() >
+                static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max() - offset)) {
+                internal_error();
+                return std::nullopt;
+            }
+            offset += static_cast<std::int32_t>(page->members.size());
+        }
+    }
+
+    UserResolverOutcome resolve_user_substring(const std::string& substring,
+                                               const std::optional<core::TdChat>& domain) {
+        std::optional<std::vector<std::int64_t>> ids;
+        if (!domain) {
+            if (me_.is_bot) {
+                bot_unsupported();
+                return take_user_error_or_stop();
+            }
+            ids = contact_user_ids();
+        } else if (!valid_int53(domain->id) || !valid_user_id(domain->related_id) ||
+                   !common::valid_utf8(domain->title)) {
+            internal_error();
+            return take_user_error_or_stop();
+        } else if (domain->kind == core::TdChatKind::BasicGroup) {
+            ids = basic_group_user_ids(domain->related_id);
+        } else if (domain->kind == core::TdChatKind::Supergroup ||
+                   domain->kind == core::TdChatKind::Channel) {
+            ids = supergroup_user_ids(domain->related_id, substring);
+        } else {
+            usage("user member domain requires a group chat", "unsupported_chat_type", "from");
+            return take_user_error_or_stop();
+        }
+        if (!ids) {
+            return take_user_error_or_stop();
+        }
+        const auto folded_substring = ascii_fold(substring);
+        std::vector<UserIdentity> candidates;
+        std::size_t matches = 0;
+        std::optional<UserIdentity> single;
+        for (const auto id : *ids) {
+            auto identity = read_user_identity(id);
+            if (!identity) {
+                return take_user_error_or_stop();
+            }
+            if (ascii_fold(identity->display_name).find(folded_substring) == std::string::npos) {
+                continue;
+            }
+            ++matches;
+            if (matches == 1) {
+                single = *identity;
+            }
+            if (candidates.size() < kMaximumAmbiguousCandidates) {
+                candidates.push_back(std::move(*identity));
+            }
+        }
+        if (matches == 0) {
+            not_found();
+            return take_user_error_or_stop();
+        }
+        if (matches == 1 && single) {
+            return std::move(*single);
+        }
+        error_ = ResolverUserAmbiguousError{.selector = selector_,
+                                            .candidates = std::move(candidates),
+                                            .truncated = matches > kMaximumAmbiguousCandidates};
+        return take_user_error_or_stop();
     }
 
     std::optional<ResolveResult> resolve(const ClassifiedSelector& selector, ResolverScope scope) {
@@ -450,6 +774,10 @@ class ResolverRun {
         error_ = ResolverInternalError{.operation = caller_};
     }
 
+    void pagination_invalid() {
+        error_ = ResolverPaginationInvalidError{.operation = caller_};
+    }
+
     void not_found(ResolverScope scope = ResolverScope::ActiveDialogs) {
         error_ = ResolverNotFoundError{.selector = selector_,
                                        .scope = scope == ResolverScope::LocalMaterialized
@@ -457,14 +785,15 @@ class ResolverRun {
                                                     : std::nullopt};
     }
 
-    void usage(std::string_view /*message*/, std::string_view reason) {
+    void usage(std::string_view /*message*/, std::string_view reason,
+               std::string argument = "selector") {
         ResolverUsageReason typed_reason = ResolverUsageReason::InvalidArgument;
         if (reason == "unsupported_chat_type") {
             typed_reason = ResolverUsageReason::UnsupportedChatType;
         } else if (reason == "unsupported_link_type") {
             typed_reason = ResolverUsageReason::UnsupportedLinkType;
         }
-        error_ = ResolverUsageError{.argument = "selector", .reason = typed_reason};
+        error_ = ResolverUsageError{.argument = std::move(argument), .reason = typed_reason};
     }
 
     std::optional<core::TdChat> get_chat(std::int64_t chat_id, bool domain_scan = false) {
@@ -1045,6 +1374,11 @@ class ResolverConsumer::Impl {
         return run_.resolve_saved_messages_for_write();
     }
 
+    UserResolverOutcome resolve_user(std::string selector,
+                                     const std::optional<core::TdChat>& domain) {
+        return run_.resolve_user(std::move(selector), domain);
+    }
+
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const {
         return run_.cached_saved_messages_chat();
     }
@@ -1115,6 +1449,11 @@ ResolverOutcome ResolverConsumer::resolve_saved_messages() {
 
 ResolverOutcome ResolverConsumer::resolve_saved_messages_for_write() {
     return impl_->resolve_saved_messages_for_write();
+}
+
+UserResolverOutcome ResolverConsumer::resolve_user(std::string selector,
+                                                   const std::optional<core::TdChat>& domain) {
+    return impl_->resolve_user(std::move(selector), domain);
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {
@@ -1228,6 +1567,28 @@ struct ResolverErrorMapper {
             std::string(resolver_error_subject(error.operation)) + " returned an unexpected object",
             {{"operation", resolver_caller_name(error.operation)}, {"reason", "internal_error"}},
             kGeneric);
+    }
+
+    json operator()(const ResolverUserAmbiguousError& error) const {
+        json candidates = json::array();
+        for (const auto& candidate : error.candidates) {
+            candidates.push_back({{"id", candidate.id},
+                                  {"display_name", candidate.display_name},
+                                  {"usernames", candidate.usernames},
+                                  {"is_bot", candidate.is_bot}});
+        }
+        return terminal("AMBIGUOUS", "multiple users match the selector",
+                        {{"selector", error.selector},
+                         {"candidates", std::move(candidates)},
+                         {"truncated", error.truncated}},
+                        kUsage);
+    }
+
+    json operator()(const ResolverPaginationInvalidError& error) const {
+        return terminal("PAGINATION_INVALID", "resolver pagination did not advance",
+                        {{"operation", resolver_caller_name(error.operation)},
+                         {"reason", "non_advancing_upstream"}},
+                        kGeneric);
     }
 
     M2Operation owning_operation;
