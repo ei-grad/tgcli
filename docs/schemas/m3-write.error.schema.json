@@ -544,7 +544,7 @@
                         "operation": { "const": "saved_attach" },
                         "chat_id": { "$ref": "#/$defs/int53" },
                         "message_id": { "$ref": "#/$defs/int53" },
-                        "reason": { "enum": ["wrong_content_type", "wrong_topic"] }
+                        "reason": { "enum": ["not_replyable", "wrong_content_type", "wrong_topic"] }
                       }
                     },
                     {

@@ -747,6 +747,10 @@ TEST_CASE("saved attachment errors are strict public M4 branches",
                                                {"chat_id", 42},
                                                {"message_id", -77},
                                                {"reason", "wrong_topic"}}),
+        terminal_error("PRECONDITION_FAILED", {{"operation", "saved_attach"},
+                                               {"chat_id", 42},
+                                               {"message_id", -77},
+                                               {"reason", "not_replyable"}}),
         terminal_error("TIMEOUT", {{"operation", "saved_attach"},
                                    {"phase", "confirmation"},
                                    {"state", "ready"},
@@ -774,9 +778,9 @@ TEST_CASE("saved attachment errors are strict public M4 branches",
     invalid["error"]["details"]["reason"] = "unreadable";
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
     invalid = errors[4];
-    invalid["error"]["details"]["reason"] = "not_replyable";
+    invalid["error"]["details"]["reason"] = "not_forwardable";
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
-    invalid = errors[5];
+    invalid = errors[6];
     invalid["error"]["details"].erase("temporary_message_id");
     CHECK_THAT(invalid, !tgcli::test::matches_json_schema("m3-write.error.schema.json"));
 }

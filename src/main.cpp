@@ -195,21 +195,35 @@ std::optional<tgcli::proto::WriteAuthority> write_authority(bool allow_write) {
 }
 
 tgcli::proto::RequestContext make_request_context(bool json_output, bool yes, bool dry_run,
-                                                  tgcli::proto::WriteAuthority authority) {
+                                                  tgcli::proto::WriteAuthority authority,
+                                                  std::string frozen_cwd) {
     tgcli::proto::RequestContext context;
     context.tty = ::isatty(STDIN_FILENO) != 0;
     context.json = json_output;
     context.yes = yes;
     context.dry_run = dry_run;
     context.write_authority = authority;
-    if (std::array<char, 4096> cwd{}; ::getcwd(cwd.data(), cwd.size()) != nullptr) {
-        context.cwd = cwd.data();
-    }
+    context.cwd = std::move(frozen_cwd);
     if (const char* media_dir = std::getenv("TGCLI_MEDIA_DIR");
         media_dir != nullptr && *media_dir != '\0') {
         context.media_dir = media_dir;
     }
     return context;
+}
+
+std::optional<std::string> capture_saved_attach_cwd() {
+    constexpr std::size_t maximum_cwd_bytes = 4096;
+    std::vector<char> buffer(256);
+    for (;;) {
+        errno = 0;
+        if (::getcwd(buffer.data(), buffer.size()) != nullptr) {
+            return std::string(buffer.data());
+        }
+        if (errno != ERANGE || buffer.size() == maximum_cwd_bytes + 1) {
+            return std::nullopt;
+        }
+        buffer.resize(std::min(buffer.size() * 2, maximum_cwd_bytes + 1));
+    }
 }
 
 struct ParseErrorDescription {
@@ -603,15 +617,22 @@ bool is_saved_attach(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "attach"};
 }
 
-std::optional<int> validate_saved_attach_arguments(const SavedCliArguments& saved) {
+std::optional<int> validate_saved_attach_arguments(const SavedCliArguments& saved,
+                                                   std::string& frozen_cwd) {
     constexpr std::int64_t maximum_int53 = 9007199254740991LL;
     if (!saved.attach_message_id_valid || saved.attach_message_id == 0 ||
         saved.attach_message_id < -maximum_int53 || saved.attach_message_id > maximum_int53) {
         return report_usage("saved attach message id must be a nonzero int53 value", "message-id");
     }
-    std::array<char, 4096> cwd{};
-    if (::getcwd(cwd.data(), cwd.size()) == nullptr ||
-        !tgcli::daemon::canonical_source_display_path(saved.attach_path, cwd.data())) {
+    frozen_cwd.clear();
+    if (!saved.attach_path.starts_with('/')) {
+        auto captured = capture_saved_attach_cwd();
+        if (!captured) {
+            return report_usage("saved attach path is invalid", "PATH");
+        }
+        frozen_cwd = std::move(*captured);
+    }
+    if (!tgcli::daemon::canonical_source_display_path(saved.attach_path, frozen_cwd)) {
         return report_usage("saved attach path is invalid", "PATH");
     }
     if (!tgcli::daemon::valid_saved_attach_caption(saved.attach_caption)) {
@@ -622,7 +643,8 @@ std::optional<int> validate_saved_attach_arguments(const SavedCliArguments& save
 }
 
 std::optional<int> validate_saved_arguments(const std::vector<std::string>& command,
-                                            const SavedCliArguments& saved) {
+                                            const SavedCliArguments& saved,
+                                            std::string& frozen_cwd) {
     if (saved.cursor_option->count() != 0 && is_saved_tags(command)) {
         return report_usage("saved tags does not accept --cursor", "--cursor");
     }
@@ -636,7 +658,7 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
         if (!is_saved_attach(command)) {
             return std::nullopt;
         }
-        return validate_saved_attach_arguments(saved);
+        return validate_saved_attach_arguments(saved, frozen_cwd);
     }
     if (saved.cursor_option->count() != 0 && saved.limit_option->count() != 0) {
         return report_usage("-n is not accepted with a continuation cursor", "-n");
@@ -674,8 +696,8 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
                            const ChatsCliArguments& chats, const MessageCliArguments& messages,
                            const SendCliArguments& send, const ChatCliArguments& chat,
                            const ReadCliArguments& read, const FetchCliArguments& fetch,
-                           std::string_view resolve_selector) {
-    if (const auto saved_exit = validate_saved_arguments(command, saved); saved_exit) {
+                           std::string_view resolve_selector, std::string& frozen_cwd) {
+    if (const auto saved_exit = validate_saved_arguments(command, saved, frozen_cwd); saved_exit) {
         return saved_exit;
     }
     if (const auto chats_exit = validate_chats_arguments(command, chats, saved); chats_exit) {
@@ -1525,8 +1547,10 @@ int run(int argc, char** argv) {
     if (command.empty()) {
         return report_missing_command();
     }
-    if (const auto argument_exit = validate_command_arguments(
-            command, saved, chats, messages, send, chat, *selected_read, fetch, resolve_selector);
+    std::string frozen_cwd;
+    if (const auto argument_exit =
+            validate_command_arguments(command, saved, chats, messages, send, chat, *selected_read,
+                                       fetch, resolve_selector, frozen_cwd);
         argument_exit) {
         return *argument_exit;
     }
@@ -1574,7 +1598,8 @@ int run(int argc, char** argv) {
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
                              send, chat, *selected_read, fetch);
-    auto request_context = make_request_context(json_output, yes, dry_run, *folded_authority);
+    auto request_context =
+        make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd));
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);
     }

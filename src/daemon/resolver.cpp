@@ -275,6 +275,19 @@ class ResolverRun {
         return materialize_result(std::move(*result));
     }
 
+    ResolverOutcome resolve_saved_messages_for_write() {
+        error_.reset();
+        if (!principal_) {
+            internal_error();
+            return take_resolve_error_or_stop();
+        }
+        auto result = resolve_saved_messages_link(true);
+        if (!result) {
+            return take_resolve_error_or_stop();
+        }
+        return materialize_result(std::move(*result));
+    }
+
     ResolverOutcome materialize_result(ResolveResult result) {
         if (!principal_) {
             internal_error();
@@ -930,7 +943,8 @@ class ResolverRun {
                              ResolvedLinkType::DirectMessagesChat, std::nullopt, std::move(chat));
     }
 
-    std::optional<ResolveResult> resolve_saved_messages_link() {
+    std::optional<ResolveResult>
+    resolve_saved_messages_link(bool require_principal_binding = false) {
         if (me_.is_bot) {
             bot_unsupported();
             return std::nullopt;
@@ -946,12 +960,20 @@ class ResolverRun {
             return std::nullopt;
         }
         const auto* chat = response->value.get_if<core::TdChat>();
-        if (chat == nullptr || !valid_int53(chat->id)) {
+        if (chat == nullptr || !valid_int53(chat->id) ||
+            (require_principal_binding &&
+             (chat->kind != core::TdChatKind::Private || chat->related_id != me_.id))) {
             internal_error();
             return std::nullopt;
         }
         auto materialized = identity(*chat);
         if (!materialized) {
+            return std::nullopt;
+        }
+        if (require_principal_binding &&
+            (materialized->type != "private" || materialized->is_bot ||
+             last_private_user_id_ != std::optional<std::int64_t>{me_.id})) {
+            internal_error();
             return std::nullopt;
         }
         saved_messages_chat_ = *chat;
@@ -1016,6 +1038,10 @@ class ResolverConsumer::Impl {
 
     ResolverOutcome resolve_saved_messages() {
         return run_.resolve_saved_messages();
+    }
+
+    ResolverOutcome resolve_saved_messages_for_write() {
+        return run_.resolve_saved_messages_for_write();
     }
 
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const {
@@ -1084,6 +1110,10 @@ ResolverOutcome ResolverConsumer::resolve_exact_chat(std::string selector, std::
 
 ResolverOutcome ResolverConsumer::resolve_saved_messages() {
     return impl_->resolve_saved_messages();
+}
+
+ResolverOutcome ResolverConsumer::resolve_saved_messages_for_write() {
+    return impl_->resolve_saved_messages_for_write();
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {

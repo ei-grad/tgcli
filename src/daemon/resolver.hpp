@@ -142,6 +142,7 @@ class ResolverConsumer {
     ResolverOutcome resolve_chat(std::string selector, ResolverScope scope);
     ResolverOutcome resolve_exact_chat(std::string selector, std::string argument = "chat");
     ResolverOutcome resolve_saved_messages();
+    ResolverOutcome resolve_saved_messages_for_write();
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const;
     ReadyReadResult read_target(const ReadyReadStart& start);
 

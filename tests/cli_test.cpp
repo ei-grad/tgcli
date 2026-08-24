@@ -38,6 +38,7 @@
 #include <future>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <sstream>
 #include <string>
@@ -153,6 +154,11 @@ struct RunOutcome {
     std::string err;
 };
 
+struct BinaryChildCwd {
+    int descriptor = -1;
+    std::string remove_after_chdir;
+};
+
 RunOutcome run_captured(const std::vector<std::string>& command, const cli::RunOptions& options,
                         const IsolatedEnv& env) {
     proto::Request request(options.account);
@@ -187,7 +193,8 @@ RunOutcome run_request_captured(const proto::Request& request, const cli::RunOpt
 
 RunOutcome run_binary_captured(const std::vector<std::string>& arguments, const IsolatedEnv& env,
                                const std::string& stem,
-                               std::optional<std::string> stdin_data = std::nullopt) {
+                               std::optional<std::string> stdin_data = std::nullopt,
+                               std::optional<BinaryChildCwd> child_cwd = std::nullopt) {
     const std::string output_path = env.root() + "/" + stem + ".out";
     const std::string error_path = env.root() + "/" + stem + ".err";
     const std::string input_path = env.root() + "/" + stem + ".in";
@@ -218,6 +225,13 @@ RunOutcome run_binary_captured(const std::vector<std::string>& arguments, const 
             ::dup2(input, STDIN_FILENO);
             ::close(input);
         }
+        if (child_cwd) {
+            if (child_cwd->descriptor < 0 || ::fchdir(child_cwd->descriptor) != 0 ||
+                (!child_cwd->remove_after_chdir.empty() &&
+                 ::rmdir(child_cwd->remove_after_chdir.c_str()) != 0)) {
+                ::_exit(126);
+            }
+        }
         std::vector<std::string> argument_storage{"tgcli"};
         argument_storage.insert(argument_storage.end(), arguments.begin(), arguments.end());
         std::vector<char*> argv;
@@ -241,6 +255,64 @@ RunOutcome run_binary_captured(const std::vector<std::string>& arguments, const 
     };
     return {WEXITSTATUS(status), read_file(output_path), read_file(error_path)};
 }
+
+class DeepWorkingDirectory final {
+  public:
+    DeepWorkingDirectory(const IsolatedEnv& env, std::size_t target_length)
+        : root_(env.root() + "/deep-cwd-" + std::to_string(target_length)), path_(root_) {
+        REQUIRE(path_.size() < target_length);
+        REQUIRE(std::filesystem::create_directory(root_));
+        const int root_descriptor = ::open(root_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        REQUIRE(root_descriptor >= 0);
+        descriptors_.push_back(root_descriptor);
+        while (path_.size() < target_length) {
+            const auto remaining = target_length - path_.size();
+            REQUIRE(remaining > 1);
+            const auto component_length = std::min<std::size_t>(200, remaining - 1);
+            std::string component(component_length, 'd');
+            REQUIRE(::mkdirat(descriptors_.back(), component.c_str(), 0700) == 0);
+            const int descriptor = ::openat(descriptors_.back(), component.c_str(),
+                                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            REQUIRE(descriptor >= 0);
+            components_.push_back(std::move(component));
+            descriptors_.push_back(descriptor);
+            path_.push_back('/');
+            path_.append(components_.back());
+        }
+        REQUIRE(path_.size() == target_length);
+    }
+
+    ~DeepWorkingDirectory() {
+        for (std::size_t index = components_.size(); index > 0; --index) {
+            ::close(descriptors_[index]);
+            static_cast<void>(
+                ::unlinkat(descriptors_[index - 1], components_[index - 1].c_str(), AT_REMOVEDIR));
+        }
+        if (!descriptors_.empty()) {
+            ::close(descriptors_.front());
+        }
+        static_cast<void>(::rmdir(root_.c_str()));
+    }
+
+    DeepWorkingDirectory(const DeepWorkingDirectory&) = delete;
+    DeepWorkingDirectory& operator=(const DeepWorkingDirectory&) = delete;
+    DeepWorkingDirectory(DeepWorkingDirectory&&) = delete;
+    DeepWorkingDirectory& operator=(DeepWorkingDirectory&&) = delete;
+
+    [[nodiscard]] int descriptor() const {
+        return descriptors_.back();
+    }
+
+    [[nodiscard]] const std::string& path() const {
+        return path_;
+    }
+
+  private:
+    std::string root_;
+    std::string path_;
+    std::vector<std::string> components_;
+    std::vector<int> descriptors_;
+};
 
 class InjectedPrompt final : public cli::ChallengePrompt {
   public:
@@ -777,7 +849,9 @@ class ChildProtocolDaemon {
         if (options.message_write_fixture) {
             const auto normalized = [](const proto::Request& request,
                                        daemon::RequestSession& session) {
-                session.result({{"command", request.command}, {"args", request.args}});
+                session.result({{"command", request.command},
+                                {"args", request.args},
+                                {"cwd", request.context.cwd}});
             };
             dispatcher.register_command(
                 "msg edit", {daemon::Tier::Write, normalized, false, daemon::M3Operation::MsgEdit});
@@ -2745,6 +2819,70 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
         CHECK(normalized["command"] == test_case.command);
         CHECK(normalized["args"] == test_case.args);
     }
+    CHECK(fixture.running());
+}
+
+TEST_CASE("saved attach captures one cwd only when a relative path requires it",
+          "[cli][m4][saved-attach][cwd][process]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.message_write_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+
+    SECTION("absolute path ignores an unavailable removed cwd") {
+        const auto removed = env.root() + "/removed-cwd";
+        REQUIRE(std::filesystem::create_directory(removed));
+        const int descriptor = ::open(removed.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        REQUIRE(descriptor >= 0);
+        const auto outcome = run_binary_captured(
+            {"--json", "saved", "attach", "7", "/tmp/input.bin"}, env,
+            "saved-attach-absolute-removed-cwd", std::nullopt,
+            BinaryChildCwd{.descriptor = descriptor, .remove_after_chdir = removed});
+        ::close(descriptor);
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        const auto normalized = json::parse(outcome.out);
+        REQUIRE(normalized["cwd"].is_string());
+        CHECK(normalized["cwd"].get_ref<const std::string&>().empty());
+    }
+
+    SECTION("exact 4096-byte cwd is frozen once for a relative path") {
+        const DeepWorkingDirectory cwd(env, 4096);
+        const auto outcome = run_binary_captured(
+            {"--json", "saved", "attach", "7", "../input.bin"}, env,
+            "saved-attach-relative-cwd-4096", std::nullopt,
+            BinaryChildCwd{.descriptor = cwd.descriptor(), .remove_after_chdir = {}});
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        CHECK(json::parse(outcome.out)["cwd"] == cwd.path());
+    }
+
+    SECTION("one-over cwd is rejected for a relative path without partial stdout") {
+        const DeepWorkingDirectory cwd(env, 4097);
+        const auto outcome = run_binary_captured(
+            {"--json", "saved", "attach", "7", "../input.bin"}, env,
+            "saved-attach-relative-cwd-4097", std::nullopt,
+            BinaryChildCwd{.descriptor = cwd.descriptor(), .remove_after_chdir = {}});
+        REQUIRE(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err)["error"]["details"] ==
+              json{{"argument", "PATH"}, {"reason", "invalid_argument"}});
+    }
+
+    SECTION("absolute path ignores an overlong cwd") {
+        const DeepWorkingDirectory cwd(env, 4097);
+        const auto outcome = run_binary_captured(
+            {"--json", "saved", "attach", "7", "/tmp/input.bin"}, env,
+            "saved-attach-absolute-cwd-4097", std::nullopt,
+            BinaryChildCwd{.descriptor = cwd.descriptor(), .remove_after_chdir = {}});
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        const auto normalized = json::parse(outcome.out);
+        REQUIRE(normalized["cwd"].is_string());
+        CHECK(normalized["cwd"].get_ref<const std::string&>().empty());
+    }
+
     CHECK(fixture.running());
 }
 

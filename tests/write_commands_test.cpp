@@ -807,12 +807,16 @@ void bind_principal(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetMe, self());
 }
 
-void plan_saved_attachment(FakeWrites& fake, core::TdMessageProperties properties = {},
-                           std::optional<core::TdTopic> topic = core::TdTopic{
-                               .kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1}) {
+void bind_saved_identity(FakeWrites& fake) {
     bind_principal(fake);
     fake.respond(core::TdFunctionKind::CreatePrivateChat, private_chat(42));
     fake.respond(core::TdFunctionKind::GetUser, self());
+}
+
+void plan_saved_attachment(FakeWrites& fake, core::TdMessageProperties properties = {},
+                           std::optional<core::TdTopic> topic = core::TdTopic{
+                               .kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1}) {
+    bind_saved_identity(fake);
     fake.respond(core::TdFunctionKind::GetMessage, saved_planning_message(-77, topic));
     properties.can_be_replied = true;
     fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
@@ -1011,7 +1015,7 @@ TEST_CASE("saved attach preserves a null root Saved topic",
     CHECK(function_field<std::string>(descriptor, "topic_kind") == "none");
 }
 
-TEST_CASE("saved attach replays and conflicts after pass one without Saved materialization",
+TEST_CASE("saved attach replays and conflicts after principal-bound Saved materialization",
           "[write-command][saved-attach][idempotency][replay][fake-boundary]") {
     FakeWrites fake;
     fake.tree().write_source("replay attachment");
@@ -1023,7 +1027,7 @@ TEST_CASE("saved attach replays and conflicts after pass one without Saved mater
     REQUIRE(first.result);
 
     auto replay_pending = fake.dispatch(request);
-    bind_principal(fake);
+    bind_saved_identity(fake);
     const auto replay = replay_pending.get();
     REQUIRE(replay.result);
     CHECK(replay.result == first.result);
@@ -1031,11 +1035,11 @@ TEST_CASE("saved attach replays and conflicts after pass one without Saved mater
     auto conflict_request = request;
     conflict_request.args["caption"] = "different caption";
     auto conflict_pending = fake.dispatch(conflict_request);
-    bind_principal(fake);
+    bind_saved_identity(fake);
     const auto conflict = conflict_pending.get();
     REQUIRE(conflict.error);
     CHECK((*conflict.error)["error"]["code"] == "IDEMPOTENCY_CONFLICT");
-    CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 1);
+    CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 3);
     CHECK(fake.count(core::TdFunctionKind::SendMessage) == 1);
 }
 
@@ -1060,7 +1064,7 @@ TEST_CASE("saved attach rejects a malformed authoritative document result after 
     CHECK((*store.snapshot.entries.front().terminal)["code"] == "INTERNAL");
 }
 
-TEST_CASE("saved attach rejects bots and missing input before Saved materialization",
+TEST_CASE("saved attach rejects bots before and missing input after Saved identity binding",
           "[write-command][saved-attach][preflight][fake-boundary]") {
     SECTION("bot") {
         FakeWrites fake;
@@ -1077,7 +1081,7 @@ TEST_CASE("saved attach rejects bots and missing input before Saved materializat
     SECTION("missing source") {
         FakeWrites fake;
         auto pending = fake.dispatch(saved_attach_request(fake.tree()));
-        bind_principal(fake);
+        bind_saved_identity(fake);
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
         CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
@@ -1086,8 +1090,223 @@ TEST_CASE("saved attach rejects bots and missing input before Saved materializat
         CHECK((*outcome.error)["error"]["details"] == json{{"operation", "saved_attach"},
                                                            {"path", fake.tree().source_path()},
                                                            {"reason", "missing"}});
-        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 1);
         CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+}
+
+TEST_CASE("saved attach binds its private Saved chat to the authenticated principal",
+          "[write-command][saved-attach][principal-binding][fake-boundary]") {
+    const auto exercise = [](const auto& respond_invalid_identity) {
+        FakeWrites fake;
+        fake.tree().write_source("principal-bound bytes");
+        auto pass_one_reads = std::make_shared<std::atomic<std::size_t>>(0);
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->read = [pass_one_reads](daemon::FileSpoolIo operation, int descriptor, void* bytes,
+                                       std::size_t size) {
+            if (operation == daemon::FileSpoolIo::Pass1Read) {
+                ++*pass_one_reads;
+            }
+            return ::read(descriptor, bytes, size);
+        };
+        fake.file_spool_hooks(hooks);
+
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_principal(fake);
+        respond_invalid_identity(fake);
+        const auto outcome = pending.get();
+
+        REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK(*pass_one_reads == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetMessage) == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetMessageProperties) == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        CHECK(read_bytes(fake.tree().source_path()) == "principal-bound bytes");
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+        check_closed_without_pending(fake);
+    };
+
+    SECTION("malformed createPrivateChat response") {
+        exercise([](FakeWrites& fake) {
+            fake.respond(core::TdFunctionKind::CreatePrivateChat, core::TdOk{});
+        });
+    }
+    SECTION("non-private createPrivateChat response") {
+        exercise([](FakeWrites& fake) {
+            fake.respond(core::TdFunctionKind::CreatePrivateChat, basic_chat());
+            static_cast<void>(
+                fake.try_respond(core::TdFunctionKind::GetMessage, saved_planning_message(-77)));
+        });
+    }
+    SECTION("private chat for another user") {
+        exercise([](FakeWrites& fake) {
+            fake.respond(core::TdFunctionKind::CreatePrivateChat, private_chat(77));
+            if (fake.try_respond(core::TdFunctionKind::GetUser,
+                                 peer(core::TdUserPresence::Online))) {
+                static_cast<void>(fake.try_respond(core::TdFunctionKind::GetMessage,
+                                                   saved_planning_message(-77)));
+            }
+        });
+    }
+    SECTION("private user response mismatches the principal") {
+        exercise([](FakeWrites& fake) {
+            fake.respond(core::TdFunctionKind::CreatePrivateChat, private_chat(42));
+            fake.respond(core::TdFunctionKind::GetUser,
+                         peer(core::TdUserPresence::Online, false, 77));
+        });
+    }
+    SECTION("private user classification is bot") {
+        exercise([](FakeWrites& fake) {
+            fake.respond(core::TdFunctionKind::CreatePrivateChat, private_chat(42));
+            fake.respond(core::TdFunctionKind::GetUser,
+                         peer(core::TdUserPresence::Online, true, 42));
+            static_cast<void>(
+                fake.try_respond(core::TdFunctionKind::GetMessage, planning_message(-77)));
+        });
+    }
+}
+
+TEST_CASE("saved attach maps pass-one spool failures to their exact public terminal",
+          "[write-command][saved-attach][spool][pass-one][fake-boundary]") {
+    const auto exercise = [](std::shared_ptr<daemon::testing::FileSpoolHooks> hooks,
+                             std::string_view reason) {
+        FakeWrites fake;
+        fake.tree().write_source("pass-one bytes");
+        fake.file_spool_hooks(std::move(hooks));
+
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_saved_identity(fake);
+        const auto outcome = pending.get();
+
+        REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        CHECK((*outcome.error)["error"] == json{{"code", "SPOOL_UNAVAILABLE"},
+                                                {"message", "attachment spool is unavailable"},
+                                                {"details",
+                                                 {{"operation", "saved_attach"},
+                                                  {"path", fake.tree().source_path()},
+                                                  {"reason", reason}}}});
+        CHECK(fake.count(core::TdFunctionKind::GetMessage) == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetMessageProperties) == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        CHECK(read_bytes(fake.tree().source_path()) == "pass-one bytes");
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+        check_closed_without_pending(fake);
+    };
+
+    SECTION("open failure") {
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->should_fail = [](daemon::FileSpoolStage stage) {
+            return stage == daemon::FileSpoolStage::BeforeSourceEntryStat;
+        };
+        exercise(std::move(hooks), "open_failed");
+    }
+    SECTION("read EIO") {
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->read = [](daemon::FileSpoolIo operation, int descriptor, void* bytes,
+                         std::size_t size) -> ssize_t {
+            if (operation == daemon::FileSpoolIo::Pass1Read) {
+                errno = EIO;
+                return -1;
+            }
+            return ::read(descriptor, bytes, size);
+        };
+        exercise(std::move(hooks), "read_failed");
+    }
+    SECTION("timestamp representation failure") {
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->mutate_metadata = [](daemon::FileSpoolMetadata point, struct stat& status) {
+            if (point == daemon::FileSpoolMetadata::SourceBefore) {
+#if defined(__APPLE__)
+                status.st_mtimespec.tv_sec = std::numeric_limits<time_t>::max();
+                status.st_mtimespec.tv_nsec = 999'999'999;
+#else
+                status.st_mtim.tv_sec = std::numeric_limits<time_t>::max();
+                status.st_mtim.tv_nsec = 999'999'999;
+#endif
+            }
+        };
+        exercise(std::move(hooks), "schema_error");
+    }
+}
+
+TEST_CASE("saved attach keeps replyability content topic and missing-original failures distinct",
+          "[write-command][saved-attach][precondition][fake-boundary]") {
+    const auto check_closed = [](FakeWrites& fake, const Outcome& outcome) {
+        REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+        check_closed_without_pending(fake);
+    };
+
+    SECTION("text is not replyable") {
+        FakeWrites fake;
+        fake.tree().write_source("not replyable");
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_saved_identity(fake);
+        fake.respond(core::TdFunctionKind::GetMessage, saved_planning_message(-77));
+        fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
+        const auto outcome = pending.get();
+        check_closed(fake, outcome);
+        CHECK((*outcome.error)["error"]["details"] == json{{"operation", "saved_attach"},
+                                                           {"chat_id", 42},
+                                                           {"message_id", -77},
+                                                           {"reason", "not_replyable"}});
+    }
+    SECTION("wrong content type") {
+        FakeWrites fake;
+        fake.tree().write_source("wrong content");
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_saved_identity(fake);
+        auto message = saved_planning_message(-77);
+        message.content_kind = core::TdMessageContentKind::Document;
+        fake.respond(core::TdFunctionKind::GetMessage, std::move(message));
+        core::TdMessageProperties properties;
+        properties.can_be_replied = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        check_closed(fake, outcome);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "wrong_content_type");
+    }
+    SECTION("wrong topic") {
+        FakeWrites fake;
+        fake.tree().write_source("wrong topic");
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_saved_identity(fake);
+        fake.respond(core::TdFunctionKind::GetMessage,
+                     saved_planning_message(-77, core::TdTopic{.kind = core::TdTopicKind::Forum,
+                                                               .id = 19,
+                                                               .tdlib_type_id = 1}));
+        core::TdMessageProperties properties;
+        properties.can_be_replied = true;
+        fake.respond(core::TdFunctionKind::GetMessageProperties, properties);
+        const auto outcome = pending.get();
+        check_closed(fake, outcome);
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "wrong_topic");
+    }
+    SECTION("missing original") {
+        FakeWrites fake;
+        fake.tree().write_source("missing original");
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_saved_identity(fake);
+        fake.respond(core::TdFunctionKind::GetMessage,
+                     core::TdError{.code = 404, .message = "message not found"});
+        const auto outcome = pending.get();
+        check_closed(fake, outcome);
+        CHECK((*outcome.error)["error"] ==
+              json{{"code", "NOT_FOUND"},
+                   {"message", "message was not found"},
+                   {"details", {{"chat_id", 42}, {"message_id", -77}}}});
+        CHECK(fake.count(core::TdFunctionKind::GetMessageProperties) == 0);
     }
 }
 

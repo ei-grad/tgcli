@@ -2107,6 +2107,15 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
     if (!authority) {
         return;
     }
+    auto resolved = resolver.resolve_saved_messages_for_write();
+    if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
+        return;
+    }
+    if (std::holds_alternative<ResolverStop>(resolved)) {
+        return;
+    }
+    auto target = std::get<ResolvedChatTarget>(std::move(resolved));
     if (!request.context.dry_run &&
         session.begin_audited_terminal() != AuditedTerminalStatus::Designated) {
         return;
@@ -2130,7 +2139,7 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
         std::make_shared<SavedAttachState>(SavedAttachState{.arguments = request.args,
                                                             .input = std::nullopt,
                                                             .principal = principal,
-                                                            .target = std::nullopt,
+                                                            .target = std::move(target),
                                                             .invocation_id = invocation,
                                                             .spool_local_path = {},
                                                             .dispatch_authorization = nullptr,
@@ -2171,6 +2180,12 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
             case FileSpoolErrorKind::InvalidInput:
                 return usage("saved attach path is invalid", "PATH");
             case FileSpoolErrorKind::DurabilityFailure:
+                return terminal("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
+                                {{"operation", "saved_attach"},
+                                 {"path", input->display_path},
+                                 {"reason", spool_reason_name(error->durability_reason.value_or(
+                                                DurabilityReason::Contradiction))}},
+                                kGeneric);
             case FileSpoolErrorKind::Contradiction:
                 return internal(operation);
             }
@@ -2201,17 +2216,9 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
     };
     hooks.plan = [state, &resolver, &session, &request,
                   this](const WriteAdmission& admission) -> WritePlanningOutcome {
-        if (!state->input || !admission.pass1_source) {
+        if (!state->input || !state->target || !admission.pass1_source) {
             return internal(operation);
         }
-        auto resolved = resolver.resolve_saved_messages();
-        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
-            return resolver_terminal_for_write(*error, operation, request);
-        }
-        if (std::holds_alternative<ResolverStop>(resolved)) {
-            return json(nullptr);
-        }
-        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
         auto facts =
             read_message_planning_facts(resolver, client_.get(), session, operation, request,
                                         state->target->chat.id, state->input->message_id);
@@ -2219,8 +2226,7 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
             return std::move(*failure);
         }
         auto& planning = std::get<MessagePlanningFacts>(facts);
-        if (!planning.properties.can_be_replied ||
-            planning.message.content_kind != core::TdMessageContentKind::Text) {
+        if (planning.message.content_kind != core::TdMessageContentKind::Text) {
             return precondition(operation, state->target->chat.id, state->input->message_id,
                                 "wrong_content_type");
         }
@@ -2231,6 +2237,10 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
                 return precondition(operation, state->target->chat.id, state->input->message_id,
                                     "wrong_topic");
             }
+        }
+        if (!planning.properties.can_be_replied) {
+            return precondition(operation, state->target->chat.id, state->input->message_id,
+                                "not_replyable");
         }
         std::string contract_error;
         auto plan = write_contract::make_plan(
