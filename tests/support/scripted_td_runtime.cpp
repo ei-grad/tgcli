@@ -344,9 +344,8 @@ core::TdValue ScriptedTdRuntime::make_get_user(std::int64_t user_id) {
 
 core::TdValue ScriptedTdRuntime::make_get_basic_group_full_info(std::int64_t basic_group_id) {
     before_make(core::TdFunctionKind::GetBasicGroupFullInfo);
-    return core::TdValue::scripted_function(
-        core::TdFunctionData{core::TdFunctionKind::GetBasicGroupFullInfo,
-                             {{"basic_group_id", basic_group_id}}});
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetBasicGroupFullInfo, {{"basic_group_id", basic_group_id}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_get_supergroup(std::int64_t supergroup_id) {
@@ -362,8 +361,7 @@ core::TdValue ScriptedTdRuntime::make_get_supergroup_full_info(std::int64_t supe
 }
 
 core::TdValue ScriptedTdRuntime::make_get_supergroup_members(std::int64_t supergroup_id,
-                                                             std::string query,
-                                                             std::int32_t offset,
+                                                             std::string query, std::int32_t offset,
                                                              std::int32_t limit) {
     before_make(core::TdFunctionKind::GetSupergroupMembers);
     return core::TdValue::scripted_function(

@@ -51,7 +51,12 @@ struct StreamNormalizationStatus {
     std::uint64_t generation = 0;
     std::uint64_t receive_sequence = 0;
     StreamNormalizationPhase phase = StreamNormalizationPhase::Empty;
+    bool ordering_barrier_open = false;
     StreamFailure failure;
+
+    [[nodiscard]] bool ready_for_admission() const noexcept {
+        return phase == StreamNormalizationPhase::Ready && !ordering_barrier_open;
+    }
 };
 
 class StreamItemView {

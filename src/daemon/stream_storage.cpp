@@ -22,6 +22,17 @@ constexpr std::uint32_t kNoHandle = std::numeric_limits<std::uint32_t>::max();
 constexpr std::uint32_t kEntityHandleBit = 0x80000000U;
 constexpr std::size_t kBootstrapPhysicalBytes = kStreamMetadataBootstrapBytes * 2;
 
+static_assert(std::atomic<bool>::is_always_lock_free);
+static_assert(std::atomic<std::int32_t>::is_always_lock_free);
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+static_assert(std::atomic<StreamNormalizationPhase>::is_always_lock_free);
+static_assert(std::atomic<StreamFailureKind>::is_always_lock_free);
+static_assert(std::atomic<core::TdSupportedUpdateKind>::is_always_lock_free);
+static_assert(std::atomic<core::TdMalformedUpdateReason>::is_always_lock_free);
+static_assert(std::atomic<StreamMetadataResource>::is_always_lock_free);
+static_assert(std::atomic<StreamMetadataPhase>::is_always_lock_free);
+
 bool valid_int53(std::int64_t value) noexcept {
     return value != 0 && value >= -kMaximumInt53 && value <= kMaximumInt53;
 }
@@ -584,6 +595,7 @@ class FixedStreamNormalizer::Impl {
         order_used = 0;
         order_head = kNoHandle;
         order_tail = kNoHandle;
+        ordering_barrier.store(false, std::memory_order_relaxed);
         failure_kind.store(StreamFailureKind::None, std::memory_order_relaxed);
         failure_update_kind.store(core::TdSupportedUpdateKind::CurrentStateEntry,
                                   std::memory_order_relaxed);
@@ -620,11 +632,13 @@ class FixedStreamNormalizer::Impl {
         for (;;) {
             const auto observed_generation = generation.load(std::memory_order_acquire);
             const auto observed_phase = phase.load(std::memory_order_acquire);
+            const auto observed_barrier = ordering_barrier.load(std::memory_order_acquire);
             StreamNormalizationStatus result{
                 .client_id = client_id.load(std::memory_order_relaxed),
                 .generation = observed_generation,
                 .receive_sequence = last_sequence.load(std::memory_order_relaxed),
                 .phase = observed_phase,
+                .ordering_barrier_open = observed_barrier,
                 .failure = {
                     .kind = failure_kind.load(std::memory_order_relaxed),
                     .update_kind = failure_update_kind.load(std::memory_order_relaxed),
@@ -639,7 +653,8 @@ class FixedStreamNormalizer::Impl {
                                  .incoming = failure_incoming.load(std::memory_order_relaxed),
                                  .would_use = failure_would_use.load(std::memory_order_relaxed)}}};
             if (observed_generation == generation.load(std::memory_order_acquire) &&
-                observed_phase == phase.load(std::memory_order_acquire)) {
+                observed_phase == phase.load(std::memory_order_acquire) &&
+                observed_barrier == ordering_barrier.load(std::memory_order_acquire)) {
                 return result;
             }
         }
@@ -650,6 +665,7 @@ class FixedStreamNormalizer::Impl {
             return;
         }
         clear_candidates();
+        ordering_barrier.store(false, std::memory_order_release);
         failure_kind.store(kind, std::memory_order_relaxed);
         phase.store(StreamNormalizationPhase::Failed, std::memory_order_release);
     }
@@ -1022,6 +1038,7 @@ class FixedStreamNormalizer::Impl {
     std::atomic<std::uint64_t> generation{0};
     std::atomic<std::uint64_t> last_sequence{0};
     std::atomic<StreamNormalizationPhase> phase{StreamNormalizationPhase::Empty};
+    std::atomic<bool> ordering_barrier{false};
     std::atomic<StreamFailureKind> failure_kind{StreamFailureKind::None};
     std::atomic<core::TdSupportedUpdateKind> failure_update_kind{
         core::TdSupportedUpdateKind::CurrentStateEntry};
@@ -1209,6 +1226,7 @@ bool FixedStreamNormalizer::Impl::append_rendered(std::uint64_t sequence_value,
     append_order(index);
     order_charged += incoming;
     ++candidate_count;
+    ordering_barrier.store(true, std::memory_order_release);
     return true;
 }
 
@@ -1372,6 +1390,7 @@ bool FixedStreamNormalizer::Impl::append_frozen(std::uint64_t sequence_value,
                         .last_message = chat.last_message};
     order_charged += kStreamMetadataItemBytes;
     ++candidate_count;
+    ordering_barrier.store(true, std::memory_order_release);
     return true;
 }
 
@@ -1448,6 +1467,7 @@ void FixedStreamNormalizer::Impl::drain() noexcept {
         order_head = kNoHandle;
         order_tail = kNoHandle;
         order_used = 0;
+        ordering_barrier.store(false, std::memory_order_release);
     }
 }
 

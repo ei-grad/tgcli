@@ -1861,6 +1861,10 @@ TdOwnerLease::operator bool() const noexcept {
 TdClient::TdClient(const TdLogConfiguration& logging)
     : TdClient(make_production_td_runtime(), logging) {}
 
+TdClient::TdClient(const TdLogConfiguration& logging,
+                   TdGenerationObserverFactory generation_observer_factory)
+    : TdClient(make_production_td_runtime(), logging, {}, std::move(generation_observer_factory)) {}
+
 TdClient::TdClient(std::unique_ptr<TdRuntime> runtime)
     : TdClient(std::move(runtime), TdLogConfiguration{}) {}
 

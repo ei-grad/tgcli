@@ -775,3 +775,40 @@ TEST_CASE("persistent and ordered arenas compact before admitting reusable capac
         CHECK(nlohmann::json::parse(sink.line(3)).at("title") == "after");
     }
 }
+
+TEST_CASE("reverse entity completion retains FIFO and admission readiness",
+          "[stream][storage][ordering]") {
+    FixedSink sink;
+    daemon::FixedStreamNormalizer normalizer(&sink);
+    bootstrap_empty(normalizer);
+    auto first =
+        stamped(core::TdUpdateNewChat{.chat = chat(-2000, 55, core::TdChatKind::Supergroup)}, 2);
+    normalizer.on_update(1, 1, first);
+    auto second =
+        stamped(core::TdUpdateNewChat{.chat = chat(-3000, 88, core::TdChatKind::Supergroup)}, 3);
+    normalizer.on_update(1, 1, second);
+    CHECK(normalizer.status().ordering_barrier_open);
+    CHECK_FALSE(normalizer.status().ready_for_admission());
+
+    auto second_entity = stamped(core::TdUpdateSupergroup{.supergroup = {.id = 88,
+                                                                         .usernames = {"second"},
+                                                                         .is_channel = false,
+                                                                         .is_forum = false}},
+                                 4);
+    normalizer.on_update(1, 1, second_entity);
+    CHECK(sink.count() == 0);
+    CHECK_FALSE(normalizer.status().ready_for_admission());
+
+    auto first_entity = stamped(core::TdUpdateSupergroup{.supergroup = {.id = 55,
+                                                                        .usernames = {"first"},
+                                                                        .is_channel = false,
+                                                                        .is_forum = false}},
+                                5);
+    normalizer.on_update(1, 1, first_entity);
+    REQUIRE(sink.count() == 4);
+    CHECK(nlohmann::json::parse(sink.line(0)).at("chat").at("id") == -2000);
+    CHECK(nlohmann::json::parse(sink.line(1)).at("chat").at("id") == -3000);
+    CHECK(nlohmann::json::parse(sink.line(2)).at("change") == "identity");
+    CHECK(nlohmann::json::parse(sink.line(3)).at("change") == "identity");
+    CHECK(normalizer.status().ready_for_admission());
+}

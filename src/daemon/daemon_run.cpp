@@ -24,6 +24,7 @@
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "daemon/server.hpp"
+#include "daemon/stream_service.hpp"
 #include "daemon/write_commands.hpp"
 
 #include <array>
@@ -238,9 +239,10 @@ int run_daemon(const std::string& account) {
     sigaddset(&signals, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &signals, nullptr);
 
-    core::TdClient td(core::TdLogConfiguration{
-        .file_path = paths::tdlib_log_file(account, environment),
-    });
+    StreamService stream_service;
+    core::TdClient td(
+        core::TdLogConfiguration{.file_path = paths::tdlib_log_file(account, environment)},
+        stream_service.observer_factory());
     const config::Store config_store(paths::config_file(environment), environment.uid);
     ConfigRuntime config_runtime(config_store.path(), {}, environment.uid);
 

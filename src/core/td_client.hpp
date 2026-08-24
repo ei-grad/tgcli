@@ -168,6 +168,8 @@ class TdClient {
     using ResponseCompletionHandler = std::function<void(std::uint64_t)>;
 
     explicit TdClient(const TdLogConfiguration& logging);
+    TdClient(const TdLogConfiguration& logging,
+             TdGenerationObserverFactory generation_observer_factory);
     explicit TdClient(std::unique_ptr<TdRuntime> runtime);
     TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging);
     TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,

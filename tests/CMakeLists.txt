@@ -67,6 +67,7 @@ add_executable(tgcli_unit_tests
     stream_td_client_test.cpp
     stream_td_runtime_conversion_test.cpp
     stream_schema_test.cpp
+    stream_service_test.cpp
     stream_metadata_test.cpp
     stream_model_test.cpp
     stream_storage_test.cpp
@@ -93,6 +94,30 @@ target_compile_definitions(tgcli_unit_tests
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).
 catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS)
+
+add_executable(tgcli_stream_callback_safety_tests
+    stream_callback_safety_test.cpp)
+target_link_libraries(tgcli_stream_callback_safety_tests
+    PRIVATE tgcli_daemon tgcli_core Catch2::Catch2WithMain)
+target_include_directories(tgcli_stream_callback_safety_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(tgcli_stream_callback_safety_tests
+        PRIVATE "-Wno-mismatched-new-delete")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(tgcli_stream_callback_safety_tests PRIVATE
+        "-Wl,--wrap=pthread_mutex_lock"
+        "-Wl,--wrap=pthread_mutex_unlock"
+        "-Wl,--wrap=pthread_cond_wait"
+        "-Wl,--wrap=pthread_cond_timedwait"
+        "-Wl,--wrap=read"
+        "-Wl,--wrap=write"
+        "-Wl,--wrap=close"
+        "-Wl,--wrap=fsync"
+        "-Wl,--wrap=fdatasync")
+endif()
+catch_discover_tests(tgcli_stream_callback_safety_tests ADD_TAGS_AS_LABELS)
 
 add_test(
     NAME schema-asset-generator
