@@ -144,7 +144,7 @@ struct TdClosedDecision::State {
 class TdClient::Impl {
   public:
     Impl(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
-         TdClientEventHooks event_hooks)
+         TdClientEventHooks event_hooks, TdGenerationObserverFactory generation_observer_factory)
         : runtime_(std::move(runtime)),
           event_now_(event_hooks.now ? std::move(event_hooks.now)
                                      : [] { return TdEventClock::now(); }),
@@ -152,7 +152,8 @@ class TdClient::Impl {
           before_lifecycle_callback_drain_wait_(
               std::move(event_hooks.before_lifecycle_callback_drain_wait)),
           before_closed_decisions_drain_wait_(
-              std::move(event_hooks.before_closed_decisions_drain_wait)) {
+              std::move(event_hooks.before_closed_decisions_drain_wait)),
+          generation_observer_factory_(std::move(generation_observer_factory)) {
         if (runtime_ == nullptr) {
             throw std::invalid_argument("TdClient runtime must not be null");
         }
@@ -202,6 +203,7 @@ class TdClient::Impl {
                                    TdQueryLifetime lifetime = {}) {
         if (!authorization ||
             (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
+             function != TdFunctionKind::GetContacts &&
              function != TdFunctionKind::GetSavedMessagesTags &&
              function != TdFunctionKind::SearchSavedMessages &&
              function != TdFunctionKind::GetActiveSessions && function != TdFunctionKind::GetChat &&
@@ -219,8 +221,11 @@ class TdClient::Impl {
              function != TdFunctionKind::GetInternalLinkType &&
              function != TdFunctionKind::GetMessageLinkInfo &&
              function != TdFunctionKind::CheckChatInviteLink &&
-             function != TdFunctionKind::GetUser && function != TdFunctionKind::GetSupergroup &&
+             function != TdFunctionKind::GetUser &&
+             function != TdFunctionKind::GetBasicGroupFullInfo &&
+             function != TdFunctionKind::GetSupergroup &&
              function != TdFunctionKind::GetSupergroupFullInfo &&
+             function != TdFunctionKind::GetSupergroupMembers &&
              function != TdFunctionKind::CreatePrivateChat &&
              function != TdFunctionKind::GetMessage &&
              function != TdFunctionKind::GetMessageProperties &&
@@ -247,6 +252,11 @@ class TdClient::Impl {
         }
         return send_read(authorization, TdFunctionKind::GetMe,
                          runtime_->make_auth_function(TdAuthRequest{TdFunctionKind::GetMe}));
+    }
+
+    std::future<TdValue>
+    get_contacts(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+        return send_read(authorization, TdFunctionKind::GetContacts, runtime_->make_get_contacts());
     }
 
     std::future<TdValue>
@@ -402,6 +412,13 @@ class TdClient::Impl {
     }
 
     std::future<TdValue>
+    get_basic_group_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                              std::int64_t basic_group_id) {
+        return send_read(authorization, TdFunctionKind::GetBasicGroupFullInfo,
+                         runtime_->make_get_basic_group_full_info(basic_group_id));
+    }
+
+    std::future<TdValue>
     get_supergroup(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                    std::int64_t supergroup_id) {
         return send_read(authorization, TdFunctionKind::GetSupergroup,
@@ -413,6 +430,15 @@ class TdClient::Impl {
                              std::int64_t supergroup_id) {
         return send_read(authorization, TdFunctionKind::GetSupergroupFullInfo,
                          runtime_->make_get_supergroup_full_info(supergroup_id));
+    }
+
+    std::future<TdValue>
+    get_supergroup_members(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t supergroup_id, std::string query, std::int32_t offset,
+                           std::int32_t limit) {
+        return send_read(
+            authorization, TdFunctionKind::GetSupergroupMembers,
+            runtime_->make_get_supergroup_members(supergroup_id, std::move(query), offset, limit));
     }
 
     std::future<TdValue>
@@ -1144,11 +1170,15 @@ class TdClient::Impl {
     };
 
     struct Generation {
-        Generation(std::int32_t client_id_value, std::uint64_t number_value)
-            : client_id(client_id_value), number(number_value) {}
+        Generation(std::int32_t client_id_value, std::uint64_t number_value,
+                   std::unique_ptr<TdGenerationObserver> observer_value)
+            : client_id(client_id_value), number(number_value),
+              observer(std::move(observer_value)) {}
 
         std::int32_t client_id;
         std::uint64_t number;
+        std::unique_ptr<TdGenerationObserver> observer;
+        std::uint64_t current_state_query_id = 0;
         QueryRegistry<TdValue> queries;
         detail::RequestLifecycle<TdValue> lifecycle{"tdlib client generation closed"};
         std::mutex auth_commit_mutex;
@@ -1175,7 +1205,14 @@ class TdClient::Impl {
     std::shared_ptr<Generation> make_generation() {
         const auto generation_number = next_generation_++;
         const auto client_id = runtime_->create_client(generation_number);
-        auto generation = std::make_shared<Generation>(client_id, generation_number);
+        auto observer = generation_observer_factory_
+                            ? generation_observer_factory_(client_id, generation_number)
+                            : nullptr;
+        if (generation_observer_factory_ && observer == nullptr) {
+            throw std::logic_error("TdClient generation observer factory returned null");
+        }
+        auto generation =
+            std::make_shared<Generation>(client_id, generation_number, std::move(observer));
         generation->internal_auth_owner_id = next_owner_id_.fetch_add(1, std::memory_order_relaxed);
         generation->lifecycle_owner_id = next_owner_id_.fetch_add(1, std::memory_order_relaxed);
         generation->internal_auth_owner_capability =
@@ -1203,6 +1240,24 @@ class TdClient::Impl {
         auto submission = submit_locked(generation, descriptor, function);
         if (submission.query_id != 1) {
             throw std::logic_error("authorization bootstrap must reserve query id 1");
+        }
+        if (generation->observer != nullptr) {
+            const TdSendDescriptor current_state_descriptor{
+                .function = TdFunctionKind::GetCurrentState,
+                .tier = DescriptorKind::AuthBootstrap,
+                .owner = {TdOwnerKind::InternalAuth, generation->internal_auth_owner_id,
+                          generation->internal_auth_owner_capability},
+                .client_generation = generation_number,
+                .auth_sequence = 0,
+                .auth_state = AuthState::Unknown,
+            };
+            auto current_state = runtime_->make_get_current_state();
+            auto current_state_submission =
+                submit_locked(generation, current_state_descriptor, current_state);
+            if (current_state_submission.query_id != 2) {
+                throw std::logic_error("current-state bootstrap must reserve query id 2");
+            }
+            generation->current_state_query_id = current_state_submission.query_id;
         }
         return generation;
     }
@@ -1466,6 +1521,10 @@ class TdClient::Impl {
             auto publication = begin_event_publication(observed_at);
             event.object.set_receive_event_metadata(receive_event_sequence,
                                                     publication.observed_at);
+            if (event.query_id == generation->current_state_query_id &&
+                generation->observer != nullptr) {
+                generation->observer->on_current_state(event.object);
+            }
             if (install_response) {
                 commit_auth_state_locked(generation, *auth_publication, false);
             }
@@ -1517,6 +1576,9 @@ class TdClient::Impl {
             auto publication = begin_event_publication(observed_at);
             event.object.set_receive_event_metadata(receive_event_sequence,
                                                     publication.observed_at);
+            if (generation->observer != nullptr) {
+                generation->observer->on_update(event.object);
+            }
             if (!generation->initial_state_installed) {
                 generation->pending_updates.push_back(std::move(event.object));
                 pending = true;
@@ -1630,6 +1692,7 @@ class TdClient::Impl {
     std::function<void(TdEventClock::time_point)> after_event_observed_;
     std::function<void()> before_lifecycle_callback_drain_wait_;
     std::function<void()> before_closed_decisions_drain_wait_;
+    TdGenerationObserverFactory generation_observer_factory_;
     mutable std::mutex event_publication_mutex_;
     mutable std::mutex state_mutex_;
     std::shared_ptr<Generation> current_;
@@ -1795,7 +1858,13 @@ TdClient::TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration&
 
 TdClient::TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
                    TdClientEventHooks event_hooks)
-    : impl_(std::make_unique<Impl>(std::move(runtime), logging, std::move(event_hooks))) {}
+    : TdClient(std::move(runtime), logging, std::move(event_hooks), {}) {}
+
+TdClient::TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
+                   TdClientEventHooks event_hooks,
+                   TdGenerationObserverFactory generation_observer_factory)
+    : impl_(std::make_unique<Impl>(std::move(runtime), logging, std::move(event_hooks),
+                                   std::move(generation_observer_factory))) {}
 
 TdClient::~TdClient() = default;
 
@@ -1824,6 +1893,11 @@ TdClient::send_read(const std::shared_ptr<const AuthStateSnapshot>& authorizatio
 std::future<TdValue>
 TdClient::get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
     return impl_->get_me(authorization);
+}
+
+std::future<TdValue>
+TdClient::get_contacts(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
+    return impl_->get_contacts(authorization);
 }
 
 std::future<TdValue>
@@ -1974,6 +2048,12 @@ TdClient::get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization
 }
 
 std::future<TdValue>
+TdClient::get_basic_group_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                    std::int64_t basic_group_id) {
+    return impl_->get_basic_group_full_info(authorization, basic_group_id);
+}
+
+std::future<TdValue>
 TdClient::get_supergroup(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                          std::int64_t supergroup_id) {
     return impl_->get_supergroup(authorization, supergroup_id);
@@ -1983,6 +2063,14 @@ std::future<TdValue>
 TdClient::get_supergroup_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    std::int64_t supergroup_id) {
     return impl_->get_supergroup_full_info(authorization, supergroup_id);
+}
+
+std::future<TdValue>
+TdClient::get_supergroup_members(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                 std::int64_t supergroup_id, std::string query, std::int32_t offset,
+                                 std::int32_t limit) {
+    return impl_->get_supergroup_members(authorization, supergroup_id, std::move(query), offset,
+                                         limit);
 }
 
 std::future<TdValue>

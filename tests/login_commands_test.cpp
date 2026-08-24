@@ -386,7 +386,9 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetMe:
         return {core::AuthStateData{core::AuthState::Ready}};
     case core::TdFunctionKind::GetAuthorizationState:
+    case core::TdFunctionKind::GetCurrentState:
     case core::TdFunctionKind::GetOption:
+    case core::TdFunctionKind::GetContacts:
     case core::TdFunctionKind::GetSavedMessagesTags:
     case core::TdFunctionKind::SearchSavedMessages:
     case core::TdFunctionKind::GetActiveSessions:
@@ -408,8 +410,10 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetMessageLinkInfo:
     case core::TdFunctionKind::CheckChatInviteLink:
     case core::TdFunctionKind::GetUser:
+    case core::TdFunctionKind::GetBasicGroupFullInfo:
     case core::TdFunctionKind::GetSupergroup:
     case core::TdFunctionKind::GetSupergroupFullInfo:
+    case core::TdFunctionKind::GetSupergroupMembers:
     case core::TdFunctionKind::CreatePrivateChat:
     case core::TdFunctionKind::GetMessage:
     case core::TdFunctionKind::GetMessageProperties:

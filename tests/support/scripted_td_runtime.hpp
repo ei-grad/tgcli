@@ -38,6 +38,8 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     void initialize_process(const core::TdLogConfiguration& logging) override;
     std::int32_t create_client(std::uint64_t client_generation) override;
     core::TdValue make_function(core::TdBuiltinFunction function) override;
+    core::TdValue make_get_current_state() override;
+    core::TdValue make_get_contacts() override;
     core::TdValue make_set_tdlib_parameters(core::TdlibParameters parameters) override;
     core::TdValue make_auth_function(core::TdAuthRequest request) override;
     core::TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) override;
@@ -82,8 +84,11 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     make_check_chat_invite_link(std::string_view link,
                                 const secure::WipeObserver& wipe_observer = {}) override;
     core::TdValue make_get_user(std::int64_t user_id) override;
+    core::TdValue make_get_basic_group_full_info(std::int64_t basic_group_id) override;
     core::TdValue make_get_supergroup(std::int64_t supergroup_id) override;
     core::TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) override;
+    core::TdValue make_get_supergroup_members(std::int64_t supergroup_id, std::string query,
+                                              std::int32_t offset, std::int32_t limit) override;
     core::TdValue make_create_private_chat(std::int64_t user_id, bool force) override;
     core::TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) override;
     core::TdValue make_get_message_properties(std::int64_t chat_id,

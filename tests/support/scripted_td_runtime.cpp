@@ -59,6 +59,18 @@ core::TdValue ScriptedTdRuntime::make_function(core::TdBuiltinFunction function)
     throw std::logic_error("unknown built-in TDLib function");
 }
 
+core::TdValue ScriptedTdRuntime::make_get_current_state() {
+    before_make(core::TdFunctionKind::GetCurrentState);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetCurrentState});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_contacts() {
+    before_make(core::TdFunctionKind::GetContacts);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetContacts});
+}
+
 core::TdValue ScriptedTdRuntime::make_set_tdlib_parameters(core::TdlibParameters parameters) {
     return core::TdValue::scripted_function(core::describe_tdlib_parameters(parameters));
 }
@@ -330,6 +342,13 @@ core::TdValue ScriptedTdRuntime::make_get_user(std::int64_t user_id) {
         core::TdFunctionData{core::TdFunctionKind::GetUser, {{"user_id", user_id}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_basic_group_full_info(std::int64_t basic_group_id) {
+    before_make(core::TdFunctionKind::GetBasicGroupFullInfo);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetBasicGroupFullInfo,
+                             {{"basic_group_id", basic_group_id}}});
+}
+
 core::TdValue ScriptedTdRuntime::make_get_supergroup(std::int64_t supergroup_id) {
     before_make(core::TdFunctionKind::GetSupergroup);
     return core::TdValue::scripted_function(core::TdFunctionData{
@@ -340,6 +359,20 @@ core::TdValue ScriptedTdRuntime::make_get_supergroup_full_info(std::int64_t supe
     before_make(core::TdFunctionKind::GetSupergroupFullInfo);
     return core::TdValue::scripted_function(core::TdFunctionData{
         core::TdFunctionKind::GetSupergroupFullInfo, {{"supergroup_id", supergroup_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_supergroup_members(std::int64_t supergroup_id,
+                                                             std::string query,
+                                                             std::int32_t offset,
+                                                             std::int32_t limit) {
+    before_make(core::TdFunctionKind::GetSupergroupMembers);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetSupergroupMembers,
+                             {{"supergroup_id", supergroup_id},
+                              {"filter", std::string{"search"}},
+                              {"query", std::move(query)},
+                              {"offset", static_cast<std::int64_t>(offset)},
+                              {"limit", static_cast<std::int64_t>(limit)}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_create_private_chat(std::int64_t user_id, bool force) {

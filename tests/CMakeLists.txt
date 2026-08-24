@@ -63,6 +63,8 @@ add_executable(tgcli_unit_tests
     schema_cli_test.cpp
     schema_test.cpp
     session_schema_test.cpp
+    stream_td_client_test.cpp
+    stream_td_runtime_conversion_test.cpp
     stream_schema_test.cpp
     stream_metadata_test.cpp
     stream_model_test.cpp

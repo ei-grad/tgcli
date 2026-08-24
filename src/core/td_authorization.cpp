@@ -15,6 +15,7 @@ struct FunctionPolicy {
 FunctionPolicy policy_for(TdFunctionKind function) {
     switch (function) {
     case TdFunctionKind::GetAuthorizationState:
+    case TdFunctionKind::GetCurrentState:
         return {DescriptorKind::AuthBootstrap, AuthState::Unknown, TdOwnerKind::InternalAuth};
     case TdFunctionKind::SetTdlibParameters:
         return {DescriptorKind::AuthBootstrap, AuthState::WaitTdlibParameters,
@@ -35,6 +36,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
         return {DescriptorKind::AuthBootstrap, AuthState::WaitPassword, TdOwnerKind::Login};
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetMe:
+    case TdFunctionKind::GetContacts:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
@@ -55,8 +57,10 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetMessageLinkInfo:
     case TdFunctionKind::CheckChatInviteLink:
     case TdFunctionKind::GetUser:
+    case TdFunctionKind::GetBasicGroupFullInfo:
     case TdFunctionKind::GetSupergroup:
     case TdFunctionKind::GetSupergroupFullInfo:
+    case TdFunctionKind::GetSupergroupMembers:
     case TdFunctionKind::CreatePrivateChat:
     case TdFunctionKind::GetMessage:
     case TdFunctionKind::GetMessageProperties:

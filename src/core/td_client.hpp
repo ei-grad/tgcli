@@ -23,6 +23,24 @@ using TdQueryLifetime = std::shared_ptr<const void>;
 
 class AuthBootstrap;
 
+class TdGenerationObserver {
+  public:
+    TdGenerationObserver() = default;
+    TdGenerationObserver(const TdGenerationObserver&) = delete;
+    TdGenerationObserver& operator=(const TdGenerationObserver&) = delete;
+    TdGenerationObserver(TdGenerationObserver&&) = delete;
+    TdGenerationObserver& operator=(TdGenerationObserver&&) = delete;
+    virtual ~TdGenerationObserver() = default;
+
+    // Runs on the receive thread inside the publication gate. Implementations
+    // must not allocate, block, acquire locks, perform I/O, or call TDLib.
+    virtual void on_update(const TdValue& update) noexcept = 0;
+    virtual void on_current_state(const TdValue& state) noexcept = 0;
+};
+
+using TdGenerationObserverFactory =
+    std::function<std::unique_ptr<TdGenerationObserver>(std::int32_t, std::uint64_t)>;
+
 struct TdClientEventHooks {
     std::function<TdEventClock::time_point()> now;
     // Runs after publication prerequisites are held but before entering the publication gate.
@@ -151,6 +169,9 @@ class TdClient {
     TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging);
     TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
              TdClientEventHooks event_hooks);
+    TdClient(std::unique_ptr<TdRuntime> runtime, const TdLogConfiguration& logging,
+             TdClientEventHooks event_hooks,
+             TdGenerationObserverFactory generation_observer_factory);
     ~TdClient();
     TdClient(const TdClient&) = delete;
     TdClient& operator=(const TdClient&) = delete;
@@ -175,6 +196,8 @@ class TdClient {
     std::future<TdValue> send_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                    TdFunctionKind function, TdValue request);
     std::future<TdValue> get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization);
+    std::future<TdValue>
+    get_contacts(const std::shared_ptr<const AuthStateSnapshot>& authorization);
     std::future<TdValue>
     get_saved_messages_tags(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                             std::int64_t saved_messages_topic_id);
@@ -244,11 +267,18 @@ class TdClient {
     std::future<TdValue> get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   std::int64_t user_id);
     std::future<TdValue>
+    get_basic_group_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                              std::int64_t basic_group_id);
+    std::future<TdValue>
     get_supergroup(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                    std::int64_t supergroup_id);
     std::future<TdValue>
     get_supergroup_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                              std::int64_t supergroup_id);
+    std::future<TdValue>
+    get_supergroup_members(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t supergroup_id, std::string query, std::int32_t offset,
+                           std::int32_t limit);
     std::future<TdValue>
     create_private_chat(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                         std::int64_t user_id, bool force);

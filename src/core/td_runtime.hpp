@@ -33,6 +33,8 @@ enum class TdFunctionKind {
     CheckAuthenticationPassword,
     GetOption,
     GetMe,
+    GetCurrentState,
+    GetContacts,
     GetSavedMessagesTags,
     SearchSavedMessages,
     GetActiveSessions,
@@ -54,8 +56,10 @@ enum class TdFunctionKind {
     GetMessageLinkInfo,
     CheckChatInviteLink,
     GetUser,
+    GetBasicGroupFullInfo,
     GetSupergroup,
     GetSupergroupFullInfo,
+    GetSupergroupMembers,
     CreatePrivateChat,
     GetMessage,
     GetMessageProperties,
@@ -106,6 +110,10 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getOption";
     case TdFunctionKind::GetMe:
         return "getMe";
+    case TdFunctionKind::GetCurrentState:
+        return "getCurrentState";
+    case TdFunctionKind::GetContacts:
+        return "getContacts";
     case TdFunctionKind::GetSavedMessagesTags:
         return "getSavedMessagesTags";
     case TdFunctionKind::SearchSavedMessages:
@@ -148,10 +156,14 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "checkChatInviteLink";
     case TdFunctionKind::GetUser:
         return "getUser";
+    case TdFunctionKind::GetBasicGroupFullInfo:
+        return "getBasicGroupFullInfo";
     case TdFunctionKind::GetSupergroup:
         return "getSupergroup";
     case TdFunctionKind::GetSupergroupFullInfo:
         return "getSupergroupFullInfo";
+    case TdFunctionKind::GetSupergroupMembers:
+        return "getSupergroupMembers";
     case TdFunctionKind::CreatePrivateChat:
         return "createPrivateChat";
     case TdFunctionKind::GetMessage:
@@ -661,6 +673,8 @@ struct TdUserSummary {
     bool is_bot = false;
     bool is_premium = false;
     TdUserPresence presence = TdUserPresence::Hidden;
+
+    bool operator==(const TdUserSummary&) const = default;
 };
 
 enum class TdReactionKind { Emoji, CustomEmoji, Paid, Unknown };
@@ -1475,8 +1489,316 @@ struct TdSupergroup {
     std::int64_t id = 0;
     std::vector<std::string> usernames;
     bool is_channel = false;
+    bool is_forum = false;
 
     bool operator==(const TdSupergroup&) const = default;
+};
+
+struct TdBasicGroup {
+    std::int64_t id = 0;
+    std::int32_t member_count = 0;
+    bool is_active = false;
+    std::int64_t upgraded_to_supergroup_id = 0;
+
+    bool operator==(const TdBasicGroup&) const = default;
+};
+
+struct TdUsers {
+    std::int32_t total_count = 0;
+    std::vector<std::int64_t> user_ids;
+
+    bool operator==(const TdUsers&) const = default;
+};
+
+enum class TdChatMemberStatusKind {
+    Creator,
+    Administrator,
+    Member,
+    Restricted,
+    Left,
+    Banned,
+    Unknown
+};
+
+struct TdChatMemberStatus {
+    TdChatMemberStatusKind kind = TdChatMemberStatusKind::Unknown;
+    bool is_member = false;
+    std::optional<std::int32_t> unsupported_tdlib_type_id;
+
+    bool operator==(const TdChatMemberStatus&) const = default;
+};
+
+struct TdChatMember {
+    TdMessageSender member;
+    std::string tag;
+    std::int64_t inviter_user_id = 0;
+    std::int32_t joined_chat_date = 0;
+    TdChatMemberStatus status;
+
+    bool operator==(const TdChatMember&) const = default;
+};
+
+struct TdBasicGroupFullInfo {
+    std::string description;
+    std::int64_t creator_user_id = 0;
+    std::vector<TdChatMember> members;
+
+    bool operator==(const TdBasicGroupFullInfo&) const = default;
+};
+
+struct TdChatMembers {
+    std::int32_t total_count = 0;
+    std::vector<TdChatMember> members;
+
+    bool operator==(const TdChatMembers&) const = default;
+};
+
+struct TdMessageContent {
+    TdMessageContentKind kind = TdMessageContentKind::Other;
+    std::string text;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdMessageContent&) const = default;
+};
+
+struct TdReactionSummary {
+    TdReactionType reaction;
+    std::int32_t total_count = 0;
+    bool is_chosen = false;
+    std::optional<TdMessageSender> used_sender;
+    std::vector<TdMessageSender> recent_senders;
+
+    bool operator==(const TdReactionSummary&) const = default;
+};
+
+struct TdReactionSnapshot {
+    std::vector<TdReactionSummary> items;
+    bool are_tags = false;
+    bool can_get_added_reactions = false;
+
+    bool operator==(const TdReactionSnapshot&) const = default;
+};
+
+struct TdReactionCount {
+    TdReactionType reaction;
+    std::int32_t total_count = 0;
+
+    bool operator==(const TdReactionCount&) const = default;
+};
+
+enum class TdSupportedUpdateKind {
+    CurrentStateEntry,
+    NewMessage,
+    MessageContent,
+    MessageEdited,
+    MessageInteractionInfo,
+    MessageReaction,
+    MessageReactions,
+    DeleteMessages,
+    User,
+    BasicGroup,
+    Supergroup,
+    NewChat,
+    ChatTitle,
+    ChatLastMessage,
+    ChatAddedToList,
+    ChatRemovedFromList,
+    ChatReadInbox,
+    MessageMentionRead,
+    MessageUnreadReactions,
+    MessageContainsUnreadPollVotes,
+    ChatUnreadMentionCount,
+    ChatUnreadReactionCount,
+    ChatUnreadPollVoteCount,
+    ChatIsMarkedAsUnread,
+};
+
+enum class TdMalformedUpdateReason {
+    MissingObject,
+    InvalidIdentifier,
+    InvalidCount,
+    InvalidDate,
+    InvalidContent,
+    InvalidReaction,
+    InvalidSender,
+    InvalidChatList,
+    InvalidEntity,
+};
+
+struct TdMalformedSupportedUpdate {
+    TdSupportedUpdateKind kind = TdSupportedUpdateKind::NewMessage;
+    TdMalformedUpdateReason reason = TdMalformedUpdateReason::MissingObject;
+    std::int32_t tdlib_type_id = 0;
+
+    bool operator==(const TdMalformedSupportedUpdate&) const = default;
+};
+
+struct TdUpdateNewMessage {
+    TdMessageSummary message;
+
+    bool operator==(const TdUpdateNewMessage&) const = default;
+};
+
+struct TdUpdateMessageContent {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    TdMessageContent content;
+
+    bool operator==(const TdUpdateMessageContent&) const = default;
+};
+
+struct TdUpdateMessageEdited {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::int32_t edit_date = 0;
+    bool has_reply_markup = false;
+
+    bool operator==(const TdUpdateMessageEdited&) const = default;
+};
+
+struct TdUpdateMessageInteractionInfo {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::optional<TdReactionSnapshot> reactions;
+
+    bool operator==(const TdUpdateMessageInteractionInfo&) const = default;
+};
+
+struct TdUpdateMessageReaction {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    TdMessageSender actor;
+    std::int32_t date = 0;
+    std::vector<TdReactionType> old_reactions;
+    std::vector<TdReactionType> new_reactions;
+
+    bool operator==(const TdUpdateMessageReaction&) const = default;
+};
+
+struct TdUpdateMessageReactions {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::int32_t date = 0;
+    std::vector<TdReactionCount> reactions;
+
+    bool operator==(const TdUpdateMessageReactions&) const = default;
+};
+
+struct TdUpdateUser {
+    TdUserSummary user;
+
+    bool operator==(const TdUpdateUser&) const = default;
+};
+
+struct TdUpdateBasicGroup {
+    TdBasicGroup basic_group;
+
+    bool operator==(const TdUpdateBasicGroup&) const = default;
+};
+
+struct TdUpdateSupergroup {
+    TdSupergroup supergroup;
+
+    bool operator==(const TdUpdateSupergroup&) const = default;
+};
+
+struct TdUpdateNewChat {
+    TdChat chat;
+
+    bool operator==(const TdUpdateNewChat&) const = default;
+};
+
+struct TdUpdateChatTitle {
+    std::int64_t chat_id = 0;
+    std::string title;
+
+    bool operator==(const TdUpdateChatTitle&) const = default;
+};
+
+struct TdUpdateChatLastMessage {
+    std::int64_t chat_id = 0;
+    std::optional<TdMessageSummary> last_message;
+
+    bool operator==(const TdUpdateChatLastMessage&) const = default;
+};
+
+struct TdUpdateChatAddedToList {
+    std::int64_t chat_id = 0;
+    TdChatList list;
+
+    bool operator==(const TdUpdateChatAddedToList&) const = default;
+};
+
+struct TdUpdateChatRemovedFromList {
+    std::int64_t chat_id = 0;
+    TdChatList list;
+
+    bool operator==(const TdUpdateChatRemovedFromList&) const = default;
+};
+
+struct TdUpdateChatReadInbox {
+    std::int64_t chat_id = 0;
+    std::int64_t last_read_inbox_message_id = 0;
+    std::int32_t unread_count = 0;
+
+    bool operator==(const TdUpdateChatReadInbox&) const = default;
+};
+
+struct TdUpdateMessageMentionRead {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::int32_t unread_mention_count = 0;
+
+    bool operator==(const TdUpdateMessageMentionRead&) const = default;
+};
+
+struct TdUpdateMessageUnreadReactions {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    std::int32_t unread_reaction_count = 0;
+
+    bool operator==(const TdUpdateMessageUnreadReactions&) const = default;
+};
+
+struct TdUpdateMessageContainsUnreadPollVotes {
+    std::int64_t chat_id = 0;
+    std::int64_t message_id = 0;
+    bool contains_unread_poll_votes = false;
+    std::int32_t unread_poll_vote_count = 0;
+
+    bool operator==(const TdUpdateMessageContainsUnreadPollVotes&) const = default;
+};
+
+struct TdUpdateChatUnreadMentionCount {
+    std::int64_t chat_id = 0;
+    std::int32_t unread_mention_count = 0;
+
+    bool operator==(const TdUpdateChatUnreadMentionCount&) const = default;
+};
+
+struct TdUpdateChatUnreadReactionCount {
+    std::int64_t chat_id = 0;
+    std::int32_t unread_reaction_count = 0;
+
+    bool operator==(const TdUpdateChatUnreadReactionCount&) const = default;
+};
+
+struct TdUpdateChatUnreadPollVoteCount {
+    std::int64_t chat_id = 0;
+    std::int32_t unread_poll_vote_count = 0;
+
+    bool operator==(const TdUpdateChatUnreadPollVoteCount&) const = default;
+};
+
+struct TdUpdateChatIsMarkedAsUnread {
+    std::int64_t chat_id = 0;
+    bool is_marked_unread = false;
+
+    bool operator==(const TdUpdateChatIsMarkedAsUnread&) const = default;
+};
+
+struct TdCurrentState {
+    std::vector<TdValue> updates;
 };
 
 enum class TdInternalLinkKind {
@@ -1547,6 +1869,8 @@ class TdRuntime {
     virtual void initialize_process(const TdLogConfiguration& logging) = 0;
     virtual std::int32_t create_client(std::uint64_t client_generation) = 0;
     virtual TdValue make_function(TdBuiltinFunction function) = 0;
+    virtual TdValue make_get_current_state() = 0;
+    virtual TdValue make_get_contacts() = 0;
     virtual TdValue make_set_tdlib_parameters(TdlibParameters parameters) = 0;
     virtual TdValue make_auth_function(TdAuthRequest request) = 0;
     virtual TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) = 0;
@@ -1590,8 +1914,11 @@ class TdRuntime {
     virtual TdValue make_check_chat_invite_link(std::string_view link,
                                                 const secure::WipeObserver& wipe_observer = {}) = 0;
     virtual TdValue make_get_user(std::int64_t user_id) = 0;
+    virtual TdValue make_get_basic_group_full_info(std::int64_t basic_group_id) = 0;
     virtual TdValue make_get_supergroup(std::int64_t supergroup_id) = 0;
     virtual TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) = 0;
+    virtual TdValue make_get_supergroup_members(std::int64_t supergroup_id, std::string query,
+                                                std::int32_t offset, std::int32_t limit) = 0;
     virtual TdValue make_create_private_chat(std::int64_t user_id, bool force) = 0;
     virtual TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) = 0;
     virtual TdValue make_get_message_properties(std::int64_t chat_id, std::int64_t message_id) = 0;

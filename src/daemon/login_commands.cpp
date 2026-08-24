@@ -304,6 +304,7 @@ WaitResult wait_get_me(core::TdClient& client, AuthTracker& tracker, RequestSess
 std::string_view auth_function_name(TdFunctionKind function) {
     switch (function) {
     case TdFunctionKind::GetAuthorizationState:
+    case TdFunctionKind::GetCurrentState:
     case TdFunctionKind::SetTdlibParameters:
     case TdFunctionKind::SetAuthenticationPhoneNumber:
     case TdFunctionKind::RequestQrCodeAuthentication:
@@ -318,6 +319,7 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::Close:
         return core::td_function_name(function);
     case TdFunctionKind::GetOption:
+    case TdFunctionKind::GetContacts:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
@@ -339,8 +341,10 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetMessageLinkInfo:
     case TdFunctionKind::CheckChatInviteLink:
     case TdFunctionKind::GetUser:
+    case TdFunctionKind::GetBasicGroupFullInfo:
     case TdFunctionKind::GetSupergroup:
     case TdFunctionKind::GetSupergroupFullInfo:
+    case TdFunctionKind::GetSupergroupMembers:
     case TdFunctionKind::CreatePrivateChat:
     case TdFunctionKind::GetMessage:
     case TdFunctionKind::GetMessageProperties:
