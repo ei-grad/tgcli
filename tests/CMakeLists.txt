@@ -69,6 +69,7 @@ add_executable(tgcli_unit_tests
     stream_schema_test.cpp
     stream_metadata_test.cpp
     stream_model_test.cpp
+    stream_storage_test.cpp
     secret_hook_test.cpp
     cli_test.cpp
     td_client_test.cpp
@@ -110,6 +111,11 @@ add_test(
     NAME tdlib-session-source-contract
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_SOURCE_DIR}/scripts/verify_tdlib_session_source_contract.py"
+        --repo-root "${CMAKE_SOURCE_DIR}")
+add_test(
+    NAME tdlib-stream-source-contract
+    COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/scripts/verify_tdlib_stream_source_contract.py"
         --repo-root "${CMAKE_SOURCE_DIR}")
 add_test(
     NAME td-api-source-boundary

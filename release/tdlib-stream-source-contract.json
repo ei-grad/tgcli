@@ -1,0 +1,25 @@
+{
+  "assertions": [
+    {
+      "file_sha256": "4d002f748f78110fd16e0091df5f52e9f101f578d3c9ea414c8668d77012c590",
+      "fragment_sha256": "3c3a196bbce9786d5cfe7b14bd48a0db9bccb53d4b188a7bd7dab8fca32c793b",
+      "id": "chat_folder_count_is_clamped_to_one_hundred",
+      "path": "td/telegram/DialogFilterManager.cpp",
+      "source_lines": [
+        "  auto max_dialog_filters = clamp(td_->option_manager_->get_option_integer(\"chat_folder_count_max\"),",
+        "                                  static_cast<int64>(0), static_cast<int64>(100));",
+        "  if (dialog_filters_.size() >= narrow_cast<size_t>(max_dialog_filters)) {",
+        "    return promise.set_error(400, \"The maximum number of chat folders exceeded\");"
+      ]
+    }
+  ],
+  "component": {
+    "archive_sha256": "095a2e78ced222bbe4cf934d7a6796db6c13837b45f3c31e0a28df5d273770e7",
+    "generated_source_tree_sha256": "5999031e3cbfe0ebbd95f88b152fe2724df7042beb9e74843feb65b02ca6588d",
+    "id": "tdlib",
+    "immutable_ref": "a17f87c4cff7b90b278d12b91ba0614383aaee82",
+    "source_tree_sha256": "b7b7a35caefdc6d083f42fc8f331344fd6e021bdf30fde7518326303c2bdca35",
+    "version": "1.8.65"
+  },
+  "schema_version": 1
+}
