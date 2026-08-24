@@ -65,6 +65,25 @@ class UserResolverHarness {
         });
     }
 
+    std::future<tgcli::daemon::UserResolverOutcome>
+    resolve_without_principal(std::string selector) {
+        return std::async(std::launch::async, [this, selector = std::move(selector)]() mutable {
+            tgcli::daemon::CallbackSink sink(
+                [](const json&) {}, [](const json&) {}, [](const json&) {},
+                [](const std::string&, const std::string&, const json&, int) {});
+            tgcli::proto::Request request("main");
+            request.id = 1;
+            request.command = {"wait-for"};
+            request.context.timeout_seconds = 1.0;
+            request.context.cwd = "/";
+            tgcli::daemon::RequestSession session(std::move(request), sink, 0,
+                                                  tgcli::daemon::RequestSession::NonceGenerator{},
+                                                  tgcli::daemon::ActivityTracker::Token{});
+            tgcli::daemon::ResolverConsumer consumer(*client_, "main", session);
+            return consumer.resolve_user(std::move(selector));
+        });
+    }
+
     template <typename T>
     tgcli::core::TdFunctionData respond(tgcli::core::TdFunctionKind expected, T value) {
         REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
@@ -245,15 +264,14 @@ TEST_CASE("user resolver accepts positive numeric ids without enumerating a doma
 TEST_CASE("user resolver accepts exact usernames and public profile links for bots",
           "[resolver][user-resolver][public][bot][fake-boundary]") {
     for (const auto& selector :
-         {std::string{"@Helper"}, std::string{"t.me/helper"}, std::string{"https://t.me/helper"}}) {
+         {std::string{"@helper"}, std::string{"t.me/helper"}, std::string{"https://t.me/helper"}}) {
         DYNAMIC_SECTION(selector) {
             UserResolverHarness harness;
             auto pending = harness.resolve(selector);
             harness.respond_me(true);
             const auto search = harness.respond(tgcli::core::TdFunctionKind::SearchPublicChat,
                                                 private_chat(88, "Helper"));
-            CHECK(field_as<std::string>(search, "username") ==
-                  (selector == "@Helper" ? "Helper" : "helper"));
+            CHECK(field_as<std::string>(search, "username") == "helper");
             harness.respond(tgcli::core::TdFunctionKind::GetUser,
                             UserResolverHarness::user(88, "Helper", {}, true, {"helper"}));
             const auto outcome = pending.get();
@@ -265,10 +283,10 @@ TEST_CASE("user resolver accepts exact usernames and public profile links for bo
     }
 }
 
-TEST_CASE("global user substring scans the complete contacts domain case-insensitively",
+TEST_CASE("global user substring scans the complete contacts domain with exact case",
           "[resolver][user-resolver][contacts][fake-boundary]") {
     UserResolverHarness harness;
-    auto pending = harness.resolve("bOb buI");
+    auto pending = harness.resolve("BOB Bui");
     harness.respond_me();
     harness.respond(tgcli::core::TdFunctionKind::GetContacts,
                     tgcli::core::TdUsers{.total_count = 3, .user_ids = {10, 11, 12}});
@@ -284,10 +302,52 @@ TEST_CASE("global user substring scans the complete contacts domain case-insensi
     CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 3);
 }
 
+TEST_CASE("display-name matching is a case-sensitive UTF-8 byte substring",
+          "[resolver][user-resolver][contacts][case-sensitive][fake-boundary]") {
+    SECTION("mixed-case selector is a miss") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("ada");
+        harness.respond_me();
+        harness.respond(tgcli::core::TdFunctionKind::GetContacts,
+                        tgcli::core::TdUsers{.total_count = 1, .user_ids = {10}});
+        harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                        UserResolverHarness::user(10, "Ada", "Lovelace"));
+        CHECK(terminal(pending.get())["code"] == "NOT_FOUND");
+    }
+
+    SECTION("mixed-case candidates do not create false ambiguity") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("Ada");
+        harness.respond_me();
+        harness.respond(tgcli::core::TdFunctionKind::GetContacts,
+                        tgcli::core::TdUsers{.total_count = 2, .user_ids = {10, 11}});
+        harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                        UserResolverHarness::user(10, "Ada", "One"));
+        harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                        UserResolverHarness::user(11, "ada", "Two"));
+        CHECK(resolved(pending.get()).id == 10);
+    }
+
+    SECTION("exact-case candidates remain ambiguous") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("Ada");
+        harness.respond_me();
+        harness.respond(tgcli::core::TdFunctionKind::GetContacts,
+                        tgcli::core::TdUsers{.total_count = 2, .user_ids = {10, 11}});
+        harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                        UserResolverHarness::user(10, "Ada", "One"));
+        harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                        UserResolverHarness::user(11, "Ada", "Two"));
+        const auto mapped = terminal(pending.get());
+        CHECK(mapped["code"] == "AMBIGUOUS");
+        CHECK(mapped["details"]["candidates"].size() == 2);
+    }
+}
+
 TEST_CASE("basic-group user substring consumes the full member vector",
           "[resolver][user-resolver][basic-group][fake-boundary]") {
     UserResolverHarness harness;
-    auto pending = harness.resolve("love", domain_chat(tgcli::core::TdChatKind::BasicGroup, 51));
+    auto pending = harness.resolve("Love", domain_chat(tgcli::core::TdChatKind::BasicGroup, 51));
     harness.respond_me();
     const auto full = harness.respond(
         tgcli::core::TdFunctionKind::GetBasicGroupFullInfo,
@@ -306,13 +366,13 @@ TEST_CASE("basic-group user substring consumes the full member vector",
 TEST_CASE("supergroup user substring probes complete Search pages with advancing offsets",
           "[resolver][user-resolver][supergroup][pagination][fake-boundary]") {
     UserResolverHarness harness;
-    auto pending = harness.resolve("ada", domain_chat(tgcli::core::TdChatKind::Supergroup, 55));
+    auto pending = harness.resolve("Ada", domain_chat(tgcli::core::TdChatKind::Supergroup, 55));
     harness.respond_me();
     const auto first = harness.respond(
         tgcli::core::TdFunctionKind::GetSupergroupMembers,
         tgcli::core::TdChatMembers{.total_count = 3, .members = {member(7), member(8)}});
     CHECK(field_as<std::string>(first, "filter") == "search");
-    CHECK(field_as<std::string>(first, "query") == "ada");
+    CHECK(field_as<std::string>(first, "query") == "Ada");
     CHECK(field_as<std::int64_t>(first, "offset") == 0);
     CHECK(field_as<std::int64_t>(first, "limit") == 200);
     const auto second =
@@ -327,7 +387,7 @@ TEST_CASE("supergroup user substring probes complete Search pages with advancing
     harness.respond(tgcli::core::TdFunctionKind::GetUser,
                     UserResolverHarness::user(8, "Alan", "Turing"));
     harness.respond(tgcli::core::TdFunctionKind::GetUser,
-                    UserResolverHarness::user(9, "ADA", "Lovelace"));
+                    UserResolverHarness::user(9, "Ada", "Lovelace"));
     const auto outcome = pending.get();
     CHECK(resolved(outcome).id == 9);
     CHECK(harness.count(tgcli::core::TdFunctionKind::GetSupergroupMembers) == 3);
@@ -336,7 +396,7 @@ TEST_CASE("supergroup user substring probes complete Search pages with advancing
 TEST_CASE("user ambiguity retains TD order truncates at twenty and has no scope field",
           "[resolver][user-resolver][contacts][ambiguous][fake-boundary]") {
     UserResolverHarness harness;
-    auto pending = harness.resolve("match");
+    auto pending = harness.resolve("Match");
     harness.respond_me();
     std::vector<std::int64_t> ids;
     for (std::int64_t id = 1; id <= 22; ++id) {
@@ -351,8 +411,8 @@ TEST_CASE("user ambiguity retains TD order truncates at twenty and has no scope 
     }
     const auto outcome = pending.get();
     const auto mapped = terminal(outcome);
-    CHECK(mapped["code"] == "AMBIGUOUS");
-    CHECK(mapped["details"]["selector"] == "match");
+    REQUIRE(mapped["code"] == "AMBIGUOUS");
+    CHECK(mapped["details"]["selector"] == "Match");
     CHECK_FALSE(mapped["details"].contains("scope"));
     REQUIRE(mapped["details"]["candidates"].size() == 20);
     CHECK(mapped["details"]["candidates"].front()["id"] == 1);
@@ -372,6 +432,20 @@ TEST_CASE("bot user resolver rejects only the contacts-only substring branch",
     CHECK(mapped["details"] == json{{"operation", "resolve"}});
     CHECK(harness.count(tgcli::core::TdFunctionKind::GetContacts) == 0);
     CHECK(harness.sent_count() == 2);
+}
+
+TEST_CASE("bot per-chat substring resolution uses members without contacts",
+          "[resolver][user-resolver][bot][basic-group][fake-boundary]") {
+    UserResolverHarness harness;
+    auto pending = harness.resolve("Ada", domain_chat(tgcli::core::TdChatKind::BasicGroup, 51));
+    harness.respond_me(true);
+    harness.respond(tgcli::core::TdFunctionKind::GetBasicGroupFullInfo,
+                    tgcli::core::TdBasicGroupFullInfo{
+                        .description = {}, .creator_user_id = 7, .members = {member(7)}});
+    harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                    UserResolverHarness::user(7, "Ada", "Member"));
+    CHECK(resolved(pending.get()).id == 7);
+    CHECK(harness.count(tgcli::core::TdFunctionKind::GetContacts) == 0);
 }
 
 TEST_CASE("user resolver preserves request deadline and authorization-loss precedence",
@@ -395,6 +469,21 @@ TEST_CASE("user resolver preserves request deadline and authorization-loss prece
             tgcli::core::TdUsers{.total_count = 1, .user_ids = {7}});
         const auto outcome = pending.get();
         CHECK(terminal(outcome)["code"] == "NOT_AUTHED");
+        CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
+    }
+
+    SECTION("authorization loss in the middle of Search pagination remains resolve-attributed") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("Ada", domain_chat(tgcli::core::TdChatKind::Supergroup, 55));
+        harness.respond_me();
+        harness.respond(tgcli::core::TdFunctionKind::GetSupergroupMembers,
+                        tgcli::core::TdChatMembers{.total_count = 2, .members = {member(7)}});
+        harness.lose_authorization_before_response(
+            tgcli::core::TdFunctionKind::GetSupergroupMembers,
+            tgcli::core::TdChatMembers{.total_count = 2, .members = {member(8)}});
+        const auto mapped = terminal(pending.get());
+        CHECK(mapped["code"] == "NOT_AUTHED");
+        CHECK(mapped["message"] == "resolve requires an authenticated account");
         CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
     }
 }
@@ -503,6 +592,27 @@ TEST_CASE("user resolver fails closed on malformed or duplicate complete domains
         CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
     }
 
+    SECTION("nonempty supergroup page cannot exceed zero total count") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("Ada", domain_chat(tgcli::core::TdChatKind::Supergroup, 55));
+        harness.respond_me();
+        harness.respond(tgcli::core::TdFunctionKind::GetSupergroupMembers,
+                        tgcli::core::TdChatMembers{.total_count = 0, .members = {member(7)}});
+        CHECK(terminal(pending.get())["code"] == "INTERNAL");
+        CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
+    }
+
+    SECTION("nonempty supergroup page cannot exceed undersized total count") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("Ada", domain_chat(tgcli::core::TdChatKind::Supergroup, 55));
+        harness.respond_me();
+        harness.respond(
+            tgcli::core::TdFunctionKind::GetSupergroupMembers,
+            tgcli::core::TdChatMembers{.total_count = 1, .members = {member(7), member(8)}});
+        CHECK(terminal(pending.get())["code"] == "INTERNAL");
+        CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
+    }
+
     SECTION("returned user identity must stay bound to the requested id") {
         UserResolverHarness harness;
         auto pending = harness.resolve("77");
@@ -522,6 +632,38 @@ TEST_CASE("user resolver fails closed on malformed or duplicate complete domains
         const auto outcome = pending.get();
         CHECK(terminal(outcome)["code"] == "INTERNAL");
         CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
+    }
+
+    SECTION("private chat id must equal its related user id") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("@helper");
+        harness.respond_me();
+        auto mismatched = private_chat(88);
+        mismatched.id = 87;
+        harness.respond(tgcli::core::TdFunctionKind::SearchPublicChat, mismatched);
+        CHECK(terminal(pending.get())["code"] == "INTERNAL");
+        CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
+    }
+
+    SECTION("private chat id must be positive") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("@helper");
+        harness.respond_me();
+        auto negative = private_chat(88);
+        negative.id = -88;
+        harness.respond(tgcli::core::TdFunctionKind::SearchPublicChat, negative);
+        CHECK(terminal(pending.get())["code"] == "INTERNAL");
+        CHECK(harness.count(tgcli::core::TdFunctionKind::GetUser) == 0);
+    }
+
+    SECTION("returned active username must exactly match") {
+        UserResolverHarness harness;
+        auto pending = harness.resolve("@helper");
+        harness.respond_me();
+        harness.respond(tgcli::core::TdFunctionKind::SearchPublicChat, private_chat(88));
+        harness.respond(tgcli::core::TdFunctionKind::GetUser,
+                        UserResolverHarness::user(88, "Helper", {}, false, {"other"}));
+        CHECK(terminal(pending.get())["code"] == "INTERNAL");
     }
 }
 
@@ -549,4 +691,14 @@ TEST_CASE("exact user selectors ignore a supplied member domain and malformed li
         CHECK(harness.count(tgcli::core::TdFunctionKind::SearchPublicChat) == 0);
         CHECK(harness.count(tgcli::core::TdFunctionKind::GetContacts) == 0);
     }
+}
+
+TEST_CASE("invalid numeric user selector is rejected without any TD request",
+          "[resolver][user-resolver][numeric][ordering][fake-boundary]") {
+    UserResolverHarness harness;
+    const auto outcome = harness.resolve_without_principal("-77").get();
+    const auto mapped = terminal(outcome);
+    CHECK(mapped["code"] == "USAGE");
+    CHECK(mapped["details"] == json{{"argument", "from"}, {"reason", "invalid_argument"}});
+    CHECK(harness.sent_count() == 1);
 }

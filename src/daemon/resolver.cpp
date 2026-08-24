@@ -103,21 +103,10 @@ bool valid_user_id(std::int64_t value) {
     return value > 0 && value <= kMaximumInt53;
 }
 
-char ascii_lower(char value) {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-}
-
-std::string ascii_fold(std::string_view value) {
-    std::string folded(value);
-    std::ranges::transform(folded, folded.begin(), ascii_lower);
-    return folded;
-}
-
 bool valid_usernames(const std::vector<std::string>& usernames) {
     std::unordered_set<std::string> seen;
     for (const auto& username : usernames) {
-        if (username.empty() || !common::valid_utf8(username) ||
-            !seen.insert(ascii_fold(username)).second) {
+        if (username.empty() || !common::valid_utf8(username) || !seen.insert(username).second) {
             return false;
         }
     }
@@ -342,21 +331,33 @@ class ResolverRun {
         caller_ = M2Operation::Resolve;
         error_.reset();
         selector_ = std::move(selector);
-        if (!principal_) {
-            internal_error();
-            return take_user_error_or_stop();
-        }
         const auto classified = classify_local_selector(selector_);
         if (!classified) {
             usage("invalid user selector", "invalid_argument", "from");
             return take_user_error_or_stop();
         }
+        if (classified->kind == LocalSelectorKind::Numeric && !valid_user_id(classified->chat_id)) {
+            usage("invalid user id", "invalid_argument", "from");
+            return take_user_error_or_stop();
+        }
+        if (classified->kind == LocalSelectorKind::InvalidLink) {
+            usage("invalid user profile link", "invalid_argument", "from");
+            return take_user_error_or_stop();
+        }
+        if (classified->kind == LocalSelectorKind::BotStartLink ||
+            classified->kind == LocalSelectorKind::MessageLink ||
+            classified->kind == LocalSelectorKind::ChatInviteLink ||
+            classified->kind == LocalSelectorKind::DirectMessagesChatLink ||
+            classified->kind == LocalSelectorKind::UnsupportedLink) {
+            usage("unsupported user profile link", "unsupported_link_type", "from");
+            return take_user_error_or_stop();
+        }
+        if (!principal_) {
+            internal_error();
+            return take_user_error_or_stop();
+        }
         switch (classified->kind) {
         case LocalSelectorKind::Numeric:
-            if (!valid_user_id(classified->chat_id)) {
-                usage("invalid user id", "invalid_argument", "from");
-                return take_user_error_or_stop();
-            }
             if (auto identity = read_user_identity(classified->chat_id, true)) {
                 return std::move(*identity);
             }
@@ -370,15 +371,12 @@ class ResolverRun {
         case LocalSelectorKind::Title:
             return resolve_user_substring(classified->value, domain);
         case LocalSelectorKind::InvalidLink:
-            usage("invalid user profile link", "invalid_argument", "from");
-            return take_user_error_or_stop();
         case LocalSelectorKind::BotStartLink:
         case LocalSelectorKind::MessageLink:
         case LocalSelectorKind::ChatInviteLink:
         case LocalSelectorKind::DirectMessagesChatLink:
         case LocalSelectorKind::UnsupportedLink:
-            usage("unsupported user profile link", "unsupported_link_type", "from");
-            return take_user_error_or_stop();
+            break;
         }
         internal_error();
         return take_user_error_or_stop();
@@ -489,8 +487,8 @@ class ResolverRun {
             return std::nullopt;
         }
         const auto* chat = response->value.get_if<core::TdChat>();
-        if (chat == nullptr || !valid_int53(chat->id) || chat->kind != core::TdChatKind::Private ||
-            !valid_user_id(chat->related_id)) {
+        if (chat == nullptr || !valid_user_id(chat->id) ||
+            chat->kind != core::TdChatKind::Private || chat->id != chat->related_id) {
             internal_error();
             return std::nullopt;
         }
@@ -498,9 +496,8 @@ class ResolverRun {
         if (!identity) {
             return std::nullopt;
         }
-        const auto folded_username = ascii_fold(username);
         if (!std::ranges::any_of(identity->usernames, [&](const std::string& candidate) {
-                return ascii_fold(candidate) == folded_username;
+                return candidate == username;
             })) {
             internal_error();
             return std::nullopt;
@@ -582,7 +579,8 @@ class ResolverRun {
             }
             const auto* page = response->value.get_if<core::TdChatMembers>();
             if (page == nullptr || page->total_count < 0 ||
-                page->members.size() > static_cast<std::size_t>(kUserMemberPageLimit)) {
+                page->members.size() > static_cast<std::size_t>(kUserMemberPageLimit) ||
+                page->members.size() > static_cast<std::size_t>(page->total_count)) {
                 internal_error();
                 return std::nullopt;
             }
@@ -634,7 +632,6 @@ class ResolverRun {
         if (!ids) {
             return take_user_error_or_stop();
         }
-        const auto folded_substring = ascii_fold(substring);
         std::vector<UserIdentity> candidates;
         std::size_t matches = 0;
         std::optional<UserIdentity> single;
@@ -643,7 +640,7 @@ class ResolverRun {
             if (!identity) {
                 return take_user_error_or_stop();
             }
-            if (ascii_fold(identity->display_name).find(folded_substring) == std::string::npos) {
+            if (identity->display_name.find(substring) == std::string::npos) {
                 continue;
             }
             ++matches;
