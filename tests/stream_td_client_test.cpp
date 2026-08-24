@@ -37,6 +37,8 @@ struct ObserverState {
     std::atomic<std::uint64_t> public_sequence{0};
     std::atomic<std::size_t> update_count{0};
     std::atomic<std::size_t> current_state_count{0};
+    std::atomic<std::size_t> current_state_failure_count{0};
+    std::atomic<bool> current_state_failure_exact{false};
 };
 
 class RecordingGenerationObserver final : public TdGenerationObserver {
@@ -60,6 +62,19 @@ class RecordingGenerationObserver final : public TdGenerationObserver {
                 state_->next_sequence.fetch_add(1, std::memory_order_relaxed),
                 std::memory_order_release);
         }
+    }
+
+    void on_current_state_failure(const std::exception_ptr& failure) noexcept override {
+        bool exact = false;
+        try {
+            std::rethrow_exception(failure);
+        } catch (const std::runtime_error& error) {
+            exact = std::string_view(error.what()) == "scripted current-state dispatch failure";
+        } catch (const std::exception&) {
+            exact = false;
+        }
+        state_->current_state_failure_exact.store(exact, std::memory_order_release);
+        state_->current_state_failure_count.fetch_add(1, std::memory_order_release);
     }
 
   private:
@@ -282,4 +297,106 @@ TEST_CASE("generation observers reject stale callbacks and reset on replacement"
         return client.auth_state()->client_generation == 2 &&
                client.auth_state()->data.state == AuthState::Ready;
     }));
+}
+
+TEST_CASE("initial generation reports synchronous current-state dispatch failure once",
+          "[stream][core][td-runtime][bootstrap][failure][fake-boundary]") {
+    auto runtime = std::make_unique<ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    auto state = std::make_shared<ObserverState>();
+    scripted->set_before_send([](const TdFunctionData& function) {
+        if (function.kind() == TdFunctionKind::GetCurrentState) {
+            throw std::runtime_error("scripted current-state dispatch failure");
+        }
+    });
+    TdGenerationObserverFactory observer_factory = [&](std::int32_t, std::uint64_t) {
+        return std::make_unique<RecordingGenerationObserver>(state);
+    };
+    TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
+
+    REQUIRE(scripted->wait_for_sent(1));
+    REQUIRE(eventually(
+        [&] { return state->current_state_failure_count.load(std::memory_order_acquire) == 1; }));
+    CHECK(state->current_state_failure_exact.load(std::memory_order_acquire));
+    CHECK(state->current_state_count.load(std::memory_order_acquire) == 0);
+    REQUIRE(scripted->sent_functions().size() == 1);
+
+    const auto first = scripted->clients().front();
+    scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
+    REQUIRE(scripted->wait_for_received(1));
+    CHECK(state->current_state_failure_count.load(std::memory_order_acquire) == 1);
+    CHECK(state->current_state_count.load(std::memory_order_acquire) == 0);
+    scripted->set_before_send({});
+    scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
+}
+
+TEST_CASE("replacement generation reports synchronous current-state dispatch failure once",
+          "[stream][core][td-runtime][bootstrap][generation][failure][fake-boundary]") {
+    auto runtime = std::make_unique<ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    auto first_state = std::make_shared<ObserverState>();
+    auto second_state = std::make_shared<ObserverState>();
+    TdGenerationObserverFactory observer_factory = [&](std::int32_t, std::uint64_t generation) {
+        return std::make_unique<RecordingGenerationObserver>(generation == 1 ? first_state
+                                                                             : second_state);
+    };
+    TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
+    REQUIRE(scripted->wait_for_sent(2));
+    const auto first = scripted->clients().front();
+    scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
+    scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
+
+    scripted->set_before_send([](const TdFunctionData& function) {
+        if (function.kind() == TdFunctionKind::GetCurrentState) {
+            throw std::runtime_error("scripted current-state dispatch failure");
+        }
+    });
+    scripted->push_update(first, {}, AuthStateData{AuthState::Closed});
+    REQUIRE(scripted->wait_for_clients(2));
+    REQUIRE(scripted->wait_for_sent(3));
+    REQUIRE(eventually([&] {
+        return second_state->current_state_failure_count.load(std::memory_order_acquire) == 1;
+    }));
+    CHECK(second_state->current_state_failure_exact.load(std::memory_order_acquire));
+    CHECK(second_state->current_state_count.load(std::memory_order_acquire) == 0);
+    CHECK(scripted->sent_functions().back().function.kind() ==
+          TdFunctionKind::GetAuthorizationState);
+
+    const auto second = scripted->clients().back();
+    scripted->push_response(second, 2, TdValue::from(TdCurrentState{}));
+    REQUIRE(scripted->wait_for_received(4));
+    CHECK(second_state->current_state_failure_count.load(std::memory_order_acquire) == 1);
+    CHECK(second_state->current_state_count.load(std::memory_order_acquire) == 0);
+    scripted->set_before_send({});
+    scripted->push_response(second, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] {
+        return client.auth_state()->client_generation == 2 &&
+               client.auth_state()->data.state == AuthState::Ready;
+    }));
+}
+
+TEST_CASE("current-state observer consumes the response barrier exactly once",
+          "[stream][core][td-runtime][bootstrap][duplicate][fake-boundary]") {
+    auto runtime = std::make_unique<ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    auto state = std::make_shared<ObserverState>();
+    TdGenerationObserverFactory observer_factory = [&](std::int32_t, std::uint64_t) {
+        return std::make_unique<RecordingGenerationObserver>(state);
+    };
+    TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
+    REQUIRE(scripted->wait_for_sent(2));
+    const auto first = scripted->clients().front();
+
+    scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
+    REQUIRE(eventually(
+        [&] { return state->current_state_count.load(std::memory_order_acquire) == 1; }));
+    scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
+    REQUIRE(scripted->wait_for_received(2));
+    CHECK(state->current_state_count.load(std::memory_order_acquire) == 1);
+    CHECK(state->current_state_failure_count.load(std::memory_order_acquire) == 0);
+
+    scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
 }

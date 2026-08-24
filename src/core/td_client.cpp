@@ -1139,6 +1139,7 @@ class TdClient::Impl {
     struct Submission {
         std::uint64_t query_id = 0;
         std::future<TdValue> future;
+        std::exception_ptr synchronous_failure;
     };
 
     struct LeaseLocks {
@@ -1257,7 +1258,12 @@ class TdClient::Impl {
             if (current_state_submission.query_id != 2) {
                 throw std::logic_error("current-state bootstrap must reserve query id 2");
             }
-            generation->current_state_query_id = current_state_submission.query_id;
+            if (current_state_submission.synchronous_failure) {
+                generation->observer->on_current_state_failure(
+                    current_state_submission.synchronous_failure);
+            } else {
+                generation->current_state_query_id = current_state_submission.query_id;
+            }
         }
         return generation;
     }
@@ -1273,7 +1279,7 @@ class TdClient::Impl {
         const auto& function_data = function.function_data();
         if (const auto failure = authorization_failure_locked(
                 generation, descriptor, function_data ? &*function_data : nullptr)) {
-            return {0, failed_future(*failure)};
+            return {0, failed_future(*failure), {}};
         }
         return submit_admitted_locked(generation, descriptor, function, lifetime);
     }
@@ -1321,12 +1327,14 @@ class TdClient::Impl {
                                       TdValue& function, const TdQueryLifetime& lifetime = {}) {
         static_cast<void>(admitted_descriptor);
         auto [query_id, future] = generation->queries.reserve(lifetime);
+        std::exception_ptr synchronous_failure;
         try {
             runtime_->send(generation->client_id, generation->number, query_id, function);
         } catch (const std::exception&) {
-            static_cast<void>(generation->queries.fail(query_id, std::current_exception()));
+            synchronous_failure = std::current_exception();
+            static_cast<void>(generation->queries.fail(query_id, synchronous_failure));
         }
-        return {query_id, std::move(future)};
+        return {query_id, std::move(future), std::move(synchronous_failure)};
     }
 
     void send_close_locked(const std::shared_ptr<Generation>& generation) {
@@ -1500,6 +1508,10 @@ class TdClient::Impl {
         }
 
         auto response = generation->queries.take(event.query_id);
+        const bool current_state_response =
+            response && generation->observer != nullptr &&
+            event.query_id == generation->current_state_query_id &&
+            std::exchange(generation->current_state_query_id, 0) == event.query_id;
         std::optional<LeaseLocks> auth_locks;
         bool install_response = false;
         if (event.query_id == 1 && event.authorization_state.has_value()) {
@@ -1521,8 +1533,7 @@ class TdClient::Impl {
             auto publication = begin_event_publication(observed_at);
             event.object.set_receive_event_metadata(receive_event_sequence,
                                                     publication.observed_at);
-            if (event.query_id == generation->current_state_query_id &&
-                generation->observer != nullptr) {
+            if (current_state_response) {
                 generation->observer->on_current_state(event.object);
             }
             if (install_response) {

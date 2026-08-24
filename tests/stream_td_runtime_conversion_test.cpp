@@ -31,7 +31,9 @@ td_api::object_ptr<td_api::message> message(std::int64_t id = 123, std::int64_t 
     return value;
 }
 
-td_api::object_ptr<td_api::user> user(std::int64_t id = 42) {
+td_api::object_ptr<td_api::user> user_with_type(std::int64_t id,
+                                                td_api::object_ptr<td_api::UserType> type,
+                                                bool include_status = true) {
     auto value = td_api::make_object<td_api::user>();
     value->id_ = id;
     value->first_name_ = "Ada";
@@ -39,8 +41,15 @@ td_api::object_ptr<td_api::user> user(std::int64_t id = 42) {
     value->usernames_ = td_api::make_object<td_api::usernames>(std::vector<std::string>{"ada"},
                                                                std::vector<std::string>{}, "",
                                                                std::vector<std::string>{});
-    value->type_ = td_api::make_object<td_api::userTypeRegular>();
+    value->type_ = std::move(type);
+    if (include_status) {
+        value->status_ = td_api::make_object<td_api::userStatusEmpty>();
+    }
     return value;
+}
+
+td_api::object_ptr<td_api::user> user(std::int64_t id = 42) {
+    return user_with_type(id, td_api::make_object<td_api::userTypeRegular>());
 }
 
 td_api::object_ptr<td_api::chat> chat(std::int64_t id = -1001) {
@@ -254,6 +263,27 @@ TEST_CASE("malformed supported stream updates remain typed while unsupported upd
     CHECK(unsupported.get_if<TdUpdateChatTitle>() == nullptr);
 }
 
+TEST_CASE("all pinned user types remain live inputs while null required status is malformed",
+          "[stream][core][tdlib][td-runtime-converter][user]") {
+    const auto check_type = [](td_api::object_ptr<td_api::UserType> type, bool expected_bot) {
+        auto converted =
+            convert(td_api::make_object<td_api::updateUser>(user_with_type(42, std::move(type))));
+        const auto* update = converted.get_if<TdUpdateUser>();
+        REQUIRE(update != nullptr);
+        CHECK(update->user.id == 42);
+        CHECK(update->user.is_bot == expected_bot);
+    };
+
+    check_type(td_api::make_object<td_api::userTypeRegular>(), false);
+    check_type(td_api::make_object<td_api::userTypeDeleted>(), false);
+    check_type(td_api::make_object<td_api::userTypeBot>(), true);
+    check_type(td_api::make_object<td_api::userTypeUnknown>(), false);
+
+    auto converted = convert(td_api::make_object<td_api::updateUser>(
+        user_with_type(42, td_api::make_object<td_api::userTypeRegular>(), false)));
+    malformed(converted, TdSupportedUpdateKind::User);
+}
+
 TEST_CASE("getCurrentState returns only typed supported inputs and retains malformed entries",
           "[stream][core][tdlib][td-runtime-converter][bootstrap]") {
     std::vector<td_api::object_ptr<td_api::Update>> items;
@@ -274,6 +304,38 @@ TEST_CASE("getCurrentState returns only typed supported inputs and retains malfo
     auto invalid = detail::convert_production_direct_response_for_test(
         TdFunctionKind::GetCurrentState, TdValue::from(std::move(wrong)));
     CHECK(invalid.get_if<TdDirectConversionError>() != nullptr);
+}
+
+TEST_CASE("getCurrentState retains all pinned user types and flags null required status",
+          "[stream][core][tdlib][td-runtime-converter][bootstrap][user]") {
+    std::vector<td_api::object_ptr<td_api::Update>> items;
+    items.emplace_back(td_api::make_object<td_api::updateUser>(
+        user_with_type(41, td_api::make_object<td_api::userTypeRegular>())));
+    items.emplace_back(td_api::make_object<td_api::updateUser>(
+        user_with_type(42, td_api::make_object<td_api::userTypeDeleted>())));
+    items.emplace_back(td_api::make_object<td_api::updateUser>(
+        user_with_type(43, td_api::make_object<td_api::userTypeBot>())));
+    items.emplace_back(td_api::make_object<td_api::updateUser>(
+        user_with_type(44, td_api::make_object<td_api::userTypeUnknown>())));
+    items.emplace_back(td_api::make_object<td_api::updateUser>(
+        user_with_type(45, td_api::make_object<td_api::userTypeRegular>(), false)));
+
+    td_api::object_ptr<td_api::Object> native =
+        td_api::make_object<td_api::updates>(std::move(items));
+    auto converted = detail::convert_production_direct_response_for_test(
+        TdFunctionKind::GetCurrentState, TdValue::from(std::move(native)));
+    const auto* state = converted.get_if<TdCurrentState>();
+    REQUIRE(state != nullptr);
+    REQUIRE(state->updates.size() == 5);
+    for (std::size_t index = 0; index < 4; ++index) {
+        CAPTURE(index);
+        REQUIRE(state->updates[index].get_if<TdUpdateUser>() != nullptr);
+    }
+    CHECK_FALSE(state->updates[0].get_if<TdUpdateUser>()->user.is_bot);
+    CHECK_FALSE(state->updates[1].get_if<TdUpdateUser>()->user.is_bot);
+    CHECK(state->updates[2].get_if<TdUpdateUser>()->user.is_bot);
+    CHECK_FALSE(state->updates[3].get_if<TdUpdateUser>()->user.is_bot);
+    malformed(state->updates[4], TdSupportedUpdateKind::User);
 }
 
 TEST_CASE("M5 resolver read factories and responses match the pinned TDLib boundary",

@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <future>
 #include <memory>
@@ -32,10 +33,12 @@ class TdGenerationObserver {
     TdGenerationObserver& operator=(TdGenerationObserver&&) = delete;
     virtual ~TdGenerationObserver() = default;
 
-    // Runs on the receive thread inside the publication gate. Implementations
-    // must not allocate, block, acquire locks, perform I/O, or call TDLib.
+    // Update and state callbacks run on the receive thread inside the publication gate.
+    // Implementations must not allocate, block, acquire locks, perform I/O, or call TDLib.
     virtual void on_update(const TdValue& update) noexcept = 0;
     virtual void on_current_state(const TdValue& state) noexcept = 0;
+    // Dispatch failure runs synchronously on the generation construction thread.
+    virtual void on_current_state_failure(const std::exception_ptr& failure) noexcept = 0;
 };
 
 using TdGenerationObserverFactory =

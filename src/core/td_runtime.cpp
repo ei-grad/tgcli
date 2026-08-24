@@ -1935,9 +1935,9 @@ std::optional<TdValue> convert_supported_update(td_api::Object& object,
         }
         auto user = convert_user(*update.user_);
         if (user.id <= 0 || user.id > kTdInt53Max || update.user_->type_ == nullptr ||
-            !common::valid_utf8(user.first_name) || !common::valid_utf8(user.last_name) ||
-            !common::valid_utf8(user.phone_number) || !valid_usernames(user.usernames) ||
-            update.user_->type_->get_id() == td_api::userTypeUnknown::ID) {
+            update.user_->status_ == nullptr || !common::valid_utf8(user.first_name) ||
+            !common::valid_utf8(user.last_name) || !common::valid_utf8(user.phone_number) ||
+            !valid_usernames(user.usernames)) {
             return malformed(TdSupportedUpdateKind::User, TdMalformedUpdateReason::InvalidEntity);
         }
         return TdValue::from(TdUpdateUser{.user = std::move(user)});
