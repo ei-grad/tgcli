@@ -211,7 +211,7 @@ tgcli::proto::RequestContext make_request_context(bool json_output, bool yes, bo
     return context;
 }
 
-std::optional<std::string> capture_saved_attach_cwd() {
+std::optional<std::string> capture_request_cwd() {
     constexpr std::size_t maximum_cwd_bytes = 4096;
     std::vector<char> buffer(256);
     for (;;) {
@@ -618,19 +618,11 @@ bool is_saved_attach(const std::vector<std::string>& command) {
 }
 
 std::optional<int> validate_saved_attach_arguments(const SavedCliArguments& saved,
-                                                   std::string& frozen_cwd) {
+                                                   std::string_view frozen_cwd) {
     constexpr std::int64_t maximum_int53 = 9007199254740991LL;
     if (!saved.attach_message_id_valid || saved.attach_message_id == 0 ||
         saved.attach_message_id < -maximum_int53 || saved.attach_message_id > maximum_int53) {
         return report_usage("saved attach message id must be a nonzero int53 value", "message-id");
-    }
-    frozen_cwd.clear();
-    if (!saved.attach_path.starts_with('/')) {
-        auto captured = capture_saved_attach_cwd();
-        if (!captured) {
-            return report_usage("saved attach path is invalid", "PATH");
-        }
-        frozen_cwd = std::move(*captured);
     }
     if (!tgcli::daemon::canonical_source_display_path(saved.attach_path, frozen_cwd)) {
         return report_usage("saved attach path is invalid", "PATH");
@@ -644,7 +636,7 @@ std::optional<int> validate_saved_attach_arguments(const SavedCliArguments& save
 
 std::optional<int> validate_saved_arguments(const std::vector<std::string>& command,
                                             const SavedCliArguments& saved,
-                                            std::string& frozen_cwd) {
+                                            std::string_view frozen_cwd) {
     if (saved.cursor_option->count() != 0 && is_saved_tags(command)) {
         return report_usage("saved tags does not accept --cursor", "--cursor");
     }
@@ -696,7 +688,7 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
                            const ChatsCliArguments& chats, const MessageCliArguments& messages,
                            const SendCliArguments& send, const ChatCliArguments& chat,
                            const ReadCliArguments& read, const FetchCliArguments& fetch,
-                           std::string_view resolve_selector, std::string& frozen_cwd) {
+                           std::string_view resolve_selector, std::string_view frozen_cwd) {
     if (const auto saved_exit = validate_saved_arguments(command, saved, frozen_cwd); saved_exit) {
         return saved_exit;
     }
@@ -1547,7 +1539,8 @@ int run(int argc, char** argv) {
     if (command.empty()) {
         return report_missing_command();
     }
-    std::string frozen_cwd;
+    auto captured_cwd = capture_request_cwd();
+    std::string frozen_cwd = captured_cwd ? std::move(*captured_cwd) : std::string{};
     if (const auto argument_exit =
             validate_command_arguments(command, saved, chats, messages, send, chat, *selected_read,
                                        fetch, resolve_selector, frozen_cwd);

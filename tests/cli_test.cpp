@@ -2755,6 +2755,7 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
           "[cli][m3][message-write][frame][process]") {
     const IsolatedEnv env;
     configure_main_account();
+    const auto expected_cwd = std::filesystem::current_path().string();
     const ChildProtocolDaemon fixture({.message_write_fixture = true,
                                        .protocol_version = proto::kProtocolVersion,
                                        .binary_version = kVersion});
@@ -2818,6 +2819,7 @@ TEST_CASE("message mutation subprocesses emit exact normalized socket frames",
         const auto normalized = json::parse(outcome.out);
         CHECK(normalized["command"] == test_case.command);
         CHECK(normalized["args"] == test_case.args);
+        CHECK(normalized["cwd"] == expected_cwd);
     }
     CHECK(fixture.running());
 }
@@ -2829,6 +2831,21 @@ TEST_CASE("saved attach captures one cwd only when a relative path requires it",
     const ChildProtocolDaemon fixture({.message_write_fixture = true,
                                        .protocol_version = proto::kProtocolVersion,
                                        .binary_version = kVersion});
+
+    SECTION("absolute path retains an available valid cwd") {
+        const auto valid = env.root() + "/valid-cwd";
+        REQUIRE(std::filesystem::create_directory(valid));
+        const int descriptor = ::open(valid.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        REQUIRE(descriptor >= 0);
+        const auto outcome =
+            run_binary_captured({"--json", "saved", "attach", "7", "/tmp/input.bin"}, env,
+                                "saved-attach-absolute-valid-cwd", std::nullopt,
+                                BinaryChildCwd{.descriptor = descriptor, .remove_after_chdir = {}});
+        ::close(descriptor);
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        CHECK(json::parse(outcome.out)["cwd"] == valid);
+    }
 
     SECTION("absolute path ignores an unavailable removed cwd") {
         const auto removed = env.root() + "/removed-cwd";

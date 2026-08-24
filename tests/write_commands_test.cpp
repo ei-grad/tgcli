@@ -813,6 +813,14 @@ void bind_saved_identity(FakeWrites& fake) {
     fake.respond(core::TdFunctionKind::GetUser, self());
 }
 
+bool try_bind_saved_identity_after_principal(FakeWrites& fake) {
+    if (!fake.try_respond(core::TdFunctionKind::CreatePrivateChat, private_chat(42))) {
+        return false;
+    }
+    fake.respond(core::TdFunctionKind::GetUser, self());
+    return true;
+}
+
 void plan_saved_attachment(FakeWrites& fake, core::TdMessageProperties properties = {},
                            std::optional<core::TdTopic> topic = core::TdTopic{
                                .kind = core::TdTopicKind::Saved, .id = 19, .tdlib_type_id = 1}) {
@@ -1027,19 +1035,25 @@ TEST_CASE("saved attach replays and conflicts after principal-bound Saved materi
     REQUIRE(first.result);
 
     auto replay_pending = fake.dispatch(request);
-    bind_saved_identity(fake);
+    bind_principal(fake);
+    const bool replay_resolver_attempted =
+        fake.try_respond(core::TdFunctionKind::CreatePrivateChat,
+                         core::TdError{.code = 500, .message = "transient resolver failure"});
     const auto replay = replay_pending.get();
     REQUIRE(replay.result);
     CHECK(replay.result == first.result);
+    CHECK_FALSE(replay_resolver_attempted);
 
     auto conflict_request = request;
     conflict_request.args["caption"] = "different caption";
     auto conflict_pending = fake.dispatch(conflict_request);
-    bind_saved_identity(fake);
+    bind_principal(fake);
+    const bool conflict_resolver_attempted = try_bind_saved_identity_after_principal(fake);
     const auto conflict = conflict_pending.get();
     REQUIRE(conflict.error);
     CHECK((*conflict.error)["error"]["code"] == "IDEMPOTENCY_CONFLICT");
-    CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 3);
+    CHECK_FALSE(conflict_resolver_attempted);
+    CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 1);
     CHECK(fake.count(core::TdFunctionKind::SendMessage) == 1);
 }
 
@@ -1081,7 +1095,8 @@ TEST_CASE("saved attach rejects bots before and missing input after Saved identi
     SECTION("missing source") {
         FakeWrites fake;
         auto pending = fake.dispatch(saved_attach_request(fake.tree()));
-        bind_saved_identity(fake);
+        bind_principal(fake);
+        const bool resolver_attempted = try_bind_saved_identity_after_principal(fake);
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
         CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
@@ -1090,7 +1105,9 @@ TEST_CASE("saved attach rejects bots before and missing input after Saved identi
         CHECK((*outcome.error)["error"]["details"] == json{{"operation", "saved_attach"},
                                                            {"path", fake.tree().source_path()},
                                                            {"reason", "missing"}});
-        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 1);
+        CHECK_FALSE(resolver_attempted);
+        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetUser) == 0);
         CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
     }
 }
@@ -1119,7 +1136,8 @@ TEST_CASE("saved attach binds its private Saved chat to the authenticated princi
         REQUIRE(outcome.error);
         CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
         CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
-        CHECK(*pass_one_reads == 0);
+        CHECK((*outcome.error)["error"]["details"]["operation"] == "resolve");
+        CHECK(*pass_one_reads > 0);
         CHECK(fake.count(core::TdFunctionKind::GetMessage) == 0);
         CHECK(fake.count(core::TdFunctionKind::GetMessageProperties) == 0);
         CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
@@ -1170,6 +1188,85 @@ TEST_CASE("saved attach binds its private Saved chat to the authenticated princi
     }
 }
 
+TEST_CASE("saved attach resolver failures retain Resolve attribution",
+          "[write-command][saved-attach][resolver-attribution][fake-boundary]") {
+    for (const bool rate_limited : {false, true}) {
+        CAPTURE(rate_limited);
+        FakeWrites fake;
+        fake.tree().write_source("resolver failure bytes");
+        auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::CreatePrivateChat,
+                     core::TdError{.code = rate_limited ? 429 : 500,
+                                   .message = rate_limited ? "retry after 6" : "resolver failed"});
+        const auto outcome = pending.get();
+
+        REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+        CHECK((*outcome.error)["error"]["code"] == (rate_limited ? "RATE_LIMITED" : "TDLIB_ERROR"));
+        CHECK((*outcome.error)["error"]["details"]["operation"] == "resolve");
+        if (rate_limited) {
+            CHECK((*outcome.error)["error"]["details"]["retry_after"] == 6);
+        }
+        CHECK(fake.count(core::TdFunctionKind::GetMessage) == 0);
+        CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+        check_closed_without_pending(fake);
+    }
+}
+
+TEST_CASE("saved attach spool contradiction precedes source and Saved materialization",
+          "[write-command][saved-attach][spool][contradiction][ordering][fake-boundary]") {
+    FakeWrites fake;
+    fake.tree().write_source("contradiction bytes");
+    const auto spool = fake.tree().account_state() + "/spool";
+    const auto contradiction = spool + "/not-an-invocation";
+    REQUIRE(std::filesystem::create_directory(spool));
+    REQUIRE(::chmod(spool.c_str(), 0700) == 0);
+    REQUIRE(std::filesystem::create_directory(contradiction));
+    REQUIRE(::chmod(contradiction.c_str(), 0700) == 0);
+    auto pass_one_reads = std::make_shared<std::atomic<std::size_t>>(0);
+    auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+    hooks->read = [pass_one_reads](daemon::FileSpoolIo operation, int descriptor, void* bytes,
+                                   std::size_t size) {
+        if (operation == daemon::FileSpoolIo::Pass1Read) {
+            ++*pass_one_reads;
+        }
+        return ::read(descriptor, bytes, size);
+    };
+    fake.file_spool_hooks(hooks);
+
+    auto pending = fake.dispatch(saved_attach_request(fake.tree()));
+    bind_principal(fake);
+    const bool resolver_attempted = try_bind_saved_identity_after_principal(fake);
+    const auto outcome = pending.get();
+
+    REQUIRE(outcome.error);
+    const auto diagnostic = daemon::encode_filesystem_diagnostic_path(contradiction);
+    REQUIRE(diagnostic);
+    CHECK(*outcome.error ==
+          json{{"error",
+                {{"code", "AUDIT_INCOMPLETE"},
+                 {"message", "attachment spool recovery is incomplete"},
+                 {"details",
+                  {{"account", "main"},
+                   {"path", {{"kind", "bytes_hex"}, {"value", diagnostic->bytes_hex}}},
+                   {"mutation_state", "none"},
+                   {"completed_stages", json::array()}}}}}});
+    CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("m3-write.error.schema.json"));
+    CHECK_FALSE(resolver_attempted);
+    CHECK(*pass_one_reads == 0);
+    CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
+    CHECK(fake.count(core::TdFunctionKind::GetUser) == 0);
+    CHECK(fake.count(core::TdFunctionKind::GetMessage) == 0);
+    CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);
+    CHECK(read_bytes(fake.tree().source_path()) == "contradiction bytes");
+    CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+}
+
 TEST_CASE("saved attach maps pass-one spool failures to their exact public terminal",
           "[write-command][saved-attach][spool][pass-one][fake-boundary]") {
     const auto exercise = [](std::shared_ptr<daemon::testing::FileSpoolHooks> hooks,
@@ -1179,7 +1276,8 @@ TEST_CASE("saved attach maps pass-one spool failures to their exact public termi
         fake.file_spool_hooks(std::move(hooks));
 
         auto pending = fake.dispatch(saved_attach_request(fake.tree()));
-        bind_saved_identity(fake);
+        bind_principal(fake);
+        const bool resolver_attempted = try_bind_saved_identity_after_principal(fake);
         const auto outcome = pending.get();
 
         REQUIRE(outcome.error);
@@ -1190,6 +1288,9 @@ TEST_CASE("saved attach maps pass-one spool failures to their exact public termi
                                                  {{"operation", "saved_attach"},
                                                   {"path", fake.tree().source_path()},
                                                   {"reason", reason}}}});
+        CHECK_FALSE(resolver_attempted);
+        CHECK(fake.count(core::TdFunctionKind::CreatePrivateChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetUser) == 0);
         CHECK(fake.count(core::TdFunctionKind::GetMessage) == 0);
         CHECK(fake.count(core::TdFunctionKind::GetMessageProperties) == 0);
         CHECK(fake.count(core::TdFunctionKind::SendMessage) == 0);

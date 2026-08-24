@@ -276,6 +276,7 @@ class ResolverRun {
     }
 
     ResolverOutcome resolve_saved_messages_for_write() {
+        caller_ = M2Operation::Resolve;
         error_.reset();
         if (!principal_) {
             internal_error();

@@ -2107,15 +2107,6 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
     if (!authority) {
         return;
     }
-    auto resolved = resolver.resolve_saved_messages_for_write();
-    if (const auto* error = std::get_if<ResolverError>(&resolved)) {
-        emit_terminal(session, resolver_terminal_for_write(*error, operation, request));
-        return;
-    }
-    if (std::holds_alternative<ResolverStop>(resolved)) {
-        return;
-    }
-    auto target = std::get<ResolvedChatTarget>(std::move(resolved));
     if (!request.context.dry_run &&
         session.begin_audited_terminal() != AuditedTerminalStatus::Designated) {
         return;
@@ -2139,7 +2130,7 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
         std::make_shared<SavedAttachState>(SavedAttachState{.arguments = request.args,
                                                             .input = std::nullopt,
                                                             .principal = principal,
-                                                            .target = std::move(target),
+                                                            .target = std::nullopt,
                                                             .invocation_id = invocation,
                                                             .spool_local_path = {},
                                                             .dispatch_authorization = nullptr,
@@ -2216,9 +2207,17 @@ void WriteCoordinator::attach_saved_file(const proto::Request& request, RequestS
     };
     hooks.plan = [state, &resolver, &session, &request,
                   this](const WriteAdmission& admission) -> WritePlanningOutcome {
-        if (!state->input || !state->target || !admission.pass1_source) {
+        if (!state->input || !admission.pass1_source) {
             return internal(operation);
         }
+        auto resolved = resolver.resolve_saved_messages_for_write();
+        if (const auto* error = std::get_if<ResolverError>(&resolved)) {
+            return resolver_terminal_for_write(*error, operation, request);
+        }
+        if (std::holds_alternative<ResolverStop>(resolved)) {
+            return json(nullptr);
+        }
+        state->target = std::get<ResolvedChatTarget>(std::move(resolved));
         auto facts =
             read_message_planning_facts(resolver, client_.get(), session, operation, request,
                                         state->target->chat.id, state->input->message_id);
