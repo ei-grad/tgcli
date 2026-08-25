@@ -39,6 +39,13 @@ struct ObserverState {
     std::atomic<std::size_t> current_state_count{0};
     std::atomic<std::size_t> current_state_failure_count{0};
     std::atomic<bool> current_state_failure_exact{false};
+    std::atomic<std::size_t> authorization_count{0};
+    std::atomic<std::size_t> boundary_count{0};
+    std::atomic<std::uint64_t> last_authorization_sequence{0};
+    std::atomic<std::uint64_t> last_boundary_sequence{0};
+    std::atomic<std::uint64_t> authorization_order{0};
+    std::atomic<std::uint64_t> boundary_order{0};
+    std::atomic<AuthState> last_authorization{AuthState::Unknown};
 };
 
 class RecordingGenerationObserver final : public TdGenerationObserver {
@@ -75,6 +82,23 @@ class RecordingGenerationObserver final : public TdGenerationObserver {
         }
         state_->current_state_failure_exact.store(exact, std::memory_order_release);
         state_->current_state_failure_count.fetch_add(1, std::memory_order_release);
+    }
+
+    void on_authorization_state(const AuthStateData& state,
+                                std::uint64_t receive_sequence) noexcept override {
+        state_->last_authorization.store(state.state, std::memory_order_relaxed);
+        state_->last_authorization_sequence.store(receive_sequence, std::memory_order_relaxed);
+        state_->authorization_order.store(
+            state_->next_sequence.fetch_add(1, std::memory_order_relaxed),
+            std::memory_order_release);
+        state_->authorization_count.fetch_add(1, std::memory_order_release);
+    }
+
+    void on_receive_boundary(std::uint64_t receive_sequence) noexcept override {
+        state_->last_boundary_sequence.store(receive_sequence, std::memory_order_relaxed);
+        state_->boundary_order.store(state_->next_sequence.fetch_add(1, std::memory_order_relaxed),
+                                     std::memory_order_release);
+        state_->boundary_count.fetch_add(1, std::memory_order_release);
     }
 
   private:
@@ -259,6 +283,44 @@ TEST_CASE("generation observer is installed before current-state send and preced
     client.unsubscribe_updates(subscription);
 }
 
+TEST_CASE("generation observer receives auth then one boundary for events and empty polls",
+          "[stream][core][boundary][authorization][fake-boundary]") {
+    auto runtime = std::make_unique<ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    auto state = std::make_shared<ObserverState>();
+    TdGenerationObserverFactory observer_factory = [&](std::int32_t, std::uint64_t) {
+        return std::make_unique<RecordingGenerationObserver>(state);
+    };
+    const TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
+    REQUIRE(scripted->wait_for_sent(2));
+    const auto first = scripted->clients().front();
+    REQUIRE(eventually([&] { return state->boundary_count.load(std::memory_order_acquire) > 0; }));
+    const auto empty_boundaries = state->boundary_count.load(std::memory_order_acquire);
+    CHECK(state->last_boundary_sequence.load(std::memory_order_acquire) == 0);
+
+    scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
+    REQUIRE(scripted->wait_for_received(1));
+    REQUIRE(eventually(
+        [&] { return state->last_boundary_sequence.load(std::memory_order_acquire) == 1; }));
+    scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(scripted->wait_for_received(2));
+    REQUIRE(eventually([&] {
+        return state->last_authorization.load(std::memory_order_acquire) == AuthState::Ready &&
+               state->last_boundary_sequence.load(std::memory_order_acquire) == 2;
+    }));
+    CHECK(state->last_authorization_sequence.load(std::memory_order_acquire) == 2);
+    CHECK(state->authorization_order.load(std::memory_order_acquire) <
+          state->boundary_order.load(std::memory_order_acquire));
+
+    const auto before_orphan = state->boundary_count.load(std::memory_order_acquire);
+    scripted->push_response(first, 999, TdValue::from(TdOk{}));
+    REQUIRE(scripted->wait_for_received(3));
+    REQUIRE(eventually(
+        [&] { return state->boundary_count.load(std::memory_order_acquire) > before_orphan; }));
+    CHECK(state->last_boundary_sequence.load(std::memory_order_acquire) == 3);
+    CHECK(state->boundary_count.load(std::memory_order_acquire) >= empty_boundaries + 3);
+}
+
 TEST_CASE("generation observers reject stale callbacks and reset on replacement",
           "[stream][core][td-runtime][generation][fake-boundary]") {
     auto runtime = std::make_unique<ScriptedTdRuntime>();
@@ -283,13 +345,23 @@ TEST_CASE("generation observers reject stale callbacks and reset on replacement"
     CHECK(scripted->sent_functions()[2].function.kind() == TdFunctionKind::GetAuthorizationState);
     CHECK(scripted->sent_functions()[3].function.kind() == TdFunctionKind::GetCurrentState);
 
+    const auto received_before_stale = scripted->received_count();
+    const auto boundaries_before_stale =
+        second_state->boundary_count.load(std::memory_order_acquire);
     scripted->push_update(first,
                           TdValue::from(TdUpdateChatTitle{.chat_id = -1001, .title = "stale"}));
+    REQUIRE(scripted->wait_for_received(received_before_stale + 1));
+    REQUIRE(eventually([&] {
+        return second_state->boundary_count.load(std::memory_order_acquire) >
+               boundaries_before_stale;
+    }));
+    CHECK(second_state->last_boundary_sequence.load(std::memory_order_acquire) == 0);
+    CHECK(first_state->update_count.load(std::memory_order_acquire) == 0);
+
     scripted->push_update(second,
                           TdValue::from(TdUpdateChatTitle{.chat_id = -1001, .title = "current"}));
     REQUIRE(eventually(
         [&] { return second_state->update_count.load(std::memory_order_acquire) == 1; }));
-    CHECK(first_state->update_count.load(std::memory_order_acquire) == 0);
 
     scripted->push_response(second, 2, TdValue::from(TdCurrentState{}));
     scripted->push_response(second, 1, {}, AuthStateData{AuthState::Ready});

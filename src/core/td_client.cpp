@@ -1180,6 +1180,7 @@ class TdClient::Impl {
         std::uint64_t number;
         std::unique_ptr<TdGenerationObserver> observer;
         std::uint64_t current_state_query_id = 0;
+        std::uint64_t last_receive_event_sequence = 0;
         QueryRegistry<TdValue> queries;
         detail::RequestLifecycle<TdValue> lifecycle{"tdlib client generation closed"};
         std::mutex auth_commit_mutex;
@@ -1437,9 +1438,29 @@ class TdClient::Impl {
         while (!stop_.load(std::memory_order_acquire)) {
             auto event = runtime_->receive(kReceiveTimeout);
             if (!event.has_value()) {
+                std::shared_ptr<Generation> generation;
+                {
+                    const std::lock_guard<std::mutex> lock(state_mutex_);
+                    generation = current_;
+                }
+                receive_boundary(generation);
                 continue;
             }
             handle_event(std::move(*event));
+        }
+    }
+
+    static void receive_boundary(const std::shared_ptr<Generation>& generation) noexcept {
+        if (generation != nullptr && generation->observer != nullptr) {
+            generation->observer->on_receive_boundary(generation->last_receive_event_sequence);
+        }
+    }
+
+    static void observe_authorization(const std::shared_ptr<Generation>& generation,
+                                      const AuthStateData& state,
+                                      std::uint64_t receive_event_sequence) noexcept {
+        if (generation->observer != nullptr) {
+            generation->observer->on_authorization_state(state, receive_event_sequence);
         }
     }
 
@@ -1481,6 +1502,7 @@ class TdClient::Impl {
         }
         if (generation == nullptr || event.client_id != generation->client_id ||
             event.client_generation != generation->number) {
+            receive_boundary(generation);
             return;
         }
         const bool closes_generation =
@@ -1489,6 +1511,7 @@ class TdClient::Impl {
             close_generation_admission(generation);
         }
         const auto receive_event_sequence = next_receive_event_sequence_++;
+        generation->last_receive_event_sequence = receive_event_sequence;
 
         if (event.authorization_state) {
             if (event.authorization_state->state == AuthState::LoggingOut ||
@@ -1538,6 +1561,8 @@ class TdClient::Impl {
             }
             if (install_response) {
                 commit_auth_state_locked(generation, *auth_publication, false);
+                observe_authorization(generation, *event.authorization_state,
+                                      receive_event_sequence);
             }
             if (response) {
                 response->promise.set_value(std::move(event.object));
@@ -1546,12 +1571,13 @@ class TdClient::Impl {
         auth_locks.reset();
         if (auth_publication) {
             finish_auth_publication(generation, *auth_publication);
-            if (installed_closed) {
-                handle_closed(generation);
-            }
         }
         if (response) {
             response_completions_.publish(receive_event_sequence);
+        }
+        receive_boundary(generation);
+        if (installed_closed) {
+            handle_closed(generation);
         }
     }
 
@@ -1570,10 +1596,13 @@ class TdClient::Impl {
                 event.object.set_receive_event_metadata(receive_event_sequence,
                                                         publication.observed_at);
                 commit_auth_state_locked(generation, auth_publication, true);
+                observe_authorization(generation, *event.authorization_state,
+                                      receive_event_sequence);
             }
             locks = {};
             finish_auth_publication(generation, auth_publication);
             updates_.publish(event.object);
+            receive_boundary(generation);
             if (closed) {
                 handle_closed(generation);
             }
@@ -1602,6 +1631,7 @@ class TdClient::Impl {
         if (!pending) {
             updates_.publish(event.object);
         }
+        receive_boundary(generation);
     }
 
     AuthPublication prepare_auth_publication(const std::shared_ptr<Generation>& generation,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/td_client.hpp"
+#include "daemon/stream_ingress.hpp"
 #include "daemon/stream_storage.hpp"
 
 namespace tgcli::daemon {
@@ -11,11 +12,11 @@ namespace detail {
 
 } // namespace detail
 
-class StreamService {
+class StreamService final : private StreamReceiveSink {
   public:
     explicit StreamService(StreamReceiveSink* sink = nullptr,
                            detail::StreamStatusPublishProbe status_probe = {});
-    ~StreamService();
+    ~StreamService() override;
     StreamService(const StreamService&) = delete;
     StreamService& operator=(const StreamService&) = delete;
     StreamService(StreamService&&) = delete;
@@ -23,9 +24,15 @@ class StreamService {
 
     [[nodiscard]] core::TdGenerationObserverFactory observer_factory() noexcept;
     [[nodiscard]] StreamNormalizationStatus status() const noexcept;
+    [[nodiscard]] StreamIngressHub& ingress_hub() noexcept;
+    void claim_shutdown() noexcept;
 
   private:
     class GenerationObserver;
+    void on_item(const StreamItemView& item, const StreamMetadataView& metadata) noexcept override;
+
+    StreamReceiveSink* external_sink_ = nullptr;
+    StreamIngressHub hub_;
     FixedStreamNormalizer normalizer_;
 
     friend class GenerationObserver;

@@ -992,3 +992,43 @@ TEST_CASE("fixed ingress scan enqueue overflow and removal stay callback safe",
     REQUIRE(hub.poll_reclaim(*reserved));
     CHECK(callback_violations().load(std::memory_order_acquire) == 0);
 }
+
+TEST_CASE("stream lifecycle activation authorization and enqueue stay callback safe",
+          "[stream][callback-safety][ingress][boundary][authorization]") {
+    reset_instrumentation();
+    tgcli::daemon::StreamService service;
+    auto observer = service.observer_factory()(1001, 1);
+    REQUIRE(observer);
+
+    tgcli::core::TdCurrentState base;
+    base.updates.push_back(tgcli::core::TdValue::from(tgcli::core::TdUpdateUser{.user = user(42)}));
+    base.updates.push_back(tgcli::core::TdValue::from(
+        tgcli::core::TdUpdateNewChat{.chat = chat(-1001, 42, tgcli::core::TdChatKind::Private)}));
+    observer->on_current_state(stamped(std::move(base), 1));
+    observer->on_authorization_state(tgcli::core::AuthStateData{tgcli::core::AuthState::Ready}, 2);
+
+    const tgcli::daemon::StreamIngressRequest request{
+        .client_id = 1001,
+        .generation = 1,
+        .operation = tgcli::daemon::StreamOperation::Listen,
+        .mode = tgcli::daemon::StreamMode::Items,
+        .type_mask = tgcli::daemon::stream_event_mask(tgcli::daemon::StreamEventClass::Message)};
+    auto reserved = service.ingress_hub().reserve(request);
+    REQUIRE(reserved);
+    REQUIRE(service.ingress_hub().commit_activation(*reserved));
+    observer->on_receive_boundary(2);
+    REQUIRE(service.ingress_hub().activation_state(*reserved) ==
+            tgcli::daemon::StreamIngressState::Published);
+
+    observer->on_update(stamped(tgcli::core::TdUpdateNewMessage{.message = message()}, 3));
+    observer->on_receive_boundary(3);
+    REQUIRE(service.ingress_hub().poll_front(*reserved));
+    observer->on_authorization_state(tgcli::core::AuthStateData{tgcli::core::AuthState::Closing},
+                                     4);
+    observer->on_receive_boundary(4);
+    const auto terminal = service.ingress_hub().claim_terminal(*reserved);
+    REQUIRE(terminal);
+    CHECK(terminal->cause == tgcli::daemon::StreamTerminalCause::AuthorizationLost);
+    CHECK(terminal->auth_state == static_cast<std::int32_t>(tgcli::core::AuthState::Closing));
+    CHECK(callback_violations().load(std::memory_order_acquire) == 0);
+}

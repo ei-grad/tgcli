@@ -91,6 +91,7 @@ struct StreamTerminalPayload {
     std::uint64_t queued_bytes = 0;
     std::uint64_t incoming_bytes = 0;
     std::int32_t auth_state = 0;
+    StreamFailure metadata_failure;
 };
 
 struct StreamIngressDescriptor {
@@ -197,13 +198,16 @@ class StreamIngressHub {
     reserve(const StreamIngressRequest& request);
     [[nodiscard]] std::optional<StreamIngressAdmissionFailure>
     last_reservation_failure() const noexcept;
+    void begin_generation(std::int32_t client_id, std::uint64_t generation) noexcept;
+    void claim_generation(std::int32_t client_id, std::uint64_t generation,
+                          StreamTerminalPayload payload) noexcept;
     bool commit_activation(StreamIngressReservation& reservation) noexcept;
     [[nodiscard]] StreamIngressState
     activation_state(const StreamIngressReservation& reservation) const noexcept;
     [[nodiscard]] std::optional<StreamActivationProjection>
     activation_projection(const StreamIngressReservation& reservation) const noexcept;
     std::size_t activate_armed(std::int32_t client_id, std::uint64_t generation,
-                               std::uint64_t receive_sequence) noexcept;
+                               std::uint64_t receive_sequence, bool ready = true) noexcept;
 
     void publish(const StreamItemView& item) noexcept;
     [[nodiscard]] std::optional<StreamIngressItemView>

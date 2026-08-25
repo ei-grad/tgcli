@@ -373,10 +373,12 @@ TEST_CASE("stream ingress queue failures use exact precedence and first cause",
         auto reserved = hub.reserve(request());
         REQUIRE(reserved);
         REQUIRE(hub.claim(*reserved, {.cause = StreamTerminalCause::Shutdown,
-                                      .operation = StreamOperation::Listen}));
+                                      .operation = StreamOperation::Listen,
+                                      .metadata_failure = {}}));
         CHECK_FALSE(hub.claim(*reserved, {.cause = StreamTerminalCause::AuthorizationLost,
                                           .operation = StreamOperation::WaitFor,
-                                          .auth_state = 9}));
+                                          .auth_state = 9,
+                                          .metadata_failure = {}}));
         const auto terminal = hub.claim_terminal(*reserved);
         REQUIRE(terminal);
         CHECK(terminal->cause == StreamTerminalCause::Shutdown);

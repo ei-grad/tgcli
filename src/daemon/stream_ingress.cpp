@@ -172,7 +172,8 @@ class StreamIngressHub::Impl {
                                        .operation = slot.projection.operation,
                                        .queued_items = queued_items,
                                        .queued_bytes = queued_bytes,
-                                       .incoming_bytes = incoming_bytes}));
+                                       .incoming_bytes = incoming_bytes,
+                                       .metadata_failure = {}}));
     }
 
     static bool matches(const StreamIngressSlot& slot, const StreamItemView& item) noexcept {
@@ -264,6 +265,8 @@ class StreamIngressHub::Impl {
     std::array<std::atomic<StreamIngressSlot*>, kStreamSubscriberSlots> dormant;
     std::array<std::atomic<StreamIngressSlot*>, kStreamSubscriberSlots> published;
     std::atomic<std::uint32_t> publisher_count{0};
+    std::atomic<std::int32_t> current_client_id{0};
+    std::atomic<std::uint64_t> current_generation{0};
     mutable std::mutex control;
     std::optional<StreamIngressAtomic> lock_free_failure;
     std::optional<StreamIngressAdmissionFailure> last_failure;
@@ -376,6 +379,36 @@ StreamIngressHub::last_reservation_failure() const noexcept {
     return impl_->last_failure;
 }
 
+void StreamIngressHub::begin_generation(std::int32_t client_id, std::uint64_t generation) noexcept {
+    impl_->current_client_id.store(client_id, std::memory_order_release);
+    impl_->current_generation.store(generation, std::memory_order_release);
+    for (auto& slot : impl_->slots) {
+        const auto state = slot.state.load(std::memory_order_acquire);
+        if (state == StreamIngressState::Free || state == StreamIngressState::Removed ||
+            state == StreamIngressState::Reclaimable ||
+            (slot.staged.client_id == client_id && slot.staged.generation == generation)) {
+            continue;
+        }
+        static_cast<void>(Impl::claim(slot, {.cause = StreamTerminalCause::GenerationReplaced,
+                                             .operation = slot.staged.operation,
+                                             .metadata_failure = {}}));
+    }
+}
+
+void StreamIngressHub::claim_generation(std::int32_t client_id, std::uint64_t generation,
+                                        StreamTerminalPayload payload) noexcept {
+    for (auto& slot : impl_->slots) {
+        const auto state = slot.state.load(std::memory_order_acquire);
+        if (state == StreamIngressState::Free || state == StreamIngressState::Removed ||
+            state == StreamIngressState::Reclaimable || slot.staged.client_id != client_id ||
+            slot.staged.generation != generation) {
+            continue;
+        }
+        payload.operation = slot.staged.operation;
+        static_cast<void>(Impl::claim(slot, payload));
+    }
+}
+
 bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) noexcept {
     const std::lock_guard lock(impl_->control);
     if (!impl_->valid(reservation)) {
@@ -410,7 +443,13 @@ std::optional<StreamActivationProjection> StreamIngressHub::activation_projectio
 }
 
 std::size_t StreamIngressHub::activate_armed(std::int32_t client_id, std::uint64_t generation,
-                                             std::uint64_t receive_sequence) noexcept {
+                                             std::uint64_t receive_sequence, bool ready) noexcept {
+    const auto current_generation = impl_->current_generation.load(std::memory_order_acquire);
+    if (!ready || (current_generation != 0 &&
+                   (impl_->current_client_id.load(std::memory_order_acquire) != client_id ||
+                    current_generation != generation))) {
+        return 0;
+    }
     std::size_t activated = 0;
     for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
         auto* slot = impl_->dormant[index].load(std::memory_order_seq_cst);

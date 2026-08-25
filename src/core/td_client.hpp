@@ -39,6 +39,16 @@ class TdGenerationObserver {
     virtual void on_current_state(const TdValue& state) noexcept = 0;
     // Dispatch failure runs synchronously on the generation construction thread.
     virtual void on_current_state_failure(const std::exception_ptr& failure) noexcept = 0;
+    // Accepted authorization state precedes the boundary for the same receive event.
+    virtual void on_authorization_state(const AuthStateData& state,
+                                        std::uint64_t receive_sequence) noexcept {
+        static_cast<void>(state);
+        static_cast<void>(receive_sequence);
+    }
+    // Runs after each receive attempt, including stale events and empty polls.
+    virtual void on_receive_boundary(std::uint64_t receive_sequence) noexcept {
+        static_cast<void>(receive_sequence);
+    }
 };
 
 using TdGenerationObserverFactory =
