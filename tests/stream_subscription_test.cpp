@@ -90,6 +90,47 @@ struct ManualPoll {
     }
 };
 
+struct SecondPollGate {
+    using Clock = StreamPollSchedule::Clock;
+
+    Clock::time_point current;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::size_t sleeps = 0;
+    bool second_entered = false;
+    bool second_released = false;
+
+    std::shared_ptr<testing::StreamDeliveryHooks> hooks() {
+        auto result = std::make_shared<testing::StreamDeliveryHooks>();
+        result->now = [this] {
+            const std::lock_guard lock(mutex);
+            return current;
+        };
+        result->sleep_until = [this](Clock::time_point wake) {
+            std::unique_lock lock(mutex);
+            current = wake;
+            ++sleeps;
+            if (sleeps == 2) {
+                second_entered = true;
+                cv.notify_all();
+                cv.wait(lock, [this] { return second_released; });
+            }
+        };
+        return result;
+    }
+
+    void wait_second() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return second_entered; });
+    }
+
+    void release_second() {
+        const std::lock_guard lock(mutex);
+        second_released = true;
+        cv.notify_all();
+    }
+};
+
 struct ActivationGate {
     testing::StreamActivationProbePoint target =
         testing::StreamActivationProbePoint::BeforeLifecycle;
@@ -188,12 +229,230 @@ struct ReclaimProbe {
     }
 };
 
+struct PublishRetireGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool write_entered = false;
+    bool write_released = false;
+    bool reclaim_entered = false;
+    bool discard_entered = false;
+
+    static void notify(void* raw_context, tgcli::daemon::detail::StreamIngressProbePoint point,
+                       std::size_t index) noexcept {
+        static_cast<void>(index);
+        auto& gate = *static_cast<PublishRetireGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        if (point == tgcli::daemon::detail::StreamIngressProbePoint::EnqueueWriteStart) {
+            gate.write_entered = true;
+            gate.cv.notify_all();
+            gate.cv.wait(lock, [&gate] { return gate.write_released; });
+        } else if (point == tgcli::daemon::detail::StreamIngressProbePoint::ReclaimLoad) {
+            gate.reclaim_entered = true;
+            gate.cv.notify_all();
+        } else if (point == tgcli::daemon::detail::StreamIngressProbePoint::Discard) {
+            gate.discard_entered = true;
+            gate.cv.notify_all();
+        }
+    }
+
+    void wait_write() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return write_entered; });
+    }
+
+    void wait_reclaim() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return reclaim_entered; });
+    }
+
+    void release_write() {
+        const std::lock_guard lock(mutex);
+        write_released = true;
+        cv.notify_all();
+    }
+
+    bool discarded() {
+        const std::lock_guard lock(mutex);
+        return discard_entered;
+    }
+};
+
+struct ClaimRetireGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::size_t claim_waiting = 0;
+    std::size_t claim_owned = 0;
+    bool release_first_claim = false;
+    bool reclaim_entered = false;
+
+    static void subscription_notify(void* raw_context,
+                                    testing::StreamSubscriptionProbePoint point) noexcept {
+        auto& gate = *static_cast<ClaimRetireGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        if (point == testing::StreamSubscriptionProbePoint::ClaimWaiting) {
+            ++gate.claim_waiting;
+            gate.cv.notify_all();
+            return;
+        }
+        if (point == testing::StreamSubscriptionProbePoint::ClaimOwned) {
+            ++gate.claim_owned;
+            gate.cv.notify_all();
+            if (gate.claim_owned == 1) {
+                gate.cv.wait(lock, [&gate] { return gate.release_first_claim; });
+            }
+        }
+    }
+
+    static void ingress_notify(void* raw_context,
+                               tgcli::daemon::detail::StreamIngressProbePoint point,
+                               std::size_t index) noexcept {
+        static_cast<void>(index);
+        if (point != tgcli::daemon::detail::StreamIngressProbePoint::ReclaimLoad) {
+            return;
+        }
+        auto& gate = *static_cast<ClaimRetireGate*>(raw_context);
+        const std::lock_guard lock(gate.mutex);
+        gate.reclaim_entered = true;
+        gate.cv.notify_all();
+    }
+
+    void wait_first_owned() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return claim_owned == 1; });
+    }
+
+    void wait_second_waiting() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return claim_waiting >= 2; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        release_first_claim = true;
+        cv.notify_all();
+    }
+
+    [[nodiscard]] std::pair<std::size_t, bool> snapshot() {
+        const std::lock_guard lock(mutex);
+        return {claim_owned, reclaim_entered};
+    }
+};
+
+struct RetireClaimGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::size_t claim_waiting = 0;
+    std::size_t claim_forwarding = 0;
+    bool retire_owned = false;
+    bool released = false;
+    bool reclaim_entered = false;
+
+    static void subscription_notify(void* raw_context,
+                                    testing::StreamSubscriptionProbePoint point) noexcept {
+        auto& gate = *static_cast<RetireClaimGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        if (point == testing::StreamSubscriptionProbePoint::ClaimWaiting) {
+            ++gate.claim_waiting;
+            gate.cv.notify_all();
+            return;
+        }
+        if (point == testing::StreamSubscriptionProbePoint::ClaimForwarding) {
+            ++gate.claim_forwarding;
+            gate.cv.notify_all();
+            return;
+        }
+        if (point == testing::StreamSubscriptionProbePoint::RetireOwned) {
+            gate.retire_owned = true;
+            gate.cv.notify_all();
+            gate.cv.wait(lock, [&gate] { return gate.released; });
+        }
+    }
+
+    static void ingress_notify(void* raw_context,
+                               tgcli::daemon::detail::StreamIngressProbePoint point,
+                               std::size_t index) noexcept {
+        static_cast<void>(index);
+        if (point != tgcli::daemon::detail::StreamIngressProbePoint::ReclaimLoad) {
+            return;
+        }
+        auto& gate = *static_cast<RetireClaimGate*>(raw_context);
+        const std::lock_guard lock(gate.mutex);
+        gate.reclaim_entered = true;
+        gate.cv.notify_all();
+    }
+
+    void wait_retire_owned() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return retire_owned; });
+    }
+
+    void wait_claim_waiting() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return claim_waiting != 0; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+
+    [[nodiscard]] std::pair<std::size_t, bool> snapshot() {
+        const std::lock_guard lock(mutex);
+        return {claim_forwarding, reclaim_entered};
+    }
+};
+
+struct OverflowGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+
+    static void notify(void* raw_context, tgcli::daemon::detail::StreamIngressProbePoint point,
+                       std::size_t index) noexcept {
+        static_cast<void>(index);
+        if (point != tgcli::daemon::detail::StreamIngressProbePoint::EnqueueOverflow) {
+            return;
+        }
+        auto& gate = *static_cast<OverflowGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        gate.entered = true;
+        gate.cv.notify_all();
+        gate.cv.wait(lock, [&gate] { return gate.released; });
+    }
+
+    void wait() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return entered; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+
 StreamItemView message_item(std::string_view line, std::uint64_t sequence = 2) {
     return StreamIngressTestAccess::item(line, {}, sequence,
                                          {.event_class = StreamEventClass::Message,
                                           .chat_id = 42,
                                           .sender_kind = StreamSenderKind::User,
                                           .sender_id = 7});
+}
+
+std::string maximum_item_line() {
+    std::string line(kStreamQueueItemBytes, 'x');
+    line.back() = '\n';
+    return line;
+}
+
+void fill_queue_near_byte_capacity(StreamIngressHub& hub, std::uint64_t first_sequence) {
+    const auto line = maximum_item_line();
+    for (std::uint64_t offset = 0; offset < 31; ++offset) {
+        hub.publish(message_item(line, first_sequence + offset));
+    }
 }
 
 void activate(RequestSession& session, const std::shared_ptr<StreamIngressHub>& hub,
@@ -225,9 +484,14 @@ class BlockingSink final : public ResponseSink {
         return terminals_.load(std::memory_order_acquire);
     }
 
+    [[nodiscard]] std::size_t items() const {
+        return items_.load(std::memory_order_acquire);
+    }
+
   private:
     DeliveryOutcome emit_item(json data) override {
         static_cast<void>(data);
+        items_.fetch_add(1, std::memory_order_release);
         {
             std::unique_lock lock(mutex_);
             item_entered_ = true;
@@ -280,6 +544,7 @@ class BlockingSink final : public ResponseSink {
     bool item_entered_ = false;
     bool item_released_ = false;
     std::atomic<std::size_t> terminals_ = 0;
+    std::atomic<std::size_t> items_ = 0;
 };
 
 } // namespace
@@ -405,6 +670,142 @@ TEST_CASE("terminal during a begun complete item wins before planned count",
     CHECK(status == StreamDeliveryStatus::TerminalComplete);
     CHECK(sink->terminals() == 1);
     CHECK(count_at_terminal.load(std::memory_order_acquire) == 1);
+}
+
+TEST_CASE("Nth completion and external causes retain the forced concurrent winner",
+          "[stream][subscription][delivery][terminal][concurrency]") {
+    const std::array external{
+        StreamTerminalPayload{.cause = StreamTerminalCause::Deadline, .metadata_failure = {}},
+        StreamTerminalPayload{.cause = StreamTerminalCause::AuthorizationLost,
+                              .auth_state = 12,
+                              .metadata_failure = {}},
+        StreamTerminalPayload{.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}},
+    };
+    for (const auto& cause : external) {
+        for (const bool external_first : {true, false}) {
+            DYNAMIC_SECTION("cause=" << static_cast<int>(cause.cause)
+                                     << " external_first=" << external_first) {
+                auto hub = std::make_shared<StreamIngressHub>();
+                hub->begin_generation(1001, 7);
+                auto sink = std::make_shared<BlockingSink>();
+                RequestSession session(request(), sink, 17, {}, {}, {}, RequestDeadline{});
+                activate(session, hub);
+                REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+                hub->publish(message_item("{}\n", 2));
+                hub->publish(message_item("{}\n", 3));
+                SecondPollGate poll;
+                std::optional<StreamTerminalPayload> observed;
+                std::uint64_t delivered = 0;
+                StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+                std::thread worker([&] {
+                    status = run_stream_delivery(
+                        session, {.count = 1,
+                                  .terminal_builder =
+                                      [&observed, &delivered](const StreamTerminalPayload& terminal,
+                                                              std::uint64_t delivered_count) {
+                                          observed = terminal;
+                                          delivered = delivered_count;
+                                          return terminal_frame(terminal, delivered_count);
+                                      },
+                                  .hooks = poll.hooks()});
+                });
+                sink->wait_item();
+                if (external_first) {
+                    hub->claim_generation(1001, 7, cause);
+                    sink->release_item();
+                    poll.wait_second();
+                } else {
+                    sink->release_item();
+                    poll.wait_second();
+                    hub->claim_generation(1001, 7, cause);
+                }
+                poll.release_second();
+                worker.join();
+
+                REQUIRE(observed);
+                CHECK(observed->cause ==
+                      (external_first ? cause.cause : StreamTerminalCause::PlannedSuccess));
+                if (external_first) {
+                    CHECK(observed->auth_state == cause.auth_state);
+                }
+                CHECK(delivered == 1);
+                CHECK(sink->items() == 1);
+                CHECK(sink->terminals() == 1);
+                CHECK(status == StreamDeliveryStatus::TerminalComplete);
+                auto replacement = hub->reserve(ingress_request());
+                CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+            }
+        }
+    }
+}
+
+TEST_CASE("Nth completion races the actual queue byte overflow in both orders",
+          "[stream][subscription][delivery][terminal][overflow][concurrency]") {
+    for (const bool overflow_first : {true, false}) {
+        DYNAMIC_SECTION("overflow_first=" << overflow_first) {
+            OverflowGate overflow;
+            auto hub = std::make_shared<StreamIngressHub>(
+                tgcli::daemon::detail::StreamIngressProbe{.context = &overflow,
+                                                          .hook = &OverflowGate::notify,
+                                                          .forced_lock_free_failure = {}});
+            hub->begin_generation(1001, 7);
+            auto sink = std::make_shared<BlockingSink>();
+            RequestSession session(request(), sink, 17, {}, {}, {}, RequestDeadline{});
+            activate(session, hub);
+            REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+            hub->publish(message_item("{}\n", 2));
+            hub->publish(message_item("{}\n", 3));
+            fill_queue_near_byte_capacity(*hub, 4);
+            SecondPollGate poll;
+            std::optional<StreamTerminalPayload> observed;
+            std::uint64_t delivered = 0;
+            StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+            std::thread worker([&] {
+                status = run_stream_delivery(
+                    session, {.count = 1,
+                              .terminal_builder =
+                                  [&observed, &delivered](const StreamTerminalPayload& terminal,
+                                                          std::uint64_t delivered_count) {
+                                      observed = terminal;
+                                      delivered = delivered_count;
+                                      return terminal_frame(terminal, delivered_count);
+                                  },
+                              .hooks = poll.hooks()});
+            });
+            sink->wait_item();
+            const auto overflow_line = maximum_item_line();
+            std::thread publisher([&] { hub->publish(message_item(overflow_line, 100)); });
+            overflow.wait();
+            if (overflow_first) {
+                overflow.release();
+                publisher.join();
+                sink->release_item();
+                poll.wait_second();
+            } else {
+                sink->release_item();
+                poll.wait_second();
+                overflow.release();
+                publisher.join();
+            }
+            poll.release_second();
+            worker.join();
+
+            REQUIRE(observed);
+            CHECK(observed->cause == (overflow_first ? StreamTerminalCause::QueueBytes
+                                                     : StreamTerminalCause::PlannedSuccess));
+            if (overflow_first) {
+                CHECK(observed->incoming_bytes == kStreamQueueItemBytes);
+                CHECK(observed->queued_bytes <= kStreamQueueBytes);
+                CHECK(observed->queued_bytes + observed->incoming_bytes > kStreamQueueBytes);
+            }
+            CHECK(delivered == 1);
+            CHECK(sink->items() == 1);
+            CHECK(sink->terminals() == 1);
+            CHECK(status == StreamDeliveryStatus::TerminalComplete);
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+    }
 }
 
 TEST_CASE("incomplete suppressed and exceptional items disconnect without terminal or count",
@@ -704,6 +1105,108 @@ TEST_CASE("stream activation closes Open loss capacity and post-promotion termin
     }
 }
 
+TEST_CASE("stream activation rechecks deadline and cancellation before every promotion",
+          "[stream][subscription][activation][deadline][cancellation]") {
+    for (const auto mode :
+         {StreamActivityMode::TrackedDaemon, StreamActivityMode::UntrackedNoDaemon}) {
+        DYNAMIC_SECTION("expired at entry mode=" << static_cast<int>(mode)) {
+            ActivityTracker tracker([] {});
+            REQUIRE(tracker.daemon_ready(std::nullopt));
+            ActivityTracker::Token token;
+            if (mode == StreamActivityMode::TrackedDaemon) {
+                auto request_activity = tracker.try_request();
+                REQUIRE(request_activity);
+                token = std::move(*request_activity);
+            }
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {}, std::move(token),
+                                   {}, RequestDeadline{RequestSession::Clock::now()});
+
+            auto result = session.activate_stream_subscription(hub, ingress_request(), mode);
+            CHECK(std::get<StreamSubscriptionActivationFailure>(result) ==
+                  StreamSubscriptionActivationFailure::TerminalClaimed);
+            if (mode == StreamActivityMode::TrackedDaemon) {
+                CHECK(tracker.snapshot().requests == 1);
+                CHECK(tracker.snapshot().subscriptions == 0);
+                static_cast<void>(
+                    session.error("TIMEOUT", "request timed out", json::object(), kTimeout));
+                CHECK(tracker.snapshot().requests == 0);
+            }
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+
+        DYNAMIC_SECTION("expires before promotion mode=" << static_cast<int>(mode)) {
+            ActivityTracker tracker([] {});
+            REQUIRE(tracker.daemon_ready(std::nullopt));
+            ActivityTracker::Token token;
+            if (mode == StreamActivityMode::TrackedDaemon) {
+                auto request_activity = tracker.try_request();
+                REQUIRE(request_activity);
+                token = std::move(*request_activity);
+            }
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            Captured captured;
+            const RequestDeadline deadline{RequestSession::Clock::now() + 10ms};
+            RequestSession session(request(), capturing_sink(captured), 17, {}, std::move(token),
+                                   {}, deadline);
+            ActivationGate gate(hub);
+            StreamSubscriptionActivationResult result{StreamIngressInvalidRequest{}};
+            std::thread activation([&] {
+                result = session.activate_stream_subscription(
+                    hub, ingress_request(), mode,
+                    {.context = &gate, .hook = &ActivationGate::notify});
+            });
+            gate.wait();
+            while (!deadline_expired(deadline)) {
+                std::this_thread::yield();
+            }
+            gate.release();
+            activation.join();
+
+            CHECK(std::get<StreamSubscriptionActivationFailure>(result) ==
+                  StreamSubscriptionActivationFailure::TerminalClaimed);
+            if (mode == StreamActivityMode::TrackedDaemon) {
+                CHECK(tracker.snapshot().requests == 1);
+                CHECK(tracker.snapshot().subscriptions == 0);
+                static_cast<void>(
+                    session.error("TIMEOUT", "request timed out", json::object(), kTimeout));
+                CHECK(tracker.snapshot().requests == 0);
+            }
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+
+        DYNAMIC_SECTION("cancelled before promotion mode=" << static_cast<int>(mode)) {
+            ActivityTracker tracker([] {});
+            REQUIRE(tracker.daemon_ready(std::nullopt));
+            ActivityTracker::Token token;
+            if (mode == StreamActivityMode::TrackedDaemon) {
+                auto request_activity = tracker.try_request();
+                REQUIRE(request_activity);
+                token = std::move(*request_activity);
+            }
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {}, std::move(token),
+                                   {}, RequestDeadline{});
+            session.disconnect();
+
+            auto result = session.activate_stream_subscription(hub, ingress_request(), mode);
+            CHECK(std::get<StreamSubscriptionActivationFailure>(result) ==
+                  StreamSubscriptionActivationFailure::RequestClosed);
+            CHECK(tracker.snapshot().requests == 0);
+            CHECK(tracker.snapshot().subscriptions == 0);
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+    }
+}
+
 TEST_CASE("disconnect tears down Armed Installing and Published subscription states",
           "[stream][subscription][disconnect][activation][concurrency]") {
     for (const auto phase : {StreamIngressState::Armed, StreamIngressState::Published}) {
@@ -786,6 +1289,174 @@ TEST_CASE("subscription activity remains held until publisher-quiescent reclamat
     worker.join();
     CHECK(status == StreamDeliveryStatus::TerminalComplete);
     CHECK(tracker.snapshot().subscriptions == 0);
+}
+
+TEST_CASE("terminal teardown waits for an admitted publisher before poison and reuse",
+          "[stream][subscription][terminal][publisher][reclaim][concurrency]") {
+    PublishRetireGate gate;
+    auto hub = std::make_shared<StreamIngressHub>(tgcli::daemon::detail::StreamIngressProbe{
+        .context = &gate, .hook = &PublishRetireGate::notify, .forced_lock_free_failure = {}});
+    hub->begin_generation(1001, 7);
+    std::vector<StreamIngressReservation> occupied;
+    occupied.reserve(kStreamSubscriberSlots - 1);
+    for (std::size_t index = 1; index < kStreamSubscriberSlots; ++index) {
+        auto admission = hub->reserve(ingress_request());
+        REQUIRE(std::holds_alternative<StreamIngressReservation>(admission));
+        occupied.push_back(std::move(std::get<StreamIngressReservation>(admission)));
+    }
+    ActivityTracker tracker([] {});
+    REQUIRE(tracker.daemon_ready(std::nullopt));
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    auto sink = std::make_shared<BlockingSink>();
+    sink->release_item();
+    RequestSession session(request(), sink, 17, {}, std::move(*activity), {}, RequestDeadline{});
+    auto activation = session.activate_stream_subscription(hub, ingress_request(),
+                                                           StreamActivityMode::TrackedDaemon);
+    REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+    REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+
+    std::thread publisher([&] { hub->publish(message_item("{}\n")); });
+    gate.wait_write();
+    CHECK(StreamIngressTestAccess::publisher_count(*hub) == 1);
+    hub->claim_control_generation(1001, 7,
+                                  {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
+    ManualPoll poll;
+    StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+    std::thread worker([&] {
+        status = run_stream_delivery(
+            session,
+            {.count = std::nullopt, .terminal_builder = &terminal_frame, .hooks = poll.hooks()});
+    });
+    gate.wait_reclaim();
+
+    CHECK(StreamIngressTestAccess::publisher_count(*hub) == 1);
+    CHECK(tracker.snapshot().subscriptions == 1);
+    CHECK_FALSE(gate.discarded());
+    auto blocked = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressAdmissionFailure>(blocked));
+
+    gate.release_write();
+    publisher.join();
+    worker.join();
+    CHECK(status == StreamDeliveryStatus::TerminalComplete);
+    CHECK(sink->items() == 0);
+    CHECK(sink->terminals() == 1);
+    CHECK(tracker.snapshot().subscriptions == 0);
+    auto replacement = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+}
+
+TEST_CASE("terminal claim owns its reservation through concurrent reclaim",
+          "[stream][subscription][terminal][reclaim][concurrency]") {
+    ClaimRetireGate gate;
+    auto hub = std::make_shared<StreamIngressHub>(
+        tgcli::daemon::detail::StreamIngressProbe{.context = &gate,
+                                                  .hook = &ClaimRetireGate::ingress_notify,
+                                                  .forced_lock_free_failure = {}});
+    hub->begin_generation(1001, 7);
+    std::vector<StreamIngressReservation> occupied;
+    occupied.reserve(kStreamSubscriberSlots - 1);
+    for (std::size_t index = 1; index < kStreamSubscriberSlots; ++index) {
+        auto admission = hub->reserve(ingress_request());
+        REQUIRE(std::holds_alternative<StreamIngressReservation>(admission));
+        occupied.push_back(std::move(std::get<StreamIngressReservation>(admission)));
+    }
+    Captured captured;
+    RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {}, RequestDeadline{});
+    auto activation = session.activate_stream_subscription(
+        hub, ingress_request(), StreamActivityMode::UntrackedNoDaemon,
+        {.context = &gate,
+         .hook = nullptr,
+         .subscription_hook = &ClaimRetireGate::subscription_notify});
+    REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+    REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+    hub->claim_control_generation(1001, 7,
+                                  {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
+
+    std::thread disconnect([&] { session.disconnect(); });
+    gate.wait_first_owned();
+    ManualPoll poll;
+    StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+    std::thread worker([&] {
+        status = run_stream_delivery(
+            session,
+            {.count = std::nullopt, .terminal_builder = &terminal_frame, .hooks = poll.hooks()});
+    });
+    gate.wait_second_waiting();
+
+    const auto [owned_before_release, reclaimed_before_release] = gate.snapshot();
+    CHECK(owned_before_release == 1);
+    CHECK_FALSE(reclaimed_before_release);
+    auto blocked = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressAdmissionFailure>(blocked));
+
+    gate.release();
+    disconnect.join();
+    worker.join();
+    CHECK(status == StreamDeliveryStatus::TerminalComplete);
+    REQUIRE(captured.error);
+    CHECK(captured.error->details["cause"] == static_cast<int>(StreamTerminalCause::Shutdown));
+    CHECK(gate.snapshot().second);
+    auto replacement = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+}
+
+TEST_CASE("retired subscription rejects a late claim before ingress access",
+          "[stream][subscription][terminal][reclaim][concurrency]") {
+    RetireClaimGate gate;
+    auto hub = std::make_shared<StreamIngressHub>(
+        tgcli::daemon::detail::StreamIngressProbe{.context = &gate,
+                                                  .hook = &RetireClaimGate::ingress_notify,
+                                                  .forced_lock_free_failure = {}});
+    hub->begin_generation(1001, 7);
+    std::vector<StreamIngressReservation> occupied;
+    occupied.reserve(kStreamSubscriberSlots - 1);
+    for (std::size_t index = 1; index < kStreamSubscriberSlots; ++index) {
+        auto admission = hub->reserve(ingress_request());
+        REQUIRE(std::holds_alternative<StreamIngressReservation>(admission));
+        occupied.push_back(std::move(std::get<StreamIngressReservation>(admission)));
+    }
+    Captured captured;
+    RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {}, RequestDeadline{});
+    auto activation = session.activate_stream_subscription(
+        hub, ingress_request(), StreamActivityMode::UntrackedNoDaemon,
+        {.context = &gate,
+         .hook = nullptr,
+         .subscription_hook = &RetireClaimGate::subscription_notify});
+    REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+    REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+    hub->claim_control_generation(1001, 7,
+                                  {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
+
+    ManualPoll poll;
+    StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+    std::thread worker([&] {
+        status = run_stream_delivery(
+            session,
+            {.count = std::nullopt, .terminal_builder = &terminal_frame, .hooks = poll.hooks()});
+    });
+    gate.wait_retire_owned();
+    std::thread disconnect([&] { session.disconnect(); });
+    gate.wait_claim_waiting();
+
+    const auto [forwarded_before_release, reclaimed_before_release] = gate.snapshot();
+    CHECK(forwarded_before_release == 0);
+    CHECK_FALSE(reclaimed_before_release);
+    auto blocked = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressAdmissionFailure>(blocked));
+
+    gate.release();
+    worker.join();
+    disconnect.join();
+    CHECK(status == StreamDeliveryStatus::TerminalComplete);
+    REQUIRE(captured.error);
+    CHECK(captured.error->details["cause"] == static_cast<int>(StreamTerminalCause::Shutdown));
+    const auto [forwarded_after_reclaim, reclaimed_after_release] = gate.snapshot();
+    CHECK(forwarded_after_reclaim == 0);
+    CHECK(reclaimed_after_release);
+    auto replacement = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
 }
 
 TEST_CASE("request session destruction tears down its owned subscription lease exactly once",

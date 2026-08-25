@@ -708,6 +708,34 @@ TEST_CASE("stream ingress removal waits for a publisher that loaded the slot",
     CHECK(std::holds_alternative<StreamIngressReservation>(hub.reserve(request())));
 }
 
+TEST_CASE("reclaim never poisons storage while an admitted publisher can still write",
+          "[stream][ingress][publisher][reclaim][poison][concurrency]") {
+    PointProbe probe;
+    StreamIngressHub hub(
+        {.context = &probe, .hook = &PointProbe::notify, .forced_lock_free_failure = std::nullopt});
+    auto reserved = reserve_slot(hub);
+    const auto index = StreamIngressTestAccess::slot_index(reserved);
+    REQUIRE(hub.commit_activation(reserved));
+    REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+    probe.reset(detail::StreamIngressProbePoint::EnqueueWriteStart, index);
+    probe.enabled.store(true, std::memory_order_release);
+    std::thread publisher([&] { hub.publish(item("{}\n", 2)); });
+    wait_entered(probe);
+
+    REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::Shutdown,
+                                 .operation = StreamOperation::Listen,
+                                 .metadata_failure = {}}));
+    REQUIRE(hub.detach(reserved));
+    CHECK(StreamIngressTestAccess::publisher_count(hub) == 1);
+    CHECK_FALSE(hub.poll_reclaim(reserved));
+    CHECK_FALSE(StreamIngressTestAccess::reclaimed_state_is_poisoned(hub, index));
+
+    probe.release.store(true, std::memory_order_release);
+    publisher.join();
+    REQUIRE(hub.poll_reclaim(reserved));
+    CHECK(StreamIngressTestAccess::reclaimed_state_is_poisoned(hub, index));
+}
+
 TEST_CASE("stream ingress proves P I L D X Z for every registry slot",
           "[stream][ingress][reclaim][concurrency]") {
     PointProbe probe;

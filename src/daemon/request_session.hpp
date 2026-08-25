@@ -186,6 +186,7 @@ class RequestSession final : public ResponseSink {
     DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
                                int exit_code) override;
     ChallengeReply emit_challenge(nlohmann::json data) override;
+    void emit_abort() noexcept override;
 
     proto::Request request_;
     std::shared_ptr<ResponseSink> transport_owner_;

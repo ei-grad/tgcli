@@ -189,9 +189,17 @@ class ConnectionSink final : public ResponseSink {
 
   private:
     DeliveryOutcome emit_item(nlohmann::json data) override {
-        const bool complete = connection_->send(proto::Item{request_id_, std::move(data)});
+        bool complete = false;
+        try {
+            complete = connection_->send(proto::Item{request_id_, std::move(data)});
+        } catch (...) {
+            // Frame serialization and the connection writer expose non-enumerable exception
+            // types. A begun protocol frame cannot be retried safely.
+            abort();
+            return DeliveryOutcome::Disconnected;
+        }
         if (!complete) {
-            connection_->shutdown();
+            abort();
         }
         return complete ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
@@ -199,31 +207,66 @@ class ConnectionSink final : public ResponseSink {
         connection_->send(proto::Progress{request_id_, std::move(data)});
     }
     DeliveryOutcome emit_result(nlohmann::json data) override {
-        const bool visible = connection_->send(proto::Result{request_id_, std::move(data)});
+        bool visible = false;
+        try {
+            visible = connection_->send(proto::Result{request_id_, std::move(data)});
+        } catch (...) {
+            // See emit_item: terminal serialization failure is disconnect without retry.
+            abort();
+            return DeliveryOutcome::Disconnected;
+        }
         if (!visible) {
             connection_->shutdown();
         }
-        terminal_hook_(visible);
+        notify_terminal(visible);
         return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
     DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
                                int exit_code) override {
-        const bool visible = connection_->send(proto::Error{
-            request_id_, std::move(code), std::move(message), std::move(details), exit_code});
+        bool visible = false;
+        try {
+            visible = connection_->send(proto::Error{
+                request_id_, std::move(code), std::move(message), std::move(details), exit_code});
+        } catch (...) {
+            // See emit_item: terminal serialization failure is disconnect without retry.
+            abort();
+            return DeliveryOutcome::Disconnected;
+        }
         if (!visible) {
             connection_->shutdown();
         }
-        terminal_hook_(visible);
+        notify_terminal(visible);
         return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
     ChallengeReply emit_challenge(nlohmann::json data) override {
         connection_->send(proto::Challenge{request_id_, std::move(data)});
         return {};
     }
+    void emit_abort() noexcept override {
+        abort();
+    }
+
+    void notify_terminal(bool visible) noexcept {
+        if (terminal_notified_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        try {
+            terminal_hook_(visible);
+        } catch (...) {
+            // Server lifecycle hooks are not allowed to unwind through transport teardown.
+            connection_->shutdown();
+        }
+    }
+
+    void abort() noexcept {
+        connection_->shutdown();
+        notify_terminal(false);
+    }
 
     std::shared_ptr<ConnectionState> connection_;
     std::uint64_t request_id_;
     TerminalHook terminal_hook_ = [](bool) {};
+    std::atomic<bool> terminal_notified_{false};
 };
 
 } // namespace

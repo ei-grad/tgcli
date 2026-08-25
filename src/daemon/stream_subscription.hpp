@@ -86,10 +86,19 @@ namespace testing {
 
 enum class StreamActivationProbePoint : std::uint8_t { BeforeLifecycle, AfterPromotion };
 using StreamActivationProbeHook = void (*)(void*, StreamActivationProbePoint) noexcept;
+enum class StreamSubscriptionProbePoint : std::uint8_t {
+    ClaimWaiting,
+    ClaimOwned,
+    ClaimForwarding,
+    RetireWaiting,
+    RetireOwned
+};
+using StreamSubscriptionProbeHook = void (*)(void*, StreamSubscriptionProbePoint) noexcept;
 
 struct StreamActivationProbe {
     void* context = nullptr;
     StreamActivationProbeHook hook = nullptr;
+    StreamSubscriptionProbeHook subscription_hook = nullptr;
 };
 
 struct StreamDeliveryHooks {

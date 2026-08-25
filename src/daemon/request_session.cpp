@@ -847,4 +847,8 @@ ChallengeReply RequestSession::emit_challenge(nlohmann::json data) {
     return {transport_->challenge(std::move(data)), std::nullopt};
 }
 
+void RequestSession::emit_abort() noexcept {
+    transport_->abort_transport();
+}
+
 } // namespace tgcli::daemon

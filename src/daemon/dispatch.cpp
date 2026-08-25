@@ -202,6 +202,10 @@ std::optional<nlohmann::json> ResponseSink::challenge(nlohmann::json data) {
     return std::move(reply.answer);
 }
 
+void ResponseSink::abort_transport() noexcept {
+    emit_abort();
+}
+
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
     if ((descriptor.deadline_default == DeadlineDefault::Unlimited) !=
         allows_unlimited_default(path)) {

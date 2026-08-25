@@ -494,7 +494,8 @@ class StreamIngressHub::Impl {
                                   item.routing().chat_id);
     }
 
-    static void enqueue(StreamIngressSlot& slot, const StreamItemView& item) noexcept {
+    void enqueue(StreamIngressSlot& slot, const StreamItemView& item,
+                 std::size_t index) const noexcept {
         if (slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open ||
             !matches(slot, item)) {
             return;
@@ -523,9 +524,12 @@ class StreamIngressHub::Impl {
         }
         const auto queued_bytes = byte_producer_value - byte_consumer_value;
         if (incoming > kStreamQueueBytes - queued_bytes) {
+            notify(detail::StreamIngressProbePoint::EnqueueOverflow, index);
             overflow(slot, StreamTerminalCause::QueueBytes, queued_items, queued_bytes, incoming);
             return;
         }
+
+        notify(detail::StreamIngressProbePoint::EnqueueWriteStart, index);
 
         const auto physical = static_cast<std::size_t>(byte_producer_value % kStreamQueueBytes);
         const auto first_capacity = kStreamQueueBytes - physical;
@@ -1127,7 +1131,7 @@ void StreamIngressHub::publish(const StreamItemView& item) noexcept {
             impl_->notify(detail::StreamIngressProbePoint::MarkerLoad, index);
         }
         if (impl_->actual(index, slot)) {
-            Impl::enqueue(*slot, item);
+            impl_->enqueue(*slot, item, index);
         }
     }
 }
@@ -1225,6 +1229,7 @@ void StreamIngressHub::discard(const StreamIngressReservation& reservation) noex
     if (!impl_->valid(reservation)) {
         return;
     }
+    impl_->notify(detail::StreamIngressProbePoint::Discard, reservation.index_);
     auto& slot = impl_->slots[reservation.index_];
     invalidate_borrow(slot);
     impl_->poison_queued(slot);

@@ -266,6 +266,9 @@ enum class StreamIngressProbePoint {
     OwnerLoad,
     ReservationOwnerPublished,
     ActivationPreparing,
+    EnqueueWriteStart,
+    EnqueueOverflow,
+    Discard,
     Count
 };
 using StreamIngressProbeHook = void (*)(void*, StreamIngressProbePoint, std::size_t) noexcept;

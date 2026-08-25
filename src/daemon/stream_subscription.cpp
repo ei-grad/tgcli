@@ -15,9 +15,11 @@ class StreamSubscriptionState {
   public:
     StreamSubscriptionState(std::shared_ptr<StreamIngressHub> hub,
                             StreamIngressReservation reservation,
-                            StreamIngressPreparedActivation prepared, StreamOperation operation)
+                            StreamIngressPreparedActivation prepared, StreamOperation operation,
+                            testing::StreamActivationProbe probe)
         : hub_(std::move(hub)), reservation_(std::move(reservation)),
-          prepared_(std::move(prepared)), scratch_(kStreamQueueItemBytes), operation_(operation) {}
+          prepared_(std::move(prepared)), scratch_(kStreamQueueItemBytes), operation_(operation),
+          probe_context_(probe.context), subscription_probe_(probe.subscription_hook) {}
 
     StreamSubscriptionState(const StreamSubscriptionState&) = delete;
     StreamSubscriptionState& operator=(const StreamSubscriptionState&) = delete;
@@ -26,10 +28,15 @@ class StreamSubscriptionState {
     ~StreamSubscriptionState() = default;
 
     void adopt_activity(ActivityTracker::Token activity) noexcept {
+        const std::lock_guard lock(ownership_mutex_);
         activity_ = std::move(activity);
     }
 
     [[nodiscard]] bool commit_promotion() noexcept {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return false;
+        }
         return hub_->commit_activation_promotion(prepared_);
     }
 
@@ -38,23 +45,46 @@ class StreamSubscriptionState {
     }
 
     void publish() noexcept {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return;
+        }
         hub_->publish_prepared(reservation_, prepared_);
     }
 
     [[nodiscard]] bool claim(StreamTerminalPayload payload) noexcept {
+        notify(testing::StreamSubscriptionProbePoint::ClaimWaiting);
+        const std::lock_guard lock(ownership_mutex_);
+        notify(testing::StreamSubscriptionProbePoint::ClaimOwned);
+        if (retired_) {
+            return false;
+        }
+        notify(testing::StreamSubscriptionProbePoint::ClaimForwarding);
         payload.operation = operation_;
         return hub_->claim(reservation_, payload);
     }
 
     [[nodiscard]] std::optional<StreamTerminalPayload> claim_terminal() noexcept {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return std::nullopt;
+        }
         return hub_->claim_terminal(reservation_);
     }
 
     [[nodiscard]] bool begin_item() noexcept {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return false;
+        }
         return hub_->begin_item_delivery(reservation_);
     }
 
     [[nodiscard]] std::optional<nlohmann::json> copy_front() {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return std::nullopt;
+        }
         CopyContext context{.scratch = &scratch_};
         const auto result = hub_->visit_front(reservation_, &context, &copy_item);
         if (result == StreamIngressFrontResult::Empty) {
@@ -71,20 +101,21 @@ class StreamSubscriptionState {
     }
 
     [[nodiscard]] bool consume_front() {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return false;
+        }
         return hub_->visit_front(reservation_, nullptr, &consume_item) ==
                StreamIngressFrontResult::Consumed;
     }
 
-    void discard() noexcept {
-        hub_->discard(reservation_);
-    }
-
     void retire() noexcept {
-        const std::unique_lock lock(teardown_mutex_);
+        notify(testing::StreamSubscriptionProbePoint::RetireWaiting);
+        const std::unique_lock lock(ownership_mutex_);
+        notify(testing::StreamSubscriptionProbePoint::RetireOwned);
         if (retired_) {
             return;
         }
-        discard();
         const auto state = hub_->activation_state(reservation_);
         if (state == StreamIngressState::Reserved || state == StreamIngressState::Free) {
             retired_ = true;
@@ -101,11 +132,16 @@ class StreamSubscriptionState {
     }
 
     void release_activity() noexcept {
-        const std::lock_guard lock(teardown_mutex_);
-        if (!activity_released_) {
-            activity_.reset();
+        ActivityTracker::Token activity;
+        {
+            const std::lock_guard lock(ownership_mutex_);
+            if (activity_released_) {
+                return;
+            }
+            activity = std::move(activity_);
             activity_released_ = true;
         }
+        activity.reset();
     }
 
     void teardown() noexcept {
@@ -114,6 +150,12 @@ class StreamSubscriptionState {
     }
 
   private:
+    void notify(testing::StreamSubscriptionProbePoint point) const noexcept {
+        if (subscription_probe_ != nullptr) {
+            subscription_probe_(probe_context_, point);
+        }
+    }
+
     struct CopyContext {
         std::vector<char>* scratch = nullptr;
         std::size_t size = 0;
@@ -160,8 +202,10 @@ class StreamSubscriptionState {
     StreamIngressPreparedActivation prepared_;
     std::vector<char> scratch_;
     StreamOperation operation_ = StreamOperation::Listen;
-    std::mutex teardown_mutex_;
+    std::mutex ownership_mutex_;
     ActivityTracker::Token activity_;
+    void* probe_context_ = nullptr;
+    testing::StreamSubscriptionProbeHook subscription_probe_ = nullptr;
     bool retired_ = false;
     bool activity_released_ = false;
 };
@@ -224,7 +268,7 @@ StreamSubscriptionActivationResult RequestSession::activate_stream_subscription(
                    : StreamSubscriptionActivationFailure::PublicationFailed;
     }
     auto state = std::make_shared<detail::StreamSubscriptionState>(
-        hub, std::move(reservation), std::move(*prepared), request.operation);
+        hub, std::move(reservation), std::move(*prepared), request.operation, probe);
     StreamSubscriptionLease lease(state);
     if (probe.hook != nullptr) {
         probe.hook(probe.context, testing::StreamActivationProbePoint::BeforeLifecycle);
@@ -233,6 +277,16 @@ StreamSubscriptionActivationResult RequestSession::activate_stream_subscription(
     {
         const std::lock_guard lock(activity_mutex_);
         if (activity_state_ != ActivityState::OpenRequest) {
+            return StreamSubscriptionActivationFailure::RequestClosed;
+        }
+        if (deadline_expired(deadline_)) {
+            static_cast<void>(
+                state->claim({.cause = StreamTerminalCause::Deadline, .metadata_failure = {}}));
+            return StreamSubscriptionActivationFailure::TerminalClaimed;
+        }
+        if (cancellation_requested()) {
+            static_cast<void>(
+                state->claim({.cause = StreamTerminalCause::Disconnected, .metadata_failure = {}}));
             return StreamSubscriptionActivationFailure::RequestClosed;
         }
         if ((activity_mode == StreamActivityMode::TrackedDaemon && !activity_) ||
@@ -337,6 +391,7 @@ class detail::StreamDeliveryRunner {
     [[nodiscard]] StreamDeliveryStatus transport_failure(StreamDeliveryStatus status) noexcept {
         static_cast<void>(
             state_->claim({.cause = StreamTerminalCause::Disconnected, .metadata_failure = {}}));
+        session_->abort_transport();
         session_->disconnect();
         return finish(status);
     }
@@ -346,7 +401,6 @@ class detail::StreamDeliveryRunner {
         if (!terminal) {
             return std::nullopt;
         }
-        state_->discard();
         state_->retire();
         if (terminal->cause == StreamTerminalCause::Disconnected) {
             return finish(StreamDeliveryStatus::Disconnected);

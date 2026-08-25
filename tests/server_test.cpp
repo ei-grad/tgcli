@@ -12,6 +12,7 @@
 #include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
+#include "daemon/stream_subscription.hpp"
 #include "proto/frame_io.hpp"
 
 #include <algorithm>
@@ -1187,6 +1188,108 @@ TEST_CASE("connection sink delivers one complete parseable item frame before its
     const auto isolated = send_request(daemon, make_request({"version"}, 44));
     REQUIRE(std::holds_alternative<proto::Result>(isolated));
     CHECK(std::get<proto::Result>(isolated).id == 44);
+}
+
+TEST_CASE("stream transport exceptions abort only their exact socket without a frame",
+          "[server][stream][transport][exception]") {
+    enum class FailureMode { Builder, ItemSerialization, TerminalSerialization };
+    for (const auto mode : {FailureMode::Builder, FailureMode::ItemSerialization,
+                            FailureMode::TerminalSerialization}) {
+        DYNAMIC_SECTION("mode=" << static_cast<int>(mode)) {
+            auto hub = std::make_shared<daemon::StreamIngressHub>();
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool finished = false;
+            bool reclaimed = false;
+            bool activation_succeeded = false;
+            daemon::StreamDeliveryStatus delivery = daemon::StreamDeliveryStatus::InvalidLease;
+            const TestDaemon daemon([&](daemon::Dispatcher& dispatcher) {
+                dispatcher.register_command(
+                    "internal stream failure",
+                    {daemon::Tier::Read,
+                     [&](const proto::Request&, daemon::RequestSession& session) {
+                         const auto finish_handler = [&] {
+                             const std::lock_guard lock(mutex);
+                             finished = true;
+                             cv.notify_all();
+                         };
+                         hub->begin_generation(1001, 7);
+                         const daemon::StreamIngressRequest ingress{
+                             .client_id = 1001,
+                             .generation = 7,
+                             .operation = daemon::StreamOperation::Listen,
+                             .mode = daemon::StreamMode::Items,
+                             .type_mask =
+                                 daemon::stream_event_mask(daemon::StreamEventClass::Message)};
+                         auto activation = session.activate_stream_subscription(
+                             hub, ingress, daemon::StreamActivityMode::TrackedDaemon);
+                         activation_succeeded =
+                             std::holds_alternative<daemon::StreamSubscriptionActivated>(
+                                 activation);
+                         if (!activation_succeeded) {
+                             finish_handler();
+                             return;
+                         }
+                         if (mode == FailureMode::ItemSerialization) {
+                             if (hub->activate_armed(1001, 7, 1) != 1) {
+                                 finish_handler();
+                                 return;
+                             }
+                             std::string line = R"({"event":"message","text":")";
+                             line.push_back(static_cast<char>(0xff));
+                             line += "\"}\n";
+                             hub->publish(daemon::StreamIngressTestAccess::item(
+                                 line, {}, 2,
+                                 {.event_class = daemon::StreamEventClass::Message,
+                                  .chat_id = 42,
+                                  .sender_kind = daemon::StreamSenderKind::User,
+                                  .sender_id = 7}));
+                         } else {
+                             hub->claim_control_generation(
+                                 1001, 7,
+                                 {.cause = daemon::StreamTerminalCause::Shutdown,
+                                  .metadata_failure = {}});
+                         }
+                         delivery = daemon::run_stream_delivery(
+                             session, {.count = mode == FailureMode::ItemSerialization
+                                                    ? std::optional<std::uint64_t>{1}
+                                                    : std::nullopt,
+                                       .terminal_builder =
+                                           [mode](const daemon::StreamTerminalPayload&,
+                                                  std::uint64_t) -> daemon::StreamTerminalFrame {
+                                           if (mode == FailureMode::Builder) {
+                                               throw std::runtime_error("terminal builder failure");
+                                           }
+                                           std::string invalid(1, static_cast<char>(0xff));
+                                           return daemon::StreamTerminalResultFrame{
+                                               {{"invalid_utf8", invalid}}};
+                                       },
+                                       .hooks = {}});
+                         reclaimed = std::holds_alternative<daemon::StreamIngressReservation>(
+                             hub->reserve(ingress));
+                         finish_handler();
+                     }});
+            });
+            const int fd = connect_to(daemon.socket);
+            proto::FrameReader reader(fd);
+            static_cast<void>(read_frame(reader));
+            send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+            send_frame(fd, make_request({"internal", "stream", "failure"}, 45));
+            {
+                std::unique_lock lock(mutex);
+                REQUIRE(cv.wait_for(lock, 5s, [&] { return finished; }));
+            }
+            check_eof(reader);
+            CHECK(activation_succeeded);
+            CHECK(delivery == daemon::StreamDeliveryStatus::Disconnected);
+            CHECK(reclaimed);
+            ::close(fd);
+
+            const auto isolated = send_request(daemon, make_request({"version"}, 46));
+            REQUIRE(std::holds_alternative<proto::Result>(isolated));
+            CHECK(std::get<proto::Result>(isolated).id == 46);
+        }
+    }
 }
 
 TEST_CASE("same-v3 stale binary rejects every noncanonical request before observation",

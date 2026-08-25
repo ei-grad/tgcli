@@ -76,6 +76,7 @@ class ResponseSink {
     DeliveryOutcome error(std::string code, std::string message, nlohmann::json details,
                           int exit_code);
     std::optional<nlohmann::json> challenge(nlohmann::json data);
+    void abort_transport() noexcept;
 
     [[nodiscard]] bool has_terminal() const;
 
@@ -86,6 +87,7 @@ class ResponseSink {
     virtual DeliveryOutcome emit_error(std::string code, std::string message,
                                        nlohmann::json details, int exit_code) = 0;
     virtual ChallengeReply emit_challenge(nlohmann::json data) = 0;
+    virtual void emit_abort() noexcept {}
 
   private:
     mutable std::mutex mutex_;
