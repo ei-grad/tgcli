@@ -5,6 +5,7 @@
 #include <limits>
 #include <mutex>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace tgcli::daemon {
@@ -15,6 +16,7 @@ namespace tgcli::daemon {
 namespace {
 
 constexpr unsigned char kReclaimedPoison = 0xA7;
+constexpr auto kStateMaximum = static_cast<std::uint32_t>(StreamIngressState::Reclaimable);
 
 StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
     switch (cause) {
@@ -62,16 +64,35 @@ bool valid_request(const StreamIngressRequest& request) noexcept {
                std::greater_equal<>()) == request.chat_ids.begin() + request.chat_count;
 }
 
+std::optional<StreamIngressState> decode_state(std::uint32_t raw) noexcept {
+    if (raw > kStateMaximum) {
+        return std::nullopt;
+    }
+    return static_cast<StreamIngressState>(raw);
+}
+
+template <typename Value> void poison(Value& value) noexcept {
+    static_assert(std::is_trivially_copyable_v<Value>);
+    auto bytes = std::as_writable_bytes(std::span{&value, std::size_t{1}});
+    std::ranges::fill(bytes, static_cast<std::byte>(kReclaimedPoison));
+}
+
 } // namespace
 
 struct StreamIngressSlot {
     using DescriptorStorage = std::array<StreamIngressDescriptor, kStreamQueueItems>;
     using ByteStorage = std::array<char, kStreamQueueBytes>;
 
-    std::atomic<StreamIngressState> state{StreamIngressState::Free};
-    std::uint64_t epoch = 0;
+    std::atomic<std::uint32_t> state{static_cast<std::uint32_t>(StreamIngressState::Free)};
+    std::atomic<std::uint64_t> epoch{0};
+    std::atomic<std::uint64_t> borrow_epoch{0};
+    std::atomic<std::uint32_t> active_borrows{0};
+    std::atomic<std::uint32_t> publication_ready{0};
+    std::atomic<std::int32_t> owner_client_id{0};
+    std::atomic<std::uint64_t> owner_generation{0};
+    std::atomic<std::uint32_t> owner_operation{static_cast<std::uint32_t>(StreamOperation::Listen)};
     StreamIngressRequest staged;
-    StreamActivationProjection projection;
+    PublishedIngressFilter projection;
     std::unique_ptr<DescriptorStorage> descriptors;
     std::unique_ptr<ByteStorage> bytes;
     std::atomic<std::uint64_t> descriptor_producer{0};
@@ -84,9 +105,62 @@ struct StreamIngressSlot {
 };
 
 static_assert(std::atomic<StreamIngressSlot*>::is_always_lock_free);
+static_assert(std::atomic<std::int32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<StreamTerminalCause>::is_always_lock_free);
+
+namespace {
+
+StreamIngressState load_state(const StreamIngressSlot& slot,
+                              std::memory_order order = std::memory_order_acquire) noexcept {
+    return decode_state(slot.state.load(order)).value_or(StreamIngressState::Removed);
+}
+
+void store_state(StreamIngressSlot& slot, StreamIngressState state,
+                 std::memory_order order = std::memory_order_release) noexcept {
+    slot.state.store(static_cast<std::uint32_t>(state), order);
+}
+
+bool compare_state(StreamIngressSlot& slot, StreamIngressState& expected,
+                   StreamIngressState desired) noexcept {
+    auto raw = static_cast<std::uint32_t>(expected);
+    const bool changed =
+        slot.state.compare_exchange_weak(raw, static_cast<std::uint32_t>(desired),
+                                         std::memory_order_acq_rel, std::memory_order_acquire);
+    expected = decode_state(raw).value_or(StreamIngressState::Removed);
+    return changed;
+}
+
+bool compare_state_strong(StreamIngressSlot& slot, StreamIngressState expected,
+                          StreamIngressState desired) noexcept {
+    auto raw = static_cast<std::uint32_t>(expected);
+    return slot.state.compare_exchange_strong(raw, static_cast<std::uint32_t>(desired),
+                                              std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+bool advance_borrow_epoch(StreamIngressSlot& slot, std::uint64_t expected,
+                          std::uint64_t desired) noexcept {
+    return slot.borrow_epoch.compare_exchange_strong(expected, desired, std::memory_order_acq_rel,
+                                                     std::memory_order_acquire);
+}
+
+void invalidate_borrow(StreamIngressSlot& slot) noexcept {
+    auto current = slot.borrow_epoch.load(std::memory_order_acquire);
+    while (current != std::numeric_limits<std::uint64_t>::max()) {
+        const auto increment = (current & 1U) != 0U ? 1U : 2U;
+        if (current > std::numeric_limits<std::uint64_t>::max() - increment) {
+            return;
+        }
+        if (slot.borrow_epoch.compare_exchange_weak(current, current + increment,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+            return;
+        }
+    }
+}
+
+} // namespace
 
 class StreamIngressHub::Impl {
   public:
@@ -98,19 +172,25 @@ class StreamIngressHub::Impl {
             pointer.store(nullptr, std::memory_order_relaxed);
         }
         const std::atomic<StreamIngressSlot*> pointer;
-        const std::atomic<std::uint32_t> count;
-        const std::atomic<StreamTerminalCause> terminal;
         if (!pointer.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::SlotPointer;
-        } else if (!count.is_lock_free()) {
+        } else if (!publisher_count.is_lock_free() || !current_client_id.is_lock_free() ||
+                   !slots.front().owner_client_id.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::PublisherCount;
-        } else if (!slots.front().descriptor_producer.is_lock_free() ||
-                   !slots.front().descriptor_consumer.is_lock_free()) {
+        } else if (!slots.front().state.is_lock_free() ||
+                   !slots.front().descriptor_producer.is_lock_free() ||
+                   !slots.front().descriptor_consumer.is_lock_free() ||
+                   !slots.front().borrow_epoch.is_lock_free() ||
+                   !slots.front().active_borrows.is_lock_free() ||
+                   !slots.front().publication_ready.is_lock_free() ||
+                   !slots.front().owner_generation.is_lock_free() ||
+                   !current_generation.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::DescriptorIndex;
         } else if (!slots.front().byte_producer.is_lock_free() ||
                    !slots.front().byte_consumer.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::ByteIndex;
-        } else if (!terminal.is_lock_free()) {
+        } else if (!slots.front().terminal_cause.is_lock_free() ||
+                   !slots.front().owner_operation.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::TerminalCause;
         }
         if (probe.forced_lock_free_failure) {
@@ -127,13 +207,20 @@ class StreamIngressHub::Impl {
     class PublisherGuard {
       public:
         explicit PublisherGuard(Impl& owner) noexcept : owner_(owner) {
-            owner_.publisher_count.fetch_add(1, std::memory_order_seq_cst);
+            const auto previous = owner_.publisher_count.fetch_add(1, std::memory_order_seq_cst);
+            if (previous != 0) {
+                owner_.publisher_count.fetch_sub(1, std::memory_order_seq_cst);
+                active_ = false;
+                return;
+            }
             owner_.notify(detail::StreamIngressProbePoint::PublisherIncrement);
         }
 
         ~PublisherGuard() {
-            owner_.notify(detail::StreamIngressProbePoint::PublisherDecrement);
-            owner_.publisher_count.fetch_sub(1, std::memory_order_seq_cst);
+            if (active_) {
+                owner_.notify(detail::StreamIngressProbePoint::PublisherDecrement);
+                owner_.publisher_count.fetch_sub(1, std::memory_order_seq_cst);
+            }
         }
 
         PublisherGuard(const PublisherGuard&) = delete;
@@ -141,13 +228,27 @@ class StreamIngressHub::Impl {
         PublisherGuard(PublisherGuard&&) = delete;
         PublisherGuard& operator=(PublisherGuard&&) = delete;
 
+        [[nodiscard]] explicit operator bool() const noexcept {
+            return active_;
+        }
+
       private:
         Impl& owner_;
+        bool active_ = true;
     };
 
-    bool valid(const StreamIngressReservation& reservation) const noexcept {
+    [[nodiscard]] bool valid(const StreamIngressReservation& reservation) const noexcept {
         return reservation.hub_ != nullptr && reservation.index_ < kStreamSubscriberSlots &&
-               slots[reservation.index_].epoch == reservation.epoch_;
+               slots[reservation.index_].epoch.load(std::memory_order_acquire) ==
+                   reservation.epoch_;
+    }
+
+    [[nodiscard]] bool marker(std::size_t index, const StreamIngressSlot* pointer) const noexcept {
+        return pointer == &installing_markers[index];
+    }
+
+    [[nodiscard]] bool actual(std::size_t index, const StreamIngressSlot* pointer) const noexcept {
+        return pointer != nullptr && !marker(index, pointer);
     }
 
     static bool claim(StreamIngressSlot& slot, StreamTerminalPayload payload) noexcept {
@@ -177,6 +278,9 @@ class StreamIngressHub::Impl {
     }
 
     static bool matches(const StreamIngressSlot& slot, const StreamItemView& item) noexcept {
+        if (load_state(slot) != StreamIngressState::Published) {
+            return false;
+        }
         const auto& projection = slot.projection;
         if (projection.client_id <= 0 || projection.generation == 0 ||
             item.receive_sequence() <= projection.activation_receive_sequence ||
@@ -261,29 +365,211 @@ class StreamIngressHub::Impl {
         slot.descriptor_producer.store(producer + 1, std::memory_order_release);
     }
 
+    static void poison_queued(StreamIngressSlot& slot) noexcept {
+        const auto descriptor_begin = slot.descriptor_consumer.load(std::memory_order_relaxed);
+        const auto descriptor_end = slot.descriptor_producer.load(std::memory_order_relaxed);
+        if (descriptor_end >= descriptor_begin &&
+            descriptor_end - descriptor_begin <= kStreamQueueItems && slot.descriptors != nullptr) {
+            for (auto ticket = descriptor_begin; ticket < descriptor_end; ++ticket) {
+                poison((*slot.descriptors)[ticket % kStreamQueueItems]);
+            }
+        }
+        const auto byte_begin = slot.byte_consumer.load(std::memory_order_relaxed);
+        const auto byte_end = slot.byte_producer.load(std::memory_order_relaxed);
+        if (byte_end >= byte_begin && byte_end - byte_begin <= kStreamQueueBytes &&
+            slot.bytes != nullptr) {
+            const auto amount = static_cast<std::size_t>(byte_end - byte_begin);
+            const auto physical = static_cast<std::size_t>(byte_begin % kStreamQueueBytes);
+            const auto first = std::min(amount, kStreamQueueBytes - physical);
+            std::memset(slot.bytes->data() + physical, kReclaimedPoison, first);
+            if (amount > first) {
+                std::memset(slot.bytes->data(), kReclaimedPoison, amount - first);
+            }
+        }
+    }
+
+    static void reset_slot_locked(StreamIngressSlot& slot) noexcept {
+        poison_queued(slot);
+        invalidate_borrow(slot);
+        poison(slot.staged);
+        poison(slot.projection);
+        poison(slot.terminal_payload);
+        slot.descriptor_producer.store(0, std::memory_order_relaxed);
+        slot.descriptor_consumer.store(0, std::memory_order_relaxed);
+        slot.byte_producer.store(0, std::memory_order_relaxed);
+        slot.byte_consumer.store(0, std::memory_order_relaxed);
+        slot.owner_client_id.store(0, std::memory_order_release);
+        slot.owner_generation.store(0, std::memory_order_release);
+        slot.owner_operation.store(static_cast<std::uint32_t>(StreamOperation::Listen),
+                                   std::memory_order_release);
+        slot.terminal_cause.store(StreamTerminalCause::Open, std::memory_order_relaxed);
+        slot.publication_ready.store(0, std::memory_order_relaxed);
+        slot.terminal_delivered = false;
+        store_state(slot, StreamIngressState::Free);
+    }
+
+    bool reclaim_locked(std::size_t index, std::optional<std::uint64_t> epoch) noexcept {
+        auto& slot = slots[index];
+        if (epoch && slot.epoch.load(std::memory_order_acquire) != *epoch) {
+            return false;
+        }
+        notify(detail::StreamIngressProbePoint::ReclaimLoad, index);
+        if (load_state(slot) != StreamIngressState::Removed ||
+            slot.active_borrows.load(std::memory_order_acquire) != 0 ||
+            (slot.borrow_epoch.load(std::memory_order_acquire) & 1U) != 0U ||
+            publisher_count.load(std::memory_order_seq_cst) != 0) {
+            return false;
+        }
+        notify(detail::StreamIngressProbePoint::ReclaimZero, index);
+        if (!compare_state_strong(slot, StreamIngressState::Removed,
+                                  StreamIngressState::Reclaimable)) {
+            return false;
+        }
+        reset_slot_locked(slot);
+        retired[index] = false;
+        retired_epoch[index] = 0;
+        return true;
+    }
+
+    void sweep_retired_locked() noexcept {
+        if (publisher_count.load(std::memory_order_seq_cst) != 0) {
+            return;
+        }
+        for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
+            if (retired[index]) {
+                static_cast<void>(reclaim_locked(index, retired_epoch[index]));
+            }
+        }
+    }
+
+    void transfer_retired_locked(std::size_t index, std::uint64_t epoch) noexcept {
+        retired[index] = true;
+        retired_epoch[index] = epoch;
+    }
+
+    void receive_claim_owned(std::int32_t client_id, std::uint64_t generation,
+                             StreamTerminalPayload payload, bool matching) noexcept {
+        for (auto& slot : slots) {
+            const auto owner_client = slot.owner_client_id.load(std::memory_order_acquire);
+            const auto owner_generation_value =
+                slot.owner_generation.load(std::memory_order_acquire);
+            const bool same = owner_client == client_id && owner_generation_value == generation;
+            if (owner_client == 0 || owner_generation_value == 0 || same != matching ||
+                load_state(slot) == StreamIngressState::Free) {
+                continue;
+            }
+            payload.operation =
+                static_cast<StreamOperation>(slot.owner_operation.load(std::memory_order_acquire));
+            static_cast<void>(claim(slot, payload));
+        }
+    }
+
+    void receive_registry_claim(std::int32_t client_id, std::uint64_t generation,
+                                StreamTerminalPayload payload, bool matching) noexcept {
+        const PublisherGuard guard(*this);
+        if (!guard) {
+            return;
+        }
+        for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
+            auto* first = dormant[index].load(std::memory_order_seq_cst);
+            notify(detail::StreamIngressProbePoint::SlotLoad, index);
+            if (actual(index, first)) {
+                const bool same =
+                    first->staged.client_id == client_id && first->staged.generation == generation;
+                if (same == matching) {
+                    payload.operation = first->staged.operation;
+                    static_cast<void>(claim(*first, payload));
+                }
+            }
+            auto* second = published[index].load(std::memory_order_seq_cst);
+            notify(detail::StreamIngressProbePoint::SlotLoad, index);
+            if (actual(index, second) && second != first) {
+                const bool same = second->staged.client_id == client_id &&
+                                  second->staged.generation == generation;
+                if (same == matching) {
+                    payload.operation = second->staged.operation;
+                    static_cast<void>(claim(*second, payload));
+                }
+            }
+        }
+    }
+
     std::array<StreamIngressSlot, kStreamSubscriberSlots> slots;
+    std::array<StreamIngressSlot, kStreamSubscriberSlots> installing_markers;
     std::array<std::atomic<StreamIngressSlot*>, kStreamSubscriberSlots> dormant;
     std::array<std::atomic<StreamIngressSlot*>, kStreamSubscriberSlots> published;
     std::atomic<std::uint32_t> publisher_count{0};
     std::atomic<std::int32_t> current_client_id{0};
     std::atomic<std::uint64_t> current_generation{0};
     mutable std::mutex control;
+    std::array<bool, kStreamSubscriberSlots> retired{};
+    std::array<std::uint64_t, kStreamSubscriberSlots> retired_epoch{};
     std::optional<StreamIngressAtomic> lock_free_failure;
-    std::optional<StreamIngressAdmissionFailure> last_failure;
     detail::StreamIngressProbe probe;
 };
 
-StreamIngressItemView::StreamIngressItemView(StreamIngressDescriptor descriptor,
-                                             std::span<const char> first,
-                                             std::span<const char> second) noexcept
-    : descriptor_(descriptor), first_(first), second_(second) {}
+StreamIngressBorrowedSpan::StreamIngressBorrowedSpan(StreamIngressFrontCursor& owner,
+                                                     std::size_t index) noexcept
+    : owner_(&owner), index_(index) {}
 
-const StreamIngressDescriptor& StreamIngressItemView::descriptor() const noexcept {
-    return descriptor_;
+std::optional<std::size_t> StreamIngressBorrowedSpan::size() const noexcept {
+    return owner_ == nullptr ? std::nullopt : owner_->span_size(index_);
 }
 
-std::array<std::span<const char>, 2> StreamIngressItemView::spans() const noexcept {
-    return {first_, second_};
+bool StreamIngressBorrowedSpan::copy_to(std::span<char> destination) const noexcept {
+    return owner_ != nullptr && owner_->copy_span(index_, destination);
+}
+
+StreamIngressFrontCursor::StreamIngressFrontCursor() noexcept
+    : first_(*this, 0), second_(*this, 1) {}
+
+void StreamIngressFrontCursor::activate(StreamIngressSlot& slot, std::uint64_t reservation_epoch,
+                                        std::uint64_t borrow_epoch,
+                                        StreamIngressDescriptor descriptor,
+                                        std::span<const char> first,
+                                        std::span<const char> second) noexcept {
+    slot_ = &slot;
+    reservation_epoch_ = reservation_epoch;
+    borrow_epoch_ = borrow_epoch;
+    descriptor_ = descriptor;
+    spans_ = {first, second};
+}
+
+bool StreamIngressFrontCursor::valid() const noexcept {
+    return slot_ != nullptr && slot_->epoch.load(std::memory_order_acquire) == reservation_epoch_ &&
+           slot_->borrow_epoch.load(std::memory_order_acquire) == borrow_epoch_ &&
+           (borrow_epoch_ & 1U) != 0U && load_state(*slot_) == StreamIngressState::Published;
+}
+
+std::optional<StreamIngressDescriptor> StreamIngressFrontCursor::descriptor() const noexcept {
+    return valid() ? std::optional<StreamIngressDescriptor>{descriptor_} : std::nullopt;
+}
+
+bool StreamIngressFrontCursor::visit_spans(void* context,
+                                           StreamIngressSpanVisitor visitor) const noexcept {
+    if (!valid() || visitor == nullptr) {
+        return false;
+    }
+    visitor(context, first_, second_);
+    return valid();
+}
+
+bool StreamIngressFrontCursor::copy_span(std::size_t index,
+                                         std::span<char> destination) const noexcept {
+    if (!valid() || index >= spans_.size() || destination.size() < spans_[index].size()) {
+        return false;
+    }
+    if (!spans_[index].empty()) {
+        std::memcpy(destination.data(), spans_[index].data(), spans_[index].size());
+    }
+    return valid();
+}
+
+std::optional<std::size_t> StreamIngressFrontCursor::span_size(std::size_t index) const noexcept {
+    if (!valid() || index >= spans_.size()) {
+        return std::nullopt;
+    }
+    return spans_[index].size();
 }
 
 StreamIngressReservation::StreamIngressReservation() = default;
@@ -323,28 +609,29 @@ void StreamIngressReservation::reset() noexcept {
 StreamIngressHub::StreamIngressHub(detail::StreamIngressProbe probe)
     : impl_(std::make_unique<Impl>(probe)) {}
 
-StreamIngressHub::~StreamIngressHub() = default;
+StreamIngressHub::~StreamIngressHub() {
+    const std::lock_guard lock(impl_->control);
+    impl_->sweep_retired_locked();
+}
 
 std::optional<StreamIngressAtomic> StreamIngressHub::lock_free_failure() const noexcept {
     return impl_->lock_free_failure;
 }
 
-std::optional<StreamIngressReservation>
-StreamIngressHub::reserve(const StreamIngressRequest& request) {
+StreamIngressAdmissionResult StreamIngressHub::reserve(const StreamIngressRequest& request) {
     const std::lock_guard lock(impl_->control);
-    impl_->last_failure.reset();
+    impl_->sweep_retired_locked();
     if (impl_->lock_free_failure) {
-        impl_->last_failure = StreamIngressAdmissionFailure{
+        return StreamIngressAdmissionFailure{
             .resource = StreamIngressAdmissionResource::LockFreeIngress,
             .atomic = impl_->lock_free_failure.value_or(StreamIngressAtomic::SlotPointer)};
-        return std::nullopt;
     }
     if (!valid_request(request)) {
-        return std::nullopt;
+        return StreamIngressInvalidRequest{};
     }
     for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
         auto& slot = impl_->slots[index];
-        if (slot.state.load(std::memory_order_acquire) != StreamIngressState::Free) {
+        if (load_state(slot) != StreamIngressState::Free) {
             continue;
         }
         if (slot.descriptors == nullptr) {
@@ -352,10 +639,12 @@ StreamIngressHub::reserve(const StreamIngressRequest& request) {
                 std::make_unique_for_overwrite<StreamIngressSlot::DescriptorStorage>();
             slot.bytes = std::make_unique_for_overwrite<StreamIngressSlot::ByteStorage>();
         }
-        ++slot.epoch;
-        if (slot.epoch == 0) {
+        const auto old_epoch = slot.epoch.load(std::memory_order_relaxed);
+        if (old_epoch == std::numeric_limits<std::uint64_t>::max()) {
             continue;
         }
+        const auto epoch = old_epoch + 1;
+        slot.epoch.store(epoch, std::memory_order_relaxed);
         slot.staged = request;
         slot.projection = {};
         slot.descriptor_producer.store(0, std::memory_order_relaxed);
@@ -365,46 +654,45 @@ StreamIngressHub::reserve(const StreamIngressRequest& request) {
         slot.terminal_payload = {};
         slot.terminal_delivered = false;
         slot.terminal_cause.store(StreamTerminalCause::Open, std::memory_order_relaxed);
-        slot.state.store(StreamIngressState::Reserved, std::memory_order_release);
-        return StreamIngressReservation(this, static_cast<std::uint32_t>(index), slot.epoch);
+        slot.publication_ready.store(0, std::memory_order_relaxed);
+        slot.owner_client_id.store(request.client_id, std::memory_order_relaxed);
+        slot.owner_generation.store(request.generation, std::memory_order_relaxed);
+        slot.owner_operation.store(static_cast<std::uint32_t>(request.operation),
+                                   std::memory_order_relaxed);
+        store_state(slot, StreamIngressState::Reserved);
+        return StreamIngressReservation(this, static_cast<std::uint32_t>(index), epoch);
     }
-    impl_->last_failure = {.resource = StreamIngressAdmissionResource::SubscriberSlots,
-                           .atomic = StreamIngressAtomic::SlotPointer};
-    return std::nullopt;
-}
-
-std::optional<StreamIngressAdmissionFailure>
-StreamIngressHub::last_reservation_failure() const noexcept {
-    const std::lock_guard lock(impl_->control);
-    return impl_->last_failure;
+    return StreamIngressAdmissionFailure{.resource =
+                                             StreamIngressAdmissionResource::SubscriberSlots,
+                                         .atomic = StreamIngressAtomic::SlotPointer};
 }
 
 void StreamIngressHub::begin_generation(std::int32_t client_id, std::uint64_t generation) noexcept {
     impl_->current_client_id.store(client_id, std::memory_order_release);
     impl_->current_generation.store(generation, std::memory_order_release);
-    for (auto& slot : impl_->slots) {
-        const auto state = slot.state.load(std::memory_order_acquire);
-        if (state == StreamIngressState::Free || state == StreamIngressState::Removed ||
-            state == StreamIngressState::Reclaimable ||
-            (slot.staged.client_id == client_id && slot.staged.generation == generation)) {
-            continue;
-        }
-        static_cast<void>(Impl::claim(slot, {.cause = StreamTerminalCause::GenerationReplaced,
-                                             .operation = slot.staged.operation,
-                                             .metadata_failure = {}}));
-    }
+    const StreamTerminalPayload replacement{.cause = StreamTerminalCause::GenerationReplaced,
+                                            .metadata_failure = {}};
+    impl_->receive_claim_owned(client_id, generation, replacement, false);
+    impl_->receive_registry_claim(client_id, generation, replacement, false);
 }
 
 void StreamIngressHub::claim_generation(std::int32_t client_id, std::uint64_t generation,
                                         StreamTerminalPayload payload) noexcept {
+    impl_->receive_claim_owned(client_id, generation, payload, true);
+    impl_->receive_registry_claim(client_id, generation, payload, true);
+}
+
+void StreamIngressHub::claim_control_generation(std::int32_t client_id, std::uint64_t generation,
+                                                StreamTerminalPayload payload) noexcept {
+    const std::lock_guard lock(impl_->control);
     for (auto& slot : impl_->slots) {
-        const auto state = slot.state.load(std::memory_order_acquire);
-        if (state == StreamIngressState::Free || state == StreamIngressState::Removed ||
-            state == StreamIngressState::Reclaimable || slot.staged.client_id != client_id ||
-            slot.staged.generation != generation) {
+        if (slot.owner_client_id.load(std::memory_order_acquire) != client_id ||
+            slot.owner_generation.load(std::memory_order_acquire) != generation ||
+            load_state(slot) == StreamIngressState::Free) {
             continue;
         }
-        payload.operation = slot.staged.operation;
+        payload.operation =
+            static_cast<StreamOperation>(slot.owner_operation.load(std::memory_order_acquire));
         static_cast<void>(Impl::claim(slot, payload));
     }
 }
@@ -415,9 +703,21 @@ bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) 
         return false;
     }
     auto& slot = impl_->slots[reservation.index_];
-    auto expected = StreamIngressState::Reserved;
-    if (!slot.state.compare_exchange_strong(expected, StreamIngressState::Armed,
-                                            std::memory_order_acq_rel)) {
+    const auto current_generation = impl_->current_generation.load(std::memory_order_acquire);
+    const bool stale =
+        current_generation != 0 &&
+        (impl_->current_client_id.load(std::memory_order_acquire) != slot.staged.client_id ||
+         current_generation != slot.staged.generation);
+    if (stale) {
+        static_cast<void>(Impl::claim(slot, {.cause = StreamTerminalCause::GenerationReplaced,
+                                             .operation = slot.staged.operation,
+                                             .metadata_failure = {}}));
+    }
+    if (stale || slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
+        store_state(slot, StreamIngressState::Removed);
+        return false;
+    }
+    if (!compare_state_strong(slot, StreamIngressState::Reserved, StreamIngressState::Armed)) {
         return false;
     }
     impl_->dormant[reservation.index_].store(&slot, std::memory_order_seq_cst);
@@ -429,17 +729,25 @@ StreamIngressHub::activation_state(const StreamIngressReservation& reservation) 
     if (!impl_->valid(reservation)) {
         return StreamIngressState::Free;
     }
-    return impl_->slots[reservation.index_].state.load(std::memory_order_acquire);
+    const auto& slot = impl_->slots[reservation.index_];
+    const auto state = load_state(slot);
+    return state == StreamIngressState::Published &&
+                   slot.publication_ready.load(std::memory_order_acquire) == 0
+               ? StreamIngressState::Installing
+               : state;
 }
 
 std::optional<StreamActivationProjection> StreamIngressHub::activation_projection(
     const StreamIngressReservation& reservation) const noexcept {
-    if (!impl_->valid(reservation) ||
-        impl_->slots[reservation.index_].state.load(std::memory_order_acquire) !=
-            StreamIngressState::Published) {
+    if (!impl_->valid(reservation)) {
         return std::nullopt;
     }
-    return impl_->slots[reservation.index_].projection;
+    const auto& slot = impl_->slots[reservation.index_];
+    if (load_state(slot) != StreamIngressState::Published ||
+        slot.publication_ready.load(std::memory_order_acquire) == 0) {
+        return std::nullopt;
+    }
+    return slot.projection;
 }
 
 std::size_t StreamIngressHub::activate_armed(std::int32_t client_id, std::uint64_t generation,
@@ -450,18 +758,30 @@ std::size_t StreamIngressHub::activate_armed(std::int32_t client_id, std::uint64
                     current_generation != generation))) {
         return 0;
     }
+    const Impl::PublisherGuard guard(*impl_);
+    if (!guard) {
+        return 0;
+    }
     std::size_t activated = 0;
     for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
         auto* slot = impl_->dormant[index].load(std::memory_order_seq_cst);
-        if (slot == nullptr || slot->staged.client_id != client_id ||
+        impl_->notify(detail::StreamIngressProbePoint::SlotLoad, index);
+        if (!impl_->actual(index, slot) || slot->staged.client_id != client_id ||
             slot->staged.generation != generation) {
             continue;
         }
-        auto expected = StreamIngressState::Armed;
-        if (!slot->state.compare_exchange_strong(expected, StreamIngressState::Installing,
-                                                 std::memory_order_acq_rel)) {
+        auto* expected_pointer = static_cast<StreamIngressSlot*>(nullptr);
+        if (!impl_->published[index].compare_exchange_strong(
+                expected_pointer, &impl_->installing_markers[index], std::memory_order_seq_cst,
+                std::memory_order_seq_cst)) {
             continue;
         }
+        if (!compare_state_strong(*slot, StreamIngressState::Armed,
+                                  StreamIngressState::Installing)) {
+            impl_->published[index].exchange(nullptr, std::memory_order_seq_cst);
+            continue;
+        }
+        impl_->notify(detail::StreamIngressProbePoint::ActivationInstalling, index);
         slot->projection = {.client_id = client_id,
                             .generation = generation,
                             .activation_receive_sequence = receive_sequence,
@@ -470,80 +790,143 @@ std::size_t StreamIngressHub::activate_armed(std::int32_t client_id, std::uint64
                             .type_mask = slot->staged.type_mask,
                             .mode = slot->staged.mode,
                             .operation = slot->staged.operation};
-        if (slot->terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
-            slot->state.store(StreamIngressState::Removing, std::memory_order_release);
-            impl_->dormant[index].store(nullptr, std::memory_order_seq_cst);
-            slot->state.store(StreamIngressState::Removed, std::memory_order_release);
+        const auto* observed_marker = impl_->published[index].load(std::memory_order_seq_cst);
+        impl_->notify(detail::StreamIngressProbePoint::SlotLoad, index);
+        if (impl_->marker(index, observed_marker)) {
+            impl_->notify(detail::StreamIngressProbePoint::MarkerLoad, index);
+        }
+        const bool still_current =
+            (impl_->current_generation.load(std::memory_order_acquire) == 0 ||
+             (impl_->current_client_id.load(std::memory_order_acquire) == client_id &&
+              impl_->current_generation.load(std::memory_order_acquire) == generation));
+        if (!impl_->marker(index, observed_marker) || !still_current ||
+            slot->terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open ||
+            !compare_state_strong(*slot, StreamIngressState::Installing,
+                                  StreamIngressState::Published)) {
+            impl_->published[index].exchange(nullptr, std::memory_order_seq_cst);
+            impl_->dormant[index].exchange(nullptr, std::memory_order_seq_cst);
+            store_state(*slot, StreamIngressState::Removed);
             continue;
         }
-        impl_->dormant[index].store(nullptr, std::memory_order_seq_cst);
-        impl_->published[index].store(slot, std::memory_order_seq_cst);
+        auto* marker = &impl_->installing_markers[index];
+        if (!impl_->published[index].compare_exchange_strong(
+                marker, slot, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+            slot->publication_ready.store(0, std::memory_order_release);
+            store_state(*slot, StreamIngressState::Removed);
+            continue;
+        }
         impl_->notify(detail::StreamIngressProbePoint::Publication, index);
-        slot->state.store(StreamIngressState::Published, std::memory_order_release);
+        slot->publication_ready.store(1U, std::memory_order_release);
+        impl_->dormant[index].exchange(nullptr, std::memory_order_seq_cst);
         ++activated;
     }
     return activated;
 }
 
 void StreamIngressHub::publish(const StreamItemView& item) noexcept {
-    const Impl::PublisherGuard publisher(*impl_);
+    const Impl::PublisherGuard guard(*impl_);
+    if (!guard) {
+        return;
+    }
     for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
         auto* slot = impl_->published[index].load(std::memory_order_seq_cst);
         impl_->notify(detail::StreamIngressProbePoint::SlotLoad, index);
-        if (slot != nullptr) {
-            impl_->enqueue(*slot, item);
+        if (impl_->marker(index, slot)) {
+            impl_->notify(detail::StreamIngressProbePoint::MarkerLoad, index);
+        }
+        if (impl_->actual(index, slot)) {
+            Impl::enqueue(*slot, item);
         }
     }
 }
 
-std::optional<StreamIngressItemView>
-StreamIngressHub::poll_front(const StreamIngressReservation& reservation) noexcept {
-    if (!impl_->valid(reservation)) {
-        return std::nullopt;
+StreamIngressFrontResult StreamIngressHub::visit_front(StreamIngressReservation& reservation,
+                                                       void* context,
+                                                       StreamIngressFrontVisitor visitor) {
+    if (!impl_->valid(reservation) || visitor == nullptr) {
+        return StreamIngressFrontResult::InvalidReservation;
     }
     auto& slot = impl_->slots[reservation.index_];
-    if (slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
-        return std::nullopt;
+    if (load_state(slot) != StreamIngressState::Published ||
+        slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
+        return StreamIngressFrontResult::Empty;
     }
     const auto consumer = slot.descriptor_consumer.load(std::memory_order_relaxed);
     const auto producer = slot.descriptor_producer.load(std::memory_order_acquire);
     if (consumer == producer) {
-        return std::nullopt;
+        return StreamIngressFrontResult::Empty;
     }
+    auto borrow = slot.borrow_epoch.load(std::memory_order_acquire);
+    auto no_active_borrow = 0U;
+    if (!slot.active_borrows.compare_exchange_strong(
+            no_active_borrow, 1U, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return StreamIngressFrontResult::Invalidated;
+    }
+    if ((borrow & 1U) != 0U || borrow == std::numeric_limits<std::uint64_t>::max() ||
+        !advance_borrow_epoch(slot, borrow, borrow + 1)) {
+        slot.active_borrows.store(0, std::memory_order_release);
+        return StreamIngressFrontResult::Invalidated;
+    }
+    const auto active_borrow = borrow + 1;
+    struct BorrowRelease {
+        StreamIngressSlot* slot = nullptr;
+        std::uint64_t token = 0;
+        bool active = true;
+
+        BorrowRelease(StreamIngressSlot& slot_value, std::uint64_t token_value) noexcept
+            : slot(&slot_value), token(token_value) {}
+        ~BorrowRelease() {
+            if (token != std::numeric_limits<std::uint64_t>::max()) {
+                static_cast<void>(advance_borrow_epoch(*slot, token, token + 1));
+            }
+            if (active) {
+                slot->active_borrows.store(0, std::memory_order_release);
+            }
+        }
+        BorrowRelease(const BorrowRelease&) = delete;
+        BorrowRelease& operator=(const BorrowRelease&) = delete;
+        BorrowRelease(BorrowRelease&&) = delete;
+        BorrowRelease& operator=(BorrowRelease&&) = delete;
+    } release(slot, active_borrow);
+
     const auto descriptor = (*slot.descriptors)[consumer % kStreamQueueItems];
     const auto physical = static_cast<std::size_t>(descriptor.byte_ticket % kStreamQueueBytes);
     const auto first_size =
         std::min<std::size_t>(descriptor.json_size, kStreamQueueBytes - physical);
-    return StreamIngressItemView(descriptor, {slot.bytes->data() + physical, first_size},
+    reservation.cursor_.activate(slot, reservation.epoch_, active_borrow, descriptor,
+                                 {slot.bytes->data() + physical, first_size},
                                  {slot.bytes->data(), descriptor.json_size - first_size});
-}
+    const auto action = visitor(context, reservation.cursor_);
+    const bool retained = reservation.cursor_.valid();
+    static_cast<void>(advance_borrow_epoch(slot, active_borrow, active_borrow + 1));
+    slot.active_borrows.store(0, std::memory_order_release);
+    release.token = std::numeric_limits<std::uint64_t>::max();
+    release.active = false;
+    if (!retained) {
+        return StreamIngressFrontResult::Invalidated;
+    }
+    if (action == StreamIngressFrontAction::Keep) {
+        return StreamIngressFrontResult::Visited;
+    }
 
-bool StreamIngressHub::consume(const StreamIngressReservation& reservation,
-                               const StreamIngressItemView& item) noexcept {
-    if (!impl_->valid(reservation)) {
-        return false;
+    const auto current_consumer = slot.descriptor_consumer.load(std::memory_order_relaxed);
+    const auto current_producer = slot.descriptor_producer.load(std::memory_order_acquire);
+    if (current_consumer != consumer || current_consumer == current_producer ||
+        (*slot.descriptors)[current_consumer % kStreamQueueItems].byte_ticket !=
+            descriptor.byte_ticket) {
+        return StreamIngressFrontResult::Invalidated;
     }
-    auto& slot = impl_->slots[reservation.index_];
-    const auto consumer = slot.descriptor_consumer.load(std::memory_order_relaxed);
-    const auto producer = slot.descriptor_producer.load(std::memory_order_acquire);
-    if (consumer == producer || (*slot.descriptors)[consumer % kStreamQueueItems].byte_ticket !=
-                                    item.descriptor().byte_ticket) {
-        return false;
-    }
-    const auto physical =
-        static_cast<std::size_t>(item.descriptor().byte_ticket % kStreamQueueBytes);
-    const auto first_size =
-        std::min<std::size_t>(item.descriptor().json_size, kStreamQueueBytes - physical);
     if (first_size != 0) {
         std::memset(slot.bytes->data() + physical, kReclaimedPoison, first_size);
     }
-    if (item.descriptor().json_size > first_size) {
-        std::memset(slot.bytes->data(), kReclaimedPoison, item.descriptor().json_size - first_size);
+    if (descriptor.json_size > first_size) {
+        std::memset(slot.bytes->data(), kReclaimedPoison, descriptor.json_size - first_size);
     }
-    slot.byte_consumer.store(item.descriptor().byte_ticket + item.descriptor().json_size,
+    poison((*slot.descriptors)[current_consumer % kStreamQueueItems]);
+    slot.byte_consumer.store(descriptor.byte_ticket + descriptor.json_size,
                              std::memory_order_release);
-    slot.descriptor_consumer.store(consumer + 1, std::memory_order_release);
-    return true;
+    slot.descriptor_consumer.store(current_consumer + 1, std::memory_order_release);
+    return StreamIngressFrontResult::Consumed;
 }
 
 void StreamIngressHub::discard(const StreamIngressReservation& reservation) noexcept {
@@ -551,6 +934,8 @@ void StreamIngressHub::discard(const StreamIngressReservation& reservation) noex
         return;
     }
     auto& slot = impl_->slots[reservation.index_];
+    invalidate_borrow(slot);
+    impl_->poison_queued(slot);
     slot.descriptor_consumer.store(slot.descriptor_producer.load(std::memory_order_acquire),
                                    std::memory_order_release);
     slot.byte_consumer.store(slot.byte_producer.load(std::memory_order_acquire),
@@ -559,7 +944,7 @@ void StreamIngressHub::discard(const StreamIngressReservation& reservation) noex
 
 bool StreamIngressHub::claim(StreamIngressReservation& reservation,
                              StreamTerminalPayload payload) noexcept {
-    return impl_->valid(reservation) && impl_->claim(impl_->slots[reservation.index_], payload);
+    return impl_->valid(reservation) && Impl::claim(impl_->slots[reservation.index_], payload);
 }
 
 std::optional<StreamTerminalPayload>
@@ -593,47 +978,60 @@ bool StreamIngressHub::detach(StreamIngressReservation& reservation) noexcept {
         return false;
     }
     auto& slot = impl_->slots[reservation.index_];
-    auto state = slot.state.load(std::memory_order_acquire);
-    while (state == StreamIngressState::Armed || state == StreamIngressState::Published) {
-        if (slot.state.compare_exchange_weak(state, StreamIngressState::Removing,
-                                             std::memory_order_acq_rel)) {
+    const auto raw_state = slot.state.load(std::memory_order_acquire);
+    auto decoded_state = decode_state(raw_state);
+    if (!decoded_state) {
+        impl_->published[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
+        impl_->dormant[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
+        impl_->notify(detail::StreamIngressProbePoint::SlotExchange, reservation.index_);
+        invalidate_borrow(slot);
+        slot.publication_ready.store(0, std::memory_order_release);
+        store_state(slot, StreamIngressState::Removed);
+        return true;
+    }
+    auto state = *decoded_state;
+    while (state == StreamIngressState::Armed || state == StreamIngressState::Installing ||
+           state == StreamIngressState::Published) {
+        if (compare_state(slot, state, StreamIngressState::Removing)) {
+            invalidate_borrow(slot);
+            slot.publication_ready.store(0, std::memory_order_release);
             impl_->published[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
             impl_->dormant[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
             impl_->notify(detail::StreamIngressProbePoint::SlotExchange, reservation.index_);
-            slot.state.store(StreamIngressState::Removed, std::memory_order_release);
+            store_state(slot, StreamIngressState::Removed);
             return true;
         }
     }
-    return state == StreamIngressState::Removed || state == StreamIngressState::Reclaimable;
+    if (state == StreamIngressState::Reserved) {
+        return false;
+    }
+    if (state == StreamIngressState::Removed || state == StreamIngressState::Reclaimable) {
+        return true;
+    }
+    if (state == StreamIngressState::Removing) {
+        return false;
+    }
+    impl_->published[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
+    impl_->dormant[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
+    impl_->notify(detail::StreamIngressProbePoint::SlotExchange, reservation.index_);
+    slot.publication_ready.store(0, std::memory_order_release);
+    store_state(slot, StreamIngressState::Removed);
+    return true;
 }
 
 bool StreamIngressHub::poll_reclaim(StreamIngressReservation& reservation) noexcept {
-    if (!impl_->valid(reservation)) {
-        return false;
-    }
-    auto& slot = impl_->slots[reservation.index_];
-    auto expected = StreamIngressState::Removed;
-    if (slot.state.load(std::memory_order_acquire) != StreamIngressState::Removed ||
-        impl_->publisher_count.load(std::memory_order_seq_cst) != 0) {
-        return false;
-    }
-    impl_->notify(detail::StreamIngressProbePoint::ReclaimZero, reservation.index_);
-    if (!slot.state.compare_exchange_strong(expected, StreamIngressState::Reclaimable,
-                                            std::memory_order_acq_rel)) {
-        return false;
-    }
     const std::lock_guard lock(impl_->control);
-    if (!impl_->valid(reservation)) {
+    if (!impl_->valid(reservation) ||
+        !impl_->reclaim_locked(reservation.index_, reservation.epoch_)) {
         return false;
     }
-    slot.descriptor_producer.store(0, std::memory_order_relaxed);
-    slot.descriptor_consumer.store(0, std::memory_order_relaxed);
-    slot.byte_producer.store(0, std::memory_order_relaxed);
-    slot.byte_consumer.store(0, std::memory_order_relaxed);
-    slot.terminal_cause.store(StreamTerminalCause::Open, std::memory_order_relaxed);
-    slot.state.store(StreamIngressState::Free, std::memory_order_release);
     reservation.hub_ = nullptr;
     return true;
+}
+
+void StreamIngressHub::poll_control() noexcept {
+    const std::lock_guard lock(impl_->control);
+    impl_->sweep_retired_locked();
 }
 
 void StreamIngressHub::abandon(StreamIngressReservation& reservation) noexcept {
@@ -642,23 +1040,84 @@ void StreamIngressHub::abandon(StreamIngressReservation& reservation) noexcept {
         return;
     }
     auto& slot = impl_->slots[reservation.index_];
-    const auto state = slot.state.load(std::memory_order_acquire);
-    if (state == StreamIngressState::Reserved) {
+    if (load_state(slot) == StreamIngressState::Reserved) {
         const std::lock_guard lock(impl_->control);
-        if (impl_->valid(reservation) &&
-            slot.state.load(std::memory_order_acquire) == StreamIngressState::Reserved) {
-            slot.state.store(StreamIngressState::Free, std::memory_order_release);
+        if (impl_->valid(reservation) && load_state(slot) == StreamIngressState::Reserved) {
+            store_state(slot, StreamIngressState::Removed);
+            impl_->transfer_retired_locked(reservation.index_, reservation.epoch_);
+            impl_->sweep_retired_locked();
         }
         reservation.hub_ = nullptr;
         return;
     }
     static_cast<void>(detach(reservation));
-    static_cast<void>(poll_reclaim(reservation));
+    {
+        const std::lock_guard lock(impl_->control);
+        if (impl_->valid(reservation)) {
+            impl_->transfer_retired_locked(reservation.index_, reservation.epoch_);
+            impl_->sweep_retired_locked();
+        }
+    }
     reservation.hub_ = nullptr;
 }
 
+namespace {
+
+using PollRep = StreamPollSchedule::Clock::duration::rep;
+using PollUnsignedRep = std::make_unsigned_t<PollRep>;
+static_assert(std::is_integral_v<PollRep>);
+static_assert(std::is_signed_v<PollRep>);
+
+PollUnsignedRep magnitude(PollRep value) noexcept {
+    if (value >= 0) {
+        return static_cast<PollUnsignedRep>(value);
+    }
+    return static_cast<PollUnsignedRep>(-(value + 1)) + 1U;
+}
+
+PollUnsignedRep distance(PollRep lower, PollRep upper) noexcept {
+    if (lower >= 0) {
+        return static_cast<PollUnsignedRep>(upper) - static_cast<PollUnsignedRep>(lower);
+    }
+    if (upper < 0) {
+        return magnitude(lower) - magnitude(upper);
+    }
+    return magnitude(lower) + static_cast<PollUnsignedRep>(upper);
+}
+
+PollRep add_nonnegative(PollRep base, PollUnsignedRep delta) noexcept {
+    if (base >= 0) {
+        return static_cast<PollRep>(static_cast<PollUnsignedRep>(base) + delta);
+    }
+    const auto base_magnitude = magnitude(base);
+    if (delta < base_magnitude) {
+        const auto result_magnitude = base_magnitude - delta;
+        if (result_magnitude == magnitude(std::numeric_limits<PollRep>::min())) {
+            return std::numeric_limits<PollRep>::min();
+        }
+        return -static_cast<PollRep>(result_magnitude);
+    }
+    return static_cast<PollRep>(delta - base_magnitude);
+}
+
+StreamPollSchedule::Clock::time_point
+saturating_add(StreamPollSchedule::Clock::time_point base,
+               StreamPollSchedule::Clock::duration positive) noexcept {
+    const auto base_count = base.time_since_epoch().count();
+    const auto maximum = std::numeric_limits<PollRep>::max();
+    const auto increment = static_cast<PollUnsignedRep>(positive.count());
+    const auto room = distance(base_count, maximum);
+    if (increment > room) {
+        return StreamPollSchedule::Clock::time_point::max();
+    }
+    return StreamPollSchedule::Clock::time_point{
+        StreamPollSchedule::Clock::duration{add_nonnegative(base_count, increment)}};
+}
+
+} // namespace
+
 StreamPollSchedule::StreamPollSchedule(Clock::time_point now) noexcept
-    : next_poll_(now + kStreamWorkerPollInterval) {}
+    : next_poll_(saturating_add(now, kStreamWorkerPollInterval)) {}
 
 StreamPollSchedule::Clock::time_point
 StreamPollSchedule::next(std::optional<Clock::time_point> deadline) const noexcept {
@@ -666,12 +1125,22 @@ StreamPollSchedule::next(std::optional<Clock::time_point> deadline) const noexce
 }
 
 void StreamPollSchedule::advance(Clock::time_point now) noexcept {
-    if (next_poll_ > now) {
+    if (next_poll_ > now || next_poll_ == Clock::time_point::max()) {
         return;
     }
-    const auto elapsed = now - next_poll_;
-    const auto skipped = elapsed / kStreamWorkerPollInterval + 1;
-    next_poll_ += kStreamWorkerPollInterval * skipped;
+    const auto interval = static_cast<PollUnsignedRep>(
+        std::chrono::duration_cast<Clock::duration>(kStreamWorkerPollInterval).count());
+    const auto elapsed =
+        distance(next_poll_.time_since_epoch().count(), now.time_since_epoch().count());
+    const auto skipped = elapsed / interval + 1U;
+    const auto maximum = std::numeric_limits<PollRep>::max();
+    const auto room = distance(next_poll_.time_since_epoch().count(), maximum);
+    if (skipped > room / interval) {
+        next_poll_ = Clock::time_point::max();
+        return;
+    }
+    next_poll_ = Clock::time_point{Clock::duration{
+        add_nonnegative(next_poll_.time_since_epoch().count(), skipped * interval)}};
 }
 
 StreamItemView StreamIngressTestAccess::item(std::string_view first, std::string_view second,
@@ -698,6 +1167,46 @@ void StreamIngressTestAccess::set_tickets(StreamIngressHub& hub,
 
 void StreamIngressTestAccess::hold_publisher(StreamIngressHub& hub, bool hold) noexcept {
     hub.impl_->publisher_count.store(hold ? 1U : 0U, std::memory_order_seq_cst);
+}
+
+std::uint32_t StreamIngressTestAccess::publisher_count(const StreamIngressHub& hub) noexcept {
+    return hub.impl_->publisher_count.load(std::memory_order_seq_cst);
+}
+
+std::size_t
+StreamIngressTestAccess::slot_index(const StreamIngressReservation& reservation) noexcept {
+    return reservation.index_;
+}
+
+void StreamIngressTestAccess::set_state_raw(StreamIngressHub& hub,
+                                            const StreamIngressReservation& reservation,
+                                            std::uint32_t state) noexcept {
+    if (hub.impl_->valid(reservation)) {
+        hub.impl_->slots[reservation.index_].state.store(state, std::memory_order_release);
+    }
+}
+
+std::size_t StreamIngressTestAccess::retired_count(const StreamIngressHub& hub) noexcept {
+    const std::lock_guard lock(hub.impl_->control);
+    return static_cast<std::size_t>(
+        std::count(hub.impl_->retired.begin(), hub.impl_->retired.end(), true));
+}
+
+bool StreamIngressTestAccess::reclaimed_state_is_poisoned(const StreamIngressHub& hub,
+                                                          std::size_t index) noexcept {
+    if (index >= kStreamSubscriberSlots ||
+        load_state(hub.impl_->slots[index]) != StreamIngressState::Free) {
+        return false;
+    }
+    const auto all_poison = [](const auto& value) {
+        const auto bytes = std::as_bytes(std::span{&value, std::size_t{1}});
+        return std::ranges::all_of(bytes, [](std::byte byte) {
+            return std::to_integer<unsigned char>(byte) == kReclaimedPoison;
+        });
+    };
+    const auto& slot = hub.impl_->slots[index];
+    return all_poison(slot.staged) && all_poison(slot.projection) &&
+           all_poison(slot.terminal_payload);
 }
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)

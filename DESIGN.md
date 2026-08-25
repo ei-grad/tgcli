@@ -3617,7 +3617,8 @@ chat-ID filter of at most 64 entries, and the staged type mask, mode, and operat
 does not physically copy mutable `ChatSummary` title, username, or unread fields into
 each slot. Workers do not consume those fields, live items are self-contained, and the
 projection remains the complete observable state needed to enforce activation and
-routing semantics.
+routing semantics. Its physical representation is exactly 552 bytes, including
+explicit reserved padding; this is a size contract, not merely an upper bound.
 
 The bootstrap delta buffer has exact bounds of 4,096 deltas and 16,777,216 logical
 bytes. Persistent metadata has exact bounds of 65,536 chats, 131,072 entities, and a
@@ -3662,9 +3663,24 @@ The receive path uses:
 - one lock-free `std::atomic<uint32_t>` publisher count for deferred reclamation.
 
 Registration reserves and initializes an unpublished slot off the receive thread.
+Reservation returns one closed per-call result: an owned reservation, the exact
+admission failure observed by that call, or invalid request. There is no shared
+last-failure side channel between concurrent callers. Before arming, commit repeats
+the retained generation and terminal decision; a stale reserved slot becomes Removed
+with the winning cause and can never later publish.
+
 The receive-loop owner fills every immutable filter and metadata-snapshot field before
 publishing the slot with `slot.store(pointer, memory_order_seq_cst)` at the §4.6.5
 activation boundary. No slot registry operation uses a weaker memory order.
+Installation may transiently store a pointer to one stable, valid per-index marker
+object in the published registry. The marker is neither a tagged pointer nor slot
+storage and is never dereferenced as a published subscription. A scan that loads it
+performs no enqueue. Cancellation may exchange the marker to null; installation then
+rechecks the marker, terminal, generation, readiness, and state and must fail its
+marker-to-slot publication after that exchange. The marker object exists for the
+whole hub lifetime, so its load is safe under the same publisher guard. Tests force
+marker load, marker exchange, failed publication after exchange, and successful
+marker-to-slot publication.
 Immediately before its first slot load, every receive callback executes
 `publisher_count.fetch_add(1, memory_order_seq_cst)`, whose acquire half precedes the
 load. It then scans all 32 slots with `slot.load(memory_order_seq_cst)`, applies cheap
@@ -3680,6 +3696,10 @@ teardown.
 The slot pointer, publisher count, descriptor producer/consumer indices, byte
 producer/consumer indices, and terminal-cause atomics must each satisfy both
 `is_always_lock_free` at compile time and `is_lock_free()` during hub construction.
+The actual state, current-client, and current-generation atomic instances are checked
+too, not substitute representative objects. Slot state is stored in the already
+checked `uint32_t` representation; an invalid raw value fails closed and is removed
+without introducing a callback lock or teardown.
 The first failing atomic kind is reported by the exact `lock_free_ingress` schema
 branch in §4.6.9. M5 fails closed at admission; it must not substitute a mutex or
 lossy `try_lock`. Therefore callback lock contention is impossible in the conforming
@@ -3700,6 +3720,9 @@ schedule. After an empty poll with no terminal, the worker advances `next_poll` 
 2 ms, skips rather than replays already elapsed ticks, and calls
 `std::this_thread::sleep_until(next_poll)`; a finite request deadline replaces
 `next_poll` when earlier. It does not spin and has no condition-variable notifier.
+Every duration conversion, skipped-tick multiplication, and time-point addition is
+checked before arithmetic and saturates at the clock maximum; a schedule already at
+maximum remains there without wrapping or spinning.
 When not inside an already-started sink write, it reads terminal state and queue
 indices on every scheduled poll. This permits at most 500 empty state probes per
 second per subscription and 16,000 across 32 subscriptions; nonempty work is bounded
@@ -3719,6 +3742,21 @@ keeps the count nonzero until its last use. That slot cannot be reserved again
 before reclamation. The control terminal has separate reserved storage and cannot be
 crowded out by data.
 
+If a reservation is destroyed, unwound, or disconnected before reclamation, ownership
+of `{slot,epoch}` transfers to a fixed hub-owned retired set under the off-callback
+control mutex before the reservation loses ownership. Control polling and later
+reservation attempts retry reclamation. Capacity returns only after registry exchange,
+publisher quiescence, borrow invalidation, poisoning, and epoch-checked reset. Hub
+shutdown may synchronously sweep only after its receive producer has stopped; it never
+forces a slot Free before the zero-count observation.
+
+A worker observes a queue front only through a noncopyable, nonmovable scoped cursor.
+Its dynamic-extent byte access remains behind epoch-checking borrowed-span methods; no
+raw span is returned. The cursor invalidates the borrow on Keep, Consume, or exception
+before advancing indices. Detach invalidates the epoch, reclamation rejects an active
+borrow, and a retained cursor from an earlier epoch cannot become valid after slot
+reuse.
+
 The reclamation proof uses the single C++ sequentially consistent order. Let `P` be
 slot publication, `I` the publisher-count increment, `L` a slot load, `D` the
 publisher-count decrement after the reader's final pointer use, `X` the exchange to
@@ -3729,6 +3767,10 @@ in the same `seq_cst` order.
 - Initialization of the slot object and immutable metadata snapshot is sequenced
   before `P`. If `L` reads the pointer stored by `P`, the release/acquire semantics of
   the `seq_cst` store/load publish every initialized field to the reader.
+- A load of the stable Installing marker is not `P` and cannot enqueue. If `X`
+  exchanges that marker to null, the later marker-to-slot compare-exchange must fail
+  in the same `seq_cst` order. If it succeeds, that compare-exchange is `P`; the
+  marker's stable lifetime covers every concurrent marker load.
 - If `L < X`, then `I < L < X`. Because `D` is after the reader's final use, a `Z`
   ordered before `D` cannot observe a zero count contributed by that reader. The first
   admissible `Z` that observes zero is after `D`, so reclamation follows the last use.

@@ -212,6 +212,25 @@ struct StatusProbe {
     }
 };
 
+struct ActivationProbe {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> guard_missing{false};
+
+    static void notify(void* context, tgcli::daemon::detail::StreamIngressProbePoint point,
+                       [[maybe_unused]] std::size_t index) noexcept {
+        if (point != tgcli::daemon::detail::StreamIngressProbePoint::ActivationInstalling) {
+            return;
+        }
+        auto& probe = *static_cast<ActivationProbe*>(context);
+        probe.guard_missing.store(!guarded(), std::memory_order_release);
+        probe.entered.store(true, std::memory_order_release);
+        while (!probe.release.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+};
+
 struct TeardownProbe {
     ~TeardownProbe() {
         note_violation(InstrumentationClass::Teardown);
@@ -267,6 +286,20 @@ template <typename Value> tgcli::core::TdValue stamped(Value value, std::uint64_
     auto result = tgcli::core::TdValue::from(std::move(value));
     result.set_receive_event_metadata(sequence, tgcli::core::TdEventClock::time_point{});
     return result;
+}
+
+tgcli::daemon::StreamIngressFrontAction
+consume_ingress([[maybe_unused]] void* context,
+                const tgcli::daemon::StreamIngressFrontCursor& cursor) {
+    return cursor.valid() ? tgcli::daemon::StreamIngressFrontAction::Consume
+                          : tgcli::daemon::StreamIngressFrontAction::Keep;
+}
+
+tgcli::daemon::StreamIngressFrontAction
+keep_ingress([[maybe_unused]] void* context,
+             const tgcli::daemon::StreamIngressFrontCursor& cursor) {
+    return cursor.valid() ? tgcli::daemon::StreamIngressFrontAction::Keep
+                          : tgcli::daemon::StreamIngressFrontAction::Consume;
 }
 
 } // namespace
@@ -964,8 +997,9 @@ TEST_CASE("fixed ingress scan enqueue overflow and removal stay callback safe",
         .operation = tgcli::daemon::StreamOperation::Listen,
         .mode = tgcli::daemon::StreamMode::Items,
         .type_mask = tgcli::daemon::stream_event_mask(tgcli::daemon::StreamEventClass::Chat)};
-    auto reserved = hub.reserve(request);
-    REQUIRE(reserved);
+    auto admission = hub.reserve(request);
+    auto* reserved = std::get_if<tgcli::daemon::StreamIngressReservation>(&admission);
+    REQUIRE(reserved != nullptr);
     REQUIRE(hub.commit_activation(*reserved));
     REQUIRE(hub.activate_armed(1001, 1, 1) == 1);
     const tgcli::daemon::StreamRoutingSidecar routing{
@@ -976,9 +1010,8 @@ TEST_CASE("fixed ingress scan enqueue overflow and removal stay callback safe",
         const ForcedGuard guard;
         hub.publish(item);
     }
-    auto front = hub.poll_front(*reserved);
-    REQUIRE(front);
-    REQUIRE(hub.consume(*reserved, *front));
+    REQUIRE(hub.visit_front(*reserved, nullptr, &consume_ingress) ==
+            tgcli::daemon::StreamIngressFrontResult::Consumed);
     tgcli::daemon::StreamIngressTestAccess::set_tickets(hub, *reserved,
                                                         tgcli::daemon::kStreamQueueItems, 0, 0, 0);
     bool detached = false;
@@ -990,6 +1023,44 @@ TEST_CASE("fixed ingress scan enqueue overflow and removal stay callback safe",
     REQUIRE(detached);
     REQUIRE(hub.claim_terminal(*reserved));
     REQUIRE(hub.poll_reclaim(*reserved));
+    CHECK(callback_violations().load(std::memory_order_acquire) == 0);
+}
+
+TEST_CASE("callback activation aborts safely across concurrent exchange and reclaim",
+          "[stream][callback-safety][ingress][activation][concurrency]") {
+    reset_instrumentation();
+    ActivationProbe probe;
+    tgcli::daemon::StreamIngressHub hub({.context = &probe,
+                                         .hook = &ActivationProbe::notify,
+                                         .forced_lock_free_failure = std::nullopt});
+    const tgcli::daemon::StreamIngressRequest request{
+        .client_id = 1001,
+        .generation = 1,
+        .operation = tgcli::daemon::StreamOperation::Listen,
+        .mode = tgcli::daemon::StreamMode::Items,
+        .type_mask = tgcli::daemon::stream_event_mask(tgcli::daemon::StreamEventClass::Message)};
+    auto admission = hub.reserve(request);
+    auto* reserved = std::get_if<tgcli::daemon::StreamIngressReservation>(&admission);
+    REQUIRE(reserved != nullptr);
+    REQUIRE(hub.commit_activation(*reserved));
+    std::size_t activated = 1;
+    std::thread callback([&] {
+        const ForcedGuard guard;
+        activated = hub.activate_armed(1001, 1, 2);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (!probe.entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(probe.entered.load(std::memory_order_acquire));
+    REQUIRE(hub.detach(*reserved));
+    CHECK_FALSE(hub.poll_reclaim(*reserved));
+    probe.release.store(true, std::memory_order_release);
+    callback.join();
+    CHECK(activated == 0);
+    REQUIRE(hub.poll_reclaim(*reserved));
+    CHECK_FALSE(probe.guard_missing.load(std::memory_order_acquire));
     CHECK(callback_violations().load(std::memory_order_acquire) == 0);
 }
 
@@ -1013,8 +1084,9 @@ TEST_CASE("stream lifecycle activation authorization and enqueue stay callback s
         .operation = tgcli::daemon::StreamOperation::Listen,
         .mode = tgcli::daemon::StreamMode::Items,
         .type_mask = tgcli::daemon::stream_event_mask(tgcli::daemon::StreamEventClass::Message)};
-    auto reserved = service.ingress_hub().reserve(request);
-    REQUIRE(reserved);
+    auto admission = service.ingress_hub().reserve(request);
+    auto* reserved = std::get_if<tgcli::daemon::StreamIngressReservation>(&admission);
+    REQUIRE(reserved != nullptr);
     REQUIRE(service.ingress_hub().commit_activation(*reserved));
     observer->on_receive_boundary(2);
     REQUIRE(service.ingress_hub().activation_state(*reserved) ==
@@ -1022,7 +1094,8 @@ TEST_CASE("stream lifecycle activation authorization and enqueue stay callback s
 
     observer->on_update(stamped(tgcli::core::TdUpdateNewMessage{.message = message()}, 3));
     observer->on_receive_boundary(3);
-    REQUIRE(service.ingress_hub().poll_front(*reserved));
+    REQUIRE(service.ingress_hub().visit_front(*reserved, nullptr, &keep_ingress) ==
+            tgcli::daemon::StreamIngressFrontResult::Visited);
     observer->on_authorization_state(tgcli::core::AuthStateData{tgcli::core::AuthState::Closing},
                                      4);
     observer->on_receive_boundary(4);

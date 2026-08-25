@@ -151,8 +151,8 @@ StreamIngressHub& StreamService::ingress_hub() noexcept {
 
 void StreamService::claim_shutdown() noexcept {
     const auto current = normalizer_.status();
-    hub_.claim_generation(current.client_id, current.generation,
-                          {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
+    hub_.claim_control_generation(current.client_id, current.generation,
+                                  {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
 }
 
 void StreamService::on_item(const StreamItemView& item,

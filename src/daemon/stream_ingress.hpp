@@ -11,6 +11,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
+#include <variant>
 
 namespace tgcli::daemon {
 
@@ -51,7 +53,7 @@ struct StreamIngressRequest {
     std::uint8_t chat_count = 0;
 };
 
-struct StreamActivationProjection {
+struct PublishedIngressFilter {
     std::int32_t client_id = 0;
     std::uint64_t generation = 0;
     std::uint64_t activation_receive_sequence = 0;
@@ -60,7 +62,12 @@ struct StreamActivationProjection {
     std::uint8_t type_mask = 0;
     StreamMode mode = StreamMode::Items;
     StreamOperation operation = StreamOperation::Listen;
+    std::array<std::byte, 12> reserved{};
 };
+
+static_assert(sizeof(PublishedIngressFilter) == 552);
+
+using StreamActivationProjection = PublishedIngressFilter;
 
 enum class StreamTerminalCause : std::uint32_t {
     Open,
@@ -114,27 +121,74 @@ static_assert(sizeof(StreamIngressDescriptor) == 64);
 
 struct StreamIngressSlot;
 
-class StreamIngressItemView {
-  public:
-    ~StreamIngressItemView() = default;
-    StreamIngressItemView(StreamIngressItemView&&) noexcept = default;
-    StreamIngressItemView& operator=(StreamIngressItemView&&) noexcept = default;
-    StreamIngressItemView(const StreamIngressItemView&) = delete;
-    StreamIngressItemView& operator=(const StreamIngressItemView&) = delete;
+class StreamIngressFrontCursor;
 
-    [[nodiscard]] const StreamIngressDescriptor& descriptor() const noexcept;
-    [[nodiscard]] std::array<std::span<const char>, 2> spans() const noexcept;
+class StreamIngressBorrowedSpan {
+  public:
+    ~StreamIngressBorrowedSpan() = default;
+    StreamIngressBorrowedSpan(const StreamIngressBorrowedSpan&) = delete;
+    StreamIngressBorrowedSpan& operator=(const StreamIngressBorrowedSpan&) = delete;
+    StreamIngressBorrowedSpan(StreamIngressBorrowedSpan&&) = delete;
+    StreamIngressBorrowedSpan& operator=(StreamIngressBorrowedSpan&&) = delete;
+
+    [[nodiscard]] std::optional<std::size_t> size() const noexcept;
+    [[nodiscard]] bool copy_to(std::span<char> destination) const noexcept;
 
   private:
-    StreamIngressItemView(StreamIngressDescriptor descriptor, std::span<const char> first,
-                          std::span<const char> second) noexcept;
+    StreamIngressBorrowedSpan(StreamIngressFrontCursor& owner, std::size_t index) noexcept;
 
-    StreamIngressDescriptor descriptor_;
-    std::span<const char> first_;
-    std::span<const char> second_;
+    StreamIngressFrontCursor* owner_ = nullptr;
+    std::size_t index_ = 0;
 
-    friend class StreamIngressHub;
+    friend class StreamIngressFrontCursor;
 };
+
+using StreamIngressSpanVisitor = void (*)(void*, const StreamIngressBorrowedSpan&,
+                                          const StreamIngressBorrowedSpan&) noexcept;
+
+class StreamIngressFrontCursor {
+  public:
+    ~StreamIngressFrontCursor() = default;
+    StreamIngressFrontCursor(const StreamIngressFrontCursor&) = delete;
+    StreamIngressFrontCursor& operator=(const StreamIngressFrontCursor&) = delete;
+    StreamIngressFrontCursor(StreamIngressFrontCursor&&) = delete;
+    StreamIngressFrontCursor& operator=(StreamIngressFrontCursor&&) = delete;
+
+    [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] std::optional<StreamIngressDescriptor> descriptor() const noexcept;
+    bool visit_spans(void* context, StreamIngressSpanVisitor visitor) const noexcept;
+
+  private:
+    StreamIngressFrontCursor() noexcept;
+    void activate(StreamIngressSlot& slot, std::uint64_t reservation_epoch,
+                  std::uint64_t borrow_epoch, StreamIngressDescriptor descriptor,
+                  std::span<const char> first, std::span<const char> second) noexcept;
+    [[nodiscard]] bool copy_span(std::size_t index, std::span<char> destination) const noexcept;
+    [[nodiscard]] std::optional<std::size_t> span_size(std::size_t index) const noexcept;
+
+    StreamIngressSlot* slot_ = nullptr;
+    std::uint64_t reservation_epoch_ = 0;
+    std::uint64_t borrow_epoch_ = 0;
+    StreamIngressDescriptor descriptor_;
+    std::array<std::span<const char>, 2> spans_{};
+    StreamIngressBorrowedSpan first_;
+    StreamIngressBorrowedSpan second_;
+
+    friend class StreamIngressBorrowedSpan;
+    friend class StreamIngressHub;
+    friend class StreamIngressReservation;
+};
+
+enum class StreamIngressFrontAction : std::uint8_t { Keep, Consume };
+enum class StreamIngressFrontResult : std::uint8_t {
+    InvalidReservation,
+    Empty,
+    Visited,
+    Consumed,
+    Invalidated
+};
+using StreamIngressFrontVisitor = StreamIngressFrontAction (*)(void*,
+                                                               const StreamIngressFrontCursor&);
 
 class StreamIngressHub;
 
@@ -157,10 +211,17 @@ class StreamIngressReservation {
     StreamIngressHub* hub_ = nullptr;
     std::uint32_t index_ = 0;
     std::uint64_t epoch_ = 0;
+    StreamIngressFrontCursor cursor_;
 
     friend class StreamIngressHub;
     friend class StreamIngressTestAccess;
 };
+
+struct StreamIngressInvalidRequest {};
+
+using StreamIngressAdmissionResult =
+    std::variant<StreamIngressReservation, StreamIngressAdmissionFailure,
+                 StreamIngressInvalidRequest>;
 
 namespace detail {
 
@@ -170,7 +231,10 @@ enum class StreamIngressProbePoint {
     SlotLoad,
     PublisherDecrement,
     SlotExchange,
-    ReclaimZero
+    ReclaimLoad,
+    ReclaimZero,
+    ActivationInstalling,
+    MarkerLoad
 };
 using StreamIngressProbeHook = void (*)(void*, StreamIngressProbePoint, std::size_t) noexcept;
 
@@ -194,13 +258,12 @@ class StreamIngressHub {
     StreamIngressHub& operator=(StreamIngressHub&&) = delete;
 
     [[nodiscard]] std::optional<StreamIngressAtomic> lock_free_failure() const noexcept;
-    [[nodiscard]] std::optional<StreamIngressReservation>
-    reserve(const StreamIngressRequest& request);
-    [[nodiscard]] std::optional<StreamIngressAdmissionFailure>
-    last_reservation_failure() const noexcept;
+    [[nodiscard]] StreamIngressAdmissionResult reserve(const StreamIngressRequest& request);
     void begin_generation(std::int32_t client_id, std::uint64_t generation) noexcept;
     void claim_generation(std::int32_t client_id, std::uint64_t generation,
                           StreamTerminalPayload payload) noexcept;
+    void claim_control_generation(std::int32_t client_id, std::uint64_t generation,
+                                  StreamTerminalPayload payload) noexcept;
     bool commit_activation(StreamIngressReservation& reservation) noexcept;
     [[nodiscard]] StreamIngressState
     activation_state(const StreamIngressReservation& reservation) const noexcept;
@@ -210,10 +273,9 @@ class StreamIngressHub {
                                std::uint64_t receive_sequence, bool ready = true) noexcept;
 
     void publish(const StreamItemView& item) noexcept;
-    [[nodiscard]] std::optional<StreamIngressItemView>
-    poll_front(const StreamIngressReservation& reservation) noexcept;
-    bool consume(const StreamIngressReservation& reservation,
-                 const StreamIngressItemView& item) noexcept;
+    [[nodiscard]] StreamIngressFrontResult visit_front(StreamIngressReservation& reservation,
+                                                       void* context,
+                                                       StreamIngressFrontVisitor visitor);
     void discard(const StreamIngressReservation& reservation) noexcept;
 
     bool claim(StreamIngressReservation& reservation, StreamTerminalPayload payload) noexcept;
@@ -223,6 +285,7 @@ class StreamIngressHub {
     terminal_snapshot(const StreamIngressReservation& reservation) const noexcept;
     bool detach(StreamIngressReservation& reservation) noexcept;
     bool poll_reclaim(StreamIngressReservation& reservation) noexcept;
+    void poll_control() noexcept;
 
   private:
     void abandon(StreamIngressReservation& reservation) noexcept;
@@ -252,6 +315,14 @@ class StreamIngressTestAccess {
                             std::uint64_t descriptor_producer, std::uint64_t descriptor_consumer,
                             std::uint64_t byte_producer, std::uint64_t byte_consumer) noexcept;
     static void hold_publisher(StreamIngressHub& hub, bool hold) noexcept;
+    [[nodiscard]] static std::uint32_t publisher_count(const StreamIngressHub& hub) noexcept;
+    [[nodiscard]] static std::size_t
+    slot_index(const StreamIngressReservation& reservation) noexcept;
+    static void set_state_raw(StreamIngressHub& hub, const StreamIngressReservation& reservation,
+                              std::uint32_t state) noexcept;
+    [[nodiscard]] static std::size_t retired_count(const StreamIngressHub& hub) noexcept;
+    [[nodiscard]] static bool reclaimed_state_is_poisoned(const StreamIngressHub& hub,
+                                                          std::size_t index) noexcept;
 };
 
 } // namespace tgcli::daemon

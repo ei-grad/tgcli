@@ -85,6 +85,30 @@ daemon::StreamIngressRequest stream_request(std::int32_t client_id = 1001,
             .type_mask = daemon::stream_event_mask(daemon::StreamEventClass::Message)};
 }
 
+daemon::StreamIngressReservation reserve_stream(daemon::StreamService& service) {
+    auto result = service.ingress_hub().reserve(stream_request());
+    REQUIRE(std::holds_alternative<daemon::StreamIngressReservation>(result));
+    return std::move(std::get<daemon::StreamIngressReservation>(result));
+}
+
+daemon::StreamIngressFrontAction
+capture_descriptor(void* context, const daemon::StreamIngressFrontCursor& cursor) {
+    *static_cast<std::optional<daemon::StreamIngressDescriptor>*>(context) = cursor.descriptor();
+    return daemon::StreamIngressFrontAction::Keep;
+}
+
+std::optional<daemon::StreamIngressDescriptor>
+front_descriptor(daemon::StreamService& service, daemon::StreamIngressReservation& reservation) {
+    std::optional<daemon::StreamIngressDescriptor> descriptor;
+    const auto result =
+        service.ingress_hub().visit_front(reservation, &descriptor, &capture_descriptor);
+    if (result == daemon::StreamIngressFrontResult::Empty) {
+        return std::nullopt;
+    }
+    REQUIRE(result == daemon::StreamIngressFrontResult::Visited);
+    return descriptor;
+}
+
 struct BlockingSequenceProbe {
     std::atomic<bool> entered{false};
     std::atomic<bool> release{false};
@@ -205,25 +229,77 @@ TEST_CASE("stream service activates only at a ready ordered receive boundary",
     observer->on_current_state(state);
     observer->on_authorization_state(core::AuthStateData{core::AuthState::Ready}, 2);
 
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
-    CHECK(service.ingress_hub().activation_state(*reserved) == daemon::StreamIngressState::Armed);
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
+    CHECK(service.ingress_hub().activation_state(reserved) == daemon::StreamIngressState::Armed);
     observer->on_receive_boundary(1);
-    CHECK(service.ingress_hub().activation_state(*reserved) == daemon::StreamIngressState::Armed);
+    CHECK(service.ingress_hub().activation_state(reserved) == daemon::StreamIngressState::Armed);
     observer->on_receive_boundary(2);
-    CHECK(service.ingress_hub().activation_state(*reserved) ==
+    CHECK(service.ingress_hub().activation_state(reserved) ==
           daemon::StreamIngressState::Published);
-    CHECK(service.ingress_hub().activation_projection(*reserved)->activation_receive_sequence == 2);
+    CHECK(service.ingress_hub().activation_projection(reserved)->activation_receive_sequence == 2);
 
     auto message = stream_message();
     message.set_receive_event_metadata(3, core::TdEventClock::time_point{});
     observer->on_update(message);
     observer->on_receive_boundary(3);
-    auto front = service.ingress_hub().poll_front(*reserved);
+    const auto front = front_descriptor(service, reserved);
     REQUIRE(front);
-    CHECK(front->descriptor().receive_sequence == 3);
-    CHECK(front->descriptor().event_class == daemon::StreamEventClass::Message);
+    CHECK(front->receive_sequence == 3);
+    CHECK(front->event_class == daemon::StreamEventClass::Message);
+}
+
+TEST_CASE("live incomplete new chat keeps activation armed through its FIFO barrier",
+          "[stream][service][ingress][activation][ordering]") {
+    daemon::StreamService service;
+    auto observer = service.observer_factory()(1001, 1);
+    auto state = current_stream_state();
+    state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
+    observer->on_current_state(state);
+    observer->on_authorization_state(core::AuthStateData{core::AuthState::Ready}, 2);
+
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
+    auto incomplete = core::TdValue::from(core::TdUpdateNewChat{
+        .chat = {.id = -2000,
+                 .title = "Incomplete",
+                 .kind = core::TdChatKind::Supergroup,
+                 .related_id = 55,
+                 .tdlib_type_id = 0,
+                 .positions = {},
+                 .chat_lists = {{.kind = core::TdChatListKind::Main, .folder_id = 0}},
+                 .is_marked_unread = false,
+                 .unread_count = 0,
+                 .unread_mention_count = 0,
+                 .unread_reaction_count = 0,
+                 .unread_poll_vote_count = 0,
+                 .last_message = std::nullopt,
+                 .notification_settings = std::nullopt}});
+    incomplete.set_receive_event_metadata(3, core::TdEventClock::time_point{});
+    observer->on_update(incomplete);
+    REQUIRE(service.status().ordering_barrier_open);
+    observer->on_receive_boundary(3);
+    CHECK(service.ingress_hub().activation_state(reserved) == daemon::StreamIngressState::Armed);
+
+    auto entity = core::TdValue::from(core::TdUpdateSupergroup{
+        .supergroup = {
+            .id = 55, .usernames = {"complete"}, .is_channel = false, .is_forum = false}});
+    entity.set_receive_event_metadata(4, core::TdEventClock::time_point{});
+    observer->on_update(entity);
+    REQUIRE_FALSE(service.status().ordering_barrier_open);
+    observer->on_receive_boundary(4);
+    REQUIRE(service.ingress_hub().activation_state(reserved) ==
+            daemon::StreamIngressState::Published);
+    REQUIRE(service.ingress_hub().activation_projection(reserved));
+    CHECK(service.ingress_hub().activation_projection(reserved)->activation_receive_sequence == 4);
+    CHECK_FALSE(front_descriptor(service, reserved));
+
+    auto message = stream_message();
+    message.set_receive_event_metadata(5, core::TdEventClock::time_point{});
+    observer->on_update(message);
+    const auto front = front_descriptor(service, reserved);
+    REQUIRE(front);
+    CHECK(front->receive_sequence == 5);
 }
 
 TEST_CASE("authorization loss closes dormant ingress before publication",
@@ -234,15 +310,14 @@ TEST_CASE("authorization loss closes dormant ingress before publication",
     state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
     observer->on_current_state(state);
     observer->on_authorization_state(core::AuthStateData{core::AuthState::Ready}, 2);
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
 
     observer->on_authorization_state(core::AuthStateData{core::AuthState::Closing}, 3);
     observer->on_authorization_state(core::AuthStateData{core::AuthState::WaitPhoneNumber}, 4);
     observer->on_receive_boundary(3);
-    CHECK(service.ingress_hub().activation_state(*reserved) == daemon::StreamIngressState::Armed);
-    const auto terminal = service.ingress_hub().claim_terminal(*reserved);
+    CHECK(service.ingress_hub().activation_state(reserved) == daemon::StreamIngressState::Armed);
+    const auto terminal = service.ingress_hub().claim_terminal(reserved);
     REQUIRE(terminal);
     CHECK(terminal->cause == daemon::StreamTerminalCause::AuthorizationLost);
     CHECK(terminal->auth_state == static_cast<std::int32_t>(core::AuthState::Closing));
@@ -256,17 +331,16 @@ TEST_CASE("generation replacement claims old ingress and stale destruction is in
     state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
     first->on_current_state(state);
     first->on_authorization_state(core::AuthStateData{core::AuthState::Ready}, 2);
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
     first->on_receive_boundary(2);
-    REQUIRE(service.ingress_hub().activation_state(*reserved) ==
+    REQUIRE(service.ingress_hub().activation_state(reserved) ==
             daemon::StreamIngressState::Published);
 
     auto second = service.observer_factory()(1002, 2);
     REQUIRE(second);
     first.reset();
-    const auto terminal = service.ingress_hub().claim_terminal(*reserved);
+    const auto terminal = service.ingress_hub().claim_terminal(reserved);
     REQUIRE(terminal);
     CHECK(terminal->cause == daemon::StreamTerminalCause::GenerationReplaced);
     CHECK(service.status().client_id == 1002);
@@ -281,12 +355,10 @@ TEST_CASE("active metadata failure is retained generation wide",
     state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
     observer->on_current_state(state);
     observer->on_authorization_state(core::AuthStateData{core::AuthState::Ready}, 2);
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    auto second_reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(second_reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
-    REQUIRE(service.ingress_hub().commit_activation(*second_reserved));
+    auto reserved = reserve_stream(service);
+    auto second_reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
+    REQUIRE(service.ingress_hub().commit_activation(second_reserved));
     observer->on_receive_boundary(2);
 
     auto malformed = core::TdValue::from(
@@ -295,12 +367,12 @@ TEST_CASE("active metadata failure is retained generation wide",
                                          .tdlib_type_id = 77});
     malformed.set_receive_event_metadata(3, core::TdEventClock::time_point{});
     observer->on_update(malformed);
-    const auto terminal = service.ingress_hub().claim_terminal(*reserved);
+    const auto terminal = service.ingress_hub().claim_terminal(reserved);
     REQUIRE(terminal);
     CHECK(terminal->cause == daemon::StreamTerminalCause::MetadataFailure);
     CHECK(terminal->metadata_failure.kind == daemon::StreamFailureKind::MalformedSupported);
     CHECK(terminal->metadata_failure.tdlib_type_id == 77);
-    const auto second_terminal = service.ingress_hub().claim_terminal(*second_reserved);
+    const auto second_terminal = service.ingress_hub().claim_terminal(second_reserved);
     REQUIRE(second_terminal);
     CHECK(second_terminal->cause == daemon::StreamTerminalCause::MetadataFailure);
     CHECK(second_terminal->metadata_failure == terminal->metadata_failure);
@@ -318,20 +390,19 @@ TEST_CASE("real receive idle boundary closes the activation gap before the next 
     scripted->push_response(first, 1, {}, core::AuthStateData{core::AuthState::Ready});
     REQUIRE(eventually([&] { return service.status().ready_for_admission(); }));
 
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
     REQUIRE(eventually([&] {
-        return service.ingress_hub().activation_state(*reserved) ==
+        return service.ingress_hub().activation_state(reserved) ==
                daemon::StreamIngressState::Published;
     }));
     const auto anchor =
-        service.ingress_hub().activation_projection(*reserved)->activation_receive_sequence;
+        service.ingress_hub().activation_projection(reserved)->activation_receive_sequence;
     scripted->push_update(first, stream_message());
-    REQUIRE(eventually([&] { return service.ingress_hub().poll_front(*reserved).has_value(); }));
-    const auto front = service.ingress_hub().poll_front(*reserved);
+    REQUIRE(eventually([&] { return front_descriptor(service, reserved).has_value(); }));
+    const auto front = front_descriptor(service, reserved);
     REQUIRE(front);
-    CHECK(front->descriptor().receive_sequence > anchor);
+    CHECK(front->receive_sequence > anchor);
     client.close();
 }
 
@@ -347,16 +418,15 @@ TEST_CASE("unexpected Closed claims authorization before generation replacement"
     scripted->push_response(first, 1, {}, core::AuthStateData{core::AuthState::Ready});
     REQUIRE(eventually([&] { return service.status().ready_for_admission(); }));
 
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
     REQUIRE(eventually([&] {
-        return service.ingress_hub().activation_state(*reserved) ==
+        return service.ingress_hub().activation_state(reserved) ==
                daemon::StreamIngressState::Published;
     }));
     scripted->push_update(first, {}, core::AuthStateData{core::AuthState::Closed});
     REQUIRE(scripted->wait_for_clients(2));
-    const auto terminal = service.ingress_hub().claim_terminal(*reserved);
+    const auto terminal = service.ingress_hub().claim_terminal(reserved);
     REQUIRE(terminal);
     CHECK(terminal->cause == daemon::StreamTerminalCause::AuthorizationLost);
     CHECK(terminal->auth_state == static_cast<std::int32_t>(core::AuthState::Closed));
@@ -379,13 +449,12 @@ TEST_CASE("stream service shutdown handoff claims current generation",
     state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
     observer->on_current_state(state);
     observer->on_authorization_state(core::AuthStateData{core::AuthState::Ready}, 2);
-    auto reserved = service.ingress_hub().reserve(stream_request());
-    REQUIRE(reserved);
-    REQUIRE(service.ingress_hub().commit_activation(*reserved));
+    auto reserved = reserve_stream(service);
+    REQUIRE(service.ingress_hub().commit_activation(reserved));
     observer->on_receive_boundary(2);
 
     service.claim_shutdown();
-    const auto terminal = service.ingress_hub().claim_terminal(*reserved);
+    const auto terminal = service.ingress_hub().claim_terminal(reserved);
     REQUIRE(terminal);
     CHECK(terminal->cause == daemon::StreamTerminalCause::Shutdown);
 }
