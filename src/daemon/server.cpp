@@ -188,21 +188,33 @@ class ConnectionSink final : public ResponseSink {
     }
 
   private:
-    void emit_item(nlohmann::json data) override {
-        connection_->send(proto::Item{request_id_, std::move(data)});
+    DeliveryOutcome emit_item(nlohmann::json data) override {
+        const bool complete = connection_->send(proto::Item{request_id_, std::move(data)});
+        if (!complete) {
+            connection_->shutdown();
+        }
+        return complete ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
     void emit_progress(nlohmann::json data) override {
         connection_->send(proto::Progress{request_id_, std::move(data)});
     }
-    void emit_result(nlohmann::json data) override {
+    DeliveryOutcome emit_result(nlohmann::json data) override {
         const bool visible = connection_->send(proto::Result{request_id_, std::move(data)});
+        if (!visible) {
+            connection_->shutdown();
+        }
         terminal_hook_(visible);
+        return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
-    void emit_error(std::string code, std::string message, nlohmann::json details,
-                    int exit_code) override {
+    DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
+                               int exit_code) override {
         const bool visible = connection_->send(proto::Error{
             request_id_, std::move(code), std::move(message), std::move(details), exit_code});
+        if (!visible) {
+            connection_->shutdown();
+        }
         terminal_hook_(visible);
+        return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
     ChallengeReply emit_challenge(nlohmann::json data) override {
         connection_->send(proto::Challenge{request_id_, std::move(data)});

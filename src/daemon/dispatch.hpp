@@ -57,6 +57,8 @@ struct ChallengeReply {
     std::optional<ChallengeFailure> failure;
 };
 
+enum class DeliveryOutcome { Complete, Suppressed, Disconnected };
+
 // Where a handler emits its response frames. The first terminal call (result
 // or error) ends the request; concurrent or later frames are suppressed.
 class ResponseSink {
@@ -68,20 +70,21 @@ class ResponseSink {
     ResponseSink& operator=(ResponseSink&&) = delete;
     virtual ~ResponseSink() = default;
 
-    void item(nlohmann::json data);
+    DeliveryOutcome item(nlohmann::json data);
     void progress(nlohmann::json data);
-    void result(nlohmann::json data);
-    void error(std::string code, std::string message, nlohmann::json details, int exit_code);
+    DeliveryOutcome result(nlohmann::json data);
+    DeliveryOutcome error(std::string code, std::string message, nlohmann::json details,
+                          int exit_code);
     std::optional<nlohmann::json> challenge(nlohmann::json data);
 
     [[nodiscard]] bool has_terminal() const;
 
   protected:
-    virtual void emit_item(nlohmann::json data) = 0;
+    virtual DeliveryOutcome emit_item(nlohmann::json data) = 0;
     virtual void emit_progress(nlohmann::json data) = 0;
-    virtual void emit_result(nlohmann::json data) = 0;
-    virtual void emit_error(std::string code, std::string message, nlohmann::json details,
-                            int exit_code) = 0;
+    virtual DeliveryOutcome emit_result(nlohmann::json data) = 0;
+    virtual DeliveryOutcome emit_error(std::string code, std::string message,
+                                       nlohmann::json details, int exit_code) = 0;
     virtual ChallengeReply emit_challenge(nlohmann::json data) = 0;
 
   private:
@@ -104,18 +107,21 @@ class CallbackSink final : public ResponseSink {
           on_challenge_(std::move(on_challenge)) {}
 
   private:
-    void emit_item(nlohmann::json data) override {
+    DeliveryOutcome emit_item(nlohmann::json data) override {
         on_item_(std::move(data));
+        return DeliveryOutcome::Complete;
     }
     void emit_progress(nlohmann::json data) override {
         on_progress_(std::move(data));
     }
-    void emit_result(nlohmann::json data) override {
+    DeliveryOutcome emit_result(nlohmann::json data) override {
         on_result_(std::move(data));
+        return DeliveryOutcome::Complete;
     }
-    void emit_error(std::string code, std::string message, nlohmann::json details,
-                    int exit_code) override {
+    DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
+                               int exit_code) override {
         on_error_(std::move(code), std::move(message), std::move(details), exit_code);
+        return DeliveryOutcome::Complete;
     }
     ChallengeReply emit_challenge(nlohmann::json data) override {
         if (!on_challenge_) {

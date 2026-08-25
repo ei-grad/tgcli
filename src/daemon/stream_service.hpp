@@ -4,6 +4,8 @@
 #include "daemon/stream_ingress.hpp"
 #include "daemon/stream_storage.hpp"
 
+#include <memory>
+
 namespace tgcli::daemon {
 
 namespace detail {
@@ -25,6 +27,7 @@ class StreamService final : private StreamReceiveSink {
     [[nodiscard]] core::TdGenerationObserverFactory observer_factory() noexcept;
     [[nodiscard]] StreamNormalizationStatus status() const noexcept;
     [[nodiscard]] StreamIngressHub& ingress_hub() noexcept;
+    [[nodiscard]] std::shared_ptr<StreamIngressHub> ingress_hub_handle() const noexcept;
     void claim_shutdown() noexcept;
 
   private:
@@ -32,7 +35,7 @@ class StreamService final : private StreamReceiveSink {
     void on_item(const StreamItemView& item, const StreamMetadataView& metadata) noexcept override;
 
     StreamReceiveSink* external_sink_ = nullptr;
-    StreamIngressHub hub_;
+    std::shared_ptr<StreamIngressHub> hub_;
     FixedStreamNormalizer normalizer_;
 
     friend class GenerationObserver;

@@ -40,13 +40,17 @@ struct Captured {
 
 class ThrowingTerminalSink final : public daemon::ResponseSink {
   private:
-    void emit_item([[maybe_unused]] json data) override {}
+    daemon::DeliveryOutcome emit_item([[maybe_unused]] json data) override {
+        return daemon::DeliveryOutcome::Complete;
+    }
     void emit_progress([[maybe_unused]] json data) override {}
-    void emit_result([[maybe_unused]] json data) override {
+    daemon::DeliveryOutcome emit_result([[maybe_unused]] json data) override {
         throw std::runtime_error("terminal transport failure");
     }
-    void emit_error([[maybe_unused]] std::string code, [[maybe_unused]] std::string message,
-                    [[maybe_unused]] json details, [[maybe_unused]] int exit_code) override {
+    daemon::DeliveryOutcome emit_error([[maybe_unused]] std::string code,
+                                       [[maybe_unused]] std::string message,
+                                       [[maybe_unused]] json details,
+                                       [[maybe_unused]] int exit_code) override {
         throw std::runtime_error("terminal transport failure");
     }
     daemon::ChallengeReply emit_challenge([[maybe_unused]] json data) override {
@@ -61,12 +65,19 @@ class FailingChallengeSink final : public daemon::ResponseSink {
     }
 
   private:
-    void emit_item([[maybe_unused]] json data) override {}
+    daemon::DeliveryOutcome emit_item([[maybe_unused]] json data) override {
+        return daemon::DeliveryOutcome::Complete;
+    }
     void emit_progress([[maybe_unused]] json data) override {}
-    void emit_result([[maybe_unused]] json data) override {}
-    void emit_error([[maybe_unused]] std::string code, [[maybe_unused]] std::string message,
-                    [[maybe_unused]] json details, [[maybe_unused]] int exit_code) override {
+    daemon::DeliveryOutcome emit_result([[maybe_unused]] json data) override {
+        return daemon::DeliveryOutcome::Complete;
+    }
+    daemon::DeliveryOutcome emit_error([[maybe_unused]] std::string code,
+                                       [[maybe_unused]] std::string message,
+                                       [[maybe_unused]] json details,
+                                       [[maybe_unused]] int exit_code) override {
         emitted_error_ = true;
+        return daemon::DeliveryOutcome::Complete;
     }
     daemon::ChallengeReply emit_challenge([[maybe_unused]] json data) override {
         return {std::nullopt, daemon::ChallengeFailure{"INPUT_FAILED", "challenge transport failed",
@@ -158,6 +169,17 @@ void wait_until_deadline(const daemon::RequestSession& session) {
 } // namespace
 
 // NOLINTBEGIN(misc-const-correctness): Catch2 and concurrency callbacks mutate test state.
+TEST_CASE("response sink reports complete and suppressed deliveries", "[session][transport]") {
+    daemon::CallbackSink sink([](const json&) {}, [](const json&) {}, [](const json&) {},
+                              [](const std::string&, const std::string&, const json&, int) {});
+
+    CHECK(sink.item({{"event", "message"}}) == daemon::DeliveryOutcome::Complete);
+    CHECK(sink.result({{"ok", true}}) == daemon::DeliveryOutcome::Complete);
+    CHECK(sink.item({{"event", "late"}}) == daemon::DeliveryOutcome::Suppressed);
+    CHECK(sink.error("LATE", "late terminal", json::object(), kGeneric) ==
+          daemon::DeliveryOutcome::Suppressed);
+}
+
 TEST_CASE("request session holds activity until terminal forwarding completes",
           "[session][activity]") {
     daemon::ActivityTracker tracker = tracked_activity();

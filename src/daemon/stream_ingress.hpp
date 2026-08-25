@@ -79,6 +79,9 @@ enum class StreamTerminalCause : std::uint32_t {
     ClaimingGenerationReplaced,
     ClaimingShutdown,
     ClaimingMetadataFailure,
+    ClaimingPlannedSuccess,
+    ClaimingDeadline,
+    ClaimingDisconnected,
     CounterExhausted,
     ItemBytes,
     QueueItems,
@@ -86,7 +89,10 @@ enum class StreamTerminalCause : std::uint32_t {
     AuthorizationLost,
     GenerationReplaced,
     Shutdown,
-    MetadataFailure
+    MetadataFailure,
+    PlannedSuccess,
+    Deadline,
+    Disconnected
 };
 
 struct StreamTerminalPayload {
@@ -192,6 +198,28 @@ using StreamIngressFrontVisitor = StreamIngressFrontAction (*)(void*,
 
 class StreamIngressHub;
 
+class StreamIngressPreparedActivation {
+  public:
+    StreamIngressPreparedActivation() = default;
+    ~StreamIngressPreparedActivation() = default;
+    StreamIngressPreparedActivation(const StreamIngressPreparedActivation&) = delete;
+    StreamIngressPreparedActivation& operator=(const StreamIngressPreparedActivation&) = delete;
+    StreamIngressPreparedActivation(StreamIngressPreparedActivation&& other) noexcept;
+    StreamIngressPreparedActivation& operator=(StreamIngressPreparedActivation&& other) noexcept;
+
+    [[nodiscard]] explicit operator bool() const noexcept;
+
+  private:
+    StreamIngressPreparedActivation(StreamIngressHub* hub, std::uint32_t index,
+                                    std::uint64_t epoch) noexcept;
+
+    StreamIngressHub* hub_ = nullptr;
+    std::uint32_t index_ = 0;
+    std::uint64_t epoch_ = 0;
+
+    friend class StreamIngressHub;
+};
+
 class StreamIngressReservation {
   public:
     StreamIngressReservation();
@@ -237,6 +265,7 @@ enum class StreamIngressProbePoint {
     MarkerLoad,
     OwnerLoad,
     ReservationOwnerPublished,
+    ActivationPreparing,
     Count
 };
 using StreamIngressProbeHook = void (*)(void*, StreamIngressProbePoint, std::size_t) noexcept;
@@ -267,6 +296,12 @@ class StreamIngressHub {
                           StreamTerminalPayload payload) noexcept;
     void claim_control_generation(std::int32_t client_id, std::uint64_t generation,
                                   StreamTerminalPayload payload) noexcept;
+    [[nodiscard]] std::optional<StreamIngressPreparedActivation>
+    prepare_activation(StreamIngressReservation& reservation) noexcept;
+    [[nodiscard]] bool
+    commit_activation_promotion(StreamIngressPreparedActivation& prepared) noexcept;
+    void publish_prepared(StreamIngressReservation& reservation,
+                          StreamIngressPreparedActivation& prepared) noexcept;
     bool commit_activation(StreamIngressReservation& reservation) noexcept;
     [[nodiscard]] StreamIngressState
     activation_state(const StreamIngressReservation& reservation) const noexcept;
@@ -282,6 +317,7 @@ class StreamIngressHub {
     void discard(const StreamIngressReservation& reservation) noexcept;
 
     bool claim(StreamIngressReservation& reservation, StreamTerminalPayload payload) noexcept;
+    bool begin_item_delivery(StreamIngressReservation& reservation) noexcept;
     [[nodiscard]] std::optional<StreamTerminalPayload>
     claim_terminal(StreamIngressReservation& reservation) noexcept;
     [[nodiscard]] std::optional<StreamTerminalPayload>

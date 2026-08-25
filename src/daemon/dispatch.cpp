@@ -147,11 +147,12 @@ M3BotAdmission evaluate_m3_bot_admission(M3Operation operation, bool is_bot,
     return M3BotAdmission::Unsupported;
 }
 
-void ResponseSink::item(nlohmann::json data) {
+DeliveryOutcome ResponseSink::item(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (!terminal_) {
-        emit_item(std::move(data));
+    if (terminal_) {
+        return DeliveryOutcome::Suppressed;
     }
+    return emit_item(std::move(data));
 }
 
 void ResponseSink::progress(nlohmann::json data) {
@@ -161,23 +162,23 @@ void ResponseSink::progress(nlohmann::json data) {
     }
 }
 
-void ResponseSink::result(nlohmann::json data) {
+DeliveryOutcome ResponseSink::result(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_) {
-        return;
+        return DeliveryOutcome::Suppressed;
     }
     terminal_ = true;
-    emit_result(std::move(data));
+    return emit_result(std::move(data));
 }
 
-void ResponseSink::error(std::string code, std::string message, nlohmann::json details,
-                         int exit_code) {
+DeliveryOutcome ResponseSink::error(std::string code, std::string message, nlohmann::json details,
+                                    int exit_code) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_) {
-        return;
+        return DeliveryOutcome::Suppressed;
     }
     terminal_ = true;
-    emit_error(std::move(code), std::move(message), std::move(details), exit_code);
+    return emit_error(std::move(code), std::move(message), std::move(details), exit_code);
 }
 
 bool ResponseSink::has_terminal() const {
@@ -194,8 +195,8 @@ std::optional<nlohmann::json> ResponseSink::challenge(nlohmann::json data) {
     if (reply.failure) {
         terminal_ = true;
         auto failure = std::move(*reply.failure);
-        emit_error(std::move(failure.code), std::move(failure.message), std::move(failure.details),
-                   failure.exit_code);
+        static_cast<void>(emit_error(std::move(failure.code), std::move(failure.message),
+                                     std::move(failure.details), failure.exit_code));
         return std::nullopt;
     }
     return std::move(reply.answer);

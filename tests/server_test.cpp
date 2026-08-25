@@ -1158,6 +1158,37 @@ TEST_CASE("hello handshake then version round-trip over the socket", "[server]")
     ::close(fd);
 }
 
+TEST_CASE("connection sink delivers one complete parseable item frame before its terminal",
+          "[server][stream][transport]") {
+    const TestDaemon daemon([](daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "internal frames",
+            {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {
+                 static_cast<void>(
+                     session.item({{"event", "message"}, {"text", "line\ncontrol\tutf8-λ"}}));
+                 static_cast<void>(session.result({{"complete", true}}));
+             }});
+    });
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, make_request({"internal", "frames"}, 43));
+
+    const auto item = std::get<proto::Item>(read_frame(reader));
+    CHECK(item.id == 43);
+    CHECK(item.data["event"] == "message");
+    CHECK(item.data["text"] == "line\ncontrol\tutf8-λ");
+    const auto terminal = std::get<proto::Result>(read_frame(reader));
+    CHECK(terminal.id == 43);
+    CHECK(terminal.data == json{{"complete", true}});
+    ::close(fd);
+
+    const auto isolated = send_request(daemon, make_request({"version"}, 44));
+    REQUIRE(std::holds_alternative<proto::Result>(isolated));
+    CHECK(std::get<proto::Result>(isolated).id == 44);
+}
+
 TEST_CASE("same-v3 stale binary rejects every noncanonical request before observation",
           "[server][protocol-v3][binary-mismatch][safety]") {
     RequestObservationCounters observations;

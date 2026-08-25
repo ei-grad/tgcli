@@ -3665,9 +3665,11 @@ The receive path uses:
 Registration reserves and initializes an unpublished slot off the receive thread.
 Reservation returns one closed per-call result: an owned reservation, the exact
 admission failure observed by that call, or invalid request. There is no shared
-last-failure side channel between concurrent callers. Before arming, commit repeats
-the retained generation and terminal decision; a stale reserved slot becomes Removed
-with the winning cause and can never later publish.
+last-failure side channel between concurrent callers. Before activity promotion, a
+separate lock-free activation state arbitrates promotion against terminal claim. A
+terminal that wins this CAS prevents promotion. Once promotion wins, publication is
+unconditional and noexcept even if a terminal cause is claimed immediately afterward;
+that cause then drives ordinary detach and teardown.
 
 The receive-loop owner fills every immutable filter and metadata-snapshot field before
 publishing the slot with `slot.store(pointer, memory_order_seq_cst)` at the §4.6.5
@@ -3993,6 +3995,11 @@ A cause callback only compare-exchanges state; it performs no wake or notificati
 The worker observes the claim on its §4.6.6 poll schedule. The callback never waits
 for the socket lock. After a terminal claim, queued frames that have not begun are
 discarded. A frame whose write already began is allowed to finish before the terminal.
+Beginning a frame is the writer's atomic observation that the cause is still Open; it
+does not place writer progress in the terminal-cause atomic. Delivered count remains
+writer-owned and may advance after an external payload is published. After a Complete
+Nth delivery the writer increments count and then attempts Open-to-planned-success;
+failure preserves the external winner.
 
 Item delivery succeeds only after the complete protocol frame, including newline, is
 written. Only then does count increment. A failed or partial write changes the session
@@ -4026,18 +4033,22 @@ Subscription activation is transactional:
 
 1. reserve and initialize a dormant hub slot while the existing request activity
    token still prevents idle exit;
-2. under the RequestSession lifecycle gate, verify Open and promote the request token
-   to Subscription;
-3. publish the already-initialized slot with the same lifecycle decision;
+2. under the RequestSession lifecycle gate, verify Open and atomically arbitrate the
+   prepared activation against terminal claim while promoting the request token to
+   Subscription;
+3. install the move-only lease in RequestSession-owned storage and unconditionally
+   publish the already-initialized slot with the same lifecycle decision;
 4. if Open was lost before promotion, release the dormant slot and leave normal
    terminal handling to release the request token;
-5. no fallible operation occurs after promotion and before publication.
+5. no fallible operation, rollback, or demotion occurs after promotion and before
+   publication.
 
 Terminal/disconnect teardown removes the slot and releases the promoted token exactly
 once after the final send attempt. Unlimited active subscriptions therefore keep
 `subscriptions > 0` and prevent idle exit. Promotion failure, registry-capacity
-failure, setup error, and publish rollback each have tests proving zero leaked or
-double-released activity.
+failure, and setup error each have tests proving zero leaked or double-released
+activity. A post-promotion terminal has separate coverage proving unconditional
+publication followed by exact-once Subscription release.
 
 There is no reconnect, automatic resubscribe, replay, resume token, public sequence,
 gapless claim, or delivery acknowledgment after socket failure.
@@ -4167,8 +4178,8 @@ Fake/native tests must cover:
 - silent listen Result in daemon/no-daemon paths;
 - per-item stdout flush, EPIPE/short-write/flush failure cancellation, and no fabricated
   terminal;
-- transactional activity promotion, every rollback, unlimited idle suppression, and
-  exact-once release;
+- transactional activity promotion, pre-promotion cancellation, unconditional
+  post-promotion publication, unlimited idle suppression, and exact-once release;
 - old-generation and post-terminal rejection, no reconnect/resume claim;
 - stream/result/error schema validation, strict stream catalog bijection, and packaged
   discoverability;

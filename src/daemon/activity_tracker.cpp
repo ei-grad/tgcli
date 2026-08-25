@@ -88,10 +88,13 @@ struct ActivityTracker::State {
         condition.notify_all();
     }
 
-    [[nodiscard]] bool promote_request() {
+    [[nodiscard]] bool promote_request(void* context, Token::PromotionCommit commit) {
         {
             const std::lock_guard lock(mutex);
             if (requests == 0) {
+                return false;
+            }
+            if (commit != nullptr && !commit(context)) {
                 return false;
             }
             --requests;
@@ -137,7 +140,11 @@ ActivityTracker::Token& ActivityTracker::Token::operator=(Token&& other) noexcep
 }
 
 bool ActivityTracker::Token::promote_to_subscription() {
-    if (!state_ || kind_ != Kind::Request || !state_->promote_request()) {
+    return promote_to_subscription(nullptr, nullptr);
+}
+
+bool ActivityTracker::Token::promote_to_subscription(void* context, PromotionCommit commit) {
+    if (!state_ || kind_ != Kind::Request || !state_->promote_request(context, commit)) {
         return false;
     }
     kind_ = Kind::Subscription;

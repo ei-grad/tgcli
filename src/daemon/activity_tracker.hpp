@@ -35,6 +35,7 @@ class ActivityTracker {
 
     class Token {
       public:
+        using PromotionCommit = bool (*)(void*) noexcept;
         Token() = default;
         ~Token();
 
@@ -48,6 +49,7 @@ class ActivityTracker {
         }
 
         [[nodiscard]] bool promote_to_subscription();
+        [[nodiscard]] bool promote_to_subscription(void* context, PromotionCommit commit);
         void reset();
 
       private:

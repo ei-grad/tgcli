@@ -42,7 +42,7 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
   public:
     GenerationObserver(StreamService& service, std::int32_t client_id, std::uint64_t generation)
         : service_(service), client_id_(client_id), generation_(generation) {
-        service_.hub_.begin_generation(client_id_, generation_);
+        service_.hub_->begin_generation(client_id_, generation_);
         if (!service_.normalizer_.begin(client_id_, generation_)) {
             throw std::logic_error("invalid stream generation identity");
         }
@@ -86,10 +86,10 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
             return;
         }
         authorization_lost_ = true;
-        service_.hub_.claim_generation(client_id_, generation_,
-                                       {.cause = StreamTerminalCause::AuthorizationLost,
-                                        .auth_state = static_cast<std::int32_t>(state.state),
-                                        .metadata_failure = {}});
+        service_.hub_->claim_generation(client_id_, generation_,
+                                        {.cause = StreamTerminalCause::AuthorizationLost,
+                                         .auth_state = static_cast<std::int32_t>(state.state),
+                                         .metadata_failure = {}});
     }
 
     void on_receive_boundary(std::uint64_t receive_sequence) noexcept override {
@@ -106,7 +106,7 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
                            receive_sequence >= status.receive_sequence &&
                            receive_sequence >= authorization_sequence_;
         static_cast<void>(
-            service_.hub_.activate_armed(client_id_, generation_, receive_sequence, ready));
+            service_.hub_->activate_armed(client_id_, generation_, receive_sequence, ready));
     }
 
   private:
@@ -116,9 +116,9 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
 
     void claim_metadata_failure(const StreamNormalizationStatus& status) noexcept {
         if (status.phase == StreamNormalizationPhase::Failed) {
-            service_.hub_.claim_generation(client_id_, generation_,
-                                           {.cause = StreamTerminalCause::MetadataFailure,
-                                            .metadata_failure = status.failure});
+            service_.hub_->claim_generation(client_id_, generation_,
+                                            {.cause = StreamTerminalCause::MetadataFailure,
+                                             .metadata_failure = status.failure});
         }
     }
 
@@ -131,7 +131,8 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
 };
 
 StreamService::StreamService(StreamReceiveSink* sink, detail::StreamStatusPublishProbe status_probe)
-    : external_sink_(sink), normalizer_(this, status_probe) {}
+    : external_sink_(sink), hub_(std::make_shared<StreamIngressHub>()),
+      normalizer_(this, status_probe) {}
 
 StreamService::~StreamService() = default;
 
@@ -146,18 +147,23 @@ StreamNormalizationStatus StreamService::status() const noexcept {
 }
 
 StreamIngressHub& StreamService::ingress_hub() noexcept {
+    return *hub_;
+}
+
+std::shared_ptr<StreamIngressHub> StreamService::ingress_hub_handle() const noexcept {
     return hub_;
 }
 
 void StreamService::claim_shutdown() noexcept {
     const auto current = normalizer_.status();
-    hub_.claim_control_generation(current.client_id, current.generation,
-                                  {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
+    hub_->claim_control_generation(
+        current.client_id, current.generation,
+        {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
 }
 
 void StreamService::on_item(const StreamItemView& item,
                             const StreamMetadataView& metadata) noexcept {
-    hub_.publish(item);
+    hub_->publish(item);
     if (external_sink_ != nullptr) {
         external_sink_->on_item(item, metadata);
     }

@@ -974,6 +974,182 @@ TEST_CASE("stream ingress queue failures use exact precedence and first cause",
     }
 }
 
+TEST_CASE("prepared activation publishes or preserves the intervening terminal",
+          "[stream][ingress][activation][terminal]") {
+    SECTION("cause before promotion cancels promotion") {
+        StreamIngressHub hub;
+        hub.begin_generation(1001, 7);
+        auto reserved = reserve_slot(hub);
+        auto prepared = hub.prepare_activation(reserved);
+        REQUIRE(prepared);
+        REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::Deadline,
+                                     .operation = StreamOperation::Listen,
+                                     .metadata_failure = {}}));
+        CHECK_FALSE(hub.commit_activation_promotion(*prepared));
+        const auto terminal = hub.claim_terminal(reserved);
+        REQUIRE(terminal);
+        CHECK(terminal->cause == StreamTerminalCause::Deadline);
+    }
+
+    SECTION("promotion before cause publishes unconditionally") {
+        StreamIngressHub hub;
+        hub.begin_generation(1001, 7);
+        auto reserved = reserve_slot(hub);
+        auto prepared = hub.prepare_activation(reserved);
+        REQUIRE(prepared);
+        REQUIRE(hub.commit_activation_promotion(*prepared));
+        REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::Deadline,
+                                     .operation = StreamOperation::Listen,
+                                     .metadata_failure = {}}));
+        hub.publish_prepared(reserved, *prepared);
+        CHECK(hub.activation_state(reserved) == StreamIngressState::Armed);
+        const auto terminal = hub.claim_terminal(reserved);
+        REQUIRE(terminal);
+        CHECK(terminal->cause == StreamTerminalCause::Deadline);
+    }
+}
+
+TEST_CASE("receive terminal between preparation check and commit cancels activation",
+          "[stream][ingress][activation][terminal][concurrency]") {
+    PointProbe probe;
+    StreamIngressHub hub(
+        {.context = &probe, .hook = &PointProbe::notify, .forced_lock_free_failure = std::nullopt});
+    hub.begin_generation(1001, 7);
+    auto reserved = reserve_slot(hub);
+    probe.reset(detail::StreamIngressProbePoint::ActivationPreparing,
+                StreamIngressTestAccess::slot_index(reserved));
+    probe.enabled.store(true, std::memory_order_release);
+    std::optional<StreamIngressPreparedActivation> prepared;
+    std::thread preparation([&] { prepared = hub.prepare_activation(reserved); });
+    wait_entered(probe);
+
+    StreamTerminalPayload payload;
+    SECTION("authorization loss") {
+        payload = {.cause = StreamTerminalCause::AuthorizationLost,
+                   .auth_state = 31,
+                   .metadata_failure = {}};
+    }
+    SECTION("metadata failure") {
+        payload = {.cause = StreamTerminalCause::MetadataFailure,
+                   .metadata_failure = {.kind = StreamFailureKind::Capacity,
+                                        .capacity = {.resource = StreamMetadataResource::Chats,
+                                                     .phase = StreamMetadataPhase::Active,
+                                                     .limit = 65'536,
+                                                     .used = 65'536,
+                                                     .incoming = 1,
+                                                     .would_use = 65'537}}};
+    }
+    hub.claim_generation(1001, 7, payload);
+    probe.release.store(true, std::memory_order_release);
+    preparation.join();
+
+    CHECK_FALSE(prepared);
+    CHECK(hub.activation_state(reserved) == StreamIngressState::Removed);
+    const auto terminal = hub.claim_terminal(reserved);
+    REQUIRE(terminal);
+    CHECK(terminal->cause == payload.cause);
+    CHECK(terminal->auth_state == payload.auth_state);
+    CHECK(terminal->metadata_failure == payload.metadata_failure);
+    REQUIRE(hub.poll_reclaim(reserved));
+}
+
+TEST_CASE("item begin linearizes terminal suppression and complete-count arbitration",
+          "[stream][ingress][delivery][terminal]") {
+    SECTION("terminal before item suppresses begin") {
+        StreamIngressHub hub;
+        hub.begin_generation(1001, 7);
+        auto reserved = reserve_slot(hub);
+        REQUIRE(hub.commit_activation(reserved));
+        REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+        REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::Shutdown,
+                                     .operation = StreamOperation::Listen,
+                                     .metadata_failure = {}}));
+        CHECK_FALSE(hub.begin_item_delivery(reserved));
+    }
+
+    SECTION("terminal during begun item wins after complete delivery") {
+        StreamIngressHub hub;
+        hub.begin_generation(1001, 7);
+        auto reserved = reserve_slot(hub);
+        REQUIRE(hub.commit_activation(reserved));
+        REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+        REQUIRE(hub.begin_item_delivery(reserved));
+        REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::AuthorizationLost,
+                                     .operation = StreamOperation::Listen,
+                                     .auth_state = 12,
+                                     .metadata_failure = {}}));
+        CHECK(hub.terminal_snapshot(reserved)->cause == StreamTerminalCause::AuthorizationLost);
+    }
+
+    SECTION("Nth complete item claims planned success before later causes") {
+        StreamIngressHub hub;
+        hub.begin_generation(1001, 7);
+        auto reserved = reserve_slot(hub);
+        REQUIRE(hub.commit_activation(reserved));
+        REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+        REQUIRE(hub.begin_item_delivery(reserved));
+        REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::PlannedSuccess,
+                                     .operation = StreamOperation::Listen,
+                                     .metadata_failure = {}}));
+        CHECK_FALSE(hub.claim(reserved, {.cause = StreamTerminalCause::Deadline,
+                                         .operation = StreamOperation::Listen,
+                                         .metadata_failure = {}}));
+        const auto terminal = hub.claim_terminal(reserved);
+        REQUIRE(terminal);
+        CHECK(terminal->cause == StreamTerminalCause::PlannedSuccess);
+    }
+}
+
+TEST_CASE("Nth completion and every external terminal preserve atomic first cause",
+          "[stream][ingress][delivery][terminal][concurrency]") {
+    const std::array external{StreamTerminalPayload{.cause = StreamTerminalCause::Deadline,
+                                                    .operation = StreamOperation::Listen,
+                                                    .metadata_failure = {}},
+                              StreamTerminalPayload{.cause = StreamTerminalCause::AuthorizationLost,
+                                                    .operation = StreamOperation::Listen,
+                                                    .auth_state = 12,
+                                                    .metadata_failure = {}},
+                              StreamTerminalPayload{.cause = StreamTerminalCause::Shutdown,
+                                                    .operation = StreamOperation::Listen,
+                                                    .metadata_failure = {}},
+                              StreamTerminalPayload{.cause = StreamTerminalCause::QueueBytes,
+                                                    .operation = StreamOperation::Listen,
+                                                    .queued_items = 10,
+                                                    .queued_bytes = kStreamQueueBytes,
+                                                    .incoming_bytes = 1,
+                                                    .metadata_failure = {}}};
+    for (const auto& cause : external) {
+        DYNAMIC_SECTION("external first cause=" << static_cast<int>(cause.cause)) {
+            StreamIngressHub hub;
+            hub.begin_generation(1001, 7);
+            auto reserved = reserve_slot(hub);
+            REQUIRE(hub.commit_activation(reserved));
+            REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+            REQUIRE(hub.begin_item_delivery(reserved));
+            REQUIRE(hub.claim(reserved, cause));
+            CHECK_FALSE(hub.claim(reserved, {.cause = StreamTerminalCause::PlannedSuccess,
+                                             .operation = StreamOperation::Listen,
+                                             .metadata_failure = {}}));
+            REQUIRE(hub.terminal_snapshot(reserved));
+            CHECK(hub.terminal_snapshot(reserved)->cause == cause.cause);
+        }
+        DYNAMIC_SECTION("planned first cause=" << static_cast<int>(cause.cause)) {
+            StreamIngressHub hub;
+            hub.begin_generation(1001, 7);
+            auto reserved = reserve_slot(hub);
+            REQUIRE(hub.commit_activation(reserved));
+            REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+            REQUIRE(hub.begin_item_delivery(reserved));
+            REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::PlannedSuccess,
+                                         .operation = StreamOperation::Listen,
+                                         .metadata_failure = {}}));
+            CHECK_FALSE(hub.claim(reserved, cause));
+            REQUIRE(hub.terminal_snapshot(reserved));
+            CHECK(hub.terminal_snapshot(reserved)->cause == StreamTerminalCause::PlannedSuccess);
+        }
+    }
+}
+
 TEST_CASE("one full ingress queue does not alter another subscriber",
           "[stream][ingress][isolation]") {
     StreamIngressHub hub;

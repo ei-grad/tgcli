@@ -127,6 +127,15 @@ struct BlockingSequenceProbe {
 
 } // namespace
 
+TEST_CASE("stream service exposes one stable shared ingress lifetime",
+          "[stream][service][ingress][lifetime]") {
+    daemon::StreamService service;
+    const auto ingress = service.ingress_hub_handle();
+    REQUIRE(ingress);
+    CHECK(ingress.get() == &service.ingress_hub());
+    CHECK(service.ingress_hub_handle() == ingress);
+}
+
 TEST_CASE("stream service factory begins each generation before current-state dispatch",
           "[stream][service][bootstrap][fake-boundary]") {
     daemon::StreamService service;

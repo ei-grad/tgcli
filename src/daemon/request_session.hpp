@@ -3,6 +3,7 @@
 #include "daemon/activity_tracker.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/stream_subscription.hpp"
 #include "proto/frame.hpp"
 
 #include <chrono>
@@ -99,6 +100,11 @@ class RequestSession final : public ResponseSink {
                    std::optional<RequestDeadline> admission_deadline = {},
                    ConfigAdmissionMode config_admission_mode = ConfigAdmissionMode::DirectFallback,
                    std::optional<WallClock::time_point> admission_wall_time = {});
+    ~RequestSession() noexcept override;
+    RequestSession(const RequestSession&) = delete;
+    RequestSession& operator=(const RequestSession&) = delete;
+    RequestSession(RequestSession&&) = delete;
+    RequestSession& operator=(RequestSession&&) = delete;
 
     [[nodiscard]] const proto::Request& request() const;
     [[nodiscard]] std::uint64_t request_source_bytes() const;
@@ -122,6 +128,9 @@ class RequestSession final : public ResponseSink {
     void audit_fatal();
     AuditedDispatchStatus dispatch_audited(const std::function<void()>& dispatch);
     [[nodiscard]] bool promote_to_subscription();
+    [[nodiscard]] StreamSubscriptionActivationResult activate_stream_subscription(
+        const std::shared_ptr<StreamIngressHub>& hub, const StreamIngressRequest& request,
+        StreamActivityMode activity_mode, testing::StreamActivationProbe probe = {});
 
     bool reserve_in_flight();
     bool reserve_direct_in_flight();
@@ -132,7 +141,13 @@ class RequestSession final : public ResponseSink {
 
   private:
     enum class State { Running, Disconnected, Shutdown, TimedOut, ProtocolError, AuditFatal };
-    enum class ActivityState { Active, TerminalForwarding, Released };
+    enum class ActivityState {
+        OpenRequest,
+        OpenLegacySubscription,
+        OpenStreamSubscription,
+        TerminalForwarding,
+        Released
+    };
 
     struct Identity {
         std::uint64_t request_id = 0;
@@ -163,12 +178,13 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] bool begin_terminal_forwarding();
     void finish_terminal_forwarding();
     void release_activity();
+    [[nodiscard]] bool claim_stream_terminal(StreamTerminalPayload payload) noexcept;
 
-    void emit_item(nlohmann::json data) override;
+    DeliveryOutcome emit_item(nlohmann::json data) override;
     void emit_progress(nlohmann::json data) override;
-    void emit_result(nlohmann::json data) override;
-    void emit_error(std::string code, std::string message, nlohmann::json details,
-                    int exit_code) override;
+    DeliveryOutcome emit_result(nlohmann::json data) override;
+    DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
+                               int exit_code) override;
     ChallengeReply emit_challenge(nlohmann::json data) override;
 
     proto::Request request_;
@@ -203,7 +219,12 @@ class RequestSession final : public ResponseSink {
 
     std::mutex activity_mutex_;
     ActivityTracker::Token activity_;
-    ActivityState activity_state_ = ActivityState::Active;
+    ActivityState activity_state_ = ActivityState::OpenRequest;
+    std::optional<StreamSubscriptionLease> stream_subscription_;
+
+    friend class detail::StreamDeliveryRunner;
+    friend StreamDeliveryStatus run_stream_delivery(RequestSession& session,
+                                                    const StreamDeliveryOptions& options);
 };
 
 } // namespace tgcli::daemon

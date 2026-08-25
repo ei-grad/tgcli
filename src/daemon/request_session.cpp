@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <exception>
 #include <fcntl.h>
 #include <stdexcept>
 #include <unistd.h>
@@ -164,6 +165,26 @@ RequestSession::RequestSession(proto::Request request, std::shared_ptr<ResponseS
       activity_(std::move(request_activity)) {
     if (transport_ == nullptr) {
         throw std::invalid_argument("request session transport is null");
+    }
+}
+
+RequestSession::~RequestSession() noexcept {
+    try {
+        disconnect();
+        std::optional<StreamSubscriptionLease> subscription;
+        {
+            const std::lock_guard lock(activity_mutex_);
+            subscription = std::move(stream_subscription_);
+            if (activity_state_ != ActivityState::Released) {
+                activity_.reset();
+                activity_state_ = ActivityState::Released;
+            }
+        }
+        subscription.reset();
+    } catch (...) {
+        // Mutex and observer callables expose non-enumerable exception types. Destruction cannot
+        // safely recover after lifecycle teardown begins.
+        std::terminate();
     }
 }
 
@@ -389,8 +410,8 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
         }
         state_ = State::ProtocolError;
         secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
-        error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
-              {{"request_id", answer.id}, {"reason", rejection}}, kUsage);
+        static_cast<void>(error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
+                                {{"request_id", answer.id}, {"reason", rejection}}, kUsage));
         if (current_) {
             resolve_current({ChallengeStatus::ProtocolError, std::monostate{}});
         }
@@ -439,7 +460,6 @@ void RequestSession::disconnect() {
         disconnected_at_ = Clock::now();
         state_ = State::Disconnected;
         cancellation_source_.request_stop();
-        release_activity();
         answer_reserved_ = false;
         reserved_identity_.reset();
         if (current_) {
@@ -451,35 +471,43 @@ void RequestSession::disconnect() {
             hook = in_flight_hook_;
         }
     }
+    if (!claim_stream_terminal(
+            {.cause = StreamTerminalCause::Disconnected, .metadata_failure = {}})) {
+        release_activity();
+    }
     notify_in_flight(state, hook);
 }
 
 void RequestSession::shutdown() {
-    const std::lock_guard lock(session_mutex_);
-    if (state_ != State::Running) {
-        return;
-    }
-    if (!shutdown_at_) {
-        shutdown_at_ = Clock::now();
-    }
-    shutdown_requested_ = true;
-    if (audited_terminal_) {
+    bool audited = false;
+    {
+        const std::lock_guard lock(session_mutex_);
+        if (state_ != State::Running) {
+            return;
+        }
+        if (!shutdown_at_) {
+            shutdown_at_ = Clock::now();
+        }
+        shutdown_requested_ = true;
+        audited = audited_terminal_;
         cancellation_source_.request_stop();
         answer_reserved_ = false;
         reserved_identity_.reset();
+        if (!audited) {
+            state_ = State::Shutdown;
+        }
         if (current_) {
             resolve_current({ChallengeStatus::Shutdown, std::monostate{}});
         }
+    }
+    if (audited) {
         return;
     }
-    state_ = State::Shutdown;
-    cancellation_source_.request_stop();
-    answer_reserved_ = false;
-    reserved_identity_.reset();
-    error("DAEMON_SHUTDOWN", "daemon is shutting down", {{"reason", "daemon_shutdown"}}, kGeneric);
-    if (current_) {
-        resolve_current({ChallengeStatus::Shutdown, std::monostate{}});
+    if (claim_stream_terminal({.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}})) {
+        return;
     }
+    static_cast<void>(error("DAEMON_SHUTDOWN", "daemon is shutting down",
+                            {{"reason", "daemon_shutdown"}}, kGeneric));
 }
 
 AuditedTerminalStatus RequestSession::begin_audited_terminal() {
@@ -584,7 +612,11 @@ void RequestSession::audit_fatal() {
 
 bool RequestSession::promote_to_subscription() {
     const std::lock_guard lock(activity_mutex_);
-    return activity_state_ == ActivityState::Active && activity_.promote_to_subscription();
+    if (activity_state_ != ActivityState::OpenRequest || !activity_.promote_to_subscription()) {
+        return false;
+    }
+    activity_state_ = ActivityState::OpenLegacySubscription;
+    return true;
 }
 
 bool RequestSession::reserve_in_flight() {
@@ -721,7 +753,9 @@ void RequestSession::notify_in_flight(InFlightState state, const InFlightHook& h
 
 bool RequestSession::begin_terminal_forwarding() {
     const std::lock_guard lock(activity_mutex_);
-    if (activity_state_ != ActivityState::Active) {
+    if (activity_state_ != ActivityState::OpenRequest &&
+        activity_state_ != ActivityState::OpenLegacySubscription &&
+        activity_state_ != ActivityState::OpenStreamSubscription) {
         return false;
     }
     activity_state_ = ActivityState::TerminalForwarding;
@@ -729,56 +763,84 @@ bool RequestSession::begin_terminal_forwarding() {
 }
 
 void RequestSession::finish_terminal_forwarding() {
-    const std::lock_guard lock(activity_mutex_);
-    if (activity_state_ == ActivityState::TerminalForwarding) {
-        activity_.reset();
-        activity_state_ = ActivityState::Released;
+    std::optional<StreamSubscriptionLease> subscription;
+    {
+        const std::lock_guard lock(activity_mutex_);
+        if (activity_state_ == ActivityState::TerminalForwarding) {
+            activity_.reset();
+            subscription = std::move(stream_subscription_);
+            activity_state_ = ActivityState::Released;
+        }
     }
+    subscription.reset();
 }
 
 void RequestSession::release_activity() {
     const std::lock_guard lock(activity_mutex_);
-    if (activity_state_ == ActivityState::Active) {
+    if (activity_state_ == ActivityState::OpenRequest ||
+        activity_state_ == ActivityState::OpenLegacySubscription) {
         activity_.reset();
         activity_state_ = ActivityState::Released;
     }
 }
 
-void RequestSession::emit_item(nlohmann::json data) {
-    transport_->item(std::move(data));
+bool RequestSession::claim_stream_terminal(StreamTerminalPayload payload) noexcept {
+    std::shared_ptr<detail::StreamSubscriptionState> subscription;
+    {
+        const std::lock_guard lock(activity_mutex_);
+        if (activity_state_ != ActivityState::OpenStreamSubscription &&
+            activity_state_ != ActivityState::TerminalForwarding) {
+            return false;
+        }
+        if (stream_subscription_) {
+            subscription = stream_subscription_->state_;
+        }
+    }
+    if (!subscription) {
+        return false;
+    }
+    static_cast<void>(detail::stream_subscription_claim(subscription, payload));
+    return true;
+}
+
+DeliveryOutcome RequestSession::emit_item(nlohmann::json data) {
+    return transport_->item(std::move(data));
 }
 
 void RequestSession::emit_progress(nlohmann::json data) {
     transport_->progress(std::move(data));
 }
 
-void RequestSession::emit_result(nlohmann::json data) {
+DeliveryOutcome RequestSession::emit_result(nlohmann::json data) {
     if (!begin_terminal_forwarding()) {
-        return;
+        return DeliveryOutcome::Suppressed;
     }
     try {
-        transport_->result(std::move(data));
+        const auto outcome = transport_->result(std::move(data));
+        finish_terminal_forwarding();
+        return outcome;
     } catch (...) {
         // A terminal claim cannot be retried regardless of the transport's exception type.
         finish_terminal_forwarding();
         throw;
     }
-    finish_terminal_forwarding();
 }
 
-void RequestSession::emit_error(std::string code, std::string message, nlohmann::json details,
-                                int exit_code) {
+DeliveryOutcome RequestSession::emit_error(std::string code, std::string message,
+                                           nlohmann::json details, int exit_code) {
     if (!begin_terminal_forwarding()) {
-        return;
+        return DeliveryOutcome::Suppressed;
     }
     try {
-        transport_->error(std::move(code), std::move(message), std::move(details), exit_code);
+        const auto outcome =
+            transport_->error(std::move(code), std::move(message), std::move(details), exit_code);
+        finish_terminal_forwarding();
+        return outcome;
     } catch (...) {
         // A terminal claim cannot be retried regardless of the transport's exception type.
         finish_terminal_forwarding();
         throw;
     }
-    finish_terminal_forwarding();
 }
 
 ChallengeReply RequestSession::emit_challenge(nlohmann::json data) {

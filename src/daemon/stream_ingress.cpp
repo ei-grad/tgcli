@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -17,6 +18,14 @@ namespace {
 
 constexpr unsigned char kReclaimedPoison = 0xA7;
 constexpr auto kStateMaximum = static_cast<std::uint32_t>(StreamIngressState::Reclaimable);
+
+enum class ActivationCommit : std::uint32_t {
+    Open,
+    Prepared,
+    TerminalClaiming,
+    Cancelled,
+    PromotionCommitted
+};
 
 StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
     switch (cause) {
@@ -36,6 +45,12 @@ StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
         return StreamTerminalCause::ClaimingShutdown;
     case StreamTerminalCause::MetadataFailure:
         return StreamTerminalCause::ClaimingMetadataFailure;
+    case StreamTerminalCause::PlannedSuccess:
+        return StreamTerminalCause::ClaimingPlannedSuccess;
+    case StreamTerminalCause::Deadline:
+        return StreamTerminalCause::ClaimingDeadline;
+    case StreamTerminalCause::Disconnected:
+        return StreamTerminalCause::ClaimingDisconnected;
     case StreamTerminalCause::Open:
     case StreamTerminalCause::ClaimingCounterExhausted:
     case StreamTerminalCause::ClaimingItemBytes:
@@ -45,6 +60,9 @@ StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
     case StreamTerminalCause::ClaimingGenerationReplaced:
     case StreamTerminalCause::ClaimingShutdown:
     case StreamTerminalCause::ClaimingMetadataFailure:
+    case StreamTerminalCause::ClaimingPlannedSuccess:
+    case StreamTerminalCause::ClaimingDeadline:
+    case StreamTerminalCause::ClaimingDisconnected:
         return StreamTerminalCause::Open;
     }
     return StreamTerminalCause::Open;
@@ -88,6 +106,8 @@ struct StreamIngressSlot {
     std::atomic<std::uint64_t> borrow_epoch{0};
     std::atomic<std::uint32_t> active_borrows{0};
     std::atomic<std::uint32_t> publication_ready{0};
+    std::atomic<std::uint32_t> activation_commit{
+        static_cast<std::uint32_t>(ActivationCommit::Open)};
     std::atomic<std::int32_t> owner_client_id{0};
     std::atomic<std::uint64_t> owner_generation{0};
     std::atomic<std::uint32_t> owner_operation{static_cast<std::uint32_t>(StreamOperation::Listen)};
@@ -329,6 +349,7 @@ class StreamIngressHub::Impl {
                    !slots.front().borrow_epoch.is_lock_free() ||
                    !slots.front().active_borrows.is_lock_free() ||
                    !slots.front().publication_ready.is_lock_free() ||
+                   !slots.front().activation_commit.is_lock_free() ||
                    !slots.front().owner_generation.is_lock_free() ||
                    !current_generation.is_lock_free() ||
                    !retained_terminal.generation.is_lock_free() ||
@@ -414,13 +435,33 @@ class StreamIngressHub::Impl {
         if (claiming == StreamTerminalCause::Open) {
             return false;
         }
+        auto activation = slot.activation_commit.load(std::memory_order_acquire);
+        bool activation_claimed = false;
+        while (activation == static_cast<std::uint32_t>(ActivationCommit::Open) ||
+               activation == static_cast<std::uint32_t>(ActivationCommit::Prepared)) {
+            if (slot.activation_commit.compare_exchange_weak(
+                    activation, static_cast<std::uint32_t>(ActivationCommit::TerminalClaiming),
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+                activation_claimed = true;
+                break;
+            }
+        }
         auto expected = StreamTerminalCause::Open;
         if (!slot.terminal_cause.compare_exchange_strong(
                 expected, claiming, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            if (activation_claimed) {
+                slot.activation_commit.store(
+                    static_cast<std::uint32_t>(ActivationCommit::Cancelled),
+                    std::memory_order_release);
+            }
             return false;
         }
         slot.terminal_payload = payload;
         slot.terminal_cause.store(payload.cause, std::memory_order_release);
+        if (activation_claimed) {
+            slot.activation_commit.store(static_cast<std::uint32_t>(ActivationCommit::Cancelled),
+                                         std::memory_order_release);
+        }
         return true;
     }
 
@@ -562,6 +603,8 @@ class StreamIngressHub::Impl {
                                    std::memory_order_release);
         slot.terminal_cause.store(StreamTerminalCause::Open, std::memory_order_relaxed);
         slot.publication_ready.store(0, std::memory_order_relaxed);
+        slot.activation_commit.store(static_cast<std::uint32_t>(ActivationCommit::Open),
+                                     std::memory_order_relaxed);
         slot.terminal_delivered = false;
         store_state(slot, StreamIngressState::Free);
     }
@@ -575,6 +618,8 @@ class StreamIngressHub::Impl {
         if (load_state(slot) != StreamIngressState::Removed ||
             slot.active_borrows.load(std::memory_order_acquire) != 0 ||
             (slot.borrow_epoch.load(std::memory_order_acquire) & 1U) != 0U ||
+            slot.activation_commit.load(std::memory_order_acquire) ==
+                static_cast<std::uint32_t>(ActivationCommit::TerminalClaiming) ||
             publisher_count.load(std::memory_order_seq_cst) != 0) {
             return false;
         }
@@ -758,6 +803,29 @@ StreamIngressReservation::operator bool() const noexcept {
     return hub_ != nullptr;
 }
 
+StreamIngressPreparedActivation::StreamIngressPreparedActivation(StreamIngressHub* hub,
+                                                                 std::uint32_t index,
+                                                                 std::uint64_t epoch) noexcept
+    : hub_(hub), index_(index), epoch_(epoch) {}
+
+StreamIngressPreparedActivation::StreamIngressPreparedActivation(
+    StreamIngressPreparedActivation&& other) noexcept
+    : hub_(std::exchange(other.hub_, nullptr)), index_(other.index_), epoch_(other.epoch_) {}
+
+StreamIngressPreparedActivation&
+StreamIngressPreparedActivation::operator=(StreamIngressPreparedActivation&& other) noexcept {
+    if (this != &other) {
+        hub_ = std::exchange(other.hub_, nullptr);
+        index_ = other.index_;
+        epoch_ = other.epoch_;
+    }
+    return *this;
+}
+
+StreamIngressPreparedActivation::operator bool() const noexcept {
+    return hub_ != nullptr;
+}
+
 void StreamIngressReservation::reset() noexcept {
     if (hub_ != nullptr) {
         hub_->abandon(*this);
@@ -813,6 +881,8 @@ StreamIngressAdmissionResult StreamIngressHub::reserve(const StreamIngressReques
         slot.terminal_delivered = false;
         slot.terminal_cause.store(StreamTerminalCause::Open, std::memory_order_relaxed);
         slot.publication_ready.store(0, std::memory_order_relaxed);
+        slot.activation_commit.store(static_cast<std::uint32_t>(ActivationCommit::Open),
+                                     std::memory_order_relaxed);
         slot.owner_client_id.store(request.client_id, std::memory_order_relaxed);
         slot.owner_generation.store(request.generation, std::memory_order_relaxed);
         slot.owner_operation.store(static_cast<std::uint32_t>(request.operation),
@@ -861,12 +931,16 @@ void StreamIngressHub::claim_control_generation(std::int32_t client_id, std::uin
     }
 }
 
-bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) noexcept {
+std::optional<StreamIngressPreparedActivation>
+StreamIngressHub::prepare_activation(StreamIngressReservation& reservation) noexcept {
     const std::lock_guard lock(impl_->control);
     if (!impl_->valid(reservation)) {
-        return false;
+        return std::nullopt;
     }
     auto& slot = impl_->slots[reservation.index_];
+    if (load_state(slot) != StreamIngressState::Reserved) {
+        return std::nullopt;
+    }
     const auto current_generation = impl_->current_generation.load(std::memory_order_acquire);
     const bool stale =
         current_generation != 0 &&
@@ -885,24 +959,60 @@ bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) 
     if (stale || retained ||
         slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
         store_state(slot, StreamIngressState::Removed);
+        return std::nullopt;
+    }
+    impl_->notify(detail::StreamIngressProbePoint::ActivationPreparing, reservation.index_);
+    auto activation = static_cast<std::uint32_t>(ActivationCommit::Open);
+    if (!slot.activation_commit.compare_exchange_strong(
+            activation, static_cast<std::uint32_t>(ActivationCommit::Prepared),
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+        store_state(slot, StreamIngressState::Removed);
+        return std::nullopt;
+    }
+    return StreamIngressPreparedActivation(this, reservation.index_, reservation.epoch_);
+}
+
+bool StreamIngressHub::commit_activation_promotion(
+    StreamIngressPreparedActivation& prepared) noexcept {
+    if (prepared.hub_ != this || prepared.index_ >= kStreamSubscriberSlots) {
         return false;
     }
-    if (!compare_state_strong(slot, StreamIngressState::Reserved, StreamIngressState::Armed)) {
+    auto& slot = impl_->slots[prepared.index_];
+    if (slot.epoch.load(std::memory_order_acquire) != prepared.epoch_) {
         return false;
+    }
+    auto expected = static_cast<std::uint32_t>(ActivationCommit::Prepared);
+    return slot.activation_commit.compare_exchange_strong(
+        expected, static_cast<std::uint32_t>(ActivationCommit::PromotionCommitted),
+        std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+void StreamIngressHub::publish_prepared(StreamIngressReservation& reservation,
+                                        StreamIngressPreparedActivation& prepared) noexcept {
+    const std::lock_guard lock(impl_->control);
+    if (!impl_->valid(reservation) || prepared.hub_ != this ||
+        prepared.index_ != reservation.index_ || prepared.epoch_ != reservation.epoch_ ||
+        impl_->slots[reservation.index_].activation_commit.load(std::memory_order_acquire) !=
+            static_cast<std::uint32_t>(ActivationCommit::PromotionCommitted)) {
+        std::terminate();
+    }
+    auto& slot = impl_->slots[reservation.index_];
+    if (!compare_state_strong(slot, StreamIngressState::Reserved, StreamIngressState::Armed)) {
+        std::terminate();
     }
     impl_->dormant[reservation.index_].store(&slot, std::memory_order_seq_cst);
-    const auto retained_after_install = impl_->retained_terminal.snapshot(
-        slot.staged.client_id, slot.staged.generation, slot.staged.operation);
-    if (retained_after_install) {
-        static_cast<void>(Impl::claim(slot, *retained_after_install));
-    }
-    if (retained_after_install ||
-        slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
-        impl_->dormant[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
-        impl_->notify(detail::StreamIngressProbePoint::SlotExchange, reservation.index_);
-        store_state(slot, StreamIngressState::Removed);
+    prepared.hub_ = nullptr;
+}
+
+bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) noexcept {
+    auto prepared = prepare_activation(reservation);
+    if (!prepared || !commit_activation_promotion(*prepared)) {
+        if (impl_->valid(reservation)) {
+            store_state(impl_->slots[reservation.index_], StreamIngressState::Removed);
+        }
         return false;
     }
+    publish_prepared(reservation, *prepared);
     return true;
 }
 
@@ -1127,6 +1237,17 @@ void StreamIngressHub::discard(const StreamIngressReservation& reservation) noex
 bool StreamIngressHub::claim(StreamIngressReservation& reservation,
                              StreamTerminalPayload payload) noexcept {
     return impl_->valid(reservation) && Impl::claim(impl_->slots[reservation.index_], payload);
+}
+
+bool StreamIngressHub::begin_item_delivery(StreamIngressReservation& reservation) noexcept {
+    if (!impl_->valid(reservation)) {
+        return false;
+    }
+    auto& slot = impl_->slots[reservation.index_];
+    if (load_state(slot) != StreamIngressState::Published) {
+        return false;
+    }
+    return slot.terminal_cause.load(std::memory_order_acquire) == StreamTerminalCause::Open;
 }
 
 std::optional<StreamTerminalPayload>

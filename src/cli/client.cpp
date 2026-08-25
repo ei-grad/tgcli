@@ -135,17 +135,21 @@ class InProcessSink final : public daemon::ResponseSink {
         : renderer_(renderer), prompt_(prompt), tty_(tty) {}
 
   private:
-    void emit_item(json data) override {
+    daemon::DeliveryOutcome emit_item(json data) override {
         FrameRenderer::on_item(data);
+        return daemon::DeliveryOutcome::Complete;
     }
     void emit_progress(json data) override {
         renderer_.on_progress(data);
     }
-    void emit_result(json data) override {
+    daemon::DeliveryOutcome emit_result(json data) override {
         renderer_.on_result(data);
+        return daemon::DeliveryOutcome::Complete;
     }
-    void emit_error(std::string code, std::string message, json details, int exit_code) override {
+    daemon::DeliveryOutcome emit_error(std::string code, std::string message, json details,
+                                       int exit_code) override {
         renderer_.on_error(code, message, details, exit_code);
+        return daemon::DeliveryOutcome::Complete;
     }
     daemon::ChallengeReply emit_challenge(json challenge) override {
         if (!tty_) {
