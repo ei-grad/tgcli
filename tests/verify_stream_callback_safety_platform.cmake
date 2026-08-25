@@ -60,7 +60,9 @@ foreach(fragment
         "InstrumentationClass::TdSubmission"
         "InstrumentationClass::Teardown"
         "stream_callback_active()"
-        "tgcli_stream_callback_safety_install_apple_recorder(&note_violation)")
+        "using AppleRecorder = void (*)(std::size_t) noexcept"
+        "static_assert(std::is_same_v<decltype(&record_apple_instrumentation), AppleRecorder>)"
+        "tgcli_stream_callback_safety_install_apple_recorder(&record_apple_instrumentation)")
     string(FIND "${test_source}" "${fragment}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR "Apple callback-safety positive proof is missing: ${fragment}")

@@ -35,9 +35,10 @@
 #include <sys/epoll.h>
 #endif
 
+using AppleRecorder = void (*)(std::size_t) noexcept;
+
 #if defined(__APPLE__)
-extern "C" void
-tgcli_stream_callback_safety_install_apple_recorder(void (*)(std::size_t) noexcept) noexcept;
+extern "C" void tgcli_stream_callback_safety_install_apple_recorder(AppleRecorder) noexcept;
 #endif
 
 namespace {
@@ -98,6 +99,16 @@ void note_violation(InstrumentationClass instrumentation) noexcept {
     }
 }
 
+void record_apple_instrumentation(std::size_t raw_instrumentation) noexcept {
+    if (raw_instrumentation >= static_cast<std::size_t>(InstrumentationClass::Count)) {
+        callback_violations().fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    note_violation(static_cast<InstrumentationClass>(raw_instrumentation));
+}
+
+static_assert(std::is_same_v<decltype(&record_apple_instrumentation), AppleRecorder>);
+
 std::uint64_t observed_count(InstrumentationClass instrumentation) noexcept {
     return observed_counts()
         .at(static_cast<std::size_t>(instrumentation))
@@ -112,7 +123,7 @@ std::uint64_t instrumentation_count(InstrumentationClass instrumentation) noexce
 
 void reset_instrumentation() noexcept {
 #if defined(__APPLE__)
-    tgcli_stream_callback_safety_install_apple_recorder(&note_violation);
+    tgcli_stream_callback_safety_install_apple_recorder(&record_apple_instrumentation);
 #endif
     callback_violations().store(0, std::memory_order_relaxed);
     for (auto& value : instrumentation_counts()) {
@@ -927,4 +938,17 @@ TEST_CASE("callback instrumentation has guarded positive controls",
     void* outside = ::operator new(8);
     ::operator delete(outside);
     CHECK(callback_violations().load(std::memory_order_acquire) == guarded_count);
+}
+
+TEST_CASE("Apple callback recorder rejects unknown instrumentation classes",
+          "[stream][callback-safety][instrumentation]") {
+    reset_instrumentation();
+    record_apple_instrumentation(static_cast<std::size_t>(InstrumentationClass::Count));
+    CHECK(callback_violations().load(std::memory_order_acquire) == 1);
+    for (const auto& value : instrumentation_counts()) {
+        CHECK(value.load(std::memory_order_acquire) == 0);
+    }
+    for (const auto& value : observed_counts()) {
+        CHECK(value.load(std::memory_order_acquire) == 0);
+    }
 }
