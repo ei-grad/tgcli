@@ -47,9 +47,7 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
         }
     }
 
-    ~GenerationObserver() override {
-        service_.normalizer_.end(client_id_, generation_);
-    }
+    ~GenerationObserver() override = default;
 
     GenerationObserver(const GenerationObserver&) = delete;
     GenerationObserver& operator=(const GenerationObserver&) = delete;

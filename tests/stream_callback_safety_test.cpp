@@ -23,14 +23,21 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sys/epoll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+#if defined(__linux__)
+#include <sys/epoll.h>
+#endif
+
+#if defined(__APPLE__)
+extern "C" void
+tgcli_stream_callback_safety_install_apple_recorder(void (*)(std::size_t) noexcept) noexcept;
 #endif
 
 namespace {
@@ -104,6 +111,9 @@ std::uint64_t instrumentation_count(InstrumentationClass instrumentation) noexce
 }
 
 void reset_instrumentation() noexcept {
+#if defined(__APPLE__)
+    tgcli_stream_callback_safety_install_apple_recorder(&note_violation);
+#endif
     callback_violations().store(0, std::memory_order_relaxed);
     for (auto& value : instrumentation_counts()) {
         value.store(0, std::memory_order_relaxed);
@@ -178,7 +188,9 @@ struct StatusProbe {
 
     static void notify(void* context,
                        tgcli::daemon::detail::StreamStatusPublishPoint point) noexcept {
-        if (point == tgcli::daemon::detail::StreamStatusPublishPoint::Reset) {
+        if (point == tgcli::daemon::detail::StreamStatusPublishPoint::Reset ||
+            (point == tgcli::daemon::detail::StreamStatusPublishPoint::WriterBegin &&
+             !tgcli::daemon::detail::stream_callback_active())) {
             return;
         }
         auto& probe = *static_cast<StatusProbe*>(context);
@@ -464,8 +476,9 @@ extern "C" int __wrap_open(const char* filename, int flags, ...) {
     if ((flags & O_CREAT) == 0) {
         return __real_open(filename, flags);
     }
-    va_list arguments;
+    va_list arguments{};
     va_start(arguments, flags);
+    // NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized)
     const auto mode = static_cast<mode_t>(va_arg(arguments, int));
     va_end(arguments);
     return __real_open(filename, flags, mode);
@@ -475,8 +488,9 @@ extern "C" int __wrap_openat(int directory, const char* filename, int flags, ...
     if ((flags & O_CREAT) == 0) {
         return __real_openat(directory, filename, flags);
     }
-    va_list arguments;
+    va_list arguments{};
     va_start(arguments, flags);
+    // NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized)
     const auto mode = static_cast<mode_t>(va_arg(arguments, int));
     va_end(arguments);
     return __real_openat(directory, filename, flags, mode);
@@ -791,7 +805,7 @@ TEST_CASE("callback instrumentation has guarded positive controls",
     });
     auto function = tgcli::core::TdValue::scripted_function(
         tgcli::core::TdFunctionData{tgcli::core::TdFunctionKind::GetCurrentState});
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     pthread_mutex_t wait_mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t wait_condition = PTHREAD_COND_INITIALIZER;
     std::atomic<bool> waiter_ready{false};
@@ -841,7 +855,7 @@ TEST_CASE("callback instrumentation has guarded positive controls",
         std::free(positioned);
         // NOLINTEND(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
         pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
         static_cast<void>(pthread_mutex_lock(&mutex));
@@ -875,12 +889,16 @@ TEST_CASE("callback instrumentation has guarded positive controls",
         static_cast<void>(write_result);
         static_cast<void>(pwrite_result);
         static_cast<void>(fsync(descriptor));
+#if defined(__linux__)
         static_cast<void>(fdatasync(descriptor));
+#endif
         static_cast<void>(poll(nullptr, 0, 0));
         timeval timeout{};
         static_cast<void>(select(0, nullptr, nullptr, nullptr, &timeout));
+#if defined(__linux__)
         epoll_event event{};
         static_cast<void>(epoll_wait(-1, &event, 1, 0));
+#endif
         static_cast<void>(send(-1, byte.data(), byte.size(), 0));
         static_cast<void>(recv(-1, byte.data(), byte.size(), 0));
         static_cast<void>(close(descriptor_at));
@@ -892,7 +910,7 @@ TEST_CASE("callback instrumentation has guarded positive controls",
         static_cast<void>(teardown);
     }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     signaler.join();
     static_cast<void>(pthread_mutex_destroy(&wait_mutex));
     static_cast<void>(pthread_cond_destroy(&wait_condition));

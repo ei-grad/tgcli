@@ -1504,6 +1504,18 @@ TEST_CASE("stream status publication never exposes mixed snapshots",
 
 TEST_CASE("stream status publication covers sequence barrier and revision rollover",
           "[stream][storage][status]") {
+    BlockingStatusProbe begin_probe;
+    begin_probe.target = daemon::detail::StreamStatusPublishPoint::WriterBegin;
+    daemon::FixedStreamNormalizer beginning(
+        nullptr, {.context = &begin_probe, .hook = &BlockingStatusProbe::notify});
+    std::thread beginner([&] { static_cast<void>(beginning.begin(3, 5)); });
+    wait_entered(begin_probe);
+    auto begin_reader = std::async(std::launch::async, [&] { return beginning.status(); });
+    CHECK(begin_reader.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout);
+    begin_probe.release.store(true, std::memory_order_release);
+    beginner.join();
+    CHECK(begin_reader.get().generation == 5);
+
     BlockingStatusProbe sequence_probe;
     daemon::FixedStreamNormalizer sequenced(
         nullptr, {.context = &sequence_probe, .hook = &BlockingStatusProbe::notify});

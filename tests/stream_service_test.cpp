@@ -34,6 +34,22 @@ core::TdValue current_state() {
     return core::TdValue::from(core::TdCurrentState{});
 }
 
+struct BlockingSequenceProbe {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+
+    static void notify(void* context, daemon::detail::StreamStatusPublishPoint point) noexcept {
+        if (point != daemon::detail::StreamStatusPublishPoint::Sequence) {
+            return;
+        }
+        auto& probe = *static_cast<BlockingSequenceProbe*>(context);
+        probe.entered.store(true, std::memory_order_release);
+        while (!probe.release.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+};
+
 } // namespace
 
 TEST_CASE("stream service factory begins each generation before current-state dispatch",
@@ -100,6 +116,33 @@ TEST_CASE("old observer destruction and stale callbacks cannot clear a replaceme
     state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
     second->on_current_state(state);
     CHECK(service.status().phase == daemon::StreamNormalizationPhase::Ready);
+}
+
+TEST_CASE("old observer destruction cannot publish during replacement callback",
+          "[stream][service][generation][status]") {
+    BlockingSequenceProbe probe;
+    daemon::StreamService service(nullptr,
+                                  {.context = &probe, .hook = &BlockingSequenceProbe::notify});
+    auto factory = service.observer_factory();
+    auto first = factory(1001, 1);
+    auto second = factory(1002, 2);
+    auto state = current_state();
+    state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
+
+    std::thread callback([&] { second->on_current_state(state); });
+    REQUIRE(eventually([&] { return probe.entered.load(std::memory_order_acquire); }));
+    auto destroy = std::async(std::launch::async, [&] { first.reset(); });
+    CHECK(destroy.wait_for(2s) == std::future_status::ready);
+    auto reader = std::async(std::launch::async, [&] { return service.status(); });
+    CHECK(reader.wait_for(10ms) == std::future_status::timeout);
+
+    probe.release.store(true, std::memory_order_release);
+    callback.join();
+    destroy.get();
+    const auto status = reader.get();
+    CHECK(status.client_id == 1002);
+    CHECK(status.generation == 2);
+    CHECK(status.phase == daemon::StreamNormalizationPhase::Ready);
 }
 
 TEST_CASE("stream service observes synchronous current-state dispatch failure",

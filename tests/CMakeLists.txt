@@ -106,7 +106,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(tgcli_stream_callback_safety_tests
         PRIVATE "-Wno-mismatched-new-delete")
 endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(APPLE)
+    add_library(tgcli_stream_callback_safety_apple_interpose SHARED
+        support/stream_callback_safety_apple_interpose.cpp)
+    target_compile_features(tgcli_stream_callback_safety_apple_interpose PRIVATE cxx_std_20)
+    target_link_libraries(tgcli_stream_callback_safety_tests
+        PRIVATE tgcli_stream_callback_safety_apple_interpose)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(tgcli_stream_callback_safety_tests PRIVATE
         "-Wl,--wrap=pthread_mutex_lock"
         "-Wl,--wrap=pthread_mutex_trylock"
@@ -136,7 +142,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         "-Wl,--wrap=send"
         "-Wl,--wrap=recv")
 endif()
-catch_discover_tests(tgcli_stream_callback_safety_tests ADD_TAGS_AS_LABELS)
+if(APPLE)
+    catch_discover_tests(tgcli_stream_callback_safety_tests
+        ADD_TAGS_AS_LABELS
+        PROPERTIES ENVIRONMENT
+            "DYLD_INSERT_LIBRARIES=$<TARGET_FILE:tgcli_stream_callback_safety_apple_interpose>")
+else()
+    catch_discover_tests(tgcli_stream_callback_safety_tests ADD_TAGS_AS_LABELS)
+endif()
+
+add_test(
+    NAME stream-callback-safety-platform-contract
+    COMMAND "${CMAKE_COMMAND}"
+        -DREPO_ROOT=${CMAKE_SOURCE_DIR}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/verify_stream_callback_safety_platform.cmake")
 
 add_test(
     NAME schema-asset-generator

@@ -136,7 +136,7 @@ class StreamMetadataView {
 
 namespace detail {
 
-enum class StreamStatusPublishPoint { FailurePayload, Barrier, Sequence, Reset };
+enum class StreamStatusPublishPoint { WriterBegin, FailurePayload, Barrier, Sequence, Reset };
 using StreamStatusPublishHook = void (*)(void*, StreamStatusPublishPoint) noexcept;
 
 struct StreamStatusPublishProbe {
@@ -173,7 +173,6 @@ class FixedStreamNormalizer {
     FixedStreamNormalizer& operator=(FixedStreamNormalizer&&) = delete;
 
     bool begin(std::int32_t client_id, std::uint64_t generation) noexcept;
-    void end(std::int32_t client_id, std::uint64_t generation) noexcept;
     void on_update(std::int32_t client_id, std::uint64_t generation,
                    const core::TdValue& update) noexcept;
     void on_current_state(std::int32_t client_id, std::uint64_t generation,

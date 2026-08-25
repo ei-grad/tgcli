@@ -658,14 +658,9 @@ class FixedStreamNormalizer::Impl {
           status_revision(probe_value.initial_revision) {}
 
     std::uint64_t begin_status_write() noexcept {
-        const auto stable = status_revision.load(std::memory_order_relaxed);
-        if (stable == std::numeric_limits<std::uint64_t>::max() - 1U) {
-            status_revision.store(std::numeric_limits<std::uint64_t>::max(),
-                                  std::memory_order_release);
-            return 0;
-        }
-        status_revision.store(stable + 1U, std::memory_order_release);
-        return stable + 2U;
+        const auto stable = status_revision.fetch_add(1U, std::memory_order_acq_rel);
+        notify_status(detail::StreamStatusPublishPoint::WriterBegin);
+        return stable == std::numeric_limits<std::uint64_t>::max() - 1U ? 0 : stable + 2U;
     }
 
     void notify_status(detail::StreamStatusPublishPoint point) const noexcept {
@@ -736,12 +731,6 @@ class FixedStreamNormalizer::Impl {
     bool matches(std::int32_t expected_client, std::uint64_t expected_generation) const noexcept {
         return client_id.load(std::memory_order_relaxed) == expected_client &&
                generation.load(std::memory_order_relaxed) == expected_generation;
-    }
-
-    void end(std::int32_t expected_client, std::uint64_t expected_generation) noexcept {
-        if (matches(expected_client, expected_generation)) {
-            phase.store(StreamNormalizationPhase::Empty, std::memory_order_release);
-        }
     }
 
     [[nodiscard]] StreamNormalizationStatus read_status() const noexcept {
@@ -3117,10 +3106,6 @@ FixedStreamNormalizer::~FixedStreamNormalizer() = default;
 
 bool FixedStreamNormalizer::begin(std::int32_t client_id, std::uint64_t generation) noexcept {
     return impl_->publish_status([&] { return impl_->begin(client_id, generation); });
-}
-
-void FixedStreamNormalizer::end(std::int32_t client_id, std::uint64_t generation) noexcept {
-    impl_->publish_status([&] { impl_->end(client_id, generation); });
 }
 
 void FixedStreamNormalizer::on_update(std::int32_t client_id, std::uint64_t generation,
