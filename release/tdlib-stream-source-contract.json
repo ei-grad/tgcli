@@ -11,6 +11,54 @@
         "  if (dialog_filters_.size() >= narrow_cast<size_t>(max_dialog_filters)) {",
         "    return promise.set_error(400, \"The maximum number of chat folders exceeded\");"
       ]
+    },
+    {
+      "file_sha256": "94f05fefbe9f43b6f28a1abc0394dadbd4d35676540f38f69baa9b94101ea7d7",
+      "fragment_sha256": "6e0f4924792408d11cb82ad6dc840ba075eb9380cc4343917ba798a8c1e21a3a",
+      "id": "chat_list_ids_map_one_to_one_to_public_lists",
+      "path": "td/telegram/DialogListId.cpp",
+      "source_lines": [
+        "td_api::object_ptr<td_api::ChatList> DialogListId::get_chat_list_object() const {",
+        "  if (is_folder()) {",
+        "    auto folder_id = get_folder_id();",
+        "    if (folder_id == FolderId::archive()) {",
+        "      return td_api::make_object<td_api::chatListArchive>();",
+        "    }",
+        "    return td_api::make_object<td_api::chatListMain>();",
+        "  }",
+        "  if (is_filter()) {",
+        "    return td_api::make_object<td_api::chatListFolder>(get_filter_id().get());",
+        "  }",
+        "  UNREACHABLE();",
+        "  return nullptr;",
+        "}",
+        "",
+        "vector<td_api::object_ptr<td_api::ChatList>> DialogListId::get_chat_lists_object(",
+        "    const vector<DialogListId> &dialog_list_ids) {",
+        "  return transform(dialog_list_ids, [](DialogListId dialog_list_id) { return dialog_list_id.get_chat_list_object(); });",
+        "}"
+      ]
+    },
+    {
+      "file_sha256": "7e9f8dd8b9d13821d40a807e442d3da535c48f0676ab0a1323a5d07e184e80da",
+      "fragment_sha256": "d026dc8c0b1736acd991bfdfa04ffd0ab40e7d70eb4985115345d0608ef944a4",
+      "id": "chat_list_membership_rejects_duplicate_ids",
+      "path": "td/telegram/MessagesManager.cpp",
+      "source_lines": [
+        "bool MessagesManager::is_dialog_in_list(const Dialog *d, DialogListId dialog_list_id) {",
+        "  return td::contains(d->dialog_list_ids, dialog_list_id);",
+        "}",
+        "",
+        "void MessagesManager::add_dialog_to_list(Dialog *d, DialogListId dialog_list_id) {",
+        "  LOG(INFO) << \"Add \" << d->dialog_id << \" to \" << dialog_list_id;",
+        "  CHECK(!is_dialog_in_list(d, dialog_list_id));",
+        "  d->dialog_list_ids.push_back(dialog_list_id);",
+        "  CHECK(d->is_update_new_chat_sent);",
+        "  send_closure(G()->td(), &Td::send_update,",
+        "               td_api::make_object<td_api::updateChatAddedToList>(",
+        "                   get_chat_id_object(d->dialog_id, \"updateChatAddedToList\"), dialog_list_id.get_chat_list_object()));",
+        "}"
+      ]
     }
   ],
   "component": {
@@ -21,5 +69,6 @@
     "source_tree_sha256": "b7b7a35caefdc6d083f42fc8f331344fd6e021bdf30fde7518326303c2bdca35",
     "version": "1.8.65"
   },
-  "schema_version": 1
+  "schema_version": 1,
+  "source_git_tree": "27af7989c2c65dec54eb7860fb6932d5e422c7b5"
 }

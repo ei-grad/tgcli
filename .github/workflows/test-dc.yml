@@ -33,8 +33,10 @@ jobs:
         id: tdlib-cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
+          path: |
+            ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
+            ~/.cache/tgcli-dev/td
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
 
       - name: Build tdlib prefix
         if: steps.tdlib-cache.outputs.cache-hit != 'true'
@@ -42,6 +44,7 @@ jobs:
 
       - name: Configure
         run: >-
+          TDLIB_SRC="$HOME/.cache/tgcli-dev/td"
           TGCLI_TDLIB_PREFIX="$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7"
           cmake --preset debug
 

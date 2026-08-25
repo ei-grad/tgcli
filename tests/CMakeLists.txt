@@ -96,7 +96,8 @@ target_compile_definitions(tgcli_unit_tests
 catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS)
 
 add_executable(tgcli_stream_callback_safety_tests
-    stream_callback_safety_test.cpp)
+    stream_callback_safety_test.cpp
+    support/scripted_td_runtime.cpp)
 target_link_libraries(tgcli_stream_callback_safety_tests
     PRIVATE tgcli_daemon tgcli_core Catch2::Catch2WithMain)
 target_include_directories(tgcli_stream_callback_safety_tests
@@ -108,14 +109,32 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(tgcli_stream_callback_safety_tests PRIVATE
         "-Wl,--wrap=pthread_mutex_lock"
+        "-Wl,--wrap=pthread_mutex_trylock"
         "-Wl,--wrap=pthread_mutex_unlock"
         "-Wl,--wrap=pthread_cond_wait"
         "-Wl,--wrap=pthread_cond_timedwait"
+        "-Wl,--wrap=pthread_cond_signal"
+        "-Wl,--wrap=pthread_cond_broadcast"
+        "-Wl,--wrap=malloc"
+        "-Wl,--wrap=calloc"
+        "-Wl,--wrap=realloc"
+        "-Wl,--wrap=free"
+        "-Wl,--wrap=aligned_alloc"
+        "-Wl,--wrap=posix_memalign"
+        "-Wl,--wrap=open"
+        "-Wl,--wrap=openat"
         "-Wl,--wrap=read"
+        "-Wl,--wrap=pread"
         "-Wl,--wrap=write"
+        "-Wl,--wrap=pwrite"
         "-Wl,--wrap=close"
         "-Wl,--wrap=fsync"
-        "-Wl,--wrap=fdatasync")
+        "-Wl,--wrap=fdatasync"
+        "-Wl,--wrap=poll"
+        "-Wl,--wrap=select"
+        "-Wl,--wrap=epoll_wait"
+        "-Wl,--wrap=send"
+        "-Wl,--wrap=recv")
 endif()
 catch_discover_tests(tgcli_stream_callback_safety_tests ADD_TAGS_AS_LABELS)
 
@@ -141,7 +160,17 @@ add_test(
     NAME tdlib-stream-source-contract
     COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_SOURCE_DIR}/scripts/verify_tdlib_stream_source_contract.py"
-        --repo-root "${CMAKE_SOURCE_DIR}")
+        --repo-root "${CMAKE_SOURCE_DIR}"
+        --tdlib-source "${TGCLI_TDLIB_SOURCE}")
+add_test(
+    NAME tdlib-stream-source-contract-negative
+    COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+        -s "${CMAKE_CURRENT_SOURCE_DIR}"
+        -p "test_tdlib_stream_source_contract.py")
+set_tests_properties(
+    tdlib-stream-source-contract-negative
+    PROPERTIES ENVIRONMENT
+        "PYTHONDONTWRITEBYTECODE=1;TGCLI_TEST_TDLIB_SOURCE=${TGCLI_TDLIB_SOURCE}")
 add_test(
     NAME td-api-source-boundary
     COMMAND "${Python3_EXECUTABLE}"

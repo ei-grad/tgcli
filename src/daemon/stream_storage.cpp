@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 namespace tgcli::daemon {
 
@@ -21,6 +22,7 @@ constexpr std::int64_t kMaximumInt53 = 9'007'199'254'740'991LL;
 constexpr std::uint32_t kNoHandle = std::numeric_limits<std::uint32_t>::max();
 constexpr std::uint32_t kEntityHandleBit = 0x80000000U;
 constexpr std::size_t kBootstrapPhysicalBytes = kStreamMetadataBootstrapBytes * 2;
+constexpr unsigned char kBorrowPoison = 0xA5;
 
 static_assert(std::atomic<bool>::is_always_lock_free);
 static_assert(std::atomic<std::int32_t>::is_always_lock_free);
@@ -43,6 +45,74 @@ bool valid_positive_int53(std::int64_t value) noexcept {
 
 bool valid_nonnegative_int53(std::int64_t value) noexcept {
     return value >= 0 && value <= kMaximumInt53;
+}
+
+bool ascii_equal_ignore_case(char left, char right) noexcept {
+    const auto lower = [](char value) noexcept {
+        return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a') : value;
+    };
+    return lower(left) == lower(right);
+}
+
+bool ascii_word(char value) noexcept {
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+           (value >= '0' && value <= '9') || value == '_';
+}
+
+bool ascii_space(char value) noexcept {
+    return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f' ||
+           value == '\v';
+}
+
+bool consume_ignore_case(std::string_view value, std::size_t& position,
+                         std::string_view expected) noexcept {
+    if (expected.size() > value.size() - position) {
+        return false;
+    }
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        if (!ascii_equal_ignore_case(value[position + index], expected[index])) {
+            return false;
+        }
+    }
+    position += expected.size();
+    return true;
+}
+
+std::int32_t stream_retry_after(std::string_view message) noexcept {
+    for (std::size_t start = 0; start < message.size(); ++start) {
+        if (start != 0 && ascii_word(message[start - 1])) {
+            continue;
+        }
+        auto position = start;
+        if (!consume_ignore_case(message, position, "FLOOD_WAIT_")) {
+            position = start;
+            if (!consume_ignore_case(message, position, "retry")) {
+                continue;
+            }
+            const auto space_start = position;
+            while (position < message.size() && ascii_space(message[position])) {
+                ++position;
+            }
+            if (position == space_start || !consume_ignore_case(message, position, "after")) {
+                continue;
+            }
+            while (position < message.size() && ascii_space(message[position])) {
+                ++position;
+            }
+        }
+        if (position == message.size() || message[position] < '0' || message[position] > '9') {
+            continue;
+        }
+        std::int32_t result = 0;
+        constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+        while (position < message.size() && message[position] >= '0' && message[position] <= '9') {
+            const auto digit = static_cast<std::int32_t>(message[position] - '0');
+            result = result > (maximum - digit) / 10 ? maximum : result * 10 + digit;
+            ++position;
+        }
+        return result;
+    }
+    return 0;
 }
 
 std::uint64_t saturated_add(std::uint64_t left, std::uint64_t right) noexcept {
@@ -431,13 +501,15 @@ std::uint64_t StreamItemView::receive_sequence() const noexcept {
     return sequence_;
 }
 
-StreamMetadataCursor::StreamMetadataCursor(const void* owner, std::size_t position) noexcept
-    : owner_(owner), position_(position) {}
+StreamMetadataCursor::StreamMetadataCursor(const void* owner, std::size_t position,
+                                           std::uint64_t token) noexcept
+    : owner_(owner), position_(position), token_(token) {}
 
-StreamMetadataView::StreamMetadataView(const void* owner) noexcept : owner_(owner) {}
+StreamMetadataView::StreamMetadataView(void* owner, std::uint64_t token) noexcept
+    : owner_(owner), token_(token) {}
 
 StreamMetadataCursor StreamMetadataView::cursor() const noexcept {
-    return {owner_, 0};
+    return {owner_, 0, token_};
 }
 
 class FixedStreamNormalizer::Impl {
@@ -555,7 +627,26 @@ class FixedStreamNormalizer::Impl {
         std::uint32_t title_size = 0;
     };
 
-    explicit Impl(StreamReceiveSink* sink_value)
+    class StatusWrite {
+      public:
+        explicit StatusWrite(Impl& owner) noexcept
+            : owner_(owner), published_revision_(owner_.begin_status_write()) {}
+
+        ~StatusWrite() {
+            owner_.status_revision.store(published_revision_, std::memory_order_release);
+        }
+
+        StatusWrite(const StatusWrite&) = delete;
+        StatusWrite& operator=(const StatusWrite&) = delete;
+        StatusWrite(StatusWrite&&) = delete;
+        StatusWrite& operator=(StatusWrite&&) = delete;
+
+      private:
+        Impl& owner_;
+        std::uint64_t published_revision_ = 0;
+    };
+
+    explicit Impl(StreamReceiveSink* sink_value, detail::StreamStatusPublishProbe probe_value)
         : sink(sink_value), chats(std::make_unique<ChatRecord[]>(kStreamMetadataChats)),
           entities(std::make_unique<EntityRecord[]>(kStreamMetadataEntities)),
           metadata_arena(std::make_unique<char[]>(kStreamMetadataBytes)),
@@ -563,7 +654,30 @@ class FixedStreamNormalizer::Impl {
           bootstrap_arena(std::make_unique<char[]>(kBootstrapPhysicalBytes)),
           candidates(std::make_unique<Candidate[]>(kStreamMetadataOrderItems)),
           order_arena(std::make_unique<char[]>(kStreamMetadataOrderBytes)),
-          scratch(std::make_unique<char[]>(kStreamMetadataItemBytes)) {}
+          scratch(std::make_unique<char[]>(kStreamMetadataItemBytes)), status_probe(probe_value),
+          status_revision(probe_value.initial_revision) {}
+
+    std::uint64_t begin_status_write() noexcept {
+        const auto stable = status_revision.load(std::memory_order_relaxed);
+        if (stable == std::numeric_limits<std::uint64_t>::max() - 1U) {
+            status_revision.store(std::numeric_limits<std::uint64_t>::max(),
+                                  std::memory_order_release);
+            return 0;
+        }
+        status_revision.store(stable + 1U, std::memory_order_release);
+        return stable + 2U;
+    }
+
+    void notify_status(detail::StreamStatusPublishPoint point) const noexcept {
+        if (status_probe.hook != nullptr) {
+            status_probe.hook(status_probe.context, point);
+        }
+    }
+
+    template <typename Function> decltype(auto) publish_status(Function&& function) noexcept {
+        const StatusWrite write(*this);
+        return std::forward<Function>(function)();
+    }
 
     bool begin(std::int32_t next_client_id, std::uint64_t next_generation) noexcept {
         if (next_client_id <= 0 || next_generation == 0) {
@@ -603,6 +717,7 @@ class FixedStreamNormalizer::Impl {
                              std::memory_order_relaxed);
         failure_type_id.store(0, std::memory_order_relaxed);
         failure_error_code.store(0, std::memory_order_relaxed);
+        failure_retry_after.store(0, std::memory_order_relaxed);
         failure_index.store(0, std::memory_order_relaxed);
         failure_resource.store(StreamMetadataResource::BootstrapItems, std::memory_order_relaxed);
         failure_capacity_phase.store(StreamMetadataPhase::Bootstrap, std::memory_order_relaxed);
@@ -611,6 +726,7 @@ class FixedStreamNormalizer::Impl {
         failure_incoming.store(0, std::memory_order_relaxed);
         failure_would_use.store(0, std::memory_order_relaxed);
         last_sequence.store(0, std::memory_order_relaxed);
+        notify_status(detail::StreamStatusPublishPoint::Reset);
         client_id.store(next_client_id, std::memory_order_relaxed);
         generation.store(next_generation, std::memory_order_relaxed);
         phase.store(StreamNormalizationPhase::Bootstrap, std::memory_order_release);
@@ -630,21 +746,23 @@ class FixedStreamNormalizer::Impl {
 
     [[nodiscard]] StreamNormalizationStatus read_status() const noexcept {
         for (;;) {
-            const auto observed_generation = generation.load(std::memory_order_acquire);
-            const auto observed_phase = phase.load(std::memory_order_acquire);
-            const auto observed_barrier = ordering_barrier.load(std::memory_order_acquire);
+            const auto observed_revision = status_revision.load(std::memory_order_acquire);
+            if ((observed_revision & 1U) != 0U) {
+                continue;
+            }
             StreamNormalizationStatus result{
                 .client_id = client_id.load(std::memory_order_relaxed),
-                .generation = observed_generation,
+                .generation = generation.load(std::memory_order_relaxed),
                 .receive_sequence = last_sequence.load(std::memory_order_relaxed),
-                .phase = observed_phase,
-                .ordering_barrier_open = observed_barrier,
+                .phase = phase.load(std::memory_order_relaxed),
+                .ordering_barrier_open = ordering_barrier.load(std::memory_order_relaxed),
                 .failure = {
                     .kind = failure_kind.load(std::memory_order_relaxed),
                     .update_kind = failure_update_kind.load(std::memory_order_relaxed),
                     .malformed_reason = failure_reason.load(std::memory_order_relaxed),
                     .tdlib_type_id = failure_type_id.load(std::memory_order_relaxed),
                     .tdlib_error_code = failure_error_code.load(std::memory_order_relaxed),
+                    .retry_after = failure_retry_after.load(std::memory_order_relaxed),
                     .current_state_index = failure_index.load(std::memory_order_relaxed),
                     .capacity = {.resource = failure_resource.load(std::memory_order_relaxed),
                                  .phase = failure_capacity_phase.load(std::memory_order_relaxed),
@@ -652,9 +770,7 @@ class FixedStreamNormalizer::Impl {
                                  .used = failure_used.load(std::memory_order_relaxed),
                                  .incoming = failure_incoming.load(std::memory_order_relaxed),
                                  .would_use = failure_would_use.load(std::memory_order_relaxed)}}};
-            if (observed_generation == generation.load(std::memory_order_acquire) &&
-                observed_phase == phase.load(std::memory_order_acquire) &&
-                observed_barrier == ordering_barrier.load(std::memory_order_acquire)) {
+            if (observed_revision == status_revision.load(std::memory_order_acquire)) {
                 return result;
             }
         }
@@ -667,6 +783,7 @@ class FixedStreamNormalizer::Impl {
         clear_candidates();
         ordering_barrier.store(false, std::memory_order_release);
         failure_kind.store(kind, std::memory_order_relaxed);
+        notify_status(detail::StreamStatusPublishPoint::FailurePayload);
         phase.store(StreamNormalizationPhase::Failed, std::memory_order_release);
     }
 
@@ -969,6 +1086,7 @@ class FixedStreamNormalizer::Impl {
             return false;
         }
         last_sequence.store(value, std::memory_order_relaxed);
+        notify_status(detail::StreamStatusPublishPoint::Sequence);
         return true;
     }
 
@@ -1019,6 +1137,7 @@ class FixedStreamNormalizer::Impl {
     std::unique_ptr<Candidate[]> candidates;
     std::unique_ptr<char[]> order_arena;
     std::unique_ptr<char[]> scratch;
+    detail::StreamStatusPublishProbe status_probe;
     std::size_t chat_count = 0;
     std::size_t entity_count = 0;
     std::uint32_t metadata_used = 0;
@@ -1034,6 +1153,7 @@ class FixedStreamNormalizer::Impl {
     std::uint32_t order_head = kNoHandle;
     std::uint32_t order_tail = kNoHandle;
 
+    std::atomic<std::uint64_t> status_revision{0};
     std::atomic<std::int32_t> client_id{0};
     std::atomic<std::uint64_t> generation{0};
     std::atomic<std::uint64_t> last_sequence{0};
@@ -1046,6 +1166,7 @@ class FixedStreamNormalizer::Impl {
         core::TdMalformedUpdateReason::MissingObject};
     std::atomic<std::int32_t> failure_type_id{0};
     std::atomic<std::int32_t> failure_error_code{0};
+    std::atomic<std::int32_t> failure_retry_after{0};
     std::atomic<std::uint32_t> failure_index{0};
     std::atomic<StreamMetadataResource> failure_resource{StreamMetadataResource::BootstrapItems};
     std::atomic<StreamMetadataPhase> failure_capacity_phase{StreamMetadataPhase::Bootstrap};
@@ -1053,6 +1174,28 @@ class FixedStreamNormalizer::Impl {
     std::atomic<std::uint64_t> failure_used{0};
     std::atomic<std::uint64_t> failure_incoming{0};
     std::atomic<std::uint64_t> failure_would_use{0};
+
+    std::uint64_t borrow_epoch = 0;
+    bool borrow_active = false;
+
+    std::uint64_t begin_borrow() noexcept {
+        ++borrow_epoch;
+        if (borrow_epoch == 0) {
+            ++borrow_epoch;
+        }
+        borrow_active = true;
+        return borrow_epoch;
+    }
+
+    void end_borrow(std::uint64_t token) noexcept {
+        if (borrow_active && token == borrow_epoch) {
+            borrow_active = false;
+        }
+    }
+
+    [[nodiscard]] bool valid_borrow(std::uint64_t token) const noexcept {
+        return borrow_active && token != 0 && token == borrow_epoch;
+    }
 
     void clear_candidates() noexcept;
     bool apply_value(const core::TdValue& value, bool emit, std::uint64_t sequence_value,
@@ -1227,6 +1370,7 @@ bool FixedStreamNormalizer::Impl::append_rendered(std::uint64_t sequence_value,
     order_charged += incoming;
     ++candidate_count;
     ordering_barrier.store(true, std::memory_order_release);
+    notify_status(detail::StreamStatusPublishPoint::Barrier);
     return true;
 }
 
@@ -1391,6 +1535,7 @@ bool FixedStreamNormalizer::Impl::append_frozen(std::uint64_t sequence_value,
     order_charged += kStreamMetadataItemBytes;
     ++candidate_count;
     ordering_barrier.store(true, std::memory_order_release);
+    notify_status(detail::StreamStatusPublishPoint::Barrier);
     return true;
 }
 
@@ -1449,11 +1594,16 @@ void FixedStreamNormalizer::Impl::drain() noexcept {
             break;
         }
         if (sink != nullptr) {
-            const StreamItemView item(
-                {order_arena.get() + candidate.block.offset, candidate.block.size}, {},
-                candidate.sequence);
-            const StreamMetadataView metadata(this);
+            const auto borrow_token = begin_borrow();
+            const auto first_size = static_cast<std::size_t>(candidate.block.size) / 2U;
+            const StreamItemView item({order_arena.get() + candidate.block.offset, first_size},
+                                      {order_arena.get() + candidate.block.offset + first_size,
+                                       static_cast<std::size_t>(candidate.block.size) - first_size},
+                                      candidate.sequence);
+            const StreamMetadataView metadata(this, borrow_token);
             sink->on_item(item, metadata);
+            std::memset(order_arena.get() + candidate.block.offset, kBorrowPoison,
+                        candidate.block.size);
         }
         order_charged -= candidate.charge;
         unlink_order(static_cast<std::uint32_t>(candidate_head));
@@ -1468,6 +1618,7 @@ void FixedStreamNormalizer::Impl::drain() noexcept {
         order_tail = kNoHandle;
         order_used = 0;
         ordering_barrier.store(false, std::memory_order_release);
+        notify_status(detail::StreamStatusPublishPoint::Barrier);
     }
 }
 
@@ -2023,6 +2174,8 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
     }
     if (const auto* error = value.get_if<core::TdError>()) {
         failure_error_code.store(error->code, std::memory_order_relaxed);
+        failure_retry_after.store(error->code == 429 ? stream_retry_after(error->message) : 0,
+                                  std::memory_order_relaxed);
         failure_index.store(state_index, std::memory_order_relaxed);
         fail(error->code == 429 ? StreamFailureKind::RateLimited : StreamFailureKind::TdlibError);
         return false;
@@ -2498,6 +2651,8 @@ bool FixedStreamNormalizer::Impl::buffer_value(const core::TdValue& value,
     }
     if (const auto* error = value.get_if<core::TdError>()) {
         failure_error_code.store(error->code, std::memory_order_relaxed);
+        failure_retry_after.store(error->code == 429 ? stream_retry_after(error->message) : 0,
+                                  std::memory_order_relaxed);
         fail(error->code == 429 ? StreamFailureKind::RateLimited : StreamFailureKind::TdlibError);
         return false;
     }
@@ -2855,7 +3010,8 @@ bool is_current_state_update(const core::TdValue& value) noexcept {
            value.get_if<core::TdUpdateChatUnreadPollVoteCount>() != nullptr ||
            value.get_if<core::TdUpdateChatIsMarkedAsUnread>() != nullptr ||
            value.get_if<core::TdMalformedSupportedUpdate>() != nullptr ||
-           value.get_if<core::TdDirectConversionError>() != nullptr;
+           value.get_if<core::TdDirectConversionError>() != nullptr ||
+           value.get_if<core::TdError>() != nullptr;
 }
 
 } // namespace
@@ -2901,6 +3057,8 @@ void FixedStreamNormalizer::Impl::current_state(std::int32_t expected_client,
     }
     if (const auto* error = value.get_if<core::TdError>()) {
         failure_error_code.store(error->code, std::memory_order_relaxed);
+        failure_retry_after.store(error->code == 429 ? stream_retry_after(error->message) : 0,
+                                  std::memory_order_relaxed);
         fail(error->code == 429 ? StreamFailureKind::RateLimited : StreamFailureKind::TdlibError);
         return;
     }
@@ -2944,50 +3102,61 @@ void FixedStreamNormalizer::Impl::current_state(std::int32_t expected_client,
     }
     const auto previous = last_sequence.load(std::memory_order_relaxed);
     last_sequence.store(std::max(previous, barrier), std::memory_order_relaxed);
+    notify_status(detail::StreamStatusPublishPoint::Sequence);
     bootstrap_count = 0;
     bootstrap_charged = 0;
     bootstrap_physical = 0;
     phase.store(StreamNormalizationPhase::Ready, std::memory_order_release);
 }
 
-FixedStreamNormalizer::FixedStreamNormalizer(StreamReceiveSink* sink)
-    : impl_(std::make_unique<Impl>(sink)) {}
+FixedStreamNormalizer::FixedStreamNormalizer(StreamReceiveSink* sink,
+                                             detail::StreamStatusPublishProbe status_probe)
+    : impl_(std::make_unique<Impl>(sink, status_probe)) {}
 
 FixedStreamNormalizer::~FixedStreamNormalizer() = default;
 
 bool FixedStreamNormalizer::begin(std::int32_t client_id, std::uint64_t generation) noexcept {
-    return impl_->begin(client_id, generation);
+    return impl_->publish_status([&] { return impl_->begin(client_id, generation); });
 }
 
 void FixedStreamNormalizer::end(std::int32_t client_id, std::uint64_t generation) noexcept {
-    impl_->end(client_id, generation);
+    impl_->publish_status([&] { impl_->end(client_id, generation); });
 }
 
 void FixedStreamNormalizer::on_update(std::int32_t client_id, std::uint64_t generation,
                                       const core::TdValue& update) noexcept {
-    impl_->update(client_id, generation, update);
+    impl_->publish_status([&] { impl_->update(client_id, generation, update); });
 }
 
 void FixedStreamNormalizer::on_current_state(std::int32_t client_id, std::uint64_t generation,
                                              const core::TdValue& state) noexcept {
-    impl_->current_state(client_id, generation, state);
+    impl_->publish_status([&] { impl_->current_state(client_id, generation, state); });
 }
 
 void FixedStreamNormalizer::on_current_state_failure(std::int32_t client_id,
                                                      std::uint64_t generation) noexcept {
-    if (impl_->matches(client_id, generation) &&
-        impl_->phase.load(std::memory_order_acquire) == StreamNormalizationPhase::Bootstrap) {
-        impl_->fail(StreamFailureKind::DispatchFailure);
-    }
+    impl_->publish_status([&] {
+        if (impl_->matches(client_id, generation) &&
+            impl_->phase.load(std::memory_order_acquire) == StreamNormalizationPhase::Bootstrap) {
+            impl_->fail(StreamFailureKind::DispatchFailure);
+        }
+    });
 }
 
 StreamNormalizationStatus FixedStreamNormalizer::status() const noexcept {
     return impl_->read_status();
 }
 
+StreamMetadataView::~StreamMetadataView() noexcept {
+    auto* owner = static_cast<FixedStreamNormalizer::Impl*>(owner_);
+    if (owner != nullptr) {
+        owner->end_borrow(token_);
+    }
+}
+
 bool StreamMetadataCursor::next(StreamMetadataItemView& item) noexcept {
     const auto* owner = static_cast<const FixedStreamNormalizer::Impl*>(owner_);
-    if (owner == nullptr) {
+    if (owner == nullptr || !owner->valid_borrow(token_)) {
         return false;
     }
     while (position_ < kStreamMetadataChats) {
@@ -3032,7 +3201,7 @@ bool StreamMetadataCursor::next(StreamMetadataItemView& item) noexcept {
 
 bool StreamMetadataCursor::username(std::size_t index, std::string_view& value) const noexcept {
     const auto* owner = static_cast<const FixedStreamNormalizer::Impl*>(owner_);
-    if (owner == nullptr || current_ >= kStreamMetadataChats) {
+    if (owner == nullptr || !owner->valid_borrow(token_) || current_ >= kStreamMetadataChats) {
         return false;
     }
     const auto& chat = owner->chats[current_];

@@ -10,6 +10,7 @@
       "cacheVariables": {
         "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
         "TGCLI_SYSTEM_TDLIB": "ON",
+        "TGCLI_TDLIB_SOURCE": "$penv{TDLIB_SRC}",
         "TGCLI_WERROR": "ON",
         "CMAKE_PREFIX_PATH": "$penv{TGCLI_TDLIB_PREFIX}"
       }

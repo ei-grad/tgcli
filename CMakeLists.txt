@@ -13,6 +13,8 @@ option(TGCLI_SYSTEM_TDLIB
     OFF)
 option(TGCLI_BUILD_TESTS "Build tests" ON)
 option(TGCLI_WERROR "Treat compiler warnings as errors" OFF)
+set(TGCLI_TDLIB_SOURCE "" CACHE PATH
+    "Authenticated checkout of the pinned TDLib source used by source-contract tests")
 
 find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
 
@@ -112,6 +114,8 @@ else()
         GIT_REPOSITORY https://github.com/tdlib/td
         GIT_TAG ${TGCLI_TDLIB_REV})
     FetchContent_MakeAvailable(td)
+    set(TGCLI_TDLIB_SOURCE "${td_SOURCE_DIR}" CACHE PATH
+        "Authenticated checkout of the pinned TDLib source used by source-contract tests" FORCE)
     tgcli_assert_resolved_git_revision(tdlib "${td_SOURCE_DIR}" ${TGCLI_TDLIB_REV})
     # The installed-prefix path imports tdlib headers as SYSTEM; give the
     # in-tree build the same treatment so tdlib's headers are exempt from
@@ -125,6 +129,11 @@ else()
             endif()
         endif()
     endforeach()
+endif()
+
+if(TGCLI_BUILD_TESTS AND NOT TGCLI_TDLIB_SOURCE)
+    message(FATAL_ERROR
+        "TGCLI_TDLIB_SOURCE is required when tests are enabled so source-contract tests inspect the pinned checkout")
 endif()
 
 set(tgcli_version_header "${CMAKE_CURRENT_BINARY_DIR}/include/tgcli/version.hpp")

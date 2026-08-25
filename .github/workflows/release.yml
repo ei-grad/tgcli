@@ -587,6 +587,7 @@ jobs:
           OPENSSL_PREFIX: ${{ steps.openssl.outputs.prefix }}
           TGCLI_TDLIB_PREFIX: ${{ steps.tdlib.outputs.prefix }}
         run: |
+          export TDLIB_SRC="${XDG_CACHE_HOME:-$HOME/.cache}/tgcli-dev/td"
           cmake --preset release \
             -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
             -DOPENSSL_USE_STATIC_LIBS=TRUE

@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -193,4 +195,75 @@ TEST_CASE("stream service publishes immutable failure before concurrent observat
     stop.store(true, std::memory_order_release);
     reader.join();
     CHECK_FALSE(inconsistent.load(std::memory_order_acquire));
+}
+
+TEST_CASE("stream status readers observe coherent snapshots during live publication",
+          "[stream][service][status][concurrency][fake-boundary]") {
+    daemon::StreamService service;
+    auto observer = service.observer_factory()(1001, 1);
+    REQUIRE(observer);
+    core::TdCurrentState base;
+    base.updates.push_back(core::TdValue::from(
+        core::TdUpdateUser{.user = {.id = 42,
+                                    .first_name = "Ada",
+                                    .last_name = "Lovelace",
+                                    .usernames = {"ada"},
+                                    .phone_number = {},
+                                    .is_bot = false,
+                                    .is_premium = false,
+                                    .presence = core::TdUserPresence::Online}}));
+    base.updates.push_back(core::TdValue::from(core::TdUpdateNewChat{
+        .chat = {.id = -1001,
+                 .title = "Project",
+                 .kind = core::TdChatKind::Private,
+                 .related_id = 42,
+                 .tdlib_type_id = 0,
+                 .positions = {},
+                 .chat_lists = {{.kind = core::TdChatListKind::Main, .folder_id = 0}},
+                 .is_marked_unread = false,
+                 .unread_count = 0,
+                 .unread_mention_count = 0,
+                 .unread_reaction_count = 0,
+                 .unread_poll_vote_count = 0,
+                 .last_message = std::nullopt,
+                 .notification_settings = std::nullopt}}));
+    auto state = core::TdValue::from(std::move(base));
+    state.set_receive_event_metadata(1, core::TdEventClock::time_point{});
+    observer->on_current_state(state);
+    REQUIRE(service.status().ready_for_admission());
+
+    std::atomic<bool> stop{false};
+    std::atomic<bool> invalid{false};
+    std::vector<std::thread> readers;
+    readers.reserve(2);
+    for (int index = 0; index < 2; ++index) {
+        readers.emplace_back([&] {
+            std::uint64_t previous = 0;
+            while (!stop.load(std::memory_order_acquire)) {
+                const auto status = service.status();
+                if (status.client_id != 1001 || status.generation != 1 ||
+                    status.phase != daemon::StreamNormalizationPhase::Ready ||
+                    status.failure.kind != daemon::StreamFailureKind::None ||
+                    status.ordering_barrier_open || status.receive_sequence < previous) {
+                    invalid.store(true, std::memory_order_release);
+                    return;
+                }
+                previous = status.receive_sequence;
+            }
+        });
+    }
+    for (std::uint64_t sequence = 2; sequence <= 2'000; ++sequence) {
+        auto update = core::TdValue::from(
+            core::TdUpdateChatTitle{.chat_id = -1001, .title = sequence % 2 == 0 ? "even" : "odd"});
+        update.set_receive_event_metadata(sequence, core::TdEventClock::time_point{});
+        observer->on_update(update);
+    }
+    stop.store(true, std::memory_order_release);
+    for (auto& reader : readers) {
+        reader.join();
+    }
+    CHECK_FALSE(invalid.load(std::memory_order_acquire));
+    const auto final = service.status();
+    CHECK(final.receive_sequence == 2'000);
+    CHECK(final.ready_for_admission());
 }

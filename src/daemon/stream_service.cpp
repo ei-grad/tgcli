@@ -67,6 +67,7 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
     }
 
     void on_current_state_failure(const std::exception_ptr& failure) noexcept override {
+        const CallbackScope callback;
         static_cast<void>(failure);
         service_.normalizer_.on_current_state_failure(client_id_, generation_);
     }
@@ -77,7 +78,8 @@ class StreamService::GenerationObserver final : public core::TdGenerationObserve
     std::uint64_t generation_ = 0;
 };
 
-StreamService::StreamService(StreamReceiveSink* sink) : normalizer_(sink) {}
+StreamService::StreamService(StreamReceiveSink* sink, detail::StreamStatusPublishProbe status_probe)
+    : normalizer_(sink, status_probe) {}
 
 StreamService::~StreamService() = default;
 

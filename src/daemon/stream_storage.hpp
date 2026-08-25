@@ -40,6 +40,7 @@ struct StreamFailure {
     core::TdMalformedUpdateReason malformed_reason = core::TdMalformedUpdateReason::MissingObject;
     std::int32_t tdlib_type_id = 0;
     std::int32_t tdlib_error_code = 0;
+    std::int32_t retry_after = 0;
     std::uint32_t current_state_index = 0;
     StreamMetadataCapacityFailure capacity;
 
@@ -61,6 +62,12 @@ struct StreamNormalizationStatus {
 
 class StreamItemView {
   public:
+    ~StreamItemView() = default;
+    StreamItemView(const StreamItemView&) = delete;
+    StreamItemView& operator=(const StreamItemView&) = delete;
+    StreamItemView(StreamItemView&&) = delete;
+    StreamItemView& operator=(StreamItemView&&) = delete;
+
     [[nodiscard]] std::array<std::span<const char>, 2> spans() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] std::uint64_t receive_sequence() const noexcept;
@@ -88,29 +95,57 @@ struct StreamMetadataItemView {
 
 class StreamMetadataCursor {
   public:
+    ~StreamMetadataCursor() = default;
+    StreamMetadataCursor(const StreamMetadataCursor&) = delete;
+    StreamMetadataCursor& operator=(const StreamMetadataCursor&) = delete;
+    StreamMetadataCursor(StreamMetadataCursor&&) = delete;
+    StreamMetadataCursor& operator=(StreamMetadataCursor&&) = delete;
+
     [[nodiscard]] bool next(StreamMetadataItemView& item) noexcept;
     [[nodiscard]] bool username(std::size_t index, std::string_view& value) const noexcept;
 
   private:
-    StreamMetadataCursor(const void* owner, std::size_t position) noexcept;
+    StreamMetadataCursor(const void* owner, std::size_t position, std::uint64_t token) noexcept;
 
     const void* owner_ = nullptr;
     std::size_t position_ = 0;
     std::size_t current_ = 0;
+    std::uint64_t token_ = 0;
 
     friend class StreamMetadataView;
 };
 
 class StreamMetadataView {
   public:
-    explicit StreamMetadataView(const void* owner) noexcept;
+    ~StreamMetadataView() noexcept;
+    StreamMetadataView(const StreamMetadataView&) = delete;
+    StreamMetadataView& operator=(const StreamMetadataView&) = delete;
+    StreamMetadataView(StreamMetadataView&&) = delete;
+    StreamMetadataView& operator=(StreamMetadataView&&) = delete;
+
     [[nodiscard]] StreamMetadataCursor cursor() const noexcept;
 
   private:
-    const void* owner_ = nullptr;
+    StreamMetadataView(void* owner, std::uint64_t token) noexcept;
+
+    void* owner_ = nullptr;
+    std::uint64_t token_ = 0;
 
     friend class FixedStreamNormalizer;
 };
+
+namespace detail {
+
+enum class StreamStatusPublishPoint { FailurePayload, Barrier, Sequence, Reset };
+using StreamStatusPublishHook = void (*)(void*, StreamStatusPublishPoint) noexcept;
+
+struct StreamStatusPublishProbe {
+    void* context = nullptr;
+    StreamStatusPublishHook hook = nullptr;
+    std::uint64_t initial_revision = 0;
+};
+
+} // namespace detail
 
 class StreamReceiveSink {
   public:
@@ -129,7 +164,8 @@ class FixedStreamNormalizer {
   public:
     class Impl;
 
-    explicit FixedStreamNormalizer(StreamReceiveSink* sink = nullptr);
+    explicit FixedStreamNormalizer(StreamReceiveSink* sink = nullptr,
+                                   detail::StreamStatusPublishProbe status_probe = {});
     ~FixedStreamNormalizer();
     FixedStreamNormalizer(const FixedStreamNormalizer&) = delete;
     FixedStreamNormalizer& operator=(const FixedStreamNormalizer&) = delete;

@@ -26,8 +26,10 @@ jobs:
         id: tdlib-cache
         uses: actions/cache@v4
         with:
-          path: ${{ steps.tdlib.outputs.prefix }}
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
+          path: |
+            ${{ steps.tdlib.outputs.prefix }}
+            ~/.cache/tgcli-dev/td
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux' && steps.tdlib-cache.outputs.cache-hit != 'true'
@@ -72,8 +74,10 @@ jobs:
         id: tdlib-cache
         uses: actions/cache@v4
         with:
-          path: ${{ steps.tdlib.outputs.prefix }}
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
+          path: |
+            ${{ steps.tdlib.outputs.prefix }}
+            ~/.cache/tgcli-dev/td
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -87,7 +91,10 @@ jobs:
         run: ./scripts/build-tdlib.sh "${{ steps.tdlib.outputs.prefix }}"
 
       - name: Configure
-        run: TGCLI_TDLIB_PREFIX="${{ steps.tdlib.outputs.prefix }}" cmake --preset ${{ matrix.preset }}
+        run: >-
+          TDLIB_SRC="$HOME/.cache/tgcli-dev/td"
+          TGCLI_TDLIB_PREFIX="${{ steps.tdlib.outputs.prefix }}"
+          cmake --preset ${{ matrix.preset }}
 
       - name: Build
         # setarch -R: gcc's TSan runtime rejects vm.mmap_rnd_bits > 28, and
@@ -124,8 +131,10 @@ jobs:
         id: tdlib-cache
         uses: actions/cache@v4
         with:
-          path: ${{ steps.tdlib.outputs.prefix }}
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
+          path: |
+            ${{ steps.tdlib.outputs.prefix }}
+            ~/.cache/tgcli-dev/td
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -143,7 +152,10 @@ jobs:
           ./scripts/build-tdlib.sh "${{ steps.tdlib.outputs.prefix }}"
 
       - name: Configure
-        run: TGCLI_TDLIB_PREFIX="${{ steps.tdlib.outputs.prefix }}" cmake --preset debug
+        run: >-
+          TDLIB_SRC="$HOME/.cache/tgcli-dev/td"
+          TGCLI_TDLIB_PREFIX="${{ steps.tdlib.outputs.prefix }}"
+          cmake --preset debug
 
       - name: Build
         run: cmake --build --preset debug
@@ -172,8 +184,10 @@ jobs:
         id: tdlib-cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v2
+          path: |
+            ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
+            ~/.cache/tgcli-dev/td
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
 
       - name: Build tdlib prefix
         if: steps.tdlib-cache.outputs.cache-hit != 'true'
@@ -181,7 +195,9 @@ jobs:
 
       - name: clang-tidy
         run: |
-          TGCLI_TDLIB_PREFIX="$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7" cmake --preset tidy
+          TDLIB_SRC="$HOME/.cache/tgcli-dev/td" \
+            TGCLI_TDLIB_PREFIX="$HOME/.cache/tgcli-dev/tdlib-a17f87c4cff7" \
+            cmake --preset tidy
           shopt -s globstar
           clang-tidy-18 -p build/tidy --warnings-as-errors='*' \
             src/**/*.cpp tests/*.cpp

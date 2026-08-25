@@ -13,7 +13,8 @@ namespace detail {
 
 class StreamService {
   public:
-    explicit StreamService(StreamReceiveSink* sink = nullptr);
+    explicit StreamService(StreamReceiveSink* sink = nullptr,
+                           detail::StreamStatusPublishProbe status_probe = {});
     ~StreamService();
     StreamService(const StreamService&) = delete;
     StreamService& operator=(const StreamService&) = delete;

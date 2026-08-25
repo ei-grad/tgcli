@@ -1,12 +1,18 @@
 #include "daemon/stream_model.hpp"
 #include "daemon/stream_storage.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
@@ -58,6 +64,54 @@ class FixedSink final : public daemon::StreamReceiveSink {
     bool overflow_ = false;
 };
 
+class LatestSink final : public daemon::StreamReceiveSink {
+  public:
+    void on_item(const daemon::StreamItemView& item,
+                 const daemon::StreamMetadataView& metadata) noexcept override {
+        static_cast<void>(metadata);
+        const auto spans = item.spans();
+        first_span_size_ = spans.at(0).size();
+        second_span_size_ = spans.at(1).size();
+        borrowed_ = spans.at(0).data();
+        borrowed_size_ = spans.at(0).size();
+        std::size_t copied = 0;
+        for (const auto bytes : spans) {
+            if (!bytes.empty()) {
+                std::memcpy(line_.data() + copied, bytes.data(), bytes.size());
+                copied += bytes.size();
+            }
+        }
+        size_ = copied;
+        ++count_;
+    }
+
+    [[nodiscard]] std::string_view line() const noexcept {
+        return {line_.data(), size_};
+    }
+    [[nodiscard]] std::size_t count() const noexcept {
+        return count_;
+    }
+    [[nodiscard]] bool used_two_spans() const noexcept {
+        return first_span_size_ != 0 && second_span_size_ != 0;
+    }
+    [[nodiscard]] bool borrowed_item_is_poisoned() const noexcept {
+        if (borrowed_ == nullptr || borrowed_size_ == 0) {
+            return false;
+        }
+        return std::all_of(borrowed_, borrowed_ + borrowed_size_,
+                           [](char byte) { return static_cast<unsigned char>(byte) == 0xA5U; });
+    }
+
+  private:
+    std::array<char, daemon::kStreamMetadataItemBytes> line_{};
+    const char* borrowed_ = nullptr;
+    std::size_t borrowed_size_ = 0;
+    std::size_t size_ = 0;
+    std::size_t count_ = 0;
+    std::size_t first_span_size_ = 0;
+    std::size_t second_span_size_ = 0;
+};
+
 template <typename Value> core::TdValue stamped(Value value, std::uint64_t sequence) {
     auto result = core::TdValue::from(std::move(value));
     result.set_receive_event_metadata(sequence, core::TdEventClock::time_point{});
@@ -104,6 +158,32 @@ core::TdMessageSummary message(std::int64_t chat_id = -1001) {
             .text = "experiment result"};
 }
 
+daemon::MessageContentKind oracle_content_kind(core::TdMessageContentKind kind) {
+    switch (kind) {
+    case core::TdMessageContentKind::Text:
+        return daemon::MessageContentKind::Text;
+    case core::TdMessageContentKind::Photo:
+        return daemon::MessageContentKind::Photo;
+    case core::TdMessageContentKind::Video:
+        return daemon::MessageContentKind::Video;
+    case core::TdMessageContentKind::Document:
+        return daemon::MessageContentKind::Document;
+    case core::TdMessageContentKind::Voice:
+        return daemon::MessageContentKind::Voice;
+    case core::TdMessageContentKind::Other:
+        return daemon::MessageContentKind::Other;
+    }
+    return daemon::MessageContentKind::Other;
+}
+
+void check_oracle(const LatestSink& sink, const daemon::StreamEvent& event) {
+    const auto expected = daemon::stream_event_line(event);
+    REQUIRE(expected);
+    REQUIRE_FALSE(sink.line().empty());
+    CHECK(sink.line().back() == '\n');
+    CHECK(nlohmann::json::parse(sink.line()) == nlohmann::json::parse(*expected));
+}
+
 void bootstrap(daemon::FixedStreamNormalizer& normalizer) {
     REQUIRE(normalizer.begin(7, 9));
     core::TdCurrentState state;
@@ -121,9 +201,44 @@ void bootstrap_empty(daemon::FixedStreamNormalizer& normalizer, std::uint64_t ba
     REQUIRE(normalizer.status().phase == daemon::StreamNormalizationPhase::Ready);
 }
 
+struct BlockingStatusProbe {
+    daemon::detail::StreamStatusPublishPoint target =
+        daemon::detail::StreamStatusPublishPoint::FailurePayload;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+
+    static void notify(void* context, daemon::detail::StreamStatusPublishPoint point) noexcept {
+        auto& probe = *static_cast<BlockingStatusProbe*>(context);
+        if (point != probe.target) {
+            return;
+        }
+        probe.entered.store(true, std::memory_order_release);
+        while (!probe.release.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+};
+
+void wait_entered(const BlockingStatusProbe& probe) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!probe.entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(probe.entered.load(std::memory_order_acquire));
+}
+
 } // namespace
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)
+
+static_assert(!std::is_constructible_v<daemon::StreamMetadataView, const void*>);
+static_assert(!std::is_copy_constructible_v<daemon::StreamMetadataView>);
+static_assert(!std::is_move_constructible_v<daemon::StreamMetadataView>);
+static_assert(!std::is_copy_constructible_v<daemon::StreamMetadataCursor>);
+static_assert(!std::is_move_constructible_v<daemon::StreamMetadataCursor>);
+static_assert(!std::is_copy_constructible_v<daemon::StreamItemView>);
+static_assert(!std::is_move_constructible_v<daemon::StreamItemView>);
 
 TEST_CASE("fixed stream writer escapes JSON and renders UTC without locale",
           "[stream][storage][writer]") {
@@ -162,6 +277,98 @@ TEST_CASE("fixed stream normalizer bootstraps and emits compact borrowed lines",
     CHECK_FALSE(sink.overflowed());
     CHECK(sink.line(0) == "{\"event\":\"chat_change\",\"change\":\"title\",\"chat_id\":-1001,"
                           "\"title\":\"New title\"}\n");
+}
+
+TEST_CASE("fixed stream borrowed items are split and poisoned after the sink returns",
+          "[stream][storage][borrowed]") {
+    LatestSink sink;
+    daemon::FixedStreamNormalizer normalizer(&sink);
+    bootstrap(normalizer);
+    auto update = stamped(
+        core::TdUpdateChatTitle{.chat_id = -1001, .title = "two-span \xF0\x9F\xA7\xAA"}, 11);
+    normalizer.on_update(7, 9, update);
+    REQUIRE(sink.count() == 1);
+    CHECK(sink.used_two_spans());
+    CHECK(sink.borrowed_item_is_poisoned());
+}
+
+TEST_CASE("fixed writer matches the heap oracle for content topic sender and scalar edges",
+          "[stream][storage][writer][differential]") {
+    LatestSink sink;
+    daemon::FixedStreamNormalizer normalizer(&sink);
+    bootstrap(normalizer);
+    constexpr std::array content_kinds{
+        core::TdMessageContentKind::Text,  core::TdMessageContentKind::Photo,
+        core::TdMessageContentKind::Video, core::TdMessageContentKind::Document,
+        core::TdMessageContentKind::Voice, core::TdMessageContentKind::Other};
+    constexpr std::array topic_kinds{core::TdTopicKind::Forum, core::TdTopicKind::Thread,
+                                     core::TdTopicKind::Direct, core::TdTopicKind::Saved};
+    std::uint64_t sequence = 11;
+    for (std::size_t index = 0; index < content_kinds.size(); ++index) {
+        auto value = message();
+        value.id = 9'007'199'254'740'991LL - static_cast<std::int64_t>(index);
+        value.date = 1'785'924'000;
+        if (index == 0) {
+            value.date = 1;
+        } else if (index + 1 == content_kinds.size()) {
+            value.date = std::numeric_limits<std::int32_t>::max();
+        }
+        value.content_kind = content_kinds.at(index);
+        value.text = index == 0 ? "control:\n\t\x01 UTF-8:\xF0\x9F\xA7\xAA"
+                                : "variant-" + std::to_string(index);
+        if (index == 0) {
+            value.topic = std::nullopt;
+        } else {
+            const auto topic_kind = topic_kinds.at((index - 1) % topic_kinds.size());
+            value.topic = core::TdTopic{.kind = topic_kind,
+                                        .id = topic_kind == core::TdTopicKind::Forum
+                                                  ? 2'147'483'647
+                                                  : 9'007'199'254'740'991LL,
+                                        .tdlib_type_id = 0};
+        }
+        if (index == 1) {
+            value.sender = {.kind = core::TdMessageSenderKind::Chat,
+                            .id = -9'007'199'254'740'991LL,
+                            .tdlib_type_id = 0};
+        }
+        const auto oracle = daemon::materialize_message_summary(value);
+        REQUIRE(oracle);
+        auto update = stamped(core::TdUpdateNewMessage{.message = std::move(value)}, sequence++);
+        normalizer.on_update(7, 9, update);
+        check_oracle(sink, daemon::MessageEvent{.message = *oracle});
+    }
+
+    for (const auto kind : content_kinds) {
+        const std::string text = "edit:\n\x01\xF0\x9F\xA7\xAA";
+        auto update = stamped(
+            core::TdUpdateMessageContent{
+                .chat_id = -1001,
+                .message_id = 9'007'199'254'740'991LL,
+                .content = {.kind = kind, .text = text, .tdlib_type_id = 0}},
+            sequence++);
+        normalizer.on_update(7, 9, update);
+        check_oracle(sink, daemon::EditContentEvent{
+                               .chat_id = -1001,
+                               .message_id = 9'007'199'254'740'991LL,
+                               .content = {.type = oracle_content_kind(kind), .text = text}});
+    }
+
+    for (const auto date : {std::int32_t{0}, std::numeric_limits<std::int32_t>::max()}) {
+        auto update = stamped(core::TdUpdateMessageEdited{.chat_id = -1001,
+                                                          .message_id = 123,
+                                                          .edit_date = date,
+                                                          .has_reply_markup = date != 0},
+                              sequence++);
+        normalizer.on_update(7, 9, update);
+        auto source = message();
+        source.date = date;
+        const auto rendered = daemon::materialize_message_summary(source);
+        REQUIRE(rendered);
+        check_oracle(sink, daemon::EditMetadataEvent{.chat_id = -1001,
+                                                     .message_id = 123,
+                                                     .edit_date = rendered->date,
+                                                     .has_reply_markup = date != 0});
+    }
 }
 
 TEST_CASE("fixed stream normalizer rejects forged chat-list overflow",
@@ -289,6 +496,184 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     CHECK(normalizer.status().phase == daemon::StreamNormalizationPhase::Ready);
 }
 
+TEST_CASE("fixed writer matches the heap oracle for reaction and deletion variants",
+          "[stream][storage][writer][differential]") {
+    LatestSink sink;
+    daemon::FixedStreamNormalizer normalizer(&sink);
+    bootstrap(normalizer);
+    std::uint64_t sequence = 11;
+
+    auto null_snapshot = stamped(core::TdUpdateMessageInteractionInfo{.chat_id = -1001,
+                                                                      .message_id = 123,
+                                                                      .reactions = std::nullopt},
+                                 sequence++);
+    normalizer.on_update(7, 9, null_snapshot);
+    check_oracle(sink, daemon::ReactionSnapshotEvent{
+                           .chat_id = -1001, .message_id = 123, .reactions = std::nullopt});
+
+    core::TdReactionSnapshot snapshot{
+        .items = {{.reaction = {.kind = core::TdReactionKind::Emoji,
+                                .emoji = "\xF0\x9F\xA7\xAA",
+                                .custom_emoji_id = 0,
+                                .tdlib_type_id = 0},
+                   .total_count = 0,
+                   .is_chosen = true,
+                   .used_sender = core::TdMessageSender{.kind = core::TdMessageSenderKind::User,
+                                                        .id = 9'007'199'254'740'991LL,
+                                                        .tdlib_type_id = 0},
+                   .recent_senders = {{.kind = core::TdMessageSenderKind::Chat,
+                                       .id = -9'007'199'254'740'991LL,
+                                       .tdlib_type_id = 0}}},
+                  {.reaction = {.kind = core::TdReactionKind::CustomEmoji,
+                                .emoji = {},
+                                .custom_emoji_id = 9'007'199'254'740'991LL,
+                                .tdlib_type_id = 0},
+                   .total_count = std::numeric_limits<std::int32_t>::max(),
+                   .is_chosen = false,
+                   .used_sender = std::nullopt,
+                   .recent_senders = {}},
+                  {.reaction = {.kind = core::TdReactionKind::Paid,
+                                .emoji = {},
+                                .custom_emoji_id = 0,
+                                .tdlib_type_id = 0},
+                   .total_count = 1,
+                   .is_chosen = false,
+                   .used_sender = std::nullopt,
+                   .recent_senders = {}}},
+        .are_tags = true,
+        .can_get_added_reactions = false};
+    auto full_snapshot = stamped(
+        core::TdUpdateMessageInteractionInfo{
+            .chat_id = -1001, .message_id = 123, .reactions = std::move(snapshot)},
+        sequence++);
+    normalizer.on_update(7, 9, full_snapshot);
+    daemon::ReactionSnapshot oracle_snapshot{
+        .items =
+            {{.reaction = {.kind = daemon::ReactionKind::Emoji,
+                           .emoji = "\xF0\x9F\xA7\xAA",
+                           .custom_emoji_id = 0},
+              .total_count = 0,
+              .is_chosen = true,
+              .used_sender = daemon::MessageSenderRef{.kind = daemon::MessageSenderKind::User,
+                                                      .id = 9'007'199'254'740'991LL},
+              .recent_senders = {{.kind = daemon::MessageSenderKind::Chat,
+                                  .id = -9'007'199'254'740'991LL}}},
+             {.reaction = {.kind = daemon::ReactionKind::CustomEmoji,
+                           .emoji = {},
+                           .custom_emoji_id = 9'007'199'254'740'991LL},
+              .total_count = std::numeric_limits<std::int32_t>::max(),
+              .is_chosen = false,
+              .used_sender = std::nullopt,
+              .recent_senders = {}},
+             {.reaction = {.kind = daemon::ReactionKind::Paid, .emoji = {}, .custom_emoji_id = 0},
+              .total_count = 1,
+              .is_chosen = false,
+              .used_sender = std::nullopt,
+              .recent_senders = {}}},
+        .are_tags = true,
+        .can_get_added_reactions = false};
+    check_oracle(sink, daemon::ReactionSnapshotEvent{
+                           .chat_id = -1001, .message_id = 123, .reactions = oracle_snapshot});
+
+    auto bot_delta = stamped(
+        core::TdUpdateMessageReaction{.chat_id = -1001,
+                                      .message_id = 123,
+                                      .actor = {.kind = core::TdMessageSenderKind::Chat,
+                                                .id = -9'007'199'254'740'991LL,
+                                                .tdlib_type_id = 0},
+                                      .date = std::numeric_limits<std::int32_t>::max(),
+                                      .old_reactions = {{.kind = core::TdReactionKind::Emoji,
+                                                         .emoji = "\xF0\x9F\x91\x8D",
+                                                         .custom_emoji_id = 0,
+                                                         .tdlib_type_id = 0},
+                                                        {.kind = core::TdReactionKind::Paid,
+                                                         .emoji = {},
+                                                         .custom_emoji_id = 0,
+                                                         .tdlib_type_id = 0}},
+                                      .new_reactions = {{.kind = core::TdReactionKind::CustomEmoji,
+                                                         .emoji = {},
+                                                         .custom_emoji_id = 9'007'199'254'740'991LL,
+                                                         .tdlib_type_id = 0}}},
+        sequence++);
+    normalizer.on_update(7, 9, bot_delta);
+    auto date_source = message();
+    date_source.date = std::numeric_limits<std::int32_t>::max();
+    const auto date_oracle = daemon::materialize_message_summary(date_source);
+    REQUIRE(date_oracle);
+    REQUIRE(date_oracle->date);
+    check_oracle(sink, daemon::BotReactionChangeEvent{
+                           .chat_id = -1001,
+                           .message_id = 123,
+                           .actor = {.kind = daemon::MessageSenderKind::Chat,
+                                     .id = -9'007'199'254'740'991LL},
+                           .date = *date_oracle->date,
+                           .old_reactions = {{.kind = daemon::ReactionKind::Emoji,
+                                              .emoji = "\xF0\x9F\x91\x8D",
+                                              .custom_emoji_id = 0},
+                                             {.kind = daemon::ReactionKind::Paid,
+                                              .emoji = {},
+                                              .custom_emoji_id = 0}},
+                           .new_reactions = {{.kind = daemon::ReactionKind::CustomEmoji,
+                                              .emoji = {},
+                                              .custom_emoji_id = 9'007'199'254'740'991LL}}});
+
+    auto anonymous = stamped(
+        core::TdUpdateMessageReactions{
+            .chat_id = -1001,
+            .message_id = 123,
+            .date = 1,
+            .reactions = {{.reaction = {.kind = core::TdReactionKind::Emoji,
+                                        .emoji = "\xF0\x9F\xA7\xAA",
+                                        .custom_emoji_id = 0,
+                                        .tdlib_type_id = 0},
+                           .total_count = 0},
+                          {.reaction = {.kind = core::TdReactionKind::CustomEmoji,
+                                        .emoji = {},
+                                        .custom_emoji_id = 42,
+                                        .tdlib_type_id = 0},
+                           .total_count = 2},
+                          {.reaction = {.kind = core::TdReactionKind::Paid,
+                                        .emoji = {},
+                                        .custom_emoji_id = 0,
+                                        .tdlib_type_id = 0},
+                           .total_count = std::numeric_limits<std::int32_t>::max()}}},
+        sequence++);
+    normalizer.on_update(7, 9, anonymous);
+    date_source.date = 1;
+    const auto first_date = daemon::materialize_message_summary(date_source);
+    REQUIRE(first_date);
+    REQUIRE(first_date->date);
+    check_oracle(
+        sink,
+        daemon::BotReactionSnapshotEvent{
+            .chat_id = -1001,
+            .message_id = 123,
+            .date = *first_date->date,
+            .reactions = {
+                {{.kind = daemon::ReactionKind::Emoji,
+                  .emoji = "\xF0\x9F\xA7\xAA",
+                  .custom_emoji_id = 0},
+                 0},
+                {{.kind = daemon::ReactionKind::CustomEmoji, .emoji = {}, .custom_emoji_id = 42},
+                 2},
+                {{.kind = daemon::ReactionKind::Paid, .emoji = {}, .custom_emoji_id = 0},
+                 std::numeric_limits<std::int32_t>::max()}}});
+
+    auto deletion = stamped(core::TdUpdateDeleteMessages{.client_generation = 9,
+                                                         .chat_id = -1001,
+                                                         .message_ids = {-9'007'199'254'740'991LL,
+                                                                         9'007'199'254'740'991LL},
+                                                         .is_permanent = true,
+                                                         .from_cache = true},
+                            sequence++);
+    normalizer.on_update(7, 9, deletion);
+    check_oracle(sink, daemon::DeleteBatchEvent{
+                           .chat_id = -1001,
+                           .message_ids = {-9'007'199'254'740'991LL, 9'007'199'254'740'991LL},
+                           .is_permanent = true,
+                           .from_cache = true});
+}
+
 TEST_CASE("fixed stream normalizer covers every chat delta source and same values",
           "[stream][storage][normalize]") {
     FixedSink sink;
@@ -365,6 +750,146 @@ TEST_CASE("fixed stream normalizer covers every chat delta source and same value
     normalizer.on_update(7, 9, marked);
     CHECK(nlohmann::json::parse(sink.line(10)).at("change") == "marked_unread");
     CHECK(sink.count() == 11);
+}
+
+TEST_CASE("fixed writer matches the heap oracle for every chat change and list variant",
+          "[stream][storage][writer][differential]") {
+    LatestSink sink;
+    daemon::FixedStreamNormalizer normalizer(&sink);
+    bootstrap(normalizer);
+    std::uint64_t sequence = 11;
+
+    auto newcomer = user(43);
+    newcomer.usernames = {"new", "second"};
+    auto entity = stamped(core::TdUpdateUser{.user = newcomer}, sequence++);
+    normalizer.on_update(7, 9, entity);
+    auto new_chat = chat(-2002, 43, core::TdChatKind::Private);
+    new_chat.title = "New\n\x01\xF0\x9F\xA7\xAA";
+    new_chat.chat_lists = {{.kind = core::TdChatListKind::Folder, .folder_id = 9},
+                           {.kind = core::TdChatListKind::Archive, .folder_id = 0},
+                           {.kind = core::TdChatListKind::Main, .folder_id = 0},
+                           {.kind = core::TdChatListKind::Folder, .folder_id = 2}};
+    new_chat.is_marked_unread = true;
+    new_chat.unread_count = 1;
+    new_chat.unread_mention_count = 2;
+    new_chat.unread_reaction_count = 3;
+    new_chat.unread_poll_vote_count = 4;
+    auto last = message(-2002);
+    last.topic = std::nullopt;
+    new_chat.last_message = last;
+    auto update_new = stamped(core::TdUpdateNewChat{.chat = std::move(new_chat)}, sequence++);
+    normalizer.on_update(7, 9, update_new);
+    const auto last_oracle = daemon::materialize_message_summary(last);
+    REQUIRE(last_oracle);
+    check_oracle(sink, daemon::ChatChangeEvent{daemon::NewChatChange{
+                           .chat = {.identity = {.id = -2002,
+                                                 .title = "New\n\x01\xF0\x9F\xA7\xAA",
+                                                 .type = "private",
+                                                 .is_bot = false,
+                                                 .usernames = {"new", "second"}},
+                                    .is_archived = true,
+                                    .folder_ids = {2, 9},
+                                    .is_marked_unread = true,
+                                    .unread_count = 1,
+                                    .unread_mention_count = 2,
+                                    .unread_reaction_count = 3,
+                                    .unread_poll_vote_count = 4,
+                                    .last_message = last_oracle}}});
+
+    newcomer.usernames = {"changed"};
+    auto identity = stamped(core::TdUpdateUser{.user = std::move(newcomer)}, sequence++);
+    normalizer.on_update(7, 9, identity);
+    check_oracle(sink, daemon::ChatChangeEvent{
+                           daemon::IdentityChatChange{.chat = {.id = -2002,
+                                                               .title = "New\n\x01\xF0\x9F\xA7\xAA",
+                                                               .type = "private",
+                                                               .is_bot = false,
+                                                               .usernames = {"changed"}}}});
+
+    const std::string title = "Title\n\t\x01\xF0\x9F\xA7\xAA";
+    auto title_update =
+        stamped(core::TdUpdateChatTitle{.chat_id = -1001, .title = title}, sequence++);
+    normalizer.on_update(7, 9, title_update);
+    check_oracle(
+        sink, daemon::ChatChangeEvent{daemon::TitleChatChange{.chat_id = -1001, .title = title}});
+
+    for (const bool present : {false, true}) {
+        auto last_message = present ? std::optional(message()) : std::nullopt;
+        const auto expected = last_message ? daemon::materialize_message_summary(*last_message)
+                                           : std::optional<daemon::MessageSummary>{};
+        auto update =
+            stamped(core::TdUpdateChatLastMessage{.chat_id = -1001, .last_message = last_message},
+                    sequence++);
+        normalizer.on_update(7, 9, update);
+        check_oracle(sink, daemon::ChatChangeEvent{daemon::LastMessageChatChange{
+                               .chat_id = -1001, .last_message = expected}});
+    }
+
+    struct ListCase {
+        core::TdChatList source;
+        daemon::ChatListRef oracle;
+    };
+    const std::array lists{
+        ListCase{{.kind = core::TdChatListKind::Main, .folder_id = 0},
+                 {.kind = daemon::ChatListKind::Main, .folder_id = 0}},
+        ListCase{{.kind = core::TdChatListKind::Archive, .folder_id = 0},
+                 {.kind = daemon::ChatListKind::Archive, .folder_id = 0}},
+        ListCase{{.kind = core::TdChatListKind::Folder, .folder_id = 2'147'483'647},
+                 {.kind = daemon::ChatListKind::Folder, .folder_id = 2'147'483'647}},
+    };
+    for (const auto& list : lists) {
+        auto added = stamped(core::TdUpdateChatAddedToList{.chat_id = -1001, .list = list.source},
+                             sequence++);
+        normalizer.on_update(7, 9, added);
+        check_oracle(sink, daemon::ChatChangeEvent{
+                               daemon::ListAddedChatChange{.chat_id = -1001, .list = list.oracle}});
+        auto removed = stamped(
+            core::TdUpdateChatRemovedFromList{.chat_id = -1001, .list = list.source}, sequence++);
+        normalizer.on_update(7, 9, removed);
+        check_oracle(sink, daemon::ChatChangeEvent{daemon::ListRemovedChatChange{
+                               .chat_id = -1001, .list = list.oracle}});
+    }
+
+    auto inbox = stamped(
+        core::TdUpdateChatReadInbox{.chat_id = -1001,
+                                    .last_read_inbox_message_id = 9'007'199'254'740'991LL,
+                                    .unread_count = std::numeric_limits<std::int32_t>::max()},
+        sequence++);
+    normalizer.on_update(7, 9, inbox);
+    check_oracle(sink, daemon::ChatChangeEvent{daemon::ReadInboxChatChange{
+                           .chat_id = -1001,
+                           .last_read_inbox_message_id = 9'007'199'254'740'991LL,
+                           .unread_count = std::numeric_limits<std::int32_t>::max()}});
+
+    auto mention = stamped(
+        core::TdUpdateChatUnreadMentionCount{
+            .chat_id = -1001, .unread_mention_count = std::numeric_limits<std::int32_t>::max()},
+        sequence++);
+    normalizer.on_update(7, 9, mention);
+    check_oracle(sink, daemon::ChatChangeEvent{daemon::UnreadMentionChatChange{
+                           .chat_id = -1001,
+                           .unread_mention_count = std::numeric_limits<std::int32_t>::max()}});
+    auto reaction = stamped(
+        core::TdUpdateChatUnreadReactionCount{
+            .chat_id = -1001, .unread_reaction_count = std::numeric_limits<std::int32_t>::max()},
+        sequence++);
+    normalizer.on_update(7, 9, reaction);
+    check_oracle(sink, daemon::ChatChangeEvent{daemon::UnreadReactionChatChange{
+                           .chat_id = -1001,
+                           .unread_reaction_count = std::numeric_limits<std::int32_t>::max()}});
+    auto poll = stamped(
+        core::TdUpdateChatUnreadPollVoteCount{
+            .chat_id = -1001, .unread_poll_vote_count = std::numeric_limits<std::int32_t>::max()},
+        sequence++);
+    normalizer.on_update(7, 9, poll);
+    check_oracle(sink, daemon::ChatChangeEvent{daemon::UnreadPollVoteChatChange{
+                           .chat_id = -1001,
+                           .unread_poll_vote_count = std::numeric_limits<std::int32_t>::max()}});
+    auto marked = stamped(
+        core::TdUpdateChatIsMarkedAsUnread{.chat_id = -1001, .is_marked_unread = true}, sequence++);
+    normalizer.on_update(7, 9, marked);
+    check_oracle(sink, daemon::ChatChangeEvent{daemon::MarkedUnreadChatChange{
+                           .chat_id = -1001, .is_marked_unread = true}});
 }
 
 TEST_CASE("incomplete new chat freezes bytes and preserves global FIFO",
@@ -701,13 +1226,31 @@ TEST_CASE("bootstrap retains exact first failures and rejects incomplete state",
         CHECK(status.failure.current_state_index == 1);
     }
     SECTION("rate limit remains distinct") {
-        daemon::FixedStreamNormalizer normalizer;
-        REQUIRE(normalizer.begin(1, 1));
-        auto response = stamped(core::TdError{.code = 429, .message = "retry"}, 1);
-        normalizer.on_current_state(1, 1, response);
-        const auto status = normalizer.status();
-        CHECK(status.failure.kind == daemon::StreamFailureKind::RateLimited);
-        CHECK(status.failure.tdlib_error_code == 429);
+        struct RateLimitCase {
+            std::string_view message;
+            std::int32_t retry_after;
+        };
+        static constexpr std::array cases{
+            RateLimitCase{"FLOOD_WAIT_17", 17},
+            RateLimitCase{"retry", 0},
+            RateLimitCase{"FLOOD_WAIT_0", 0},
+            RateLimitCase{"retry after 2147483647 seconds",
+                          std::numeric_limits<std::int32_t>::max()},
+            RateLimitCase{"retry after 21474836499999999999 seconds",
+                          std::numeric_limits<std::int32_t>::max()},
+        };
+        for (const auto& entry : cases) {
+            CAPTURE(entry.message);
+            daemon::FixedStreamNormalizer normalizer;
+            REQUIRE(normalizer.begin(1, 1));
+            auto response =
+                stamped(core::TdError{.code = 429, .message = std::string(entry.message)}, 1);
+            normalizer.on_current_state(1, 1, response);
+            const auto status = normalizer.status();
+            CHECK(status.failure.kind == daemon::StreamFailureKind::RateLimited);
+            CHECK(status.failure.tdlib_error_code == 429);
+            CHECK(status.failure.retry_after == entry.retry_after);
+        }
     }
     SECTION("direct conversion remains distinct") {
         daemon::FixedStreamNormalizer normalizer;
@@ -776,6 +1319,91 @@ TEST_CASE("persistent and ordered arenas compact before admitting reusable capac
     }
 }
 
+TEST_CASE("candidate descriptor ring wraps and reuses a nonzero head",
+          "[stream][storage][ordering][compaction]") {
+    daemon::FixedStreamNormalizer normalizer;
+    bootstrap(normalizer);
+    std::uint64_t sequence = 11;
+    auto first = stamped(
+        core::TdUpdateNewChat{.chat = chat(-2000, 55, core::TdChatKind::Supergroup)}, sequence++);
+    normalizer.on_update(7, 9, first);
+    auto before_second =
+        stamped(core::TdUpdateChatTitle{.chat_id = -1001, .title = "before"}, sequence++);
+    normalizer.on_update(7, 9, before_second);
+    auto second = stamped(
+        core::TdUpdateNewChat{.chat = chat(-3000, 88, core::TdChatKind::Supergroup)}, sequence++);
+    normalizer.on_update(7, 9, second);
+    auto after_second =
+        stamped(core::TdUpdateChatTitle{.chat_id = -1001, .title = "after"}, sequence++);
+    normalizer.on_update(7, 9, after_second);
+    auto first_entity = stamped(core::TdUpdateSupergroup{.supergroup = {.id = 55,
+                                                                        .usernames = {"first"},
+                                                                        .is_channel = false,
+                                                                        .is_forum = false}},
+                                sequence++);
+    normalizer.on_update(7, 9, first_entity);
+    REQUIRE(normalizer.status().ordering_barrier_open);
+
+    for (std::size_t index = 0; index < daemon::kStreamMetadataOrderItems - 4; ++index) {
+        auto title =
+            stamped(core::TdUpdateChatTitle{.chat_id = -1001, .title = "wrapped"}, sequence++);
+        normalizer.on_update(7, 9, title);
+        REQUIRE(normalizer.status().phase == daemon::StreamNormalizationPhase::Ready);
+    }
+    auto second_entity = stamped(core::TdUpdateSupergroup{.supergroup = {.id = 88,
+                                                                         .usernames = {"second"},
+                                                                         .is_channel = false,
+                                                                         .is_forum = false}},
+                                 sequence++);
+    normalizer.on_update(7, 9, second_entity);
+    const auto status = normalizer.status();
+    CHECK(status.phase == daemon::StreamNormalizationPhase::Ready);
+    CHECK_FALSE(status.ordering_barrier_open);
+    CHECK(status.ready_for_admission());
+    CHECK(status.receive_sequence == sequence - 1);
+}
+
+TEST_CASE("stream rate-limit details survive every normalization phase",
+          "[stream][storage][rate-limit]") {
+    SECTION("buffered bootstrap update") {
+        daemon::FixedStreamNormalizer normalizer;
+        REQUIRE(normalizer.begin(1, 1));
+        auto error = stamped(core::TdError{.code = 429, .message = "FLOOD_WAIT_17"}, 1);
+        normalizer.on_update(1, 1, error);
+        const auto status = normalizer.status();
+        CHECK(status.phase == daemon::StreamNormalizationPhase::Failed);
+        CHECK(status.failure.kind == daemon::StreamFailureKind::RateLimited);
+        CHECK(status.failure.tdlib_error_code == 429);
+        CHECK(status.failure.retry_after == 17);
+    }
+    SECTION("current-state entry") {
+        daemon::FixedStreamNormalizer normalizer;
+        REQUIRE(normalizer.begin(1, 1));
+        core::TdCurrentState state;
+        state.updates.push_back(
+            core::TdValue::from(core::TdError{.code = 429, .message = "retry after 23 seconds"}));
+        auto response = stamped(std::move(state), 1);
+        normalizer.on_current_state(1, 1, response);
+        const auto status = normalizer.status();
+        CHECK(status.phase == daemon::StreamNormalizationPhase::Failed);
+        CHECK(status.failure.kind == daemon::StreamFailureKind::RateLimited);
+        CHECK(status.failure.tdlib_error_code == 429);
+        CHECK(status.failure.retry_after == 23);
+        CHECK(status.failure.current_state_index == 0);
+    }
+    SECTION("active update") {
+        daemon::FixedStreamNormalizer normalizer;
+        bootstrap_empty(normalizer);
+        auto error = stamped(core::TdError{.code = 429, .message = "FLOOD_WAIT_29"}, 2);
+        normalizer.on_update(1, 1, error);
+        const auto status = normalizer.status();
+        CHECK(status.phase == daemon::StreamNormalizationPhase::Failed);
+        CHECK(status.failure.kind == daemon::StreamFailureKind::RateLimited);
+        CHECK(status.failure.tdlib_error_code == 429);
+        CHECK(status.failure.retry_after == 29);
+    }
+}
+
 TEST_CASE("reverse entity completion retains FIFO and admission readiness",
           "[stream][storage][ordering]") {
     FixedSink sink;
@@ -811,4 +1439,127 @@ TEST_CASE("reverse entity completion retains FIFO and admission readiness",
     CHECK(nlohmann::json::parse(sink.line(2)).at("change") == "identity");
     CHECK(nlohmann::json::parse(sink.line(3)).at("change") == "identity");
     CHECK(normalizer.status().ready_for_admission());
+}
+
+TEST_CASE("stream status publication never exposes mixed snapshots",
+          "[stream][storage][status][concurrency]") {
+    BlockingStatusProbe probe;
+    daemon::FixedStreamNormalizer normalizer(
+        nullptr, {.context = &probe, .hook = &BlockingStatusProbe::notify});
+    bootstrap_empty(normalizer);
+
+    probe.target = daemon::detail::StreamStatusPublishPoint::FailurePayload;
+    auto malformed = stamped(
+        core::TdMalformedSupportedUpdate{.kind = core::TdSupportedUpdateKind::MessageContent,
+                                         .reason = core::TdMalformedUpdateReason::InvalidContent,
+                                         .tdlib_type_id = 91},
+        2);
+    std::thread writer([&] { normalizer.on_update(1, 1, malformed); });
+    wait_entered(probe);
+    std::atomic<bool> reader_started{false};
+    auto reader = std::async(std::launch::async, [&] {
+        reader_started.store(true, std::memory_order_release);
+        return normalizer.status();
+    });
+    while (!reader_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    CHECK(reader.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout);
+    probe.release.store(true, std::memory_order_release);
+    writer.join();
+    const auto failure = reader.get();
+    CHECK(failure.phase == daemon::StreamNormalizationPhase::Failed);
+    CHECK(failure.failure.kind == daemon::StreamFailureKind::MalformedSupported);
+    CHECK(failure.failure.update_kind == core::TdSupportedUpdateKind::MessageContent);
+    CHECK(failure.failure.malformed_reason == core::TdMalformedUpdateReason::InvalidContent);
+    CHECK(failure.failure.tdlib_type_id == 91);
+
+    BlockingStatusProbe reset_probe;
+    reset_probe.target = daemon::detail::StreamStatusPublishPoint::Reset;
+    daemon::FixedStreamNormalizer replacement(
+        nullptr, {.context = &reset_probe, .hook = &BlockingStatusProbe::notify});
+    bool replacement_began = false;
+    std::thread replacer([&] { replacement_began = replacement.begin(17, 22); });
+    wait_entered(reset_probe);
+    std::atomic<bool> reset_reader_started{false};
+    auto reset_reader = std::async(std::launch::async, [&] {
+        reset_reader_started.store(true, std::memory_order_release);
+        return replacement.status();
+    });
+    while (!reset_reader_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    CHECK(reset_reader.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout);
+    reset_probe.release.store(true, std::memory_order_release);
+    replacer.join();
+    REQUIRE(replacement_began);
+    const auto reset = reset_reader.get();
+    CHECK(reset.client_id == 17);
+    CHECK(reset.generation == 22);
+    CHECK(reset.phase == daemon::StreamNormalizationPhase::Bootstrap);
+    CHECK(reset.receive_sequence == 0);
+    CHECK_FALSE(reset.ordering_barrier_open);
+    CHECK(reset.failure.kind == daemon::StreamFailureKind::None);
+}
+
+TEST_CASE("stream status publication covers sequence barrier and revision rollover",
+          "[stream][storage][status]") {
+    BlockingStatusProbe sequence_probe;
+    daemon::FixedStreamNormalizer sequenced(
+        nullptr, {.context = &sequence_probe, .hook = &BlockingStatusProbe::notify});
+    bootstrap_empty(sequenced);
+    sequence_probe.target = daemon::detail::StreamStatusPublishPoint::Sequence;
+    auto title = stamped(core::TdUpdateChatTitle{.chat_id = -1001, .title = "x"}, 2);
+    std::thread update([&] { sequenced.on_update(1, 1, title); });
+    wait_entered(sequence_probe);
+    std::atomic<bool> reader_started{false};
+    auto reader = std::async(std::launch::async, [&] {
+        reader_started.store(true, std::memory_order_release);
+        return sequenced.status();
+    });
+    while (!reader_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    CHECK(reader.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout);
+    sequence_probe.release.store(true, std::memory_order_release);
+    update.join();
+    const auto advanced = reader.get();
+    CHECK(advanced.client_id == 1);
+    CHECK(advanced.generation == 1);
+    CHECK(advanced.receive_sequence == 2);
+    CHECK(advanced.phase == daemon::StreamNormalizationPhase::Failed);
+    CHECK(advanced.failure.kind == daemon::StreamFailureKind::MalformedSupported);
+
+    BlockingStatusProbe barrier_probe;
+    daemon::FixedStreamNormalizer barrier(
+        nullptr, {.context = &barrier_probe, .hook = &BlockingStatusProbe::notify});
+    bootstrap(barrier);
+    barrier_probe.target = daemon::detail::StreamStatusPublishPoint::Barrier;
+    auto barrier_title = stamped(core::TdUpdateChatTitle{.chat_id = -1001, .title = "barrier"}, 11);
+    std::thread barrier_writer([&] { barrier.on_update(7, 9, barrier_title); });
+    wait_entered(barrier_probe);
+    std::atomic<bool> barrier_reader_started{false};
+    auto barrier_reader = std::async(std::launch::async, [&] {
+        barrier_reader_started.store(true, std::memory_order_release);
+        return barrier.status();
+    });
+    while (!barrier_reader_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    CHECK(barrier_reader.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout);
+    barrier_probe.release.store(true, std::memory_order_release);
+    barrier_writer.join();
+    const auto drained = barrier_reader.get();
+    CHECK(drained.phase == daemon::StreamNormalizationPhase::Ready);
+    CHECK(drained.receive_sequence == 11);
+    CHECK_FALSE(drained.ordering_barrier_open);
+
+    daemon::FixedStreamNormalizer rollover(
+        nullptr,
+        {.initial_revision = std::numeric_limits<std::uint64_t>::max() - std::uint64_t{1}});
+    REQUIRE(rollover.begin(9, 11));
+    const auto wrapped = rollover.status();
+    CHECK(wrapped.client_id == 9);
+    CHECK(wrapped.generation == 11);
+    CHECK(wrapped.phase == daemon::StreamNormalizationPhase::Bootstrap);
 }
