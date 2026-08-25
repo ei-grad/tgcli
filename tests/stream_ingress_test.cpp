@@ -146,7 +146,9 @@ struct PointProbe {
     std::atomic<bool> entered{false};
     std::atomic<bool> release{false};
     std::atomic<std::uint64_t> sequence{1};
-    std::array<std::atomic<std::uint64_t>, 9> first_order{};
+    std::array<std::atomic<std::uint64_t>,
+               static_cast<std::size_t>(detail::StreamIngressProbePoint::Count)>
+        first_order{};
 
     static void notify(void* context, detail::StreamIngressProbePoint point,
                        std::size_t index) noexcept {
@@ -360,6 +362,104 @@ TEST_CASE("stream ingress rejects stale reserved and invalid raw state fail clos
     CHECK(hub.activation_state(malformed) == StreamIngressState::Removed);
     REQUIRE(hub.detach(malformed));
     REQUIRE(hub.poll_reclaim(malformed));
+}
+
+TEST_CASE("receive generation claim protects old owner through reclaim and reuse",
+          "[stream][ingress][generation][reclaim][concurrency]") {
+    PointProbe probe;
+    StreamIngressHub hub(
+        {.context = &probe, .hook = &PointProbe::notify, .forced_lock_free_failure = std::nullopt});
+    hub.begin_generation(1001, 7);
+    auto old = reserve_slot(hub);
+    REQUIRE(hub.commit_activation(old));
+    REQUIRE(hub.activate_armed(1001, 7, 1) == 1);
+    REQUIRE(hub.detach(old));
+
+    StreamTerminalPayload payload;
+    SECTION("authorization loss") {
+        payload = StreamTerminalPayload{.cause = StreamTerminalCause::AuthorizationLost,
+                                        .operation = StreamOperation::Listen,
+                                        .auth_state = 17,
+                                        .metadata_failure = {}};
+    }
+    SECTION("metadata failure") {
+        payload = StreamTerminalPayload{
+            .cause = StreamTerminalCause::MetadataFailure,
+            .operation = StreamOperation::Listen,
+            .metadata_failure = {.kind = StreamFailureKind::MalformedSupported,
+                                 .update_kind = tgcli::core::TdSupportedUpdateKind::MessageContent,
+                                 .malformed_reason =
+                                     tgcli::core::TdMalformedUpdateReason::InvalidContent,
+                                 .tdlib_type_id = 91,
+                                 .capacity = {}}};
+    }
+
+    probe.reset(detail::StreamIngressProbePoint::OwnerLoad,
+                StreamIngressTestAccess::slot_index(old));
+    probe.enabled.store(true, std::memory_order_release);
+    std::thread claim([&] { hub.claim_generation(1001, 7, payload); });
+    wait_entered(probe);
+    CHECK(StreamIngressTestAccess::publisher_count(hub) == 1);
+    CHECK_FALSE(hub.poll_reclaim(old));
+    probe.release.store(true, std::memory_order_release);
+    claim.join();
+
+    const auto terminal = hub.claim_terminal(old);
+    REQUIRE(terminal);
+    CHECK(terminal->cause == payload.cause);
+    CHECK(terminal->auth_state == payload.auth_state);
+    CHECK(terminal->metadata_failure == payload.metadata_failure);
+    REQUIRE(hub.poll_reclaim(old));
+    hub.begin_generation(1002, 8);
+    auto replacement = reserve_slot(hub, request(1002, 8));
+    REQUIRE(hub.commit_activation(replacement));
+    CHECK_FALSE(hub.terminal_snapshot(replacement));
+}
+
+TEST_CASE("generation terminal retained while reservation owner is unpublished",
+          "[stream][ingress][generation][admission][concurrency]") {
+    PointProbe probe;
+    StreamIngressHub hub(
+        {.context = &probe, .hook = &PointProbe::notify, .forced_lock_free_failure = std::nullopt});
+    hub.begin_generation(1001, 7);
+    probe.reset(detail::StreamIngressProbePoint::ReservationOwnerPublished, 0);
+    probe.enabled.store(true, std::memory_order_release);
+    StreamIngressAdmissionResult admission{StreamIngressInvalidRequest{}};
+    std::thread reservation([&] { admission = hub.reserve(request()); });
+    wait_entered(probe);
+
+    StreamTerminalPayload payload;
+    SECTION("authorization loss") {
+        payload = StreamTerminalPayload{.cause = StreamTerminalCause::AuthorizationLost,
+                                        .operation = StreamOperation::Listen,
+                                        .auth_state = 23,
+                                        .metadata_failure = {}};
+    }
+    SECTION("metadata failure") {
+        payload = StreamTerminalPayload{
+            .cause = StreamTerminalCause::MetadataFailure,
+            .operation = StreamOperation::Listen,
+            .metadata_failure = {.kind = StreamFailureKind::Capacity,
+                                 .capacity = {.resource = StreamMetadataResource::Chats,
+                                              .phase = StreamMetadataPhase::Active,
+                                              .limit = 65'536,
+                                              .used = 65'536,
+                                              .incoming = 1,
+                                              .would_use = 65'537}}};
+    }
+    hub.claim_generation(1001, 7, payload);
+    probe.release.store(true, std::memory_order_release);
+    reservation.join();
+
+    auto* reserved = std::get_if<StreamIngressReservation>(&admission);
+    REQUIRE(reserved != nullptr);
+    CHECK_FALSE(hub.commit_activation(*reserved));
+    CHECK(hub.activation_state(*reserved) == StreamIngressState::Removed);
+    const auto terminal = hub.claim_terminal(*reserved);
+    REQUIRE(terminal);
+    CHECK(terminal->cause == payload.cause);
+    CHECK(terminal->auth_state == payload.auth_state);
+    CHECK(terminal->metadata_failure == payload.metadata_failure);
 }
 
 TEST_CASE("installing marker cancellation forbids publication and reuse before X Z",

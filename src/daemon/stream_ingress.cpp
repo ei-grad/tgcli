@@ -104,6 +104,147 @@ struct StreamIngressSlot {
     bool terminal_delivered = false;
 };
 
+struct RetainedGenerationTerminal {
+    std::atomic<StreamTerminalCause> cause{StreamTerminalCause::Open};
+    std::atomic<std::int32_t> client_id{0};
+    std::atomic<std::uint64_t> generation{0};
+    std::atomic<std::int32_t> auth_state{0};
+    std::atomic<std::uint32_t> failure_kind{0};
+    std::atomic<std::uint32_t> update_kind{0};
+    std::atomic<std::uint32_t> malformed_reason{0};
+    std::atomic<std::int32_t> tdlib_type_id{0};
+    std::atomic<std::int32_t> tdlib_error_code{0};
+    std::atomic<std::int32_t> retry_after{0};
+    std::atomic<std::uint32_t> current_state_index{0};
+    std::atomic<std::uint32_t> capacity_resource{0};
+    std::atomic<std::uint32_t> capacity_phase{0};
+    std::atomic<std::uint64_t> capacity_limit{0};
+    std::atomic<std::uint64_t> capacity_used{0};
+    std::atomic<std::uint64_t> capacity_incoming{0};
+    std::atomic<std::uint64_t> capacity_would_use{0};
+
+    void reset(std::int32_t next_client_id, std::uint64_t next_generation) noexcept {
+        static_cast<void>(cause.exchange(StreamTerminalCause::ClaimingGenerationReplaced,
+                                         std::memory_order_acq_rel));
+        client_id.store(next_client_id, std::memory_order_relaxed);
+        generation.store(next_generation, std::memory_order_relaxed);
+        auth_state.store(0, std::memory_order_relaxed);
+        failure_kind.store(static_cast<std::uint32_t>(StreamFailureKind::None),
+                           std::memory_order_relaxed);
+        update_kind.store(
+            static_cast<std::uint32_t>(core::TdSupportedUpdateKind::CurrentStateEntry),
+            std::memory_order_relaxed);
+        malformed_reason.store(
+            static_cast<std::uint32_t>(core::TdMalformedUpdateReason::MissingObject),
+            std::memory_order_relaxed);
+        tdlib_type_id.store(0, std::memory_order_relaxed);
+        tdlib_error_code.store(0, std::memory_order_relaxed);
+        retry_after.store(0, std::memory_order_relaxed);
+        current_state_index.store(0, std::memory_order_relaxed);
+        capacity_resource.store(static_cast<std::uint32_t>(StreamMetadataResource::BootstrapItems),
+                                std::memory_order_relaxed);
+        capacity_phase.store(static_cast<std::uint32_t>(StreamMetadataPhase::Bootstrap),
+                             std::memory_order_relaxed);
+        capacity_limit.store(0, std::memory_order_relaxed);
+        capacity_used.store(0, std::memory_order_relaxed);
+        capacity_incoming.store(0, std::memory_order_relaxed);
+        capacity_would_use.store(0, std::memory_order_relaxed);
+        cause.store(StreamTerminalCause::Open, std::memory_order_release);
+    }
+
+    bool publish(std::int32_t expected_client_id, std::uint64_t expected_generation,
+                 const StreamTerminalPayload& payload) noexcept {
+        if (client_id.load(std::memory_order_acquire) != expected_client_id ||
+            generation.load(std::memory_order_acquire) != expected_generation) {
+            return false;
+        }
+        const auto claiming = claiming_cause(payload.cause);
+        if (claiming == StreamTerminalCause::Open) {
+            return false;
+        }
+        auto expected = StreamTerminalCause::Open;
+        if (!cause.compare_exchange_strong(expected, claiming, std::memory_order_acq_rel,
+                                           std::memory_order_acquire)) {
+            return false;
+        }
+        auth_state.store(payload.auth_state, std::memory_order_relaxed);
+        failure_kind.store(static_cast<std::uint32_t>(payload.metadata_failure.kind),
+                           std::memory_order_relaxed);
+        update_kind.store(static_cast<std::uint32_t>(payload.metadata_failure.update_kind),
+                          std::memory_order_relaxed);
+        malformed_reason.store(
+            static_cast<std::uint32_t>(payload.metadata_failure.malformed_reason),
+            std::memory_order_relaxed);
+        tdlib_type_id.store(payload.metadata_failure.tdlib_type_id, std::memory_order_relaxed);
+        tdlib_error_code.store(payload.metadata_failure.tdlib_error_code,
+                               std::memory_order_relaxed);
+        retry_after.store(payload.metadata_failure.retry_after, std::memory_order_relaxed);
+        current_state_index.store(payload.metadata_failure.current_state_index,
+                                  std::memory_order_relaxed);
+        capacity_resource.store(
+            static_cast<std::uint32_t>(payload.metadata_failure.capacity.resource),
+            std::memory_order_relaxed);
+        capacity_phase.store(static_cast<std::uint32_t>(payload.metadata_failure.capacity.phase),
+                             std::memory_order_relaxed);
+        capacity_limit.store(payload.metadata_failure.capacity.limit, std::memory_order_relaxed);
+        capacity_used.store(payload.metadata_failure.capacity.used, std::memory_order_relaxed);
+        capacity_incoming.store(payload.metadata_failure.capacity.incoming,
+                                std::memory_order_relaxed);
+        capacity_would_use.store(payload.metadata_failure.capacity.would_use,
+                                 std::memory_order_relaxed);
+        auto expected_claiming = claiming;
+        return cause.compare_exchange_strong(expected_claiming, payload.cause,
+                                             std::memory_order_release, std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::optional<StreamTerminalPayload>
+    snapshot(std::int32_t expected_client_id, std::uint64_t expected_generation,
+             StreamOperation operation) const noexcept {
+        for (;;) {
+            const auto before = cause.load(std::memory_order_acquire);
+            if (before == StreamTerminalCause::Open) {
+                return std::nullopt;
+            }
+            if (!ready_cause(before)) {
+                continue;
+            }
+            const auto observed_client_id = client_id.load(std::memory_order_relaxed);
+            const auto observed_generation = generation.load(std::memory_order_relaxed);
+            StreamTerminalPayload payload{
+                .cause = before,
+                .operation = operation,
+                .auth_state = auth_state.load(std::memory_order_relaxed),
+                .metadata_failure = {
+                    .kind = static_cast<StreamFailureKind>(
+                        failure_kind.load(std::memory_order_relaxed)),
+                    .update_kind = static_cast<core::TdSupportedUpdateKind>(
+                        update_kind.load(std::memory_order_relaxed)),
+                    .malformed_reason = static_cast<core::TdMalformedUpdateReason>(
+                        malformed_reason.load(std::memory_order_relaxed)),
+                    .tdlib_type_id = tdlib_type_id.load(std::memory_order_relaxed),
+                    .tdlib_error_code = tdlib_error_code.load(std::memory_order_relaxed),
+                    .retry_after = retry_after.load(std::memory_order_relaxed),
+                    .current_state_index = current_state_index.load(std::memory_order_relaxed),
+                    .capacity = {.resource = static_cast<StreamMetadataResource>(
+                                     capacity_resource.load(std::memory_order_relaxed)),
+                                 .phase = static_cast<StreamMetadataPhase>(
+                                     capacity_phase.load(std::memory_order_relaxed)),
+                                 .limit = capacity_limit.load(std::memory_order_relaxed),
+                                 .used = capacity_used.load(std::memory_order_relaxed),
+                                 .incoming = capacity_incoming.load(std::memory_order_relaxed),
+                                 .would_use = capacity_would_use.load(std::memory_order_relaxed)}}};
+            if (cause.load(std::memory_order_acquire) != before) {
+                continue;
+            }
+            if (observed_client_id != expected_client_id ||
+                observed_generation != expected_generation) {
+                return std::nullopt;
+            }
+            return payload;
+        }
+    }
+};
+
 static_assert(std::atomic<StreamIngressSlot*>::is_always_lock_free);
 static_assert(std::atomic<std::int32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
@@ -175,7 +316,12 @@ class StreamIngressHub::Impl {
         if (!pointer.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::SlotPointer;
         } else if (!publisher_count.is_lock_free() || !current_client_id.is_lock_free() ||
-                   !slots.front().owner_client_id.is_lock_free()) {
+                   !slots.front().owner_client_id.is_lock_free() ||
+                   !retained_terminal.client_id.is_lock_free() ||
+                   !retained_terminal.auth_state.is_lock_free() ||
+                   !retained_terminal.tdlib_type_id.is_lock_free() ||
+                   !retained_terminal.tdlib_error_code.is_lock_free() ||
+                   !retained_terminal.retry_after.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::PublisherCount;
         } else if (!slots.front().state.is_lock_free() ||
                    !slots.front().descriptor_producer.is_lock_free() ||
@@ -184,12 +330,24 @@ class StreamIngressHub::Impl {
                    !slots.front().active_borrows.is_lock_free() ||
                    !slots.front().publication_ready.is_lock_free() ||
                    !slots.front().owner_generation.is_lock_free() ||
-                   !current_generation.is_lock_free()) {
+                   !current_generation.is_lock_free() ||
+                   !retained_terminal.generation.is_lock_free() ||
+                   !retained_terminal.failure_kind.is_lock_free() ||
+                   !retained_terminal.update_kind.is_lock_free() ||
+                   !retained_terminal.malformed_reason.is_lock_free() ||
+                   !retained_terminal.current_state_index.is_lock_free() ||
+                   !retained_terminal.capacity_resource.is_lock_free() ||
+                   !retained_terminal.capacity_phase.is_lock_free() ||
+                   !retained_terminal.capacity_limit.is_lock_free() ||
+                   !retained_terminal.capacity_used.is_lock_free() ||
+                   !retained_terminal.capacity_incoming.is_lock_free() ||
+                   !retained_terminal.capacity_would_use.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::DescriptorIndex;
         } else if (!slots.front().byte_producer.is_lock_free() ||
                    !slots.front().byte_consumer.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::ByteIndex;
         } else if (!slots.front().terminal_cause.is_lock_free() ||
+                   !retained_terminal.cause.is_lock_free() ||
                    !slots.front().owner_operation.is_lock_free()) {
             lock_free_failure = StreamIngressAtomic::TerminalCause;
         }
@@ -447,28 +605,27 @@ class StreamIngressHub::Impl {
         retired_epoch[index] = epoch;
     }
 
-    void receive_claim_owned(std::int32_t client_id, std::uint64_t generation,
+    void receive_claim_slots(std::int32_t client_id, std::uint64_t generation,
                              StreamTerminalPayload payload, bool matching) noexcept {
-        for (auto& slot : slots) {
+        const PublisherGuard guard(*this);
+        if (!guard) {
+            return;
+        }
+        for (std::size_t index = 0; index < slots.size(); ++index) {
+            auto& slot = slots[index];
             const auto owner_client = slot.owner_client_id.load(std::memory_order_acquire);
             const auto owner_generation_value =
                 slot.owner_generation.load(std::memory_order_acquire);
+            const auto state = load_state(slot);
+            notify(detail::StreamIngressProbePoint::OwnerLoad, index);
             const bool same = owner_client == client_id && owner_generation_value == generation;
             if (owner_client == 0 || owner_generation_value == 0 || same != matching ||
-                load_state(slot) == StreamIngressState::Free) {
+                state == StreamIngressState::Free) {
                 continue;
             }
             payload.operation =
                 static_cast<StreamOperation>(slot.owner_operation.load(std::memory_order_acquire));
             static_cast<void>(claim(slot, payload));
-        }
-    }
-
-    void receive_registry_claim(std::int32_t client_id, std::uint64_t generation,
-                                StreamTerminalPayload payload, bool matching) noexcept {
-        const PublisherGuard guard(*this);
-        if (!guard) {
-            return;
         }
         for (std::size_t index = 0; index < kStreamSubscriberSlots; ++index) {
             auto* first = dormant[index].load(std::memory_order_seq_cst);
@@ -501,6 +658,7 @@ class StreamIngressHub::Impl {
     std::atomic<std::uint32_t> publisher_count{0};
     std::atomic<std::int32_t> current_client_id{0};
     std::atomic<std::uint64_t> current_generation{0};
+    RetainedGenerationTerminal retained_terminal;
     mutable std::mutex control;
     std::array<bool, kStreamSubscriberSlots> retired{};
     std::array<std::uint64_t, kStreamSubscriberSlots> retired_epoch{};
@@ -659,6 +817,7 @@ StreamIngressAdmissionResult StreamIngressHub::reserve(const StreamIngressReques
         slot.owner_generation.store(request.generation, std::memory_order_relaxed);
         slot.owner_operation.store(static_cast<std::uint32_t>(request.operation),
                                    std::memory_order_relaxed);
+        impl_->notify(detail::StreamIngressProbePoint::ReservationOwnerPublished, index);
         store_state(slot, StreamIngressState::Reserved);
         return StreamIngressReservation(this, static_cast<std::uint32_t>(index), epoch);
     }
@@ -668,18 +827,23 @@ StreamIngressAdmissionResult StreamIngressHub::reserve(const StreamIngressReques
 }
 
 void StreamIngressHub::begin_generation(std::int32_t client_id, std::uint64_t generation) noexcept {
+    impl_->retained_terminal.reset(client_id, generation);
     impl_->current_client_id.store(client_id, std::memory_order_release);
     impl_->current_generation.store(generation, std::memory_order_release);
     const StreamTerminalPayload replacement{.cause = StreamTerminalCause::GenerationReplaced,
                                             .metadata_failure = {}};
-    impl_->receive_claim_owned(client_id, generation, replacement, false);
-    impl_->receive_registry_claim(client_id, generation, replacement, false);
+    impl_->receive_claim_slots(client_id, generation, replacement, false);
 }
 
 void StreamIngressHub::claim_generation(std::int32_t client_id, std::uint64_t generation,
                                         StreamTerminalPayload payload) noexcept {
-    impl_->receive_claim_owned(client_id, generation, payload, true);
-    impl_->receive_registry_claim(client_id, generation, payload, true);
+    static_cast<void>(impl_->retained_terminal.publish(client_id, generation, payload));
+    const auto retained =
+        impl_->retained_terminal.snapshot(client_id, generation, StreamOperation::Listen);
+    if (!retained) {
+        return;
+    }
+    impl_->receive_claim_slots(client_id, generation, *retained, true);
 }
 
 void StreamIngressHub::claim_control_generation(std::int32_t client_id, std::uint64_t generation,
@@ -713,7 +877,13 @@ bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) 
                                              .operation = slot.staged.operation,
                                              .metadata_failure = {}}));
     }
-    if (stale || slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
+    const auto retained = impl_->retained_terminal.snapshot(
+        slot.staged.client_id, slot.staged.generation, slot.staged.operation);
+    if (retained) {
+        static_cast<void>(Impl::claim(slot, *retained));
+    }
+    if (stale || retained ||
+        slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
         store_state(slot, StreamIngressState::Removed);
         return false;
     }
@@ -721,6 +891,18 @@ bool StreamIngressHub::commit_activation(StreamIngressReservation& reservation) 
         return false;
     }
     impl_->dormant[reservation.index_].store(&slot, std::memory_order_seq_cst);
+    const auto retained_after_install = impl_->retained_terminal.snapshot(
+        slot.staged.client_id, slot.staged.generation, slot.staged.operation);
+    if (retained_after_install) {
+        static_cast<void>(Impl::claim(slot, *retained_after_install));
+    }
+    if (retained_after_install ||
+        slot.terminal_cause.load(std::memory_order_acquire) != StreamTerminalCause::Open) {
+        impl_->dormant[reservation.index_].exchange(nullptr, std::memory_order_seq_cst);
+        impl_->notify(detail::StreamIngressProbePoint::SlotExchange, reservation.index_);
+        store_state(slot, StreamIngressState::Removed);
+        return false;
+    }
     return true;
 }
 

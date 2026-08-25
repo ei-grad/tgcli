@@ -3692,6 +3692,13 @@ TdClient receive loop has one non-reentrant publisher, so the count is exactly z
 one. The scan has fixed maximum work; it uses no mutex, condition wait, syscall,
 notification, heap, regex, TDLib request, shared_ptr refcount, or callback-time
 teardown.
+The same single, non-nested receive-owner guard spans generation-terminal owner loads,
+dormant/published registry loads, and the final per-slot terminal write. Authorization
+loss and metadata failure additionally retain one generation-wide first cause in fixed
+lock-free scalar storage before that scan. Admission commit, under its control mutex,
+snapshots that retained cause before arming and rechecks it after dormant installation;
+a retained cause claims and removes the slot instead of publishing it. Control and
+shutdown threads never enter the receive-owner guard.
 
 The slot pointer, publisher count, descriptor producer/consumer indices, byte
 producer/consumer indices, and terminal-cause atomics must each satisfy both

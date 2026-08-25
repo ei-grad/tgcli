@@ -234,7 +234,10 @@ enum class StreamIngressProbePoint {
     ReclaimLoad,
     ReclaimZero,
     ActivationInstalling,
-    MarkerLoad
+    MarkerLoad,
+    OwnerLoad,
+    ReservationOwnerPublished,
+    Count
 };
 using StreamIngressProbeHook = void (*)(void*, StreamIngressProbePoint, std::size_t) noexcept;
 
