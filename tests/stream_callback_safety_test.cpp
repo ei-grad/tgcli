@@ -1,3 +1,4 @@
+#include "daemon/stream_ingress.hpp"
 #include "daemon/stream_service.hpp"
 #include "support/scripted_td_runtime.hpp"
 
@@ -951,4 +952,43 @@ TEST_CASE("Apple callback recorder rejects unknown instrumentation classes",
     for (const auto& value : observed_counts()) {
         CHECK(value.load(std::memory_order_acquire) == 0);
     }
+}
+
+TEST_CASE("fixed ingress scan enqueue overflow and removal stay callback safe",
+          "[stream][callback-safety][ingress]") {
+    reset_instrumentation();
+    tgcli::daemon::StreamIngressHub hub;
+    const tgcli::daemon::StreamIngressRequest request{
+        .client_id = 1001,
+        .generation = 1,
+        .operation = tgcli::daemon::StreamOperation::Listen,
+        .mode = tgcli::daemon::StreamMode::Items,
+        .type_mask = tgcli::daemon::stream_event_mask(tgcli::daemon::StreamEventClass::Chat)};
+    auto reserved = hub.reserve(request);
+    REQUIRE(reserved);
+    REQUIRE(hub.commit_activation(*reserved));
+    REQUIRE(hub.activate_armed(1001, 1, 1) == 1);
+    const tgcli::daemon::StreamRoutingSidecar routing{
+        .event_class = tgcli::daemon::StreamEventClass::Chat, .chat_id = -1001, .json_size = 3};
+    auto item = tgcli::daemon::StreamIngressTestAccess::item("{", "}\n", 2, routing);
+
+    {
+        const ForcedGuard guard;
+        hub.publish(item);
+    }
+    auto front = hub.poll_front(*reserved);
+    REQUIRE(front);
+    REQUIRE(hub.consume(*reserved, *front));
+    tgcli::daemon::StreamIngressTestAccess::set_tickets(hub, *reserved,
+                                                        tgcli::daemon::kStreamQueueItems, 0, 0, 0);
+    bool detached = false;
+    {
+        const ForcedGuard guard;
+        hub.publish(item);
+        detached = hub.detach(*reserved);
+    }
+    REQUIRE(detached);
+    REQUIRE(hub.claim_terminal(*reserved));
+    REQUIRE(hub.poll_reclaim(*reserved));
+    CHECK(callback_violations().load(std::memory_order_acquire) == 0);
 }

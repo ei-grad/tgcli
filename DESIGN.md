@@ -3611,6 +3611,14 @@ and `memory_order_seq_cst`-publishes that slot before accepting the next receive
 a newly admitted subscriber from receiving a candidate whose receive sequence
 predates its activation snapshot or missing the first later event.
 
+For this internal activation step, "metadata snapshot" means the immutable activation
+projection `{client_id,generation,activation_receive_sequence}`, the resolved sorted
+chat-ID filter of at most 64 entries, and the staged type mask, mode, and operation. It
+does not physically copy mutable `ChatSummary` title, username, or unread fields into
+each slot. Workers do not consume those fields, live items are self-contained, and the
+projection remains the complete observable state needed to enforce activation and
+routing semantics.
+
 The bootstrap delta buffer has exact bounds of 4,096 deltas and 16,777,216 logical
 bytes. Persistent metadata has exact bounds of 65,536 chats, 131,072 entities, and a
 67,108,864-byte string arena. A delta's logical byte charge is 64 bytes plus the UTF-8

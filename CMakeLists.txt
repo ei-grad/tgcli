@@ -275,6 +275,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/forward.cpp
     src/daemon/stream_metadata.cpp
     src/daemon/stream_model.cpp
+    src/daemon/stream_ingress.cpp
     src/daemon/stream_service.cpp
     src/daemon/stream_storage.cpp
     src/daemon/commands.cpp

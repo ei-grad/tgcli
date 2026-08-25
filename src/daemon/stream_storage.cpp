@@ -386,8 +386,9 @@ void write_topic(JsonWriter& writer, const std::optional<core::TdTopic>& topic) 
     writer.character('}');
 }
 
-void write_message(JsonWriter& writer, const core::TdMessageSummary& message,
-                   std::string_view text) noexcept {
+void write_message(JsonWriter& writer, const core::TdMessageSummary& message, std::string_view text,
+                   StreamRoutingSidecar* routing = nullptr) noexcept {
+    const auto message_start = writer.required();
     writer.raw("{\"id\":");
     writer.integer(message.id);
     writer.raw(",\"chat_id\":");
@@ -402,9 +403,18 @@ void write_message(JsonWriter& writer, const core::TdMessageSummary& message,
     write_topic(writer, message.topic);
     writer.raw(",\"type\":");
     writer.quoted(content_kind(message.content_kind));
-    writer.raw(",\"text\":");
-    writer.quoted(text);
+    writer.raw(",\"text\":\"");
+    const auto text_start = writer.required();
+    writer.escaped(text);
+    const auto text_end = writer.required();
+    writer.character('"');
     writer.character('}');
+    if (routing != nullptr) {
+        routing->message_offset = static_cast<std::uint32_t>(message_start);
+        routing->message_size = static_cast<std::uint32_t>(writer.required() - message_start);
+        routing->text_offset = static_cast<std::uint32_t>(text_start);
+        routing->text_size = static_cast<std::uint32_t>(text_end - text_start);
+    }
 }
 
 void write_reaction(JsonWriter& writer, const core::TdReactionType& reaction) noexcept {
@@ -486,8 +496,8 @@ StreamEscapeResult stream_json_escape(std::string_view value, std::span<char> ou
 }
 
 StreamItemView::StreamItemView(std::span<const char> first, std::span<const char> second,
-                               std::uint64_t sequence) noexcept
-    : first_(first), second_(second), sequence_(sequence) {}
+                               std::uint64_t sequence, StreamRoutingSidecar routing) noexcept
+    : first_(first), second_(second), sequence_(sequence), routing_(routing) {}
 
 std::array<std::span<const char>, 2> StreamItemView::spans() const noexcept {
     return {first_, second_};
@@ -499,6 +509,10 @@ std::size_t StreamItemView::size() const noexcept {
 
 std::uint64_t StreamItemView::receive_sequence() const noexcept {
     return sequence_;
+}
+
+const StreamRoutingSidecar& StreamItemView::routing() const noexcept {
+    return routing_;
 }
 
 StreamMetadataCursor::StreamMetadataCursor(const void* owner, std::size_t position,
@@ -599,6 +613,7 @@ class FixedStreamNormalizer::Impl {
         std::uint64_t sequence = 0;
         std::uint32_t charge = 0;
         Block block;
+        StreamRoutingSidecar routing;
         FrozenChat frozen;
     };
 
@@ -1100,7 +1115,8 @@ class FixedStreamNormalizer::Impl {
                             StreamMetadataPhase failure_phase,
                             std::uint64_t sequence_value) noexcept;
     template <typename Render>
-    bool append_rendered(std::uint64_t sequence_value, Render render) noexcept;
+    bool append_rendered(std::uint64_t sequence_value, StreamRoutingSidecar routing,
+                         Render render) noexcept;
     bool append_identity(std::uint64_t sequence_value, const ChatRecord& chat,
                          const EntityRecord& entity) noexcept;
     bool append_new(std::uint64_t sequence_value, const ChatRecord& chat,
@@ -1316,9 +1332,14 @@ bool FixedStreamNormalizer::Impl::reserve_candidate(std::uint64_t charge) noexce
 
 template <typename Render>
 bool FixedStreamNormalizer::Impl::append_rendered(std::uint64_t sequence_value,
+                                                  StreamRoutingSidecar routing,
                                                   Render render) noexcept {
     JsonWriter writer({scratch.get(), kStreamMetadataItemBytes});
-    render(writer);
+    if constexpr (std::is_invocable_v<Render, JsonWriter&, StreamRoutingSidecar&>) {
+        render(writer, routing);
+    } else {
+        render(writer);
+    }
     writer.character('\n');
     if (!writer.valid()) {
         fail_malformed(core::TdSupportedUpdateKind::CurrentStateEntry);
@@ -1351,6 +1372,9 @@ bool FixedStreamNormalizer::Impl::append_rendered(std::uint64_t sequence_value,
     candidate.complete = true;
     candidate.sequence = sequence_value;
     candidate.charge = static_cast<std::uint32_t>(incoming);
+    routing.json_offset = 0;
+    routing.json_size = static_cast<std::uint32_t>(incoming);
+    candidate.routing = routing;
     candidate.block.offset = order_used;
     candidate.block.size = static_cast<std::uint32_t>(incoming);
     std::memcpy(order_arena.get() + order_used, scratch.get(), static_cast<std::size_t>(incoming));
@@ -1366,25 +1390,27 @@ bool FixedStreamNormalizer::Impl::append_rendered(std::uint64_t sequence_value,
 bool FixedStreamNormalizer::Impl::append_identity(std::uint64_t sequence_value,
                                                   const ChatRecord& chat,
                                                   const EntityRecord& entity) noexcept {
-    return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-        writer.raw("{\"event\":\"chat_change\",\"change\":\"identity\",\"chat\":{");
-        writer.raw("\"id\":");
-        writer.integer(chat.id);
-        writer.raw(",\"title\":");
-        writer.quoted(chat_title(chat));
-        writer.raw(",\"type\":");
-        writer.quoted(stored_chat_type(chat.kind));
-        writer.raw(",\"is_bot\":");
-        writer.boolean(chat.kind == ChatKind::Private && entity.is_bot);
-        writer.raw(",\"usernames\":[");
-        for (std::size_t index = 0; index < entity.username_count; ++index) {
-            if (index != 0) {
-                writer.character(',');
+    return append_rendered(
+        sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = chat.id},
+        [&](JsonWriter& writer) noexcept {
+            writer.raw("{\"event\":\"chat_change\",\"change\":\"identity\",\"chat\":{");
+            writer.raw("\"id\":");
+            writer.integer(chat.id);
+            writer.raw(",\"title\":");
+            writer.quoted(chat_title(chat));
+            writer.raw(",\"type\":");
+            writer.quoted(stored_chat_type(chat.kind));
+            writer.raw(",\"is_bot\":");
+            writer.boolean(chat.kind == ChatKind::Private && entity.is_bot);
+            writer.raw(",\"usernames\":[");
+            for (std::size_t index = 0; index < entity.username_count; ++index) {
+                if (index != 0) {
+                    writer.character(',');
+                }
+                writer.quoted(entity_username(entity, index));
             }
-            writer.quoted(entity_username(entity, index));
-        }
-        writer.raw("]}}");
-    });
+            writer.raw("]}}");
+        });
 }
 
 template <typename ChatValue, typename Title, typename MessageText>
@@ -1449,13 +1475,15 @@ void write_summary(JsonWriter& writer, const ChatValue& chat,
 
 bool FixedStreamNormalizer::Impl::append_new(std::uint64_t sequence_value, const ChatRecord& chat,
                                              const EntityRecord& entity) noexcept {
-    return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-        writer.raw("{\"event\":\"chat_change\",\"change\":\"new\",\"chat\":");
-        write_summary(
-            writer, chat, entity, [&] { return chat_title(chat); },
-            [&] { return chat_message_text(chat); }, this);
-        writer.character('}');
-    });
+    return append_rendered(
+        sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = chat.id},
+        [&](JsonWriter& writer) noexcept {
+            writer.raw("{\"event\":\"chat_change\",\"change\":\"new\",\"chat\":");
+            write_summary(
+                writer, chat, entity, [&] { return chat_title(chat); },
+                [&] { return chat_message_text(chat); }, this);
+            writer.character('}');
+        });
 }
 
 std::string_view
@@ -1501,6 +1529,7 @@ bool FixedStreamNormalizer::Impl::append_frozen(std::uint64_t sequence_value,
     candidate.complete = false;
     candidate.sequence = sequence_value;
     candidate.charge = kStreamMetadataItemBytes;
+    candidate.routing = {.event_class = StreamEventClass::Chat, .chat_id = chat.id};
     candidate.block.offset = order_used;
     candidate.block.size = physical;
     if (physical != 0) {
@@ -1588,7 +1617,7 @@ void FixedStreamNormalizer::Impl::drain() noexcept {
             const StreamItemView item({order_arena.get() + candidate.block.offset, first_size},
                                       {order_arena.get() + candidate.block.offset + first_size,
                                        static_cast<std::size_t>(candidate.block.size) - first_size},
-                                      candidate.sequence);
+                                      candidate.sequence, candidate.routing);
             const StreamMetadataView metadata(this, borrow_token);
             sink->on_item(item, metadata);
             std::memset(order_arena.get() + candidate.block.offset, kBorrowPoison,
@@ -2019,13 +2048,15 @@ bool FixedStreamNormalizer::Impl::apply_title(std::int64_t id, std::string_view 
     if (!emit || chat->kind == ChatKind::Secret) {
         return true;
     }
-    return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-        writer.raw("{\"event\":\"chat_change\",\"change\":\"title\",\"chat_id\":");
-        writer.integer(id);
-        writer.raw(",\"title\":");
-        writer.quoted(title);
-        writer.character('}');
-    });
+    return append_rendered(sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = id},
+                           [&](JsonWriter& writer) noexcept {
+                               writer.raw(
+                                   "{\"event\":\"chat_change\",\"change\":\"title\",\"chat_id\":");
+                               writer.integer(id);
+                               writer.raw(",\"title\":");
+                               writer.quoted(title);
+                               writer.character('}');
+                           });
 }
 
 bool FixedStreamNormalizer::Impl::apply_last_message(std::int64_t id,
@@ -2085,17 +2116,19 @@ bool FixedStreamNormalizer::Impl::apply_last_message(std::int64_t id,
     if (!emit || chat->kind == ChatKind::Secret) {
         return true;
     }
-    return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-        writer.raw("{\"event\":\"chat_change\",\"change\":\"last_message\",\"chat_id\":");
-        writer.integer(id);
-        writer.raw(",\"last_message\":");
-        if (message == nullptr) {
-            writer.raw("null");
-        } else {
-            write_message(writer, *message, message_text);
-        }
-        writer.character('}');
-    });
+    return append_rendered(
+        sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = id},
+        [&](JsonWriter& writer) noexcept {
+            writer.raw("{\"event\":\"chat_change\",\"change\":\"last_message\",\"chat_id\":");
+            writer.integer(id);
+            writer.raw(",\"last_message\":");
+            if (message == nullptr) {
+                writer.raw("null");
+            } else {
+                write_message(writer, *message, message_text);
+            }
+            writer.character('}');
+        });
 }
 
 bool FixedStreamNormalizer::Impl::require_known_chat(std::int64_t id, const ChatRecord*& chat,
@@ -2226,13 +2259,15 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (!emit || chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"chat_change\",\"change\":\"list_added\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"list\":");
-            write_chat_list(writer, update->list);
-            writer.character('}');
-        });
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"chat_change\",\"change\":\"list_added\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"list\":");
+                write_chat_list(writer, update->list);
+                writer.character('}');
+            });
     }
     if (const auto* update = value.get_if<core::TdUpdateChatRemovedFromList>()) {
         auto* chat =
@@ -2254,13 +2289,15 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (!emit || chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"chat_change\",\"change\":\"list_removed\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"list\":");
-            write_chat_list(writer, update->list);
-            writer.character('}');
-        });
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"chat_change\",\"change\":\"list_removed\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"list\":");
+                write_chat_list(writer, update->list);
+                writer.character('}');
+            });
     }
 
     auto counter_event = [&](std::int64_t id, std::int32_t count, core::TdSupportedUpdateKind kind,
@@ -2277,17 +2314,19 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (!emit || chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"chat_change\",\"change\":");
-            writer.quoted(change);
-            writer.raw(",\"chat_id\":");
-            writer.integer(id);
-            writer.raw(",");
-            writer.quoted(field);
-            writer.character(':');
-            writer.integer(count);
-            writer.character('}');
-        });
+        return append_rendered(sequence_value,
+                               {.event_class = StreamEventClass::Chat, .chat_id = id},
+                               [&](JsonWriter& writer) noexcept {
+                                   writer.raw("{\"event\":\"chat_change\",\"change\":");
+                                   writer.quoted(change);
+                                   writer.raw(",\"chat_id\":");
+                                   writer.integer(id);
+                                   writer.raw(",");
+                                   writer.quoted(field);
+                                   writer.character(':');
+                                   writer.integer(count);
+                                   writer.character('}');
+                               });
     };
     if (const auto* update = value.get_if<core::TdUpdateChatReadInbox>()) {
         auto* chat = metadata_chat(update->chat_id, core::TdSupportedUpdateKind::ChatReadInbox);
@@ -2303,15 +2342,17 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (!emit || chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"chat_change\",\"change\":\"read_inbox\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"last_read_inbox_message_id\":");
-            writer.integer(update->last_read_inbox_message_id);
-            writer.raw(",\"unread_count\":");
-            writer.integer(update->unread_count);
-            writer.character('}');
-        });
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"chat_change\",\"change\":\"read_inbox\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"last_read_inbox_message_id\":");
+                writer.integer(update->last_read_inbox_message_id);
+                writer.raw(",\"unread_count\":");
+                writer.integer(update->unread_count);
+                writer.character('}');
+            });
     }
     if (const auto* update = value.get_if<core::TdUpdateMessageMentionRead>()) {
         if (!valid_int53(update->message_id)) {
@@ -2374,13 +2415,15 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (!emit || chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"chat_change\",\"change\":\"marked_unread\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"is_marked_unread\":");
-            writer.boolean(update->is_marked_unread);
-            writer.character('}');
-        });
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Chat, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"chat_change\",\"change\":\"marked_unread\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"is_marked_unread\":");
+                writer.boolean(update->is_marked_unread);
+                writer.character('}');
+            });
     }
 
     if (!emit) {
@@ -2399,11 +2442,20 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"message\",\"message\":");
-            write_message(writer, update->message, update->message.text);
-            writer.character('}');
-        });
+        const StreamRoutingSidecar routing{.event_class = StreamEventClass::Message,
+                                           .chat_id = update->message.chat_id,
+                                           .sender_kind = update->message.sender.kind ==
+                                                                  core::TdMessageSenderKind::User
+                                                              ? StreamSenderKind::User
+                                                              : StreamSenderKind::Chat,
+                                           .sender_id = update->message.sender.id};
+        return append_rendered(sequence_value, routing,
+                               [&](JsonWriter& writer, StreamRoutingSidecar& sidecar) noexcept {
+                                   writer.raw("{\"event\":\"message\",\"message\":");
+                                   write_message(writer, update->message, update->message.text,
+                                                 &sidecar);
+                                   writer.character('}');
+                               });
     }
     if (const auto* update = value.get_if<core::TdUpdateMessageContent>()) {
         const ChatRecord* chat = nullptr;
@@ -2418,17 +2470,19 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"edit_content\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"message_id\":");
-            writer.integer(update->message_id);
-            writer.raw(",\"content\":{\"type\":");
-            writer.quoted(content_kind(update->content.kind));
-            writer.raw(",\"text\":");
-            writer.quoted(update->content.text);
-            writer.raw("}}");
-        });
+        return append_rendered(sequence_value,
+                               {.event_class = StreamEventClass::Edit, .chat_id = update->chat_id},
+                               [&](JsonWriter& writer) noexcept {
+                                   writer.raw("{\"event\":\"edit_content\",\"chat_id\":");
+                                   writer.integer(update->chat_id);
+                                   writer.raw(",\"message_id\":");
+                                   writer.integer(update->message_id);
+                                   writer.raw(",\"content\":{\"type\":");
+                                   writer.quoted(content_kind(update->content.kind));
+                                   writer.raw(",\"text\":");
+                                   writer.quoted(update->content.text);
+                                   writer.raw("}}");
+                               });
     }
     if (const auto* update = value.get_if<core::TdUpdateMessageEdited>()) {
         const ChatRecord* chat = nullptr;
@@ -2443,17 +2497,19 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"edit_metadata\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"message_id\":");
-            writer.integer(update->message_id);
-            writer.raw(",\"edit_date\":");
-            writer.timestamp(update->edit_date, true);
-            writer.raw(",\"has_reply_markup\":");
-            writer.boolean(update->has_reply_markup);
-            writer.character('}');
-        });
+        return append_rendered(sequence_value,
+                               {.event_class = StreamEventClass::Edit, .chat_id = update->chat_id},
+                               [&](JsonWriter& writer) noexcept {
+                                   writer.raw("{\"event\":\"edit_metadata\",\"chat_id\":");
+                                   writer.integer(update->chat_id);
+                                   writer.raw(",\"message_id\":");
+                                   writer.integer(update->message_id);
+                                   writer.raw(",\"edit_date\":");
+                                   writer.timestamp(update->edit_date, true);
+                                   writer.raw(",\"has_reply_markup\":");
+                                   writer.boolean(update->has_reply_markup);
+                                   writer.character('}');
+                               });
     }
     if (const auto* update = value.get_if<core::TdUpdateMessageInteractionInfo>()) {
         const ChatRecord* chat = nullptr;
@@ -2476,51 +2532,53 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"reaction_snapshot\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"message_id\":");
-            writer.integer(update->message_id);
-            writer.raw(",\"reactions\":");
-            if (!update->reactions) {
-                writer.raw("null");
-            } else {
-                writer.raw("{\"items\":[");
-                for (std::size_t index = 0; index < update->reactions->items.size(); ++index) {
-                    if (index != 0) {
-                        writer.character(',');
-                    }
-                    const auto& item = update->reactions->items[index];
-                    writer.raw("{\"reaction\":");
-                    write_reaction(writer, item.reaction);
-                    writer.raw(",\"total_count\":");
-                    writer.integer(item.total_count);
-                    writer.raw(",\"is_chosen\":");
-                    writer.boolean(item.is_chosen);
-                    writer.raw(",\"used_sender\":");
-                    if (item.used_sender) {
-                        write_sender(writer, *item.used_sender);
-                    } else {
-                        writer.raw("null");
-                    }
-                    writer.raw(",\"recent_senders\":[");
-                    for (std::size_t sender_index = 0; sender_index < item.recent_senders.size();
-                         ++sender_index) {
-                        if (sender_index != 0) {
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Reaction, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"reaction_snapshot\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"message_id\":");
+                writer.integer(update->message_id);
+                writer.raw(",\"reactions\":");
+                if (!update->reactions) {
+                    writer.raw("null");
+                } else {
+                    writer.raw("{\"items\":[");
+                    for (std::size_t index = 0; index < update->reactions->items.size(); ++index) {
+                        if (index != 0) {
                             writer.character(',');
                         }
-                        write_sender(writer, item.recent_senders[sender_index]);
+                        const auto& item = update->reactions->items[index];
+                        writer.raw("{\"reaction\":");
+                        write_reaction(writer, item.reaction);
+                        writer.raw(",\"total_count\":");
+                        writer.integer(item.total_count);
+                        writer.raw(",\"is_chosen\":");
+                        writer.boolean(item.is_chosen);
+                        writer.raw(",\"used_sender\":");
+                        if (item.used_sender) {
+                            write_sender(writer, *item.used_sender);
+                        } else {
+                            writer.raw("null");
+                        }
+                        writer.raw(",\"recent_senders\":[");
+                        for (std::size_t sender_index = 0;
+                             sender_index < item.recent_senders.size(); ++sender_index) {
+                            if (sender_index != 0) {
+                                writer.character(',');
+                            }
+                            write_sender(writer, item.recent_senders[sender_index]);
+                        }
+                        writer.raw("]}");
                     }
-                    writer.raw("]}");
+                    writer.raw("],\"are_tags\":");
+                    writer.boolean(update->reactions->are_tags);
+                    writer.raw(",\"can_get_added_reactions\":");
+                    writer.boolean(update->reactions->can_get_added_reactions);
+                    writer.character('}');
                 }
-                writer.raw("],\"are_tags\":");
-                writer.boolean(update->reactions->are_tags);
-                writer.raw(",\"can_get_added_reactions\":");
-                writer.boolean(update->reactions->can_get_added_reactions);
                 writer.character('}');
-            }
-            writer.character('}');
-        });
+            });
     }
     if (const auto* update = value.get_if<core::TdUpdateMessageReaction>()) {
         const ChatRecord* chat = nullptr;
@@ -2538,21 +2596,23 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"bot_reaction_change\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"message_id\":");
-            writer.integer(update->message_id);
-            writer.raw(",\"actor\":");
-            write_sender(writer, update->actor);
-            writer.raw(",\"date\":");
-            writer.timestamp(update->date, false);
-            writer.raw(",\"old_reactions\":");
-            write_reaction_array(writer, update->old_reactions);
-            writer.raw(",\"new_reactions\":");
-            write_reaction_array(writer, update->new_reactions);
-            writer.character('}');
-        });
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Reaction, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"bot_reaction_change\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"message_id\":");
+                writer.integer(update->message_id);
+                writer.raw(",\"actor\":");
+                write_sender(writer, update->actor);
+                writer.raw(",\"date\":");
+                writer.timestamp(update->date, false);
+                writer.raw(",\"old_reactions\":");
+                write_reaction_array(writer, update->old_reactions);
+                writer.raw(",\"new_reactions\":");
+                write_reaction_array(writer, update->new_reactions);
+                writer.character('}');
+            });
     }
     if (const auto* update = value.get_if<core::TdUpdateMessageReactions>()) {
         const ChatRecord* chat = nullptr;
@@ -2571,26 +2631,28 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"bot_reaction_snapshot\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"message_id\":");
-            writer.integer(update->message_id);
-            writer.raw(",\"date\":");
-            writer.timestamp(update->date, false);
-            writer.raw(",\"reactions\":[");
-            for (std::size_t index = 0; index < update->reactions.size(); ++index) {
-                if (index != 0) {
-                    writer.character(',');
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Reaction, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"bot_reaction_snapshot\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"message_id\":");
+                writer.integer(update->message_id);
+                writer.raw(",\"date\":");
+                writer.timestamp(update->date, false);
+                writer.raw(",\"reactions\":[");
+                for (std::size_t index = 0; index < update->reactions.size(); ++index) {
+                    if (index != 0) {
+                        writer.character(',');
+                    }
+                    writer.raw("{\"reaction\":");
+                    write_reaction(writer, update->reactions[index].reaction);
+                    writer.raw(",\"total_count\":");
+                    writer.integer(update->reactions[index].total_count);
+                    writer.character('}');
                 }
-                writer.raw("{\"reaction\":");
-                write_reaction(writer, update->reactions[index].reaction);
-                writer.raw(",\"total_count\":");
-                writer.integer(update->reactions[index].total_count);
-                writer.character('}');
-            }
-            writer.raw("]}");
-        });
+                writer.raw("]}");
+            });
     }
     if (const auto* update = value.get_if<core::TdUpdateDeleteMessages>()) {
         const ChatRecord* chat = nullptr;
@@ -2606,22 +2668,24 @@ bool FixedStreamNormalizer::Impl::apply_value(const core::TdValue& value, bool e
         if (chat->kind == ChatKind::Secret) {
             return true;
         }
-        return append_rendered(sequence_value, [&](JsonWriter& writer) noexcept {
-            writer.raw("{\"event\":\"delete_batch\",\"chat_id\":");
-            writer.integer(update->chat_id);
-            writer.raw(",\"message_ids\":[");
-            for (std::size_t index = 0; index < update->message_ids.size(); ++index) {
-                if (index != 0) {
-                    writer.character(',');
+        return append_rendered(
+            sequence_value, {.event_class = StreamEventClass::Delete, .chat_id = update->chat_id},
+            [&](JsonWriter& writer) noexcept {
+                writer.raw("{\"event\":\"delete_batch\",\"chat_id\":");
+                writer.integer(update->chat_id);
+                writer.raw(",\"message_ids\":[");
+                for (std::size_t index = 0; index < update->message_ids.size(); ++index) {
+                    if (index != 0) {
+                        writer.character(',');
+                    }
+                    writer.integer(update->message_ids[index]);
                 }
-                writer.integer(update->message_ids[index]);
-            }
-            writer.raw("],\"is_permanent\":");
-            writer.boolean(update->is_permanent);
-            writer.raw(",\"from_cache\":");
-            writer.boolean(update->from_cache);
-            writer.character('}');
-        });
+                writer.raw("],\"is_permanent\":");
+                writer.boolean(update->is_permanent);
+                writer.raw(",\"from_cache\":");
+                writer.boolean(update->from_cache);
+                writer.character('}');
+            });
     }
     return true;
 }

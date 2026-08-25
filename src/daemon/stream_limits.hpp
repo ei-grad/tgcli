@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -14,6 +15,12 @@ inline constexpr std::size_t kStreamMetadataOrderItems = 4'096;
 inline constexpr std::size_t kStreamMetadataOrderBytes = 16'777'216;
 inline constexpr std::size_t kStreamMetadataItemBytes = 262'144;
 inline constexpr std::size_t kStreamRawChatLists = 102;
+inline constexpr std::size_t kStreamSubscriberSlots = 32;
+inline constexpr std::size_t kStreamQueueItems = 1'024;
+inline constexpr std::size_t kStreamQueueBytes = 8'388'608;
+inline constexpr std::size_t kStreamQueueItemBytes = 262'144;
+inline constexpr std::size_t kStreamChatFilters = 64;
+inline constexpr auto kStreamWorkerPollInterval = std::chrono::milliseconds{2};
 
 enum class StreamMetadataPhase { Bootstrap, Active };
 enum class StreamMetadataResource {

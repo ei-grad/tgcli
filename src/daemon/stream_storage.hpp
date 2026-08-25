@@ -60,6 +60,28 @@ struct StreamNormalizationStatus {
     }
 };
 
+enum class StreamEventClass : std::uint8_t { Message, Edit, Delete, Reaction, Chat };
+enum class StreamSenderKind : std::uint8_t { None, User, Chat };
+
+constexpr std::uint8_t stream_event_mask(StreamEventClass event) noexcept {
+    return static_cast<std::uint8_t>(1U << static_cast<std::uint8_t>(event));
+}
+
+struct StreamRoutingSidecar {
+    StreamEventClass event_class = StreamEventClass::Chat;
+    std::int64_t chat_id = 0;
+    StreamSenderKind sender_kind = StreamSenderKind::None;
+    std::int64_t sender_id = 0;
+    std::uint32_t json_offset = 0;
+    std::uint32_t json_size = 0;
+    std::uint32_t message_offset = 0;
+    std::uint32_t message_size = 0;
+    std::uint32_t text_offset = 0;
+    std::uint32_t text_size = 0;
+
+    bool operator==(const StreamRoutingSidecar&) const = default;
+};
+
 class StreamItemView {
   public:
     ~StreamItemView() = default;
@@ -71,16 +93,19 @@ class StreamItemView {
     [[nodiscard]] std::array<std::span<const char>, 2> spans() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] std::uint64_t receive_sequence() const noexcept;
+    [[nodiscard]] const StreamRoutingSidecar& routing() const noexcept;
 
   private:
     StreamItemView(std::span<const char> first, std::span<const char> second,
-                   std::uint64_t sequence) noexcept;
+                   std::uint64_t sequence, StreamRoutingSidecar routing) noexcept;
 
     std::span<const char> first_;
     std::span<const char> second_;
     std::uint64_t sequence_ = 0;
+    StreamRoutingSidecar routing_;
 
     friend class FixedStreamNormalizer;
+    friend class StreamIngressTestAccess;
 };
 
 enum class StreamMetadataChatKind { Private, BasicGroup, Supergroup, Channel };

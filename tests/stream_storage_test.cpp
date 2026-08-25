@@ -42,6 +42,7 @@ class FixedSink final : public daemon::StreamReceiveSink {
             copied += bytes.size();
         }
         sizes_[count_] = copied;
+        routing_[count_] = item.routing();
         ++count_;
     }
 
@@ -57,9 +58,14 @@ class FixedSink final : public daemon::StreamReceiveSink {
         return overflow_;
     }
 
+    [[nodiscard]] const daemon::StreamRoutingSidecar& routing(std::size_t index) const {
+        return routing_.at(index);
+    }
+
   private:
     std::array<std::array<char, daemon::kStreamMetadataItemBytes>, 16> lines_{};
     std::array<std::size_t, 16> sizes_{};
+    std::array<daemon::StreamRoutingSidecar, 16> routing_{};
     std::size_t count_ = 0;
     bool overflow_ = false;
 };
@@ -400,6 +406,16 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     auto item = nlohmann::json::parse(sink.line(0));
     CHECK(item.at("event") == "message");
     CHECK(item.at("message").at("text") == "experiment result");
+    const auto& message_routing = sink.routing(0);
+    CHECK(message_routing.event_class == daemon::StreamEventClass::Message);
+    CHECK(message_routing.chat_id == -1001);
+    CHECK(message_routing.sender_kind == daemon::StreamSenderKind::User);
+    CHECK(message_routing.sender_id == 42);
+    CHECK(message_routing.json_size == sink.line(0).size());
+    CHECK(nlohmann::json::parse(sink.line(0).substr(
+              message_routing.message_offset, message_routing.message_size)) == item.at("message"));
+    CHECK(sink.line(0).substr(message_routing.text_offset, message_routing.text_size) ==
+          "experiment result");
 
     auto content =
         stamped(core::TdUpdateMessageContent{.chat_id = -1001,
@@ -412,6 +428,8 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     item = nlohmann::json::parse(sink.line(1));
     CHECK(item.at("event") == "edit_content");
     CHECK(item.at("content").at("type") == "photo");
+    CHECK(sink.routing(1).event_class == daemon::StreamEventClass::Edit);
+    CHECK(sink.routing(1).chat_id == -1001);
 
     auto edited = stamped(core::TdUpdateMessageEdited{.chat_id = -1001,
                                                       .message_id = 123,
@@ -422,6 +440,7 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     item = nlohmann::json::parse(sink.line(2));
     CHECK(item.at("event") == "edit_metadata");
     CHECK(item.at("edit_date") == "2026-08-05T10:00:00Z");
+    CHECK(sink.routing(2).event_class == daemon::StreamEventClass::Edit);
 
     core::TdReactionSnapshot snapshot{
         .items = {{.reaction = {.kind = core::TdReactionKind::Emoji,
@@ -446,6 +465,7 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     item = nlohmann::json::parse(sink.line(3));
     CHECK(item.at("event") == "reaction_snapshot");
     CHECK(item.at("reactions").at("items").at(0).at("total_count") == 3);
+    CHECK(sink.routing(3).event_class == daemon::StreamEventClass::Reaction);
 
     auto bot_delta = stamped(
         core::TdUpdateMessageReaction{
@@ -466,6 +486,7 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     item = nlohmann::json::parse(sink.line(4));
     CHECK(item.at("event") == "bot_reaction_change");
     CHECK(item.at("new_reactions").at(0).at("custom_emoji_id") == "123456789");
+    CHECK(sink.routing(4).event_class == daemon::StreamEventClass::Reaction);
 
     auto bot_snapshot = stamped(
         core::TdUpdateMessageReactions{
@@ -482,6 +503,7 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     item = nlohmann::json::parse(sink.line(5));
     CHECK(item.at("event") == "bot_reaction_snapshot");
     CHECK(item.at("reactions").at(0).at("total_count") == 2);
+    CHECK(sink.routing(5).event_class == daemon::StreamEventClass::Reaction);
 
     auto deletion = stamped(core::TdUpdateDeleteMessages{.client_generation = 9,
                                                          .chat_id = -1001,
@@ -493,6 +515,8 @@ TEST_CASE("fixed stream normalizer covers the closed message and reaction famili
     item = nlohmann::json::parse(sink.line(6));
     CHECK(item.at("event") == "delete_batch");
     CHECK(item.at("message_ids").size() == 2);
+    CHECK(sink.routing(6).event_class == daemon::StreamEventClass::Delete);
+    CHECK(sink.routing(6).chat_id == -1001);
     CHECK(normalizer.status().phase == daemon::StreamNormalizationPhase::Ready);
 }
 
@@ -750,6 +774,10 @@ TEST_CASE("fixed stream normalizer covers every chat delta source and same value
     normalizer.on_update(7, 9, marked);
     CHECK(nlohmann::json::parse(sink.line(10)).at("change") == "marked_unread");
     CHECK(sink.count() == 11);
+    for (std::size_t index = 0; index < sink.count(); ++index) {
+        CHECK(sink.routing(index).event_class == daemon::StreamEventClass::Chat);
+        CHECK(sink.routing(index).chat_id == -1001);
+    }
 }
 
 TEST_CASE("fixed writer matches the heap oracle for every chat change and list variant",
