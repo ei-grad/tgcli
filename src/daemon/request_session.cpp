@@ -411,11 +411,13 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
         state_ = State::ProtocolError;
         secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
         const auto reason = rejection.value_or(StreamProtocolAnswerInvalidReason::Malformed);
+        notify_probe(testing::RequestSessionProbePoint::BeforeProtocolTerminalRoute);
         const bool routed =
-            claim_stream_terminal({.cause = StreamTerminalCause::ProtocolAnswerInvalid,
-                                   .protocol_request_id = answer.id,
-                                   .protocol_reason = reason,
-                                   .metadata_failure = {}});
+            route_protocol_terminal({.cause = StreamTerminalCause::ProtocolAnswerInvalid,
+                                     .protocol_request_id = answer.id,
+                                     .protocol_reason = reason,
+                                     .metadata_failure = {}});
+        notify_probe(testing::RequestSessionProbePoint::AfterProtocolTerminalRoute);
         if (!routed) {
             static_cast<void>(
                 error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
@@ -765,6 +767,7 @@ void RequestSession::notify_in_flight(InFlightState state, const InFlightHook& h
 bool RequestSession::begin_terminal_forwarding() {
     const std::lock_guard lock(activity_mutex_);
     if (activity_state_ != ActivityState::OpenRequest &&
+        activity_state_ != ActivityState::ProtocolTerminating &&
         activity_state_ != ActivityState::OpenLegacySubscription &&
         activity_state_ != ActivityState::OpenStreamSubscription) {
         return false;
@@ -815,6 +818,31 @@ bool RequestSession::claim_stream_terminal(StreamTerminalPayload payload) noexce
     }
     static_cast<void>(detail::stream_subscription_claim(subscription, payload));
     return true;
+}
+
+bool RequestSession::route_protocol_terminal(StreamTerminalPayload payload) noexcept {
+    std::shared_ptr<detail::StreamSubscriptionState> subscription;
+    {
+        const std::lock_guard lock(activity_mutex_);
+        if (activity_state_ == ActivityState::OpenRequest) {
+            activity_state_ = ActivityState::ProtocolTerminating;
+            return false;
+        }
+        if ((activity_state_ != ActivityState::OpenStreamSubscription &&
+             activity_state_ != ActivityState::TerminalForwarding) ||
+            !stream_subscription_ || !stream_subscription_->state_) {
+            return false;
+        }
+        subscription = stream_subscription_->state_;
+    }
+    static_cast<void>(detail::stream_subscription_claim(subscription, payload));
+    return true;
+}
+
+void RequestSession::notify_probe(testing::RequestSessionProbePoint point) const noexcept {
+    if (probe_hook_ != nullptr) {
+        probe_hook_(probe_context_, point);
+    }
 }
 
 DeliveryOutcome RequestSession::emit_item(nlohmann::json data) {

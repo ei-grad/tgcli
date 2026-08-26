@@ -78,6 +78,17 @@ enum class AuditedDispatchStatus { Dispatched, Disconnected, Shutdown, TimedOut,
 enum class AuditedTerminalStatus { Designated, Disconnected, Shutdown, TimedOut, ProtocolError };
 enum class ConfigAdmissionMode { DirectFallback, FrozenRuntime };
 
+namespace testing {
+
+enum class RequestSessionProbePoint : std::uint8_t {
+    BeforeProtocolTerminalRoute,
+    AfterProtocolTerminalRoute
+};
+using RequestSessionProbeHook = void (*)(void*, RequestSessionProbePoint) noexcept;
+class RequestSessionTestAccess;
+
+} // namespace testing
+
 class RequestSession final : public ResponseSink {
   public:
     using Clock = std::chrono::steady_clock;
@@ -143,6 +154,7 @@ class RequestSession final : public ResponseSink {
     enum class State { Running, Disconnected, Shutdown, TimedOut, ProtocolError, AuditFatal };
     enum class ActivityState {
         OpenRequest,
+        ProtocolTerminating,
         OpenLegacySubscription,
         OpenStreamSubscription,
         TerminalForwarding,
@@ -180,6 +192,8 @@ class RequestSession final : public ResponseSink {
     void release_activity();
     void cancel_stream_transport() noexcept;
     [[nodiscard]] bool claim_stream_terminal(StreamTerminalPayload payload) noexcept;
+    [[nodiscard]] bool route_protocol_terminal(StreamTerminalPayload payload) noexcept;
+    void notify_probe(testing::RequestSessionProbePoint point) const noexcept;
 
     DeliveryOutcome emit_item(nlohmann::json data) override;
     void emit_progress(nlohmann::json data) override;
@@ -224,10 +238,26 @@ class RequestSession final : public ResponseSink {
     ActivityTracker::Token activity_;
     ActivityState activity_state_ = ActivityState::OpenRequest;
     std::optional<StreamSubscriptionLease> stream_subscription_;
+    void* probe_context_ = nullptr;
+    testing::RequestSessionProbeHook probe_hook_ = nullptr;
 
     friend class detail::StreamDeliveryRunner;
+    friend class testing::RequestSessionTestAccess;
     friend StreamDeliveryStatus run_stream_delivery(RequestSession& session,
                                                     const StreamDeliveryOptions& options);
 };
+
+namespace testing {
+
+class RequestSessionTestAccess {
+  public:
+    static void install_probe(RequestSession& session, void* context,
+                              RequestSessionProbeHook hook) noexcept {
+        session.probe_context_ = context;
+        session.probe_hook_ = hook;
+    }
+};
+
+} // namespace testing
 
 } // namespace tgcli::daemon

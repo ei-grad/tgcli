@@ -264,6 +264,65 @@ struct ProtocolTerminalRaceGate {
     }
 };
 
+struct ProtocolActivationArbitrationGate {
+    testing::RequestSessionProbePoint target;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool activation_entered = false;
+    bool activation_released = false;
+    bool protocol_entered = false;
+    bool protocol_released = false;
+
+    explicit ProtocolActivationArbitrationGate(testing::RequestSessionProbePoint target_value)
+        : target(target_value) {}
+
+    static void activation_notify(void* raw_context,
+                                  testing::StreamActivationProbePoint point) noexcept {
+        if (point != testing::StreamActivationProbePoint::BeforeLifecycle) {
+            return;
+        }
+        auto& gate = *static_cast<ProtocolActivationArbitrationGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        gate.activation_entered = true;
+        gate.cv.notify_all();
+        gate.cv.wait(lock, [&gate] { return gate.activation_released; });
+    }
+
+    static void protocol_notify(void* raw_context,
+                                testing::RequestSessionProbePoint point) noexcept {
+        auto& gate = *static_cast<ProtocolActivationArbitrationGate*>(raw_context);
+        if (point != gate.target) {
+            return;
+        }
+        std::unique_lock lock(gate.mutex);
+        gate.protocol_entered = true;
+        gate.cv.notify_all();
+        gate.cv.wait(lock, [&gate] { return gate.protocol_released; });
+    }
+
+    void wait_activation() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return activation_entered; });
+    }
+
+    void wait_protocol() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return protocol_entered; });
+    }
+
+    void release_activation() {
+        const std::lock_guard lock(mutex);
+        activation_released = true;
+        cv.notify_all();
+    }
+
+    void release_protocol() {
+        const std::lock_guard lock(mutex);
+        protocol_released = true;
+        cv.notify_all();
+    }
+};
+
 struct DeadlineClaimGate {
     enum class Block { BeforeClaim, AfterClaim };
     using Clock = testing::StreamDeliveryHooks::Clock;
@@ -1152,6 +1211,100 @@ TEST_CASE("direct active terminals are suppressed until runner authorization",
     CHECK(tracker.snapshot().subscriptions == 0);
     auto replacement = hub->reserve(ingress_request());
     CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+}
+
+TEST_CASE("protocol classification and stream promotion share one lifecycle decision",
+          "[stream][subscription][challenge][protocol-answer][activation][concurrency]") {
+    for (const bool protocol_first : {true, false}) {
+        DYNAMIC_SECTION("protocol_first=" << protocol_first) {
+            ProtocolActivationArbitrationGate gate{
+                protocol_first ? testing::RequestSessionProbePoint::AfterProtocolTerminalRoute
+                               : testing::RequestSessionProbePoint::BeforeProtocolTerminalRoute};
+            ActivityTracker tracker([] {});
+            REQUIRE(tracker.daemon_ready(std::nullopt));
+            auto activity = tracker.try_request();
+            REQUIRE(activity);
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            std::vector<StreamIngressReservation> occupied;
+            occupied.reserve(kStreamSubscriberSlots - 1);
+            for (std::size_t index = 1; index < kStreamSubscriberSlots; ++index) {
+                auto admission = hub->reserve(ingress_request());
+                REQUIRE(std::holds_alternative<StreamIngressReservation>(admission));
+                occupied.push_back(std::move(std::get<StreamIngressReservation>(admission)));
+            }
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {},
+                                   std::move(*activity), {}, RequestDeadline{});
+            testing::RequestSessionTestAccess::install_probe(
+                session, &gate, &ProtocolActivationArbitrationGate::protocol_notify);
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), 1);
+            invalid.answer.erase("nonce");
+
+            StreamSubscriptionActivationResult activation_result =
+                StreamSubscriptionActivationFailure::PublicationFailed;
+            std::thread activation([&] {
+                activation_result = session.activate_stream_subscription(
+                    hub, ingress_request(), StreamActivityMode::TrackedDaemon,
+                    {.context = &gate,
+                     .hook = &ProtocolActivationArbitrationGate::activation_notify,
+                     .subscription_hook = nullptr});
+            });
+            gate.wait_activation();
+
+            AnswerDisposition disposition = AnswerDisposition::RequestTerminated;
+            std::thread protocol([&] { disposition = session.receive_answer(std::move(invalid)); });
+            gate.wait_protocol();
+            gate.release_activation();
+            activation.join();
+            gate.release_protocol();
+            protocol.join();
+            const auto challenge_status = challenge.get().status();
+
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge_status == ChallengeStatus::ProtocolError);
+            if (protocol_first) {
+                CHECK_FALSE(std::holds_alternative<StreamSubscriptionActivated>(activation_result));
+                REQUIRE(captured.error);
+                CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+                CHECK(captured.error->message == "invalid challenge answer");
+                CHECK(captured.error->details == json{{"request_id", 1}, {"reason", "malformed"}});
+                CHECK(captured.error->exit_code == kUsage);
+                CHECK(session.has_terminal());
+                CHECK(tracker.snapshot().requests == 0);
+                CHECK(tracker.snapshot().subscriptions == 0);
+            } else {
+                REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation_result));
+                CHECK_FALSE(captured.error);
+                CHECK(tracker.snapshot().requests == 0);
+                CHECK(tracker.snapshot().subscriptions == 1);
+                ManualPoll poll;
+                std::size_t builder_calls = 0;
+                const auto delivery = run_stream_delivery(
+                    session, {.count = std::nullopt,
+                              .terminal_builder =
+                                  [&builder_calls](const StreamTerminalPayload& terminal,
+                                                   std::uint64_t delivered) {
+                                      static_cast<void>(terminal);
+                                      static_cast<void>(delivered);
+                                      ++builder_calls;
+                                      return StreamTerminalResultFrame{{{"unexpected", true}}};
+                                  },
+                              .hooks = poll.hooks()});
+                CHECK(delivery == StreamDeliveryStatus::TerminalComplete);
+                CHECK(builder_calls == 0);
+                REQUIRE(captured.error);
+                CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+                CHECK(captured.error->details == json{{"request_id", 1}, {"reason", "malformed"}});
+                CHECK(tracker.snapshot().requests == 0);
+                CHECK(tracker.snapshot().subscriptions == 0);
+            }
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+    }
 }
 
 TEST_CASE("active malformed and future answers retain exact fixed protocol terminals",
