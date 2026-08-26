@@ -2451,3 +2451,62 @@ TEST_CASE("match delivery preserves the ingress descriptor and returns only the 
     REQUIRE(captured.result);
     CHECK(*captured.result == message);
 }
+
+TEST_CASE("initial wait match arbitrates deadline and cancellation before planned success",
+          "[stream][subscription][match][deadline][cancellation]") {
+    const auto verify = [](StreamPollSchedule::Clock::time_point current,
+                           StreamPollSchedule::Clock::time_point deadline_at, bool cancel,
+                           bool expect_match) {
+        auto hub = std::make_shared<StreamIngressHub>();
+        hub->begin_generation(1001, 7);
+        Captured captured;
+        RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {},
+                               RequestDeadline{deadline_at});
+        auto wait_ingress = ingress_request(StreamOperation::WaitFor);
+        wait_ingress.mode = StreamMode::Match;
+        REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(
+            session.activate_stream_subscription(hub, wait_ingress,
+                                                 StreamActivityMode::UntrackedNoDaemon)));
+        REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+        if (cancel) {
+            session.disconnect();
+        }
+        ManualPoll poll;
+        poll.current = current;
+        const json initial{{"id", 77}, {"chat_id", 42}, {"text", "target"}};
+        const auto status = run_stream_match_delivery(session, {.initial_match = initial,
+                                                                .item_matcher = {},
+                                                                .terminal_builder = &terminal_frame,
+                                                                .hooks = poll.hooks()});
+        if (cancel) {
+            CHECK(status == StreamDeliveryStatus::Disconnected);
+            CHECK_FALSE(captured.result);
+            CHECK_FALSE(captured.error);
+        } else if (expect_match) {
+            CHECK(status == StreamDeliveryStatus::TerminalComplete);
+            REQUIRE(captured.result);
+            CHECK(*captured.result == initial);
+            CHECK_FALSE(captured.error);
+        } else {
+            CHECK(status == StreamDeliveryStatus::TerminalComplete);
+            CHECK_FALSE(captured.result);
+            REQUIRE(captured.error);
+            CHECK(captured.error->details.at("cause") ==
+                  static_cast<int>(StreamTerminalCause::Deadline));
+        }
+    };
+
+    const auto deadline = StreamPollSchedule::Clock::now() + 1h;
+    SECTION("match observed before deadline") {
+        verify(deadline - 1ms, deadline, false, true);
+    }
+    SECTION("deadline equality") {
+        verify(deadline, deadline, false, false);
+    }
+    SECTION("match observed after deadline") {
+        verify(deadline + 1ms, deadline, false, false);
+    }
+    SECTION("cancellation before runner") {
+        verify(deadline - 1ms, deadline, true, false);
+    }
+}

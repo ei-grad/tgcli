@@ -421,6 +421,10 @@ class ResolverRun {
         return saved_messages_chat_;
     }
 
+    [[nodiscard]] std::shared_ptr<const AuthStateSnapshot> bound_authorization() const {
+        return snapshot_;
+    }
+
   private:
     ResolverPrincipalOutcome take_error_or_stop() {
         if (error_) {
@@ -1380,6 +1384,10 @@ class ResolverConsumer::Impl {
         return run_.cached_saved_messages_chat();
     }
 
+    [[nodiscard]] std::shared_ptr<const AuthStateSnapshot> bound_authorization() const {
+        return run_.bound_authorization();
+    }
+
     ReadyReadResult read_target(const ReadyReadStart& start) {
         return run_.read_target(start);
     }
@@ -1455,6 +1463,10 @@ ResolverOutcome ResolverConsumer::resolve_saved_messages_for_write() {
 UserResolverOutcome ResolverConsumer::resolve_user(std::string selector,
                                                    const std::optional<core::TdChat>& domain) {
     return impl_->resolve_user(std::move(selector), domain);
+}
+
+std::shared_ptr<const core::AuthStateSnapshot> ResolverConsumer::bound_authorization() const {
+    return impl_->bound_authorization();
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {

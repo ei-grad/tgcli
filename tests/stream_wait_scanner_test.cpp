@@ -80,6 +80,21 @@ void publish_live(StreamIngressHub& hub, std::int64_t id, std::string text,
     hub.publish(StreamIngressTestAccess::item(line, {}, sequence, sidecar));
 }
 
+StreamCopiedItem copied_message(std::int64_t id, std::string text = "target") {
+    const auto materialized = materialize_message_summary(message(id, std::move(text)));
+    REQUIRE(materialized);
+    auto data =
+        nlohmann::json{{"event", "message"}, {"message", message_summary_json(*materialized)}};
+    const auto wire_bytes = data.dump().size() + 1;
+    return {.descriptor = {.receive_sequence = static_cast<std::uint64_t>(id),
+                           .chat_id = -1001,
+                           .sender_id = 42,
+                           .event_class = StreamEventClass::Message,
+                           .sender_kind = StreamSenderKind::User},
+            .data = std::move(data),
+            .wire_bytes = wire_bytes};
+}
+
 struct PublicationGate {
     using Clock = StreamPollSchedule::Clock;
     std::mutex mutex;
@@ -278,7 +293,7 @@ TEST_CASE("wait history scanner rejects malformed advancing pages and accepts lo
              .start_history =
                  [](const StreamHistoryRequest&) {
                      return ready(tgcli::core::TdValue::from(tgcli::core::TdMessages{
-                         .total_count = 0, .messages = {std::nullopt, std::nullopt}}));
+                         .total_count = 2, .messages = {std::nullopt, std::nullopt}}));
                  },
              .hooks = nullptr});
         REQUIRE(scan.state);
@@ -311,4 +326,181 @@ TEST_CASE("wait history scanner never starts a history call after a terminal cla
     CHECK(calls == 0);
     REQUIRE(worker.terminal_snapshot());
     CHECK(worker.terminal_snapshot()->cause == StreamTerminalCause::AuthorizationLost);
+}
+
+TEST_CASE("wait history threshold remains enforced for every post-scan live message",
+          "[stream][wait-scanner][after][live]") {
+    SessionFixture fixture;
+    auto worker = testing::RequestSessionTestAccess::stream_worker(fixture.session);
+    auto scan =
+        scan_wait_history(fixture.session, worker,
+                          {.chat_id = -1001,
+                           .after = 105,
+                           .matcher = StreamMessageMatcher{},
+                           .start_history =
+                               [](const StreamHistoryRequest&) {
+                                   return ready(tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                                       .total_count = 1, .messages = {message(100, "boundary")}}));
+                               },
+                           .hooks = nullptr});
+    REQUIRE(scan.state);
+    CHECK_FALSE(scan.state->initial_match());
+    CHECK_FALSE(scan.state->match_live(copied_message(104)));
+    CHECK_FALSE(scan.state->match_live(copied_message(105)));
+    REQUIRE(scan.state->match_live(copied_message(106)));
+    CHECK(scan.state->match_live(copied_message(106))->at("id") == 106);
+}
+
+TEST_CASE("wait history excludes ineligible and nonmatching DTO bytes from overlap capacity",
+          "[stream][wait-scanner][capacity][history]") {
+    SECTION("oversized ineligible boundary") {
+        SessionFixture fixture;
+        auto worker = testing::RequestSessionTestAccess::stream_worker(fixture.session);
+        auto scan = scan_wait_history(
+            fixture.session, worker,
+            {.chat_id = -1001,
+             .after = 100,
+             .matcher = StreamMessageMatcher{},
+             .start_history =
+                 [](const StreamHistoryRequest&) {
+                     return ready(tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                         .total_count = 1,
+                         .messages = {message(100, std::string(kStreamQueueItemBytes, 'x'))}}));
+                 },
+             .hooks = nullptr});
+        REQUIRE(scan.state);
+        CHECK_FALSE(scan.state->initial_match());
+        CHECK_FALSE(worker.terminal_snapshot());
+    }
+
+    SECTION("large nonmatching history retains only bounded keys") {
+        SessionFixture fixture;
+        auto worker = testing::RequestSessionTestAccess::stream_worker(fixture.session);
+        auto compiled = compile_stream_regex("^target$");
+        REQUIRE(std::holds_alternative<StreamRegex>(compiled));
+        auto regex = std::make_shared<StreamRegex>(std::move(std::get<StreamRegex>(compiled)));
+        std::int64_t next = 2'000;
+        auto scan = scan_wait_history(
+            fixture.session, worker,
+            {.chat_id = -1001,
+             .after = 1,
+             .matcher = StreamMessageMatcher{.sender_user_id = std::nullopt, .regex = regex},
+             .start_history =
+                 [&](const StreamHistoryRequest& call) {
+                     std::vector<std::optional<tgcli::core::TdMessageSummary>> messages;
+                     if (call.from_message_id != 0) {
+                         messages.emplace_back(message(call.from_message_id, "anchor"));
+                     }
+                     while (messages.size() < 100 && next >= 1'001) {
+                         messages.emplace_back(message(next--, std::string(9'000, 'x')));
+                     }
+                     if (next < 1'001 && messages.size() < 100) {
+                         messages.emplace_back(message(1, std::string(kStreamQueueItemBytes, 'x')));
+                     }
+                     return ready(tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                         .total_count = static_cast<std::int32_t>(messages.size()),
+                         .messages = std::move(messages)}));
+                 },
+             .hooks = nullptr});
+        REQUIRE(scan.state);
+        CHECK_FALSE(scan.state->initial_match());
+        CHECK_FALSE(worker.terminal_snapshot());
+    }
+}
+
+TEST_CASE("wait history bounds its real overlap index and retained candidate",
+          "[stream][wait-scanner][capacity][history]") {
+    SECTION("consumed-key index") {
+        SessionFixture fixture;
+        auto worker = testing::RequestSessionTestAccess::stream_worker(fixture.session);
+        auto compiled = compile_stream_regex("^never$");
+        REQUIRE(std::holds_alternative<StreamRegex>(compiled));
+        auto regex = std::make_shared<StreamRegex>(std::move(std::get<StreamRegex>(compiled)));
+        std::int64_t next = 3'000;
+        std::size_t emitted = 0;
+        auto scan = scan_wait_history(
+            fixture.session, worker,
+            {.chat_id = -1001,
+             .after = 1,
+             .matcher = StreamMessageMatcher{.sender_user_id = std::nullopt, .regex = regex},
+             .start_history =
+                 [&](const StreamHistoryRequest& call) {
+                     std::vector<std::optional<tgcli::core::TdMessageSummary>> messages;
+                     if (call.from_message_id != 0) {
+                         messages.emplace_back(message(call.from_message_id, "no"));
+                     }
+                     while (messages.size() < 100 && emitted < kStreamQueueItems + 1) {
+                         messages.emplace_back(message(next--, "no"));
+                         ++emitted;
+                     }
+                     return ready(tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                         .total_count = static_cast<std::int32_t>(messages.size()),
+                         .messages = std::move(messages)}));
+                 },
+             .hooks = nullptr});
+        CHECK_FALSE(scan.state);
+        const auto terminal = worker.terminal_snapshot();
+        REQUIRE(terminal);
+        CHECK(terminal->cause == StreamTerminalCause::HistoryOverlap);
+        CHECK(terminal->queued_items == kStreamQueueItems);
+        CHECK(terminal->queued_bytes == kStreamQueueItems * sizeof(std::int64_t) * 2);
+        CHECK(terminal->incoming_bytes == sizeof(std::int64_t) * 2);
+    }
+
+    SECTION("matching candidate bytes") {
+        SessionFixture fixture;
+        auto worker = testing::RequestSessionTestAccess::stream_worker(fixture.session);
+        auto scan = scan_wait_history(
+            fixture.session, worker,
+            {.chat_id = -1001,
+             .after = 1,
+             .matcher = StreamMessageMatcher{},
+             .start_history =
+                 [](const StreamHistoryRequest&) {
+                     return ready(tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                         .total_count = 1,
+                         .messages = {message(2, std::string(kStreamQueueItemBytes, 'x'))}}));
+                 },
+             .hooks = nullptr});
+        CHECK_FALSE(scan.state);
+        const auto terminal = worker.terminal_snapshot();
+        REQUIRE(terminal);
+        CHECK(terminal->cause == StreamTerminalCause::HistoryOverlap);
+        CHECK(terminal->queued_items == 1);
+        CHECK(terminal->queued_bytes == sizeof(std::int64_t) * 2);
+        CHECK(terminal->incoming_bytes > kStreamQueueItemBytes);
+    }
+}
+
+TEST_CASE("wait history maps structural page counts and null mixtures to internal",
+          "[stream][wait-scanner][pagination][structure]") {
+    const auto verify = [](tgcli::core::TdMessages page) {
+        SessionFixture fixture;
+        auto worker = testing::RequestSessionTestAccess::stream_worker(fixture.session);
+        auto scan =
+            scan_wait_history(fixture.session, worker,
+                              {.chat_id = -1001,
+                               .after = 1,
+                               .matcher = StreamMessageMatcher{},
+                               .start_history =
+                                   [page = std::move(page)](const StreamHistoryRequest&) mutable {
+                                       return ready(tgcli::core::TdValue::from(std::move(page)));
+                                   },
+                               .hooks = nullptr});
+        CHECK_FALSE(scan.state);
+        const auto terminal = worker.terminal_snapshot();
+        REQUIRE(terminal);
+        CHECK(terminal->cause == StreamTerminalCause::Internal);
+        CHECK(terminal->operation == StreamOperation::WaitFor);
+    };
+
+    SECTION("negative total") {
+        verify({.total_count = -1, .messages = {}});
+    }
+    SECTION("total smaller than page") {
+        verify({.total_count = 0, .messages = {message(2)}});
+    }
+    SECTION("mixed null page") {
+        verify({.total_count = 2, .messages = {message(2), std::nullopt}});
+    }
 }

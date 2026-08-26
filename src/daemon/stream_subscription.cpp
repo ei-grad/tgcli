@@ -424,9 +424,13 @@ class detail::StreamDeliveryRunner {
 
     [[nodiscard]] StreamDeliveryStatus run() {
         if (match_options_ != nullptr && match_options_->initial_match) {
+            claim_scheduled_terminal(current_time());
             if (state_->claim(
                     {.cause = StreamTerminalCause::PlannedSuccess, .metadata_failure = {}})) {
                 matched_ = match_options_->initial_match;
+            }
+            if (auto status = deliver_terminal()) {
+                return status.value();
             }
         }
         for (;;) {

@@ -72,6 +72,7 @@ struct ResolvedStreamSetup {
     std::vector<std::int64_t> chat_ids;
     std::optional<core::TdChat> user_domain;
     std::optional<std::int64_t> sender_user_id;
+    std::shared_ptr<const core::AuthStateSnapshot> authorization;
 };
 
 std::optional<ResolvedStreamSetup> resolve_setup(core::TdClient& client, std::string_view account,
@@ -88,7 +89,8 @@ std::optional<ResolvedStreamSetup> resolve_setup(core::TdClient& client, std::st
     ResolvedStreamSetup result{.principal = std::get<ResolverPrincipal>(principal),
                                .chat_ids = {},
                                .user_domain = std::nullopt,
-                               .sender_user_id = std::nullopt};
+                               .sender_user_id = std::nullopt,
+                               .authorization = nullptr};
     if (reject_bot_after && result.principal.is_bot) {
         session.error("BOT_UNSUPPORTED", "wait-for --after requires a user account",
                       {{"operation", "wait_for"}}, kUsage);
@@ -117,7 +119,32 @@ std::optional<ResolvedStreamSetup> resolve_setup(core::TdClient& client, std::st
         }
         result.sender_user_id = std::get<UserIdentity>(std::move(resolved)).id;
     }
+    result.authorization = resolver.bound_authorization();
+    if (!result.authorization) {
+        emit_resolver_error(ResolverError{ResolverInternalError{.operation = M2Operation::Resolve}},
+                            session, M2Operation::Resolve);
+        return std::nullopt;
+    }
     return result;
+}
+
+bool same_ready_authorization(const std::shared_ptr<const core::AuthStateSnapshot>& bound,
+                              const std::shared_ptr<const core::AuthStateSnapshot>& current) {
+    return bound && current && current->data.state == core::AuthState::Ready &&
+           current->client_id == bound->client_id &&
+           current->client_generation == bound->client_generation &&
+           current->auth_sequence == bound->auth_sequence;
+}
+
+void emit_setup_authorization_lost(RequestSession& session, std::string_view command,
+                                   std::string_view account,
+                                   const std::shared_ptr<const core::AuthStateSnapshot>& current) {
+    session.error(
+        "NOT_AUTHED", std::string(command) + " requires an authenticated account",
+        {{"account", account},
+         {"state", current ? json(core::auth_state_name(current->data.state)) : json("unknown")},
+         {"reason", "authorization_lost"}},
+        kNotAuthed);
 }
 
 StreamIngressRequest ingress_request(const core::AuthStateSnapshot& snapshot,
@@ -177,6 +204,13 @@ std::optional<nlohmann::json> live_match(const StreamCopiedItem& item,
                : std::nullopt;
 }
 
+void notify(const testing::StreamCoordinatorProbe& probe,
+            testing::StreamCoordinatorProbePoint point) noexcept {
+    if (probe.hook != nullptr) {
+        probe.hook(probe.context, point);
+    }
+}
+
 } // namespace
 
 void StreamCoordinator::listen(const proto::Request& request, RequestSession& session) {
@@ -195,18 +229,14 @@ void StreamCoordinator::listen(const proto::Request& request, RequestSession& se
     if (!setup) {
         return;
     }
-    const auto snapshot = client_.get().auth_state();
-    if (!snapshot || snapshot->data.state != core::AuthState::Ready) {
-        session.error("NOT_AUTHED", "listen requires an authenticated account",
-                      {{"account", account_},
-                       {"state", snapshot ? json(core::auth_state_name(snapshot->data.state))
-                                          : json("unknown")},
-                       {"reason", "authorization_lost"}},
-                      kNotAuthed);
+    notify(probe_, testing::StreamCoordinatorProbePoint::AfterResolve);
+    const auto current = client_.get().auth_state();
+    if (!same_ready_authorization(setup->authorization, current)) {
+        emit_setup_authorization_lost(session, "listen", account_, current);
         return;
     }
-    const auto ingress =
-        ingress_request(*snapshot, StreamOperation::Listen, arguments.type_mask, setup->chat_ids);
+    const auto ingress = ingress_request(*setup->authorization, StreamOperation::Listen,
+                                         arguments.type_mask, setup->chat_ids);
     if (!activate(service_.get(), session, activity_mode_, ingress, account_)) {
         return;
     }
@@ -244,18 +274,14 @@ void StreamCoordinator::wait_for(const proto::Request& request, RequestSession& 
     if (!setup) {
         return;
     }
-    const auto snapshot = client_.get().auth_state();
-    if (!snapshot || snapshot->data.state != core::AuthState::Ready) {
-        session.error("NOT_AUTHED", "wait-for requires an authenticated account",
-                      {{"account", account_},
-                       {"state", snapshot ? json(core::auth_state_name(snapshot->data.state))
-                                          : json("unknown")},
-                       {"reason", "authorization_lost"}},
-                      kNotAuthed);
+    notify(probe_, testing::StreamCoordinatorProbePoint::AfterResolve);
+    const auto current = client_.get().auth_state();
+    if (!same_ready_authorization(setup->authorization, current)) {
+        emit_setup_authorization_lost(session, "wait-for", account_, current);
         return;
     }
     const auto ingress =
-        ingress_request(*snapshot, StreamOperation::WaitFor,
+        ingress_request(*setup->authorization, StreamOperation::WaitFor,
                         stream_event_mask(StreamEventClass::Message), setup->chat_ids);
     if (!activate(service_.get(), session, activity_mode_, ingress, account_)) {
         return;
@@ -274,18 +300,18 @@ void StreamCoordinator::wait_for(const proto::Request& request, RequestSession& 
     }
 
     auto worker = session.stream_worker();
-    auto scanned =
-        scan_wait_history(session, worker,
-                          {.chat_id = setup->chat_ids.front(),
-                           .after = *arguments.after,
-                           .matcher = matcher,
-                           .start_history =
-                               [this, snapshot](const StreamHistoryRequest& history) {
-                                   return client_.get().get_chat_history(
-                                       snapshot, history.chat_id, history.from_message_id,
-                                       history.offset, history.limit, history.only_local);
-                               },
-                           .hooks = nullptr});
+    auto scanned = scan_wait_history(
+        session, worker,
+        {.chat_id = setup->chat_ids.front(),
+         .after = *arguments.after,
+         .matcher = matcher,
+         .start_history =
+             [this, authorization = setup->authorization](const StreamHistoryRequest& history) {
+                 return client_.get().get_chat_history(authorization, history.chat_id,
+                                                       history.from_message_id, history.offset,
+                                                       history.limit, history.only_local);
+             },
+         .hooks = nullptr});
     if (!scanned.state) {
         static_cast<void>(run_stream_match_delivery(
             session, {.initial_match = std::nullopt,

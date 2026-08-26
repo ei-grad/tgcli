@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <ranges>
 #include <thread>
 #include <type_traits>
@@ -96,7 +98,7 @@ struct Outcome {
 
 class CoordinatorFixture {
   public:
-    CoordinatorFixture() {
+    explicit CoordinatorFixture(testing::StreamCoordinatorProbe probe = {}) {
         auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>();
         runtime_ = runtime.get();
         client_ = std::make_unique<tgcli::core::TdClient>(
@@ -119,8 +121,8 @@ class CoordinatorFixture {
                    client_->auth_state()->data.state == tgcli::core::AuthState::Ready &&
                    service_.status().ready_for_admission();
         }));
-        coordinator_ = std::make_unique<StreamCoordinator>(*client_, service_, "main",
-                                                           StreamActivityMode::UntrackedNoDaemon);
+        coordinator_ = std::make_unique<StreamCoordinator>(
+            *client_, service_, "main", StreamActivityMode::UntrackedNoDaemon, probe);
         register_stream_commands(dispatcher_, *coordinator_);
     }
 
@@ -159,6 +161,35 @@ class CoordinatorFixture {
                                   .message = message(id, std::move(text))}));
     }
 
+    void replace_generation() {
+        const auto previous_sent = runtime_->sent_functions().size();
+        const auto previous = client_id_;
+        runtime_->push_update(previous, {},
+                              tgcli::core::AuthStateData{tgcli::core::AuthState::Closed});
+        REQUIRE(runtime_->wait_for_clients(2));
+        REQUIRE(runtime_->wait_for_sent(previous_sent + 2));
+        client_id_ = runtime_->clients().back();
+        const auto sent = runtime_->sent_functions();
+        for (std::size_t index = previous_sent; index < sent.size(); ++index) {
+            if (sent[index].function.kind() == tgcli::core::TdFunctionKind::GetCurrentState) {
+                runtime_->push_response(client_id_, sent[index].query_id,
+                                        tgcli::core::TdValue::from(current_state()));
+            } else {
+                REQUIRE(sent[index].function.kind() ==
+                        tgcli::core::TdFunctionKind::GetAuthorizationState);
+                runtime_->push_response(client_id_, sent[index].query_id, {},
+                                        tgcli::core::AuthStateData{tgcli::core::AuthState::Ready});
+            }
+        }
+        sent_count_ = previous_sent + 2;
+        REQUIRE(eventually([&] {
+            const auto snapshot = client_->auth_state();
+            return snapshot && snapshot->client_generation == client_id_.client_generation &&
+                   snapshot->data.state == tgcli::core::AuthState::Ready &&
+                   service_.status().ready_for_admission();
+        }));
+    }
+
     tgcli::test::ScriptedTdRuntime& runtime() {
         return *runtime_;
     }
@@ -171,6 +202,35 @@ class CoordinatorFixture {
     std::unique_ptr<StreamCoordinator> coordinator_;
     Dispatcher dispatcher_;
     std::size_t sent_count_ = 2;
+};
+
+struct ResolutionGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+
+    static void notify(void* context, testing::StreamCoordinatorProbePoint point) noexcept {
+        auto& gate = *static_cast<ResolutionGate*>(context);
+        if (point != testing::StreamCoordinatorProbePoint::AfterResolve) {
+            return;
+        }
+        std::unique_lock lock(gate.mutex);
+        gate.entered = true;
+        gate.cv.notify_all();
+        gate.cv.wait(lock, [&gate] { return gate.released; });
+    }
+
+    void wait() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return entered; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
 };
 
 std::shared_ptr<CallbackSink> sink(Outcome& outcome) {
@@ -296,4 +356,54 @@ TEST_CASE("listen resolves every chat before activation and fails atomically",
     REQUIRE(outcome.error);
     CHECK(outcome.error->at("code") == "NOT_FOUND");
     CHECK(outcome.error->at("details") == json{{"selector", "-1002"}});
+}
+
+TEST_CASE("stream setup rejects generation replacement after the final resolver response",
+          "[stream][coordinator][resolver][generation][fake-boundary]") {
+    for (const bool wait_for : {false, true}) {
+        CAPTURE(wait_for);
+        ResolutionGate gate;
+        CoordinatorFixture fixture({.context = &gate, .hook = &ResolutionGate::notify});
+        Outcome outcome;
+        RequestSession session(wait_for ? wait_request() : listen_request(), sink(outcome));
+        auto running = fixture.dispatch(session);
+        fixture.respond(tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdValue::from(user()));
+        fixture.respond(tgcli::core::TdFunctionKind::GetChat, tgcli::core::TdValue::from(chat()));
+        fixture.respond(tgcli::core::TdFunctionKind::GetUser, tgcli::core::TdValue::from(user()));
+        if (wait_for) {
+            fixture.respond(tgcli::core::TdFunctionKind::GetUser,
+                            tgcli::core::TdValue::from(user()));
+        }
+        gate.wait();
+        fixture.replace_generation();
+        gate.release();
+
+        REQUIRE(eventually([&] {
+            return running.wait_for(0ms) == std::future_status::ready ||
+                   testing::RequestSessionTestAccess::has_stream_subscription(session);
+        }));
+        if (testing::RequestSessionTestAccess::has_stream_subscription(session)) {
+            fixture.publish_boundary();
+            if (wait_for) {
+                fixture.respond(tgcli::core::TdFunctionKind::GetChatHistory,
+                                tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                                    .total_count = 2,
+                                    .messages = {message(200, "target"), message(100, "old")}}));
+            } else {
+                fixture.publish_message(200, "live");
+            }
+        }
+        REQUIRE(running.wait_for(2s) == std::future_status::ready);
+        running.get();
+        CHECK_FALSE(testing::RequestSessionTestAccess::has_stream_subscription(session));
+        CHECK(outcome.items.empty());
+        CHECK_FALSE(outcome.result);
+        REQUIRE(outcome.error);
+        CHECK(outcome.error->at("code") == "NOT_AUTHED");
+        CHECK(outcome.error->at("details").at("reason") == "authorization_lost");
+        CHECK(std::ranges::none_of(fixture.runtime().sent_functions(), [](const auto& sent) {
+            return sent.client_generation == 2 &&
+                   sent.function.kind() == tgcli::core::TdFunctionKind::GetChatHistory;
+        }));
+    }
 }

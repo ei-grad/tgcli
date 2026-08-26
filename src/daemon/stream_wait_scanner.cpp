@@ -16,13 +16,12 @@ namespace {
 
 using namespace std::chrono_literals;
 using MessageKey = std::pair<std::int64_t, std::int64_t>;
+inline constexpr std::size_t kHistoryKeyBytes = sizeof(std::int64_t) * 2;
+static_assert(kHistoryKeyBytes == 16);
 
-enum class OverlapSource : std::uint8_t { Live, History };
-
-struct OverlapRecord {
+struct LiveRecord {
     MessageSummary message;
     std::size_t bytes = 0;
-    OverlapSource source = OverlapSource::Live;
 };
 
 std::size_t message_wire_bytes(const MessageSummary& message) {
@@ -52,61 +51,73 @@ class StreamWaitMatchState::Impl {
             return false;
         }
         const MessageKey key{message->chat_id, message->id};
-        if (history_keys.contains(key) || records.contains(key)) {
+        if (history_keys.contains(key) || live_records.contains(key)) {
             return true;
         }
-        return add_record(key,
-                          OverlapRecord{.message = std::move(*message),
-                                        .bytes = item.wire_bytes,
-                                        .source = OverlapSource::Live},
-                          true, worker);
+        if (!add_charge(item.wire_bytes, true, worker)) {
+            return false;
+        }
+        live_records.emplace(key,
+                             LiveRecord{.message = std::move(*message), .bytes = item.wire_bytes});
+        live_order.push_back(key);
+        return true;
     }
 
-    [[nodiscard]] bool add_history(MessageSummary message, StreamSubscriptionWorker& worker) {
-        const MessageKey key{message.chat_id, message.id};
-        const auto bytes = message_wire_bytes(message);
+    [[nodiscard]] bool add_history_key(const MessageKey& key, StreamSubscriptionWorker& worker) {
+        if (history_keys.contains(key)) {
+            return true;
+        }
+        if (const auto found = live_records.find(key); found != live_records.end()) {
+            remove_charge(found->second.bytes);
+            live_records.erase(found);
+        }
+        if (!add_charge(kHistoryKeyBytes, false, worker)) {
+            return false;
+        }
         history_keys.insert(key);
-        if (const auto found = records.find(key); found != records.end()) {
-            if (bytes > kStreamQueueItemBytes ||
-                bytes > kStreamQueueBytes - queued_bytes + found->second.bytes) {
-                return overflow(worker, bytes);
-            }
-            queued_bytes = queued_bytes - found->second.bytes + bytes;
-            found->second = {
-                .message = std::move(message), .bytes = bytes, .source = OverlapSource::History};
-            return true;
-        }
-        return add_record(
-            key, {.message = std::move(message), .bytes = bytes, .source = OverlapSource::History},
-            false, worker);
+        return true;
     }
 
-    void finish(std::int64_t after) {
-        const MessageSummary* best_history = nullptr;
-        for (const auto& [key, record] : records) {
-            static_cast<void>(key);
-            if (record.source == OverlapSource::History && record.message.id > after &&
-                matcher.matches(record.message) &&
-                (best_history == nullptr || record.message.id < best_history->id)) {
-                best_history = &record.message;
+    [[nodiscard]] bool consider_history(MessageSummary message, StreamSubscriptionWorker& worker) {
+        if (!matcher.matches(message)) {
+            return true;
+        }
+        if (history_candidate && message.id >= history_candidate->id) {
+            return true;
+        }
+        if (history_candidate) {
+            remove_charge(history_candidate_bytes);
+            history_candidate.reset();
+            history_candidate_bytes = 0;
+        }
+        const auto bytes = message_wire_bytes(message);
+        if (!add_charge(bytes, true, worker)) {
+            return false;
+        }
+        history_candidate = std::move(message);
+        history_candidate_bytes = bytes;
+        return true;
+    }
+
+    void finish() {
+        if (history_candidate) {
+            initial = message_summary_json(*history_candidate);
+        } else {
+            for (const auto& key : live_order) {
+                const auto found = live_records.find(key);
+                if (found != live_records.end() && found->second.message.id > after &&
+                    matcher.matches(found->second.message)) {
+                    initial = message_summary_json(found->second.message);
+                    break;
+                }
             }
         }
-        if (best_history != nullptr) {
-            initial = message_summary_json(*best_history);
-            return;
-        }
-        for (const auto& key : live_order) {
-            const auto found = records.find(key);
-            if (found != records.end() && found->second.source == OverlapSource::Live &&
-                found->second.message.id > after && matcher.matches(found->second.message)) {
-                initial = message_summary_json(found->second.message);
-                return;
-            }
-        }
-        records.clear();
+        live_records.clear();
         live_order.clear();
-        queued_items = 0;
-        queued_bytes = 0;
+        history_candidate.reset();
+        history_candidate_bytes = 0;
+        queued_items = history_keys.size();
+        queued_bytes = history_keys.size() * kHistoryKeyBytes;
     }
 
     [[nodiscard]] std::optional<nlohmann::json> match_live(const StreamCopiedItem& item) const {
@@ -115,7 +126,7 @@ class StreamWaitMatchState::Impl {
             return std::nullopt;
         }
         const MessageKey key{message->chat_id, message->id};
-        if (history_keys.contains(key) || !matcher.matches(*message)) {
+        if (message->id <= after || history_keys.contains(key) || !matcher.matches(*message)) {
             return std::nullopt;
         }
         return message_summary_json(*message);
@@ -123,27 +134,30 @@ class StreamWaitMatchState::Impl {
 
     StreamMessageMatcher matcher;
     std::int64_t chat_id = 0;
-    std::map<MessageKey, OverlapRecord> records;
+    std::int64_t after = 0;
+    std::map<MessageKey, LiveRecord> live_records;
     std::vector<MessageKey> live_order;
     std::set<MessageKey> history_keys;
+    std::optional<MessageSummary> history_candidate;
+    std::size_t history_candidate_bytes = 0;
     std::optional<nlohmann::json> initial;
     std::uint64_t queued_items = 0;
     std::uint64_t queued_bytes = 0;
 
   private:
-    [[nodiscard]] bool add_record(const MessageKey& key, OverlapRecord record, bool live,
-                                  StreamSubscriptionWorker& worker) {
-        if (record.bytes > kStreamQueueItemBytes || queued_items >= kStreamQueueItems ||
-            record.bytes > kStreamQueueBytes - queued_bytes) {
-            return overflow(worker, record.bytes);
+    [[nodiscard]] bool add_charge(std::size_t bytes, bool item, StreamSubscriptionWorker& worker) {
+        if ((item && bytes > kStreamQueueItemBytes) || queued_items >= kStreamQueueItems ||
+            bytes > kStreamQueueBytes - queued_bytes) {
+            return overflow(worker, bytes);
         }
         queued_items += 1;
-        queued_bytes += record.bytes;
-        records.emplace(key, std::move(record));
-        if (live) {
-            live_order.push_back(key);
-        }
+        queued_bytes += bytes;
         return true;
+    }
+
+    void remove_charge(std::size_t bytes) noexcept {
+        --queued_items;
+        queued_bytes -= bytes;
     }
 
     [[nodiscard]] bool overflow(StreamSubscriptionWorker& worker,
@@ -180,6 +194,11 @@ class detail::StreamWaitScannerRun {
         bool past_after = false;
     };
 
+    struct StructuredPage {
+        std::vector<const core::TdMessageSummary*> messages;
+        bool boundary = false;
+    };
+
   public:
     StreamWaitScannerRun(RequestSession& session, StreamSubscriptionWorker& worker,
                          const StreamWaitScannerOptions& options)
@@ -187,6 +206,7 @@ class detail::StreamWaitScannerRun {
           state_(std::shared_ptr<StreamWaitMatchState>(new StreamWaitMatchState(options.matcher))),
           schedule_(now()) {
         state_->impl_->chat_id = options.chat_id;
+        state_->impl_->after = options.after;
     }
 
     StreamWaitScanResult run() {
@@ -209,7 +229,7 @@ class detail::StreamWaitScannerRun {
         if (!drain_live()) {
             return {};
         }
-        state_->impl_->finish(options_->after);
+        state_->impl_->finish();
         return {state_};
     }
 
@@ -244,7 +264,8 @@ class detail::StreamWaitScannerRun {
             return std::nullopt;
         }
         const auto* messages = value.get_if<core::TdMessages>();
-        if (messages == nullptr || messages->total_count < 0) {
+        if (messages == nullptr || messages->total_count < 0 ||
+            static_cast<std::size_t>(messages->total_count) < messages->messages.size()) {
             claim_internal(*worker_);
             return std::nullopt;
         }
@@ -337,26 +358,41 @@ class detail::StreamWaitScannerRun {
         }
     }
 
+    std::optional<StructuredPage> validate_page_structure(const core::TdMessages& page) {
+        const auto null_count = static_cast<std::size_t>(std::ranges::count_if(
+            page.messages, [](const auto& message) { return !message.has_value(); }));
+        if (null_count != 0 && null_count != page.messages.size()) {
+            claim_internal(*worker_);
+            return std::nullopt;
+        }
+        if (null_count == page.messages.size() && null_count != 0) {
+            return StructuredPage{.messages = {}, .boundary = true};
+        }
+        StructuredPage result;
+        result.messages.reserve(page.messages.size());
+        for (const auto& message : page.messages) {
+            if (!message) {
+                claim_internal(*worker_);
+                return std::nullopt;
+            }
+            result.messages.push_back(&*message);
+        }
+        result.boundary = result.messages.empty();
+        return result;
+    }
+
     std::optional<PageResult> consume_page(const core::TdMessages& page,
                                            std::int64_t from_message_id,
                                            std::optional<std::int64_t>& previous_raw,
                                            std::set<std::int64_t>& consumed_raw) {
-        std::vector<const core::TdMessageSummary*> messages;
-        messages.reserve(page.messages.size());
-        for (const auto& message : page.messages) {
-            if (!message) {
-                if (std::ranges::any_of(page.messages,
-                                        [](const auto& item) { return item.has_value(); })) {
-                    claim_pagination(*worker_);
-                    return std::nullopt;
-                }
-                return PageResult{.boundary = true};
-            }
-            messages.push_back(&*message);
+        auto structured = validate_page_structure(page);
+        if (!structured) {
+            return std::nullopt;
         }
-        if (messages.empty()) {
+        if (structured->boundary) {
             return PageResult{.boundary = true};
         }
+        auto& messages = structured->messages;
         if (from_message_id != 0 && messages.front()->id == from_message_id) {
             messages.erase(messages.begin());
         }
@@ -374,16 +410,21 @@ class detail::StreamWaitScannerRun {
             }
             previous_raw = raw->id;
             result.last_new_id = raw->id;
-            auto materialized = materialize_message_summary(*raw);
-            if (!materialized || !state_->impl_->add_history(std::move(*materialized), *worker_)) {
-                if (!worker_->terminal_snapshot()) {
-                    claim_internal(*worker_);
-                }
+            const MessageKey key{raw->chat_id, raw->id};
+            if (!state_->impl_->add_history_key(key, *worker_)) {
                 return std::nullopt;
             }
             if (raw->id <= options_->after) {
                 result.past_after = true;
                 break;
+            }
+            auto materialized = materialize_message_summary(*raw);
+            if (!materialized ||
+                !state_->impl_->consider_history(std::move(*materialized), *worker_)) {
+                if (!worker_->terminal_snapshot()) {
+                    claim_internal(*worker_);
+                }
+                return std::nullopt;
             }
         }
         return result;
