@@ -164,9 +164,10 @@ void ResponseSink::progress(nlohmann::json data) {
 
 DeliveryOutcome ResponseSink::result(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (terminal_ || !allow_direct_terminal()) {
+    if (terminal_ || !claim_public_terminal()) {
         return DeliveryOutcome::Suppressed;
     }
+    before_direct_terminal_bit();
     terminal_ = true;
     return emit_result(std::move(data));
 }
@@ -174,9 +175,10 @@ DeliveryOutcome ResponseSink::result(nlohmann::json data) {
 DeliveryOutcome ResponseSink::error(std::string code, std::string message, nlohmann::json details,
                                     int exit_code) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (terminal_ || !allow_direct_terminal()) {
+    if (terminal_ || !claim_public_terminal()) {
         return DeliveryOutcome::Suppressed;
     }
+    before_direct_terminal_bit();
     terminal_ = true;
     return emit_error(std::move(code), std::move(message), std::move(details), exit_code);
 }
@@ -192,7 +194,7 @@ bool ResponseSink::claim_protocol_fallback_terminal() {
 
 DeliveryOutcome ResponseSink::forward_stream_result(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (terminal_) {
+    if (terminal_ || !claim_stream_forward_terminal()) {
         return DeliveryOutcome::Suppressed;
     }
     terminal_ = true;
@@ -202,7 +204,7 @@ DeliveryOutcome ResponseSink::forward_stream_result(nlohmann::json data) {
 DeliveryOutcome ResponseSink::forward_stream_error(std::string code, std::string message,
                                                    nlohmann::json details, int exit_code) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (terminal_) {
+    if (terminal_ || !claim_stream_forward_terminal()) {
         return DeliveryOutcome::Suppressed;
     }
     terminal_ = true;

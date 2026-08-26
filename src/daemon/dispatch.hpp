@@ -91,7 +91,11 @@ class ResponseSink {
                                        nlohmann::json details, int exit_code) = 0;
     virtual ChallengeReply emit_challenge(nlohmann::json data) = 0;
     virtual void emit_abort() noexcept {}
-    [[nodiscard]] virtual bool allow_direct_terminal() const noexcept {
+    virtual void before_direct_terminal_bit() noexcept {}
+    [[nodiscard]] virtual bool claim_public_terminal() {
+        return true;
+    }
+    [[nodiscard]] virtual bool claim_stream_forward_terminal() {
         return true;
     }
 

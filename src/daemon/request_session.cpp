@@ -764,11 +764,19 @@ void RequestSession::notify_in_flight(InFlightState state, const InFlightHook& h
     }
 }
 
-bool RequestSession::begin_terminal_forwarding() {
+bool RequestSession::claim_public_terminal() {
     const std::lock_guard lock(activity_mutex_);
     if (activity_state_ != ActivityState::OpenRequest &&
-        activity_state_ != ActivityState::OpenLegacySubscription &&
-        activity_state_ != ActivityState::OpenStreamSubscription) {
+        activity_state_ != ActivityState::OpenLegacySubscription) {
+        return false;
+    }
+    activity_state_ = ActivityState::TerminalForwarding;
+    return true;
+}
+
+bool RequestSession::claim_stream_forward_terminal() {
+    const std::lock_guard lock(activity_mutex_);
+    if (activity_state_ != ActivityState::OpenStreamSubscription) {
         return false;
     }
     activity_state_ = ActivityState::TerminalForwarding;
@@ -884,9 +892,6 @@ void RequestSession::emit_progress(nlohmann::json data) {
 }
 
 DeliveryOutcome RequestSession::emit_result(nlohmann::json data) {
-    if (!begin_terminal_forwarding()) {
-        return DeliveryOutcome::Suppressed;
-    }
     try {
         const auto outcome = transport_->result(std::move(data));
         finish_terminal_forwarding();
@@ -900,9 +905,6 @@ DeliveryOutcome RequestSession::emit_result(nlohmann::json data) {
 
 DeliveryOutcome RequestSession::emit_error(std::string code, std::string message,
                                            nlohmann::json details, int exit_code) {
-    if (!begin_terminal_forwarding()) {
-        return DeliveryOutcome::Suppressed;
-    }
     try {
         const auto outcome =
             transport_->error(std::move(code), std::move(message), std::move(details), exit_code);
@@ -923,11 +925,8 @@ void RequestSession::emit_abort() noexcept {
     transport_->abort_transport();
 }
 
-bool RequestSession::allow_direct_terminal() const noexcept {
-    const std::lock_guard lock(activity_mutex_);
-    return activity_state_ != ActivityState::ProtocolTerminating &&
-           activity_state_ != ActivityState::OpenStreamSubscription &&
-           activity_state_ != ActivityState::TerminalForwarding;
+void RequestSession::before_direct_terminal_bit() noexcept {
+    notify_probe(testing::RequestSessionProbePoint::BeforePublicTerminalBit);
 }
 
 } // namespace tgcli::daemon

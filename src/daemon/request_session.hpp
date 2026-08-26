@@ -82,7 +82,8 @@ namespace testing {
 
 enum class RequestSessionProbePoint : std::uint8_t {
     BeforeProtocolTerminalRoute,
-    AfterProtocolTerminalRoute
+    AfterProtocolTerminalRoute,
+    BeforePublicTerminalBit
 };
 using RequestSessionProbeHook = void (*)(void*, RequestSessionProbePoint) noexcept;
 class RequestSessionTestAccess;
@@ -187,7 +188,6 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] bool exact_consumed(const proto::Answer& answer) const;
     void resolve_current(ChallengeOutcome outcome);
     static void notify_in_flight(InFlightState state, const InFlightHook& hook);
-    [[nodiscard]] bool begin_terminal_forwarding();
     [[nodiscard]] bool begin_protocol_terminal_forwarding();
     void finish_terminal_forwarding();
     void release_activity();
@@ -205,7 +205,9 @@ class RequestSession final : public ResponseSink {
                                int exit_code) override;
     ChallengeReply emit_challenge(nlohmann::json data) override;
     void emit_abort() noexcept override;
-    [[nodiscard]] bool allow_direct_terminal() const noexcept override;
+    void before_direct_terminal_bit() noexcept override;
+    [[nodiscard]] bool claim_public_terminal() override;
+    [[nodiscard]] bool claim_stream_forward_terminal() override;
 
     proto::Request request_;
     std::shared_ptr<ResponseSink> transport_owner_;

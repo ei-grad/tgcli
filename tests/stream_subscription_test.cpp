@@ -323,6 +323,69 @@ struct ProtocolActivationArbitrationGate {
     }
 };
 
+struct PublicFirstTerminalGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool activation_entered = false;
+    bool activation_released = false;
+    bool public_entered = false;
+    bool public_released = false;
+    bool protocol_routed = false;
+
+    static void activation_notify(void* raw_context,
+                                  testing::StreamActivationProbePoint point) noexcept {
+        if (point != testing::StreamActivationProbePoint::BeforeLifecycle) {
+            return;
+        }
+        auto& gate = *static_cast<PublicFirstTerminalGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        gate.activation_entered = true;
+        gate.cv.notify_all();
+        gate.cv.wait(lock, [&gate] { return gate.activation_released; });
+    }
+
+    static void protocol_notify(void* raw_context,
+                                testing::RequestSessionProbePoint point) noexcept {
+        auto& gate = *static_cast<PublicFirstTerminalGate*>(raw_context);
+        std::unique_lock lock(gate.mutex);
+        if (point == testing::RequestSessionProbePoint::BeforePublicTerminalBit) {
+            gate.public_entered = true;
+            gate.cv.notify_all();
+            gate.cv.wait(lock, [&gate] { return gate.public_released; });
+        } else if (point == testing::RequestSessionProbePoint::AfterProtocolTerminalRoute) {
+            gate.protocol_routed = true;
+            gate.cv.notify_all();
+        }
+    }
+
+    void wait_activation() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return activation_entered; });
+    }
+
+    void wait_public() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return public_entered; });
+    }
+
+    void wait_protocol() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return protocol_routed; });
+    }
+
+    void release_public() {
+        const std::lock_guard lock(mutex);
+        public_released = true;
+        cv.notify_all();
+    }
+
+    void release_activation() {
+        const std::lock_guard lock(mutex);
+        activation_released = true;
+        cv.notify_all();
+    }
+};
+
 struct DeadlineClaimGate {
     enum class Block { BeforeClaim, AfterClaim };
     using Clock = testing::StreamDeliveryHooks::Clock;
@@ -1382,6 +1445,87 @@ TEST_CASE("protocol fallback excludes concurrent public terminals",
             CHECK(captured.error->details == json{{"request_id", 1}, {"reason", "malformed"}});
             CHECK(captured.error->exit_code == kUsage);
             CHECK_FALSE(captured.result);
+            CHECK(tracker.snapshot().requests == 0);
+            CHECK(tracker.snapshot().subscriptions == 0);
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+    }
+}
+
+TEST_CASE("public terminal claim precedes protocol routing without a split decision",
+          "[stream][subscription][challenge][protocol-answer][activation][terminal][concurrency]") {
+    for (const bool public_result : {true, false}) {
+        DYNAMIC_SECTION("public_result=" << public_result) {
+            PublicFirstTerminalGate gate;
+            ActivityTracker tracker([] {});
+            REQUIRE(tracker.daemon_ready(std::nullopt));
+            auto activity = tracker.try_request();
+            REQUIRE(activity);
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            std::vector<StreamIngressReservation> occupied;
+            occupied.reserve(kStreamSubscriberSlots - 1);
+            for (std::size_t index = 1; index < kStreamSubscriberSlots; ++index) {
+                auto admission = hub->reserve(ingress_request());
+                REQUIRE(std::holds_alternative<StreamIngressReservation>(admission));
+                occupied.push_back(std::move(std::get<StreamIngressReservation>(admission)));
+            }
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {},
+                                   std::move(*activity), {}, RequestDeadline{});
+            testing::RequestSessionTestAccess::install_probe(
+                session, &gate, &PublicFirstTerminalGate::protocol_notify);
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), 1);
+            invalid.answer.erase("nonce");
+
+            StreamSubscriptionActivationResult activation_result =
+                StreamSubscriptionActivationFailure::PublicationFailed;
+            std::thread activation([&] {
+                activation_result = session.activate_stream_subscription(
+                    hub, ingress_request(), StreamActivityMode::TrackedDaemon,
+                    {.context = &gate,
+                     .hook = &PublicFirstTerminalGate::activation_notify,
+                     .subscription_hook = nullptr});
+            });
+            gate.wait_activation();
+
+            DeliveryOutcome public_outcome = DeliveryOutcome::Suppressed;
+            std::thread public_terminal([&] {
+                public_outcome = public_result ? session.result({{"source", "public"}})
+                                               : session.error("PUBLIC", "public terminal",
+                                                               {{"source", "public"}}, kGeneric);
+            });
+            gate.wait_public();
+            AnswerDisposition disposition = AnswerDisposition::RequestTerminated;
+            std::thread protocol([&] { disposition = session.receive_answer(std::move(invalid)); });
+            gate.wait_protocol();
+            gate.release_public();
+            public_terminal.join();
+            protocol.join();
+            gate.release_activation();
+            activation.join();
+            const auto challenge_status = challenge.get().status();
+
+            CHECK(public_outcome == DeliveryOutcome::Complete);
+            CHECK(session.has_terminal());
+            CHECK_FALSE(std::holds_alternative<StreamSubscriptionActivated>(activation_result));
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge_status == ChallengeStatus::ProtocolError);
+            if (public_result) {
+                REQUIRE(captured.result);
+                CHECK(*captured.result == json{{"source", "public"}});
+                CHECK_FALSE(captured.error);
+            } else {
+                CHECK_FALSE(captured.result);
+                REQUIRE(captured.error);
+                CHECK(captured.error->code == "PUBLIC");
+                CHECK(captured.error->message == "public terminal");
+                CHECK(captured.error->details == json{{"source", "public"}});
+                CHECK(captured.error->exit_code == kGeneric);
+            }
             CHECK(tracker.snapshot().requests == 0);
             CHECK(tracker.snapshot().subscriptions == 0);
             auto replacement = hub->reserve(ingress_request());
