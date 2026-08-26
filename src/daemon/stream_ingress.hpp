@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 
 namespace tgcli::daemon {
@@ -82,6 +83,7 @@ enum class StreamTerminalCause : std::uint32_t {
     ClaimingPlannedSuccess,
     ClaimingDeadline,
     ClaimingDisconnected,
+    ClaimingProtocolAnswerInvalid,
     CounterExhausted,
     ItemBytes,
     QueueItems,
@@ -92,8 +94,24 @@ enum class StreamTerminalCause : std::uint32_t {
     MetadataFailure,
     PlannedSuccess,
     Deadline,
-    Disconnected
+    Disconnected,
+    ProtocolAnswerInvalid
 };
+
+enum class StreamProtocolAnswerInvalidReason : std::uint32_t {
+    Malformed,
+    UnknownRequest,
+    FutureSequence,
+    GenerationMismatch,
+    NonceMismatch
+};
+
+static_assert(
+    std::is_same_v<std::underlying_type_t<StreamProtocolAnswerInvalidReason>, std::uint32_t>);
+static_assert(std::is_trivially_copyable_v<StreamProtocolAnswerInvalidReason>);
+
+std::string_view
+stream_protocol_answer_invalid_reason_name(StreamProtocolAnswerInvalidReason reason) noexcept;
 
 struct StreamTerminalPayload {
     StreamTerminalCause cause = StreamTerminalCause::Open;
@@ -104,8 +122,13 @@ struct StreamTerminalPayload {
     std::uint64_t queued_bytes = 0;
     std::uint64_t incoming_bytes = 0;
     std::int32_t auth_state = 0;
+    std::uint64_t protocol_request_id = 0;
+    StreamProtocolAnswerInvalidReason protocol_reason =
+        StreamProtocolAnswerInvalidReason::Malformed;
     StreamFailure metadata_failure;
 };
+
+static_assert(std::is_trivially_copyable_v<StreamTerminalPayload>);
 
 struct StreamIngressDescriptor {
     std::uint64_t byte_ticket = 0;

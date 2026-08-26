@@ -249,6 +249,9 @@ static_assert(std::atomic<tgcli::daemon::StreamIngressSlot*>::is_always_lock_fre
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<tgcli::daemon::StreamTerminalCause>::is_always_lock_free);
+static_assert(sizeof(tgcli::daemon::StreamProtocolAnswerInvalidReason) == sizeof(std::uint32_t));
+static_assert(std::is_trivially_copyable_v<tgcli::daemon::StreamProtocolAnswerInvalidReason>);
+static_assert(std::is_trivially_copyable_v<tgcli::daemon::StreamTerminalPayload>);
 
 TEST_CASE("stream ingress limits are exact", "[stream][ingress][limits]") {
     CHECK(tgcli::daemon::kStreamSubscriberSlots == 32);
@@ -257,6 +260,40 @@ TEST_CASE("stream ingress limits are exact", "[stream][ingress][limits]") {
     CHECK(tgcli::daemon::kStreamQueueItemBytes == 262'144);
     CHECK(tgcli::daemon::kStreamChatFilters == 64);
     CHECK(tgcli::daemon::kStreamWorkerPollInterval == 2ms);
+}
+
+TEST_CASE("protocol answer terminal payload is fixed per slot and never generation retained",
+          "[stream][ingress][terminal][protocol-answer]") {
+    StreamIngressHub hub;
+    hub.begin_generation(1001, 7);
+    auto reserved = reserve_slot(hub);
+    REQUIRE(
+        hub.claim(reserved, {.cause = StreamTerminalCause::ProtocolAnswerInvalid,
+                             .operation = StreamOperation::WaitFor,
+                             .protocol_request_id = std::numeric_limits<std::uint64_t>::max(),
+                             .protocol_reason = StreamProtocolAnswerInvalidReason::FutureSequence,
+                             .metadata_failure = {}}));
+    const auto terminal = hub.claim_terminal(reserved);
+    REQUIRE(terminal);
+    CHECK(terminal->cause == StreamTerminalCause::ProtocolAnswerInvalid);
+    CHECK(terminal->operation == StreamOperation::WaitFor);
+    CHECK(terminal->protocol_request_id == std::numeric_limits<std::uint64_t>::max());
+    CHECK(terminal->protocol_reason == StreamProtocolAnswerInvalidReason::FutureSequence);
+    CHECK(stream_protocol_answer_invalid_reason_name(terminal->protocol_reason) ==
+          "future_sequence");
+
+    StreamIngressHub generation_hub;
+    generation_hub.begin_generation(1001, 7);
+    generation_hub.claim_generation(
+        1001, 7,
+        {.cause = StreamTerminalCause::ProtocolAnswerInvalid,
+         .operation = StreamOperation::Listen,
+         .protocol_request_id = 7,
+         .protocol_reason = StreamProtocolAnswerInvalidReason::Malformed,
+         .metadata_failure = {}});
+    auto later = reserve_slot(generation_hub);
+    REQUIRE(generation_hub.commit_activation(later));
+    CHECK_FALSE(generation_hub.terminal_snapshot(later));
 }
 
 TEST_CASE("stream ingress activation freezes the narrow projection",

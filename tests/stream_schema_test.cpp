@@ -1,5 +1,6 @@
 #include "schema_matcher.hpp"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -659,6 +660,69 @@ TEST_CASE("stream error schema accepts every inherited and overflow branch",
     non_private_bot_candidate["error"]["details"]["candidates"][0]["is_bot"] = true;
     CHECK_THAT(non_private_bot_candidate,
                !tgcli::test::matches_json_schema("stream.error.schema.json"));
+}
+
+TEST_CASE("stream protocol answer errors have one strict uint64 reason branch",
+          "[schema][stream][error][protocol-answer]") {
+    constexpr std::array reasons{"malformed", "unknown_request", "future_sequence",
+                                 "generation_mismatch", "nonce_mismatch"};
+    for (const auto* reason : reasons) {
+        for (const auto request_id :
+             {std::uint64_t{0}, std::numeric_limits<std::uint64_t>::max()}) {
+            auto error = terminal_error("PROTOCOL_ANSWER_INVALID",
+                                        {{"request_id", request_id}, {"reason", reason}});
+            error["error"]["message"] = "invalid challenge answer";
+            CAPTURE(reason, request_id);
+            CHECK_THAT(error, tgcli::test::matches_json_schema("stream.error.schema.json"));
+        }
+    }
+
+    auto valid =
+        terminal_error("PROTOCOL_ANSWER_INVALID", {{"request_id", 1}, {"reason", "malformed"}});
+    valid["error"]["message"] = "invalid challenge answer";
+    const std::array invalid{
+        [] {
+            auto value = terminal_error("PROTOCOL_ANSWER_INVALID",
+                                        {{"request_id", -1}, {"reason", "malformed"}});
+            value["error"]["message"] = "invalid challenge answer";
+            return value;
+        }(),
+        [] {
+            auto value = terminal_error("PROTOCOL_ANSWER_INVALID",
+                                        {{"request_id", 1.5}, {"reason", "malformed"}});
+            value["error"]["message"] = "invalid challenge answer";
+            return value;
+        }(),
+        json::parse(
+            R"({"error":{"code":"PROTOCOL_ANSWER_INVALID","message":"invalid challenge answer","details":{"request_id":18446744073709551616,"reason":"malformed"}}})"),
+        [&valid] {
+            auto value = valid;
+            value["error"]["details"]["reason"] = "other";
+            return value;
+        }(),
+        [&valid] {
+            auto value = valid;
+            value["error"]["details"].erase("request_id");
+            return value;
+        }(),
+        [&valid] {
+            auto value = valid;
+            value["error"]["details"].erase("reason");
+            return value;
+        }(),
+        [&valid] {
+            auto value = valid;
+            value["error"]["details"]["unexpected"] = true;
+            return value;
+        }(),
+        [&valid] {
+            auto value = valid;
+            value["error"]["message"] = "protocol error";
+            return value;
+        }()};
+    for (const auto& error : invalid) {
+        CHECK_THAT(error, !tgcli::test::matches_json_schema("stream.error.schema.json"));
+    }
 }
 
 TEST_CASE("stream capacity schema covers every exact resource and phase",

@@ -3949,6 +3949,29 @@ operation, and a later admission receives the retained measurements with its req
 operation. First terminal cause still wins independently for a stream. This error is
 exit 1.
 
+An invalid challenge Answer received while a stream subscription is active claims the
+same per-slot first-cause terminal with this exact error:
+
+```json
+{
+  "error":{
+    "code":"PROTOCOL_ANSWER_INVALID",
+    "message":"invalid challenge answer",
+    "details":{"request_id":18446744073709551615,"reason":"future_sequence"}
+  }
+}
+```
+
+`request_id` is an unsigned 64-bit integer. `reason` is exactly `malformed`,
+`unknown_request`, `future_sequence`, `generation_mismatch`, or `nonce_mismatch`.
+This cause is fixed-width and subscription-local; it is never retained as a generation
+terminal for later admissions. It competes with timeout, authorization loss, shutdown,
+overflow, and planned success under the same first-cause rule. The stream worker alone
+serializes the winning error, with exit 2. Direct Result/Error calls cannot bypass the
+stream first cause or its single terminal writer. Without an active stream, the same
+invalid Answer retains its existing observable error, rejection disposition, protocol
+state transition, challenge resolution, and secret-payload wipe.
+
 Other exact branches are inherited rather than narrowed:
 
 - `USAGE` and existing selector ambiguity/not-found shapes;

@@ -51,6 +51,8 @@ StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
         return StreamTerminalCause::ClaimingDeadline;
     case StreamTerminalCause::Disconnected:
         return StreamTerminalCause::ClaimingDisconnected;
+    case StreamTerminalCause::ProtocolAnswerInvalid:
+        return StreamTerminalCause::ClaimingProtocolAnswerInvalid;
     case StreamTerminalCause::Open:
     case StreamTerminalCause::ClaimingCounterExhausted:
     case StreamTerminalCause::ClaimingItemBytes:
@@ -63,6 +65,7 @@ StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
     case StreamTerminalCause::ClaimingPlannedSuccess:
     case StreamTerminalCause::ClaimingDeadline:
     case StreamTerminalCause::ClaimingDisconnected:
+    case StreamTerminalCause::ClaimingProtocolAnswerInvalid:
         return StreamTerminalCause::Open;
     }
     return StreamTerminalCause::Open;
@@ -96,6 +99,23 @@ template <typename Value> void poison(Value& value) noexcept {
 }
 
 } // namespace
+
+std::string_view
+stream_protocol_answer_invalid_reason_name(StreamProtocolAnswerInvalidReason reason) noexcept {
+    switch (reason) {
+    case StreamProtocolAnswerInvalidReason::Malformed:
+        return "malformed";
+    case StreamProtocolAnswerInvalidReason::UnknownRequest:
+        return "unknown_request";
+    case StreamProtocolAnswerInvalidReason::FutureSequence:
+        return "future_sequence";
+    case StreamProtocolAnswerInvalidReason::GenerationMismatch:
+        return "generation_mismatch";
+    case StreamProtocolAnswerInvalidReason::NonceMismatch:
+        return "nonce_mismatch";
+    }
+    return "malformed";
+}
 
 struct StreamIngressSlot {
     using DescriptorStorage = std::array<StreamIngressDescriptor, kStreamQueueItems>;
@@ -174,6 +194,9 @@ struct RetainedGenerationTerminal {
 
     bool publish(std::int32_t expected_client_id, std::uint64_t expected_generation,
                  const StreamTerminalPayload& payload) noexcept {
+        if (payload.cause == StreamTerminalCause::ProtocolAnswerInvalid) {
+            return false;
+        }
         if (client_id.load(std::memory_order_acquire) != expected_client_id ||
             generation.load(std::memory_order_acquire) != expected_generation) {
             return false;

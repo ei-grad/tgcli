@@ -26,6 +26,7 @@
 #include <fstream>
 #include <functional>
 #include <latch>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <ranges>
@@ -1290,6 +1291,92 @@ TEST_CASE("stream transport exceptions abort only their exact socket without a f
             CHECK(std::get<proto::Result>(isolated).id == 46);
         }
     }
+}
+
+TEST_CASE("active stream routes a future answer to one exact socket error",
+          "[server][stream][challenge][protocol-answer][isolation]") {
+    auto hub = std::make_shared<daemon::StreamIngressHub>();
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool finished = false;
+    bool activated = false;
+    std::size_t builder_calls = 0;
+    daemon::ChallengeStatus challenge_status = daemon::ChallengeStatus::Answered;
+    daemon::StreamDeliveryStatus delivery = daemon::StreamDeliveryStatus::InvalidLease;
+    const TestDaemon daemon([&](daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "internal stream challenge",
+            {daemon::Tier::Read, [&](const proto::Request&, daemon::RequestSession& session) {
+                 hub->begin_generation(1001, 7);
+                 const daemon::StreamIngressRequest ingress{
+                     .client_id = 1001,
+                     .generation = 7,
+                     .operation = daemon::StreamOperation::Listen,
+                     .mode = daemon::StreamMode::Items,
+                     .type_mask = daemon::stream_event_mask(daemon::StreamEventClass::Message)};
+                 auto activation = session.activate_stream_subscription(
+                     hub, ingress, daemon::StreamActivityMode::TrackedDaemon);
+                 activated =
+                     std::holds_alternative<daemon::StreamSubscriptionActivated>(activation);
+                 if (activated) {
+                     auto outcome = session.challenge({proto::ChallengeKind::AuthenticationCode,
+                                                       4,
+                                                       9,
+                                                       "Code: ",
+                                                       {{"delivery_type", "sms"},
+                                                        {"expected_length", 5},
+                                                        {"resend_timeout", 30}}});
+                     challenge_status = outcome.status();
+                     delivery = daemon::run_stream_delivery(
+                         session,
+                         {.count = std::nullopt,
+                          .terminal_builder =
+                              [&](const daemon::StreamTerminalPayload& terminal,
+                                  std::uint64_t delivered) {
+                                  static_cast<void>(terminal);
+                                  static_cast<void>(delivered);
+                                  ++builder_calls;
+                                  return daemon::StreamTerminalResultFrame{{{"unexpected", true}}};
+                              },
+                          .hooks = {}});
+                 }
+                 const std::lock_guard lock(mutex);
+                 finished = true;
+                 cv.notify_all();
+             }});
+    });
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    constexpr std::uint64_t request_id = std::numeric_limits<std::uint64_t>::max();
+    send_frame(fd, make_request({"internal", "stream", "challenge"}, request_id));
+    const auto challenge = std::get<proto::Challenge>(read_frame(reader));
+    auto invalid = answer_for(request_id, challenge.challenge);
+    ++invalid.answer["sequence"].get_ref<json::number_unsigned_t&>();
+    send_frame(fd, proto::Frame{std::move(invalid)});
+
+    const auto terminal = read_frame(reader);
+    REQUIRE(std::holds_alternative<proto::Error>(terminal));
+    const auto& error = std::get<proto::Error>(terminal);
+    CHECK(error.id == request_id);
+    CHECK(error.code == "PROTOCOL_ANSWER_INVALID");
+    CHECK(error.message == "invalid challenge answer");
+    CHECK(error.details == json{{"request_id", request_id}, {"reason", "future_sequence"}});
+    CHECK(error.exit_code == kUsage);
+    {
+        std::unique_lock lock(mutex);
+        REQUIRE(cv.wait_for(lock, 5s, [&] { return finished; }));
+    }
+    CHECK(activated);
+    CHECK(challenge_status == daemon::ChallengeStatus::ProtocolError);
+    CHECK(delivery == daemon::StreamDeliveryStatus::TerminalComplete);
+    CHECK(builder_calls == 0);
+    ::close(fd);
+
+    const auto isolated = send_request(daemon, make_request({"version"}, 83));
+    REQUIRE(std::holds_alternative<proto::Result>(isolated));
+    CHECK(std::get<proto::Result>(isolated).id == 83);
 }
 
 TEST_CASE("same-v3 stale binary rejects every noncanonical request before observation",

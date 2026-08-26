@@ -164,7 +164,7 @@ void ResponseSink::progress(nlohmann::json data) {
 
 DeliveryOutcome ResponseSink::result(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (terminal_) {
+    if (terminal_ || !allow_direct_terminal()) {
         return DeliveryOutcome::Suppressed;
     }
     terminal_ = true;
@@ -173,6 +173,25 @@ DeliveryOutcome ResponseSink::result(nlohmann::json data) {
 
 DeliveryOutcome ResponseSink::error(std::string code, std::string message, nlohmann::json details,
                                     int exit_code) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (terminal_ || !allow_direct_terminal()) {
+        return DeliveryOutcome::Suppressed;
+    }
+    terminal_ = true;
+    return emit_error(std::move(code), std::move(message), std::move(details), exit_code);
+}
+
+DeliveryOutcome ResponseSink::forward_stream_result(nlohmann::json data) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (terminal_) {
+        return DeliveryOutcome::Suppressed;
+    }
+    terminal_ = true;
+    return emit_result(std::move(data));
+}
+
+DeliveryOutcome ResponseSink::forward_stream_error(std::string code, std::string message,
+                                                   nlohmann::json details, int exit_code) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_) {
         return DeliveryOutcome::Suppressed;

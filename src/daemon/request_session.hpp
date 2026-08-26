@@ -178,6 +178,7 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] bool begin_terminal_forwarding();
     void finish_terminal_forwarding();
     void release_activity();
+    void cancel_stream_transport() noexcept;
     [[nodiscard]] bool claim_stream_terminal(StreamTerminalPayload payload) noexcept;
 
     DeliveryOutcome emit_item(nlohmann::json data) override;
@@ -187,6 +188,7 @@ class RequestSession final : public ResponseSink {
                                int exit_code) override;
     ChallengeReply emit_challenge(nlohmann::json data) override;
     void emit_abort() noexcept override;
+    [[nodiscard]] bool allow_direct_terminal() const noexcept override;
 
     proto::Request request_;
     std::shared_ptr<ResponseSink> transport_owner_;
@@ -218,7 +220,7 @@ class RequestSession final : public ResponseSink {
     std::optional<Clock::time_point> shutdown_at_;
     bool shutdown_requested_ = false;
 
-    std::mutex activity_mutex_;
+    mutable std::mutex activity_mutex_;
     ActivityTracker::Token activity_;
     ActivityState activity_state_ = ActivityState::OpenRequest;
     std::optional<StreamSubscriptionLease> stream_subscription_;

@@ -18,6 +18,9 @@
 namespace tgcli::daemon {
 
 class RequestSession;
+namespace detail {
+class StreamDeliveryRunner;
+}
 
 // Safety tiers (DESIGN.md §6), statically declared per command so the gate
 // cannot be forgotten. Full gate semantics land with M3; until then the
@@ -88,10 +91,19 @@ class ResponseSink {
                                        nlohmann::json details, int exit_code) = 0;
     virtual ChallengeReply emit_challenge(nlohmann::json data) = 0;
     virtual void emit_abort() noexcept {}
+    [[nodiscard]] virtual bool allow_direct_terminal() const noexcept {
+        return true;
+    }
 
   private:
+    DeliveryOutcome forward_stream_result(nlohmann::json data);
+    DeliveryOutcome forward_stream_error(std::string code, std::string message,
+                                         nlohmann::json details, int exit_code);
+
     mutable std::mutex mutex_;
     bool terminal_ = false;
+
+    friend class detail::StreamDeliveryRunner;
 };
 
 // ResponseSink over plain callbacks; used by the in-process --no-daemon mode

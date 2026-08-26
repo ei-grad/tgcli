@@ -1,5 +1,6 @@
 #include "daemon/stream_subscription.hpp"
 
+#include "common/exit_codes.hpp"
 #include "daemon/request_session.hpp"
 
 #include <array>
@@ -326,6 +327,11 @@ class detail::StreamDeliveryRunner {
             sleep_until(schedule_.next(deadline_));
             const auto current = current_time();
             claim_scheduled_terminal(current);
+            if (options_->hooks && options_->hooks->probe != nullptr) {
+                options_->hooks->probe(
+                    options_->hooks->probe_context,
+                    testing::StreamDeliveryHooks::ProbePoint::AfterScheduledTerminalClaim);
+            }
             if (auto status = deliver_terminal()) {
                 return status.value();
             }
@@ -363,14 +369,26 @@ class detail::StreamDeliveryRunner {
     }
 
     [[nodiscard]] DeliveryOutcome deliver_terminal_frame(StreamTerminalFrame frame) {
+        auto& sink = static_cast<ResponseSink&>(*session_);
         if (auto* result = std::get_if<StreamTerminalResultFrame>(&frame)) {
-            return session_->result(std::move(result->data));
+            return sink.forward_stream_result(std::move(result->data));
         }
         if (auto* error = std::get_if<StreamTerminalErrorFrame>(&frame)) {
-            return session_->error(std::move(error->code), std::move(error->message),
-                                   std::move(error->details), error->exit_code);
+            return sink.forward_stream_error(std::move(error->code), std::move(error->message),
+                                             std::move(error->details), error->exit_code);
         }
         return DeliveryOutcome::Suppressed;
+    }
+
+    [[nodiscard]] static StreamTerminalFrame
+    protocol_answer_invalid_frame(const StreamTerminalPayload& terminal) {
+        return StreamTerminalErrorFrame{
+            .code = "PROTOCOL_ANSWER_INVALID",
+            .message = "invalid challenge answer",
+            .details = {{"request_id", terminal.protocol_request_id},
+                        {"reason", std::string(stream_protocol_answer_invalid_reason_name(
+                                       terminal.protocol_reason))}},
+            .exit_code = kUsage};
     }
 
     [[nodiscard]] StreamDeliveryStatus finish(StreamDeliveryStatus status) noexcept {
@@ -392,6 +410,7 @@ class detail::StreamDeliveryRunner {
         static_cast<void>(
             state_->claim({.cause = StreamTerminalCause::Disconnected, .metadata_failure = {}}));
         session_->abort_transport();
+        session_->cancel_stream_transport();
         session_->disconnect();
         return finish(status);
     }
@@ -406,7 +425,9 @@ class detail::StreamDeliveryRunner {
             return finish(StreamDeliveryStatus::Disconnected);
         }
         try {
-            const auto frame = options_->terminal_builder(*terminal, delivered_);
+            const auto frame = terminal->cause == StreamTerminalCause::ProtocolAnswerInvalid
+                                   ? protocol_answer_invalid_frame(*terminal)
+                                   : options_->terminal_builder(*terminal, delivered_);
             const auto outcome = deliver_terminal_frame(frame);
             if (outcome == DeliveryOutcome::Complete) {
                 return StreamDeliveryStatus::TerminalComplete;

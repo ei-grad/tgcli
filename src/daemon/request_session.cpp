@@ -335,7 +335,7 @@ ChallengeOutcome RequestSession::challenge(ChallengeSpec spec) {
 // claim must remain one mutex-serialized decision tree.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
-    std::string rejection;
+    std::optional<StreamProtocolAnswerInvalidReason> rejection;
     {
         const std::lock_guard lock(session_mutex_);
         if (state_ != State::Running) {
@@ -351,9 +351,9 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
         }
         std::string validation_error;
         if (!proto::validate_answer_payload(answer.answer, validation_error)) {
-            rejection = "malformed";
+            rejection = StreamProtocolAnswerInvalidReason::Malformed;
         } else if (answer.id != request_.id) {
-            rejection = "unknown_request";
+            rejection = StreamProtocolAnswerInvalidReason::UnknownRequest;
         } else if (exact_consumed(answer)) {
             return AnswerDisposition::DuplicateIgnored;
         } else if (!current_) {
@@ -361,14 +361,14 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
             if (sequence < next_sequence_) {
                 return AnswerDisposition::StaleIgnored;
             }
-            rejection = "future_sequence";
+            rejection = StreamProtocolAnswerInvalidReason::FutureSequence;
         } else {
             const auto sequence = answer.answer["sequence"].get<std::uint64_t>();
             if (sequence < current_->identity.sequence) {
                 return AnswerDisposition::StaleIgnored;
             }
             if (sequence > current_->identity.sequence) {
-                rejection = "future_sequence";
+                rejection = StreamProtocolAnswerInvalidReason::FutureSequence;
             } else if (compare_identity(current_->identity.client_generation,
                                         current_->identity.auth_sequence,
                                         answer) == IdentityOrder::Stale) {
@@ -376,13 +376,13 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
             } else if (compare_identity(current_->identity.client_generation,
                                         current_->identity.auth_sequence,
                                         answer) == IdentityOrder::Future) {
-                rejection = "generation_mismatch";
+                rejection = StreamProtocolAnswerInvalidReason::GenerationMismatch;
             } else if (answer.answer["nonce"] != current_->identity.nonce) {
-                rejection = "nonce_mismatch";
+                rejection = StreamProtocolAnswerInvalidReason::NonceMismatch;
             } else if (answer.answer.contains("value") &&
                        proto::challenge_kind_expects_boolean(current_->kind) !=
                            answer.answer["value"].is_boolean()) {
-                rejection = "malformed";
+                rejection = StreamProtocolAnswerInvalidReason::Malformed;
             } else {
                 remember_consumed(current_->identity);
                 if (answer.answer.contains("cancelled")) {
@@ -410,8 +410,19 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
         }
         state_ = State::ProtocolError;
         secure::wipe(answer.answer, answer.wipe_observer(), "answer_payload");
-        static_cast<void>(error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
-                                {{"request_id", answer.id}, {"reason", rejection}}, kUsage));
+        const auto reason = rejection.value_or(StreamProtocolAnswerInvalidReason::Malformed);
+        const bool routed =
+            claim_stream_terminal({.cause = StreamTerminalCause::ProtocolAnswerInvalid,
+                                   .protocol_request_id = answer.id,
+                                   .protocol_reason = reason,
+                                   .metadata_failure = {}});
+        if (!routed) {
+            static_cast<void>(
+                error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
+                      {{"request_id", answer.id},
+                       {"reason", std::string(stream_protocol_answer_invalid_reason_name(reason))}},
+                      kUsage));
+        }
         if (current_) {
             resolve_current({ChallengeStatus::ProtocolError, std::monostate{}});
         }
@@ -784,17 +795,20 @@ void RequestSession::release_activity() {
     }
 }
 
+void RequestSession::cancel_stream_transport() noexcept {
+    cancellation_source_.request_stop();
+}
+
 bool RequestSession::claim_stream_terminal(StreamTerminalPayload payload) noexcept {
     std::shared_ptr<detail::StreamSubscriptionState> subscription;
     {
         const std::lock_guard lock(activity_mutex_);
-        if (activity_state_ != ActivityState::OpenStreamSubscription &&
-            activity_state_ != ActivityState::TerminalForwarding) {
+        if ((activity_state_ != ActivityState::OpenStreamSubscription &&
+             activity_state_ != ActivityState::TerminalForwarding) ||
+            !stream_subscription_ || !stream_subscription_->state_) {
             return false;
         }
-        if (stream_subscription_) {
-            subscription = stream_subscription_->state_;
-        }
+        subscription = stream_subscription_->state_;
     }
     if (!subscription) {
         return false;
@@ -849,6 +863,12 @@ ChallengeReply RequestSession::emit_challenge(nlohmann::json data) {
 
 void RequestSession::emit_abort() noexcept {
     transport_->abort_transport();
+}
+
+bool RequestSession::allow_direct_terminal() const noexcept {
+    const std::lock_guard lock(activity_mutex_);
+    return activity_state_ != ActivityState::OpenStreamSubscription &&
+           activity_state_ != ActivityState::TerminalForwarding;
 }
 
 } // namespace tgcli::daemon

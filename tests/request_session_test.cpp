@@ -777,6 +777,7 @@ TEST_CASE("request session rejects identity violations without waking with a val
         std::function<void(proto::Answer&)> apply;
     };
     const std::vector<Mutation> mutations{
+        {"malformed", [](proto::Answer& value) { value.answer.erase("nonce"); }},
         {"unknown_request", [](proto::Answer& value) { value.id = 99; }},
         {"nonce_mismatch",
          [](proto::Answer& value) { value.answer["nonce"] = std::string(32, 'f'); }},
@@ -795,7 +796,18 @@ TEST_CASE("request session rejects identity violations without waking with a val
             auto future = std::async(std::launch::async,
                                      [&session] { return session.challenge(challenge()); });
             const auto emitted = wait_challenge(captured);
-            auto invalid = answer(emitted);
+            constexpr std::string_view sentinel = "1:token";
+            // NOLINTNEXTLINE(misc-const-correctness): mutated by the wipe observer callback.
+            std::vector<std::pair<std::string, bool>> wipe_observations;
+            auto observer = [&wipe_observations, sentinel](std::string_view stage,
+                                                           const char* bytes, std::size_t size) {
+                if (size == sentinel.size()) {
+                    wipe_observations.emplace_back(
+                        stage, std::all_of(bytes, bytes + static_cast<std::ptrdiff_t>(size),
+                                           [](char value) { return value == '\0'; }));
+                }
+            };
+            auto invalid = answer(emitted, std::string(sentinel), 1, observer);
             mutation.apply(invalid);
             const auto invalid_id = invalid.id;
             // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
@@ -809,8 +821,16 @@ TEST_CASE("request session rejects identity violations without waking with a val
             // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
             // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
+            CHECK(captured.error->message == "invalid challenge answer");
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
             CHECK(captured.error->details ==
                   json{{"request_id", invalid_id}, {"reason", mutation.reason}});
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
+            CHECK(captured.error->exit_code == kUsage);
+            // NOLINTNEXTLINE(misc-const-correctness): Catch2 creates a mutable handler.
+            CHECK(std::ranges::any_of(wipe_observations, [](const auto& observation) {
+                return observation.first == "answer_payload" && observation.second;
+            }));
         }
     }
 }

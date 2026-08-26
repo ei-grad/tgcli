@@ -104,8 +104,13 @@ struct StreamActivationProbe {
 struct StreamDeliveryHooks {
     using Clock = std::chrono::steady_clock;
 
+    enum class ProbePoint : std::uint8_t { AfterScheduledTerminalClaim };
+    using ProbeHook = void (*)(void*, ProbePoint) noexcept;
+
     std::function<Clock::time_point()> now;
     std::function<void(Clock::time_point)> sleep_until;
+    void* probe_context = nullptr;
+    ProbeHook probe = nullptr;
 };
 
 } // namespace testing

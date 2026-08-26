@@ -6,6 +6,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -20,11 +22,12 @@ using nlohmann::json;
 
 namespace {
 
-proto::Request request() {
+proto::Request request(std::uint64_t request_id = 1) {
     proto::Request value("main");
-    value.id = 1;
+    value.id = request_id;
     value.command = {"internal-stream-test"};
     value.context.cwd = "/";
+    value.context.tty = true;
     return value;
 }
 
@@ -49,7 +52,9 @@ StreamTerminalFrame terminal_frame(const StreamTerminalPayload& terminal,
 
 struct Captured {
     std::mutex mutex;
+    std::condition_variable cv;
     std::vector<json> items;
+    std::optional<json> challenge;
     std::optional<json> result;
     std::optional<proto::Error> error;
 };
@@ -69,7 +74,37 @@ std::shared_ptr<CallbackSink> capturing_sink(Captured& captured) {
             const std::lock_guard lock(captured.mutex);
             captured.error =
                 proto::Error{1, std::move(code), std::move(message), std::move(details), exit_code};
+            captured.cv.notify_all();
+        },
+        [&captured](const json& challenge) -> std::optional<json> {
+            const std::lock_guard lock(captured.mutex);
+            captured.challenge = challenge;
+            captured.cv.notify_all();
+            return std::nullopt;
         });
+}
+
+ChallengeSpec stream_challenge() {
+    return {proto::ChallengeKind::AuthenticationCode,
+            4,
+            9,
+            "Code: ",
+            {{"delivery_type", "sms"}, {"expected_length", 5}, {"resend_timeout", 30}}};
+}
+
+json wait_challenge(Captured& captured) {
+    std::unique_lock lock(captured.mutex);
+    REQUIRE(captured.cv.wait_for(lock, 2s, [&captured] { return captured.challenge.has_value(); }));
+    return *captured.challenge;
+}
+
+proto::Answer stream_answer(const json& challenge, std::uint64_t request_id) {
+    return {request_id,
+            {{"nonce", challenge["nonce"]},
+             {"sequence", challenge["sequence"]},
+             {"client_generation", challenge["client_generation"]},
+             {"auth_sequence", challenge["auth_sequence"]},
+             {"value", "12345"}}};
 }
 
 struct ManualPoll {
@@ -161,6 +196,121 @@ struct ActivationGate {
         gate.entered = true;
         gate.cv.notify_all();
         gate.cv.wait(lock, [&gate] { return gate.released; });
+    }
+
+    void wait() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return entered; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+
+struct ProtocolTerminalRaceGate {
+    enum class Block { None, ReceiveOwner, ProtocolWaiting, ProtocolOwned };
+
+    Block block = Block::None;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+
+    static void ingress_notify(void* raw_context,
+                               tgcli::daemon::detail::StreamIngressProbePoint point,
+                               std::size_t index) noexcept {
+        auto& gate = *static_cast<ProtocolTerminalRaceGate*>(raw_context);
+        if (gate.block != Block::ReceiveOwner ||
+            point != tgcli::daemon::detail::StreamIngressProbePoint::OwnerLoad || index != 0) {
+            return;
+        }
+        gate.pause();
+    }
+
+    static void subscription_notify(void* raw_context,
+                                    testing::StreamSubscriptionProbePoint point) noexcept {
+        auto& gate = *static_cast<ProtocolTerminalRaceGate*>(raw_context);
+        const bool matches = (gate.block == Block::ProtocolWaiting &&
+                              point == testing::StreamSubscriptionProbePoint::ClaimWaiting) ||
+                             (gate.block == Block::ProtocolOwned &&
+                              point == testing::StreamSubscriptionProbePoint::ClaimOwned);
+        if (matches) {
+            gate.pause();
+        }
+    }
+
+    void pause() noexcept {
+        std::unique_lock lock(mutex);
+        if (entered) {
+            return;
+        }
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [this] { return released; });
+    }
+
+    void wait() {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return entered; });
+    }
+
+    void release() {
+        const std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+
+struct DeadlineClaimGate {
+    enum class Block { BeforeClaim, AfterClaim };
+    using Clock = testing::StreamDeliveryHooks::Clock;
+
+    Block block;
+    Clock::time_point current;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+
+    DeadlineClaimGate(Block block_value, Clock::time_point current_value)
+        : block(block_value), current(current_value) {}
+
+    std::shared_ptr<testing::StreamDeliveryHooks> hooks() {
+        auto result = std::make_shared<testing::StreamDeliveryHooks>();
+        result->now = [this] {
+            const std::lock_guard lock(mutex);
+            return current;
+        };
+        result->sleep_until = [this](Clock::time_point wake) {
+            {
+                const std::lock_guard lock(mutex);
+                current = wake;
+            }
+            if (block == Block::BeforeClaim) {
+                pause();
+            }
+        };
+        result->probe_context = this;
+        result->probe = &DeadlineClaimGate::notify;
+        return result;
+    }
+
+    static void notify(void* raw_context, testing::StreamDeliveryHooks::ProbePoint point) noexcept {
+        auto& gate = *static_cast<DeadlineClaimGate*>(raw_context);
+        if (gate.block == Block::AfterClaim &&
+            point == testing::StreamDeliveryHooks::ProbePoint::AfterScheduledTerminalClaim) {
+            gate.pause();
+        }
+    }
+
+    void pause() noexcept {
+        std::unique_lock lock(mutex);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [this] { return released; });
     }
 
     void wait() {
@@ -488,6 +638,17 @@ class BlockingSink final : public ResponseSink {
         return items_.load(std::memory_order_acquire);
     }
 
+    json wait_challenge() {
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [this] { return challenge_.has_value(); });
+        return *challenge_;
+    }
+
+    [[nodiscard]] std::optional<proto::Error> terminal_error() const {
+        const std::lock_guard lock(mutex_);
+        return error_;
+    }
+
   private:
     DeliveryOutcome emit_item(json data) override {
         static_cast<void>(data);
@@ -519,10 +680,11 @@ class BlockingSink final : public ResponseSink {
 
     DeliveryOutcome emit_error(std::string code, std::string message, json details,
                                int exit_code) override {
-        static_cast<void>(code);
-        static_cast<void>(message);
-        static_cast<void>(details);
-        static_cast<void>(exit_code);
+        {
+            const std::lock_guard lock(mutex_);
+            error_ =
+                proto::Error{1, std::move(code), std::move(message), std::move(details), exit_code};
+        }
         terminals_.fetch_add(1, std::memory_order_release);
         if (throw_terminal_) {
             throw std::runtime_error("terminal delivery failed");
@@ -531,7 +693,9 @@ class BlockingSink final : public ResponseSink {
     }
 
     ChallengeReply emit_challenge(json data) override {
-        static_cast<void>(data);
+        const std::lock_guard lock(mutex_);
+        challenge_ = std::move(data);
+        cv_.notify_all();
         return {};
     }
 
@@ -543,6 +707,8 @@ class BlockingSink final : public ResponseSink {
     std::condition_variable cv_;
     bool item_entered_ = false;
     bool item_released_ = false;
+    std::optional<json> challenge_;
+    std::optional<proto::Error> error_;
     std::atomic<std::size_t> terminals_ = 0;
     std::atomic<std::size_t> items_ = 0;
 };
@@ -623,10 +789,12 @@ TEST_CASE("deadline equality wins at the first scheduled poll",
     auto hub = std::make_shared<StreamIngressHub>();
     hub->begin_generation(1001, 7);
     Captured captured;
-    const RequestDeadline deadline{StreamPollSchedule::Clock::time_point{} + 2ms};
+    const auto deadline_at = StreamPollSchedule::Clock::now() + 1h;
+    const RequestDeadline deadline{deadline_at};
     RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {}, deadline);
     activate(session, hub);
     ManualPoll poll;
+    poll.current = deadline_at - 2ms;
 
     CHECK(run_stream_delivery(session, {.count = std::nullopt,
                                         .terminal_builder = &terminal_frame,
@@ -944,37 +1112,401 @@ TEST_CASE("stream activation promotes tracked activity and requires an explicit 
     static_cast<void>(wrongly_untracked.result(json::object()));
 }
 
-TEST_CASE("promoted result and error terminals release subscription activity exactly once",
-          "[stream][subscription][activity][terminal]") {
-    for (const bool emit_error : {false, true}) {
-        DYNAMIC_SECTION("terminal=" << (emit_error ? "error" : "result")) {
-            ActivityTracker tracker([] {});
-            REQUIRE(tracker.daemon_ready(std::nullopt));
-            auto activity = tracker.try_request();
-            REQUIRE(activity);
+TEST_CASE("direct active terminals are suppressed until runner authorization",
+          "[stream][subscription][activity][terminal][authorization]") {
+    ActivityTracker tracker([] {});
+    REQUIRE(tracker.daemon_ready(std::nullopt));
+    auto activity = tracker.try_request();
+    REQUIRE(activity);
+    auto hub = std::make_shared<StreamIngressHub>();
+    hub->begin_generation(1001, 7);
+    Captured captured;
+    RequestSession session(request(), capturing_sink(captured), 17, {}, std::move(*activity), {},
+                           RequestDeadline{});
+    REQUIRE_FALSE(session.deadline().expires_at);
+    auto activation = session.activate_stream_subscription(hub, ingress_request(),
+                                                           StreamActivityMode::TrackedDaemon);
+    REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+    CHECK(tracker.snapshot().requests == 0);
+    CHECK(tracker.snapshot().subscriptions == 1);
+
+    CHECK(session.result({{"direct", true}}) == DeliveryOutcome::Suppressed);
+    CHECK(session.error("DIRECT", "direct", json::object(), kGeneric) ==
+          DeliveryOutcome::Suppressed);
+    CHECK_FALSE(session.has_terminal());
+    CHECK_FALSE(captured.result);
+    CHECK_FALSE(captured.error);
+    CHECK(tracker.snapshot().subscriptions == 1);
+
+    hub->claim_control_generation(1001, 7,
+                                  {.cause = StreamTerminalCause::Shutdown, .metadata_failure = {}});
+    ManualPoll poll;
+    CHECK(run_stream_delivery(session, {.count = std::nullopt,
+                                        .terminal_builder = &terminal_frame,
+                                        .hooks = poll.hooks()}) ==
+          StreamDeliveryStatus::TerminalComplete);
+    REQUIRE(captured.error);
+    CHECK(captured.error->code == "TERMINAL");
+    CHECK(session.result({{"late", true}}) == DeliveryOutcome::Suppressed);
+    CHECK(tracker.snapshot().requests == 0);
+    CHECK(tracker.snapshot().subscriptions == 0);
+    auto replacement = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+}
+
+TEST_CASE("active malformed and future answers retain exact fixed protocol terminals",
+          "[stream][subscription][challenge][protocol-answer]") {
+    struct Case {
+        std::uint64_t request_id;
+        const char* reason;
+        void (*mutate)(proto::Answer&);
+    };
+    const std::array cases{
+        Case{0, "malformed", [](proto::Answer& answer) { answer.answer.erase("nonce"); }},
+        Case{std::numeric_limits<std::uint64_t>::max(), "future_sequence",
+             [](proto::Answer& answer) {
+                 ++answer.answer["sequence"].get_ref<json::number_unsigned_t&>();
+             }},
+    };
+    for (const auto& test : cases) {
+        DYNAMIC_SECTION(test.reason << " request_id=" << test.request_id) {
             auto hub = std::make_shared<StreamIngressHub>();
             hub->begin_generation(1001, 7);
             Captured captured;
-            RequestSession session(request(), capturing_sink(captured), 17, {},
-                                   std::move(*activity), {}, RequestDeadline{});
-            REQUIRE_FALSE(session.deadline().expires_at);
-            auto activation = session.activate_stream_subscription(
-                hub, ingress_request(), StreamActivityMode::TrackedDaemon);
-            REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
-            CHECK(tracker.snapshot().requests == 0);
-            CHECK(tracker.snapshot().subscriptions == 1);
+            RequestSession session(request(test.request_id), capturing_sink(captured), 17, {}, {},
+                                   {}, RequestDeadline{});
+            activate(session, hub);
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), test.request_id);
+            test.mutate(invalid);
+            const auto disposition = session.receive_answer(std::move(invalid));
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge.get().status() == ChallengeStatus::ProtocolError);
+            CHECK_FALSE(captured.error);
+            CHECK_FALSE(captured.result);
 
-            const auto outcome =
-                emit_error ? session.error("TERMINAL", "stream terminal", json::object(), kGeneric)
-                           : session.result({{"complete", true}});
-            CHECK(outcome == DeliveryOutcome::Complete);
-            CHECK(session.result({{"late", true}}) == DeliveryOutcome::Suppressed);
-            CHECK(tracker.snapshot().requests == 0);
-            CHECK(tracker.snapshot().subscriptions == 0);
+            ManualPoll poll;
+            std::size_t builder_calls = 0;
+            const auto status = run_stream_delivery(
+                session, {.count = std::nullopt,
+                          .terminal_builder =
+                              [&builder_calls](const StreamTerminalPayload& terminal,
+                                               std::uint64_t delivered) {
+                                  static_cast<void>(terminal);
+                                  static_cast<void>(delivered);
+                                  ++builder_calls;
+                                  return StreamTerminalResultFrame{{{"unexpected", true}}};
+                              },
+                          .hooks = poll.hooks()});
+            CHECK(status == StreamDeliveryStatus::TerminalComplete);
+            CHECK(builder_calls == 0);
+            REQUIRE(captured.error);
+            CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+            CHECK(captured.error->message == "invalid challenge answer");
+            CHECK(captured.error->details ==
+                  json{{"request_id", test.request_id}, {"reason", test.reason}});
+            CHECK(captured.error->exit_code == kUsage);
+            CHECK_FALSE(captured.result);
+            CHECK(session.error("LATE", "late", json::object(), kGeneric) ==
+                  DeliveryOutcome::Suppressed);
             auto replacement = hub->reserve(ingress_request());
             CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
         }
     }
+}
+
+TEST_CASE("an incumbent auth or deadline terminal suppresses the protocol answer error",
+          "[stream][subscription][challenge][protocol-answer][terminal]") {
+    for (const auto cause :
+         {StreamTerminalCause::AuthorizationLost, StreamTerminalCause::Deadline}) {
+        DYNAMIC_SECTION("cause=" << static_cast<int>(cause)) {
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {},
+                                   RequestDeadline{});
+            activate(session, hub);
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), 1);
+            invalid.answer.erase("nonce");
+            if (cause == StreamTerminalCause::AuthorizationLost) {
+                hub->claim_generation(1001, 7,
+                                      {.cause = cause, .auth_state = 12, .metadata_failure = {}});
+            } else {
+                hub->claim_control_generation(1001, 7, {.cause = cause, .metadata_failure = {}});
+            }
+            const auto disposition = session.receive_answer(std::move(invalid));
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge.get().status() == ChallengeStatus::ProtocolError);
+            CHECK_FALSE(captured.error);
+
+            ManualPoll poll;
+            std::optional<StreamTerminalPayload> observed;
+            CHECK(run_stream_delivery(
+                      session, {.count = std::nullopt,
+                                .terminal_builder =
+                                    [&observed](const StreamTerminalPayload& terminal,
+                                                std::uint64_t delivered) {
+                                        static_cast<void>(delivered);
+                                        observed = terminal;
+                                        return terminal_frame(terminal, 0);
+                                    },
+                                .hooks = poll.hooks()}) == StreamDeliveryStatus::TerminalComplete);
+            REQUIRE(observed);
+            CHECK(observed->cause == cause);
+            REQUIRE(captured.error);
+            CHECK(captured.error->code == "TERMINAL");
+            CHECK(captured.error->details["cause"] == static_cast<int>(cause));
+        }
+    }
+}
+
+TEST_CASE("protocol and authorization loss preserve both forced first-cause orders",
+          "[stream][subscription][challenge][protocol-answer][auth][concurrency]") {
+    for (const bool protocol_wins : {true, false}) {
+        DYNAMIC_SECTION("protocol_wins=" << protocol_wins) {
+            ProtocolTerminalRaceGate gate;
+            auto hub = std::make_shared<StreamIngressHub>(tgcli::daemon::detail::StreamIngressProbe{
+                .context = &gate,
+                .hook = &ProtocolTerminalRaceGate::ingress_notify,
+                .forced_lock_free_failure = {}});
+            hub->begin_generation(1001, 7);
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {},
+                                   RequestDeadline{});
+            auto activation = session.activate_stream_subscription(
+                hub, ingress_request(), StreamActivityMode::UntrackedNoDaemon,
+                {.context = &gate,
+                 .hook = nullptr,
+                 .subscription_hook = &ProtocolTerminalRaceGate::subscription_notify});
+            REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), 1);
+            invalid.answer.erase("nonce");
+            AnswerDisposition disposition = AnswerDisposition::RequestTerminated;
+
+            if (protocol_wins) {
+                gate.block = ProtocolTerminalRaceGate::Block::ReceiveOwner;
+                std::thread auth([&] {
+                    hub->claim_generation(1001, 7,
+                                          {.cause = StreamTerminalCause::AuthorizationLost,
+                                           .auth_state = 12,
+                                           .metadata_failure = {}});
+                });
+                gate.wait();
+                disposition = session.receive_answer(std::move(invalid));
+                gate.release();
+                auth.join();
+            } else {
+                gate.block = ProtocolTerminalRaceGate::Block::ProtocolOwned;
+                std::thread protocol(
+                    [&] { disposition = session.receive_answer(std::move(invalid)); });
+                gate.wait();
+                hub->claim_generation(1001, 7,
+                                      {.cause = StreamTerminalCause::AuthorizationLost,
+                                       .auth_state = 12,
+                                       .metadata_failure = {}});
+                gate.release();
+                protocol.join();
+            }
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge.get().status() == ChallengeStatus::ProtocolError);
+            CHECK_FALSE(captured.error);
+
+            ManualPoll poll;
+            std::optional<StreamTerminalPayload> observed;
+            std::size_t builder_calls = 0;
+            const auto status = run_stream_delivery(
+                session, {.count = std::nullopt,
+                          .terminal_builder =
+                              [&observed, &builder_calls](const StreamTerminalPayload& terminal,
+                                                          std::uint64_t delivered) {
+                                  static_cast<void>(delivered);
+                                  observed = terminal;
+                                  ++builder_calls;
+                                  return terminal_frame(terminal, 0);
+                              },
+                          .hooks = poll.hooks()});
+            CHECK(status == StreamDeliveryStatus::TerminalComplete);
+            if (protocol_wins) {
+                CHECK(builder_calls == 0);
+                REQUIRE(captured.error);
+                CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+            } else {
+                CHECK(builder_calls == 1);
+                REQUIRE(observed);
+                CHECK(observed->cause == StreamTerminalCause::AuthorizationLost);
+                CHECK(observed->auth_state == 12);
+                REQUIRE(captured.error);
+                CHECK(captured.error->code == "TERMINAL");
+            }
+        }
+    }
+}
+
+TEST_CASE("protocol and deadline preserve both forced first-cause orders without sleep",
+          "[stream][subscription][challenge][protocol-answer][deadline][concurrency]") {
+    for (const bool protocol_wins : {true, false}) {
+        DYNAMIC_SECTION("protocol_wins=" << protocol_wins) {
+            ProtocolTerminalRaceGate protocol_gate;
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            Captured captured;
+            const RequestDeadline deadline{RequestSession::Clock::now() + 1h};
+            RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {}, deadline);
+            auto activation = session.activate_stream_subscription(
+                hub, ingress_request(), StreamActivityMode::UntrackedNoDaemon,
+                {.context = &protocol_gate,
+                 .hook = nullptr,
+                 .subscription_hook = &ProtocolTerminalRaceGate::subscription_notify});
+            REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), 1);
+            invalid.answer.erase("nonce");
+            DeadlineClaimGate deadline_gate{protocol_wins ? DeadlineClaimGate::Block::BeforeClaim
+                                                          : DeadlineClaimGate::Block::AfterClaim,
+                                            *deadline.expires_at};
+            std::optional<StreamTerminalPayload> observed;
+            std::size_t builder_calls = 0;
+            StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+            std::thread worker([&] {
+                status = run_stream_delivery(
+                    session, {.count = std::nullopt,
+                              .terminal_builder =
+                                  [&observed, &builder_calls](const StreamTerminalPayload& terminal,
+                                                              std::uint64_t delivered) {
+                                      static_cast<void>(delivered);
+                                      observed = terminal;
+                                      ++builder_calls;
+                                      return terminal_frame(terminal, 0);
+                                  },
+                              .hooks = deadline_gate.hooks()});
+            });
+            AnswerDisposition disposition = AnswerDisposition::RequestTerminated;
+            if (protocol_wins) {
+                deadline_gate.wait();
+                disposition = session.receive_answer(std::move(invalid));
+                deadline_gate.release();
+            } else {
+                deadline_gate.wait();
+                protocol_gate.block = ProtocolTerminalRaceGate::Block::ProtocolWaiting;
+                std::thread protocol(
+                    [&] { disposition = session.receive_answer(std::move(invalid)); });
+                protocol_gate.wait();
+                protocol_gate.release();
+                protocol.join();
+                deadline_gate.release();
+            }
+            worker.join();
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge.get().status() == ChallengeStatus::ProtocolError);
+            CHECK(status == StreamDeliveryStatus::TerminalComplete);
+            REQUIRE(captured.error);
+            if (protocol_wins) {
+                CHECK(builder_calls == 0);
+                CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+            } else {
+                CHECK(builder_calls == 1);
+                REQUIRE(observed);
+                CHECK(observed->cause == StreamTerminalCause::Deadline);
+                CHECK(captured.error->code == "TERMINAL");
+            }
+        }
+    }
+}
+
+TEST_CASE("a begun complete item counts before its protocol terminal and planned loses",
+          "[stream][subscription][challenge][protocol-answer][delivery][count]") {
+    auto hub = std::make_shared<StreamIngressHub>();
+    hub->begin_generation(1001, 7);
+    auto sink = std::make_shared<BlockingSink>();
+    RequestSession session(request(), sink, 17, {}, {}, {}, RequestDeadline{});
+    activate(session, hub);
+    REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+    hub->publish(message_item("{}\n"));
+    auto challenge = std::async(std::launch::async,
+                                [&session] { return session.challenge(stream_challenge()); });
+    auto invalid = stream_answer(sink->wait_challenge(), 1);
+    invalid.answer.erase("nonce");
+    ManualPoll poll;
+    std::size_t builder_calls = 0;
+    StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+    std::thread worker([&] {
+        status = run_stream_delivery(
+            session,
+            {.count = 1,
+             .terminal_builder =
+                 [&builder_calls](const StreamTerminalPayload& terminal, std::uint64_t delivered) {
+                     static_cast<void>(terminal);
+                     static_cast<void>(delivered);
+                     ++builder_calls;
+                     return StreamTerminalResultFrame{{{"unexpected", true}}};
+                 },
+             .hooks = poll.hooks()});
+    });
+    sink->wait_item();
+    const auto disposition = session.receive_answer(std::move(invalid));
+    CHECK(disposition == AnswerDisposition::Rejected);
+    CHECK(challenge.get().status() == ChallengeStatus::ProtocolError);
+    sink->release_item();
+    worker.join();
+
+    CHECK(status == StreamDeliveryStatus::TerminalComplete);
+    CHECK(sink->items() == 1);
+    CHECK(sink->terminals() == 1);
+    CHECK(builder_calls == 0);
+    const auto error = sink->terminal_error();
+    REQUIRE(error);
+    CHECK(error->code == "PROTOCOL_ANSWER_INVALID");
+    CHECK(error->details == json{{"request_id", 1}, {"reason", "malformed"}});
+}
+
+TEST_CASE("a failed begun item disconnects without forwarding its protocol terminal",
+          "[stream][subscription][challenge][protocol-answer][delivery][disconnect]") {
+    auto hub = std::make_shared<StreamIngressHub>();
+    hub->begin_generation(1001, 7);
+    auto sink = std::make_shared<BlockingSink>(DeliveryOutcome::Disconnected);
+    RequestSession session(request(), sink, 17, {}, {}, {}, RequestDeadline{});
+    activate(session, hub);
+    REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+    hub->publish(message_item("{}\n"));
+    auto challenge = std::async(std::launch::async,
+                                [&session] { return session.challenge(stream_challenge()); });
+    auto invalid = stream_answer(sink->wait_challenge(), 1);
+    invalid.answer.erase("nonce");
+    ManualPoll poll;
+    std::size_t builder_calls = 0;
+    StreamDeliveryStatus status = StreamDeliveryStatus::InvalidLease;
+    std::thread worker([&] {
+        status = run_stream_delivery(
+            session,
+            {.count = 1,
+             .terminal_builder =
+                 [&builder_calls](const StreamTerminalPayload& terminal, std::uint64_t delivered) {
+                     static_cast<void>(terminal);
+                     static_cast<void>(delivered);
+                     ++builder_calls;
+                     return StreamTerminalResultFrame{{{"unexpected", true}}};
+                 },
+             .hooks = poll.hooks()});
+    });
+    sink->wait_item();
+    const auto disposition = session.receive_answer(std::move(invalid));
+    CHECK(disposition == AnswerDisposition::Rejected);
+    CHECK(challenge.get().status() == ChallengeStatus::ProtocolError);
+    sink->release_item();
+    worker.join();
+
+    CHECK(status == StreamDeliveryStatus::Disconnected);
+    CHECK(sink->terminals() == 0);
+    CHECK(builder_calls == 0);
+    CHECK(session.cancellation_requested());
+    auto replacement = hub->reserve(ingress_request());
+    CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
 }
 
 TEST_CASE("stream activation closes Open loss capacity and post-promotion terminal",
