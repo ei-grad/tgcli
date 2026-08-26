@@ -209,6 +209,8 @@ class CoordinatorFixture {
 };
 
 struct ResolutionGate {
+    testing::StreamCoordinatorProbePoint target =
+        testing::StreamCoordinatorProbePoint::AfterResolve;
     std::mutex mutex;
     std::condition_variable cv;
     bool entered = false;
@@ -216,7 +218,7 @@ struct ResolutionGate {
 
     static void notify(void* context, testing::StreamCoordinatorProbePoint point) noexcept {
         auto& gate = *static_cast<ResolutionGate*>(context);
-        if (point != testing::StreamCoordinatorProbePoint::AfterResolve) {
+        if (point != gate.target) {
             return;
         }
         std::unique_lock lock(gate.mutex);
@@ -364,52 +366,59 @@ TEST_CASE("listen resolves every chat before activation and fails atomically",
 
 TEST_CASE("stream setup rejects generation replacement after the final resolver response",
           "[stream][coordinator][resolver][generation][fake-boundary]") {
-    for (const bool wait_for : {false, true}) {
-        CAPTURE(wait_for);
-        ResolutionGate gate;
-        CoordinatorFixture fixture({.context = &gate, .hook = &ResolutionGate::notify});
-        Outcome outcome;
-        RequestSession session(wait_for ? wait_request() : listen_request(), sink(outcome));
-        auto running = fixture.dispatch(session);
-        fixture.respond(tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdValue::from(user()));
-        fixture.respond(tgcli::core::TdFunctionKind::GetChat, tgcli::core::TdValue::from(chat()));
-        fixture.respond(tgcli::core::TdFunctionKind::GetUser, tgcli::core::TdValue::from(user()));
-        if (wait_for) {
+    for (const auto point : {testing::StreamCoordinatorProbePoint::AfterResolve,
+                             testing::StreamCoordinatorProbePoint::AfterAuthorizationLookup}) {
+        for (const bool wait_for : {false, true}) {
+            CAPTURE(point, wait_for);
+            ResolutionGate gate;
+            gate.target = point;
+            CoordinatorFixture fixture({.context = &gate, .hook = &ResolutionGate::notify});
+            Outcome outcome;
+            RequestSession session(wait_for ? wait_request() : listen_request(), sink(outcome));
+            auto running = fixture.dispatch(session);
+            fixture.respond(tgcli::core::TdFunctionKind::GetMe, tgcli::core::TdValue::from(user()));
+            fixture.respond(tgcli::core::TdFunctionKind::GetChat,
+                            tgcli::core::TdValue::from(chat()));
             fixture.respond(tgcli::core::TdFunctionKind::GetUser,
                             tgcli::core::TdValue::from(user()));
-        }
-        gate.wait();
-        fixture.replace_generation();
-        gate.release();
-
-        REQUIRE(eventually([&] {
-            return running.wait_for(0ms) == std::future_status::ready ||
-                   testing::RequestSessionTestAccess::has_stream_subscription(session);
-        }));
-        if (testing::RequestSessionTestAccess::has_stream_subscription(session)) {
-            fixture.publish_boundary();
             if (wait_for) {
-                fixture.respond(tgcli::core::TdFunctionKind::GetChatHistory,
-                                tgcli::core::TdValue::from(tgcli::core::TdMessages{
-                                    .total_count = 2,
-                                    .messages = {message(200, "target"), message(100, "old")}}));
-            } else {
-                fixture.publish_message(200, "live");
+                fixture.respond(tgcli::core::TdFunctionKind::GetUser,
+                                tgcli::core::TdValue::from(user()));
             }
+            gate.wait();
+            fixture.replace_generation();
+            gate.release();
+
+            REQUIRE(eventually([&] {
+                return running.wait_for(0ms) == std::future_status::ready ||
+                       testing::RequestSessionTestAccess::has_stream_subscription(session);
+            }));
+            if (testing::RequestSessionTestAccess::has_stream_subscription(session)) {
+                fixture.publish_boundary();
+                if (wait_for) {
+                    fixture.respond(
+                        tgcli::core::TdFunctionKind::GetChatHistory,
+                        tgcli::core::TdValue::from(tgcli::core::TdMessages{
+                            .total_count = 2,
+                            .messages = {message(200, "target"), message(100, "old")}}));
+                } else {
+                    fixture.publish_message(200, "live");
+                }
+            }
+            REQUIRE(running.wait_for(2s) == std::future_status::ready);
+            running.get();
+            CHECK_FALSE(testing::RequestSessionTestAccess::has_stream_subscription(session));
+            CHECK(outcome.items.empty());
+            CHECK_FALSE(outcome.result);
+            REQUIRE(outcome.error);
+            CHECK(outcome.error->at("code") == "NOT_AUTHED");
+            CHECK(outcome.error->at("details") ==
+                  json{{"account", "main"}, {"state", "closed"}, {"reason", "authorization_lost"}});
+            CHECK(fixture.ingress_state_count(StreamIngressState::Armed) == 0);
+            CHECK(fixture.ingress_state_count(StreamIngressState::Published) == 0);
+            CHECK(std::ranges::none_of(fixture.runtime().sent_functions(), [](const auto& sent) {
+                return sent.function.kind() == tgcli::core::TdFunctionKind::GetChatHistory;
+            }));
         }
-        REQUIRE(running.wait_for(2s) == std::future_status::ready);
-        running.get();
-        CHECK_FALSE(testing::RequestSessionTestAccess::has_stream_subscription(session));
-        CHECK(outcome.items.empty());
-        CHECK_FALSE(outcome.result);
-        REQUIRE(outcome.error);
-        CHECK(outcome.error->at("code") == "NOT_AUTHED");
-        CHECK(outcome.error->at("details") ==
-              json{{"account", "main"}, {"state", "closed"}, {"reason", "authorization_lost"}});
-        CHECK(fixture.ingress_state_count(StreamIngressState::Armed) == 0);
-        CHECK(fixture.ingress_state_count(StreamIngressState::Published) == 0);
-        CHECK(std::ranges::none_of(fixture.runtime().sent_functions(), [](const auto& sent) {
-            return sent.function.kind() == tgcli::core::TdFunctionKind::GetChatHistory;
-        }));
     }
 }

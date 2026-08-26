@@ -16,7 +16,7 @@ class StreamService;
 
 namespace testing {
 
-enum class StreamCoordinatorProbePoint : std::uint8_t { AfterResolve };
+enum class StreamCoordinatorProbePoint : std::uint8_t { AfterResolve, AfterAuthorizationLookup };
 using StreamCoordinatorProbeHook = void (*)(void*, StreamCoordinatorProbePoint) noexcept;
 
 struct StreamCoordinatorProbe {
