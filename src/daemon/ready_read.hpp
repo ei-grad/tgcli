@@ -42,6 +42,8 @@ class ReadyReadSession {
     ReadyReadSession& operator=(ReadyReadSession&&) = delete;
 
     [[nodiscard]] std::shared_ptr<const core::AuthStateSnapshot> current() const;
+    [[nodiscard]] std::shared_ptr<const core::AuthStateSnapshot>
+    first_non_ready_after(const core::AuthStateSnapshot& snapshot) const;
     ReadyReadResult read(const ReadyReadStart& start,
                          std::shared_ptr<const core::AuthStateSnapshot>& snapshot);
 

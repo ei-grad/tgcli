@@ -169,6 +169,8 @@ class ResolverConsumer {
     UserResolverOutcome resolve_user(std::string selector,
                                      const std::optional<core::TdChat>& domain = std::nullopt);
     [[nodiscard]] std::shared_ptr<const core::AuthStateSnapshot> bound_authorization() const;
+    [[nodiscard]] std::shared_ptr<const core::AuthStateSnapshot>
+    first_non_ready_after_bound() const;
     [[nodiscard]] std::optional<core::TdChat> cached_saved_messages_chat() const;
     ReadyReadResult read_target(const ReadyReadStart& start);
 

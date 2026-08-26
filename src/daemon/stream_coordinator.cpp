@@ -67,19 +67,28 @@ bool emit_resolver_stop(const UserResolverOutcome& outcome, RequestSession& sess
     return std::holds_alternative<ResolverStop>(outcome);
 }
 
+void notify(const testing::StreamCoordinatorProbe& probe,
+            testing::StreamCoordinatorProbePoint point) noexcept {
+    if (probe.hook != nullptr) {
+        probe.hook(probe.context, point);
+    }
+}
+
 struct ResolvedStreamSetup {
     ResolverPrincipal principal;
     std::vector<std::int64_t> chat_ids;
     std::optional<core::TdChat> user_domain;
     std::optional<std::int64_t> sender_user_id;
     std::shared_ptr<const core::AuthStateSnapshot> authorization;
+    std::shared_ptr<const core::AuthStateSnapshot> authorization_lost;
 };
 
 std::optional<ResolvedStreamSetup> resolve_setup(core::TdClient& client, std::string_view account,
                                                  RequestSession& session, StreamOperation operation,
                                                  const std::vector<std::string>& chat_selectors,
                                                  const std::optional<std::string>& from_selector,
-                                                 bool reject_bot_after) {
+                                                 bool reject_bot_after,
+                                                 const testing::StreamCoordinatorProbe& probe) {
     ResolverConsumer resolver(client, account, session);
     const auto principal = resolver.bind_principal(
         operation == StreamOperation::Listen ? M2Operation::Listen : M2Operation::WaitFor);
@@ -90,7 +99,8 @@ std::optional<ResolvedStreamSetup> resolve_setup(core::TdClient& client, std::st
                                .chat_ids = {},
                                .user_domain = std::nullopt,
                                .sender_user_id = std::nullopt,
-                               .authorization = nullptr};
+                               .authorization = nullptr,
+                               .authorization_lost = nullptr};
     if (reject_bot_after && result.principal.is_bot) {
         session.error("BOT_UNSUPPORTED", "wait-for --after requires a user account",
                       {{"operation", "wait_for"}}, kUsage);
@@ -125,6 +135,8 @@ std::optional<ResolvedStreamSetup> resolve_setup(core::TdClient& client, std::st
                             session, M2Operation::Resolve);
         return std::nullopt;
     }
+    notify(probe, testing::StreamCoordinatorProbePoint::AfterResolve);
+    result.authorization_lost = resolver.first_non_ready_after_bound();
     return result;
 }
 
@@ -137,14 +149,22 @@ bool same_ready_authorization(const std::shared_ptr<const core::AuthStateSnapsho
 }
 
 void emit_setup_authorization_lost(RequestSession& session, std::string_view command,
-                                   std::string_view account,
-                                   const std::shared_ptr<const core::AuthStateSnapshot>& current) {
-    session.error(
-        "NOT_AUTHED", std::string(command) + " requires an authenticated account",
-        {{"account", account},
-         {"state", current ? json(core::auth_state_name(current->data.state)) : json("unknown")},
-         {"reason", "authorization_lost"}},
-        kNotAuthed);
+                                   std::string_view account, core::AuthState state) {
+    session.error("NOT_AUTHED", std::string(command) + " requires an authenticated account",
+                  {{"account", account},
+                   {"state", core::auth_state_name(state)},
+                   {"reason", "authorization_lost"}},
+                  kNotAuthed);
+}
+
+core::AuthState
+setup_lost_state(const ResolvedStreamSetup& setup,
+                 const std::shared_ptr<const core::AuthStateSnapshot>& current) noexcept {
+    if (setup.authorization_lost) {
+        return setup.authorization_lost->data.state;
+    }
+    return current && current->data.state != core::AuthState::Ready ? current->data.state
+                                                                    : core::AuthState::Unknown;
 }
 
 StreamIngressRequest ingress_request(const core::AuthStateSnapshot& snapshot,
@@ -204,13 +224,6 @@ std::optional<nlohmann::json> live_match(const StreamCopiedItem& item,
                : std::nullopt;
 }
 
-void notify(const testing::StreamCoordinatorProbe& probe,
-            testing::StreamCoordinatorProbePoint point) noexcept {
-    if (probe.hook != nullptr) {
-        probe.hook(probe.context, point);
-    }
-}
-
 } // namespace
 
 void StreamCoordinator::listen(const proto::Request& request, RequestSession& session) {
@@ -225,14 +238,14 @@ void StreamCoordinator::listen(const proto::Request& request, RequestSession& se
     }
     auto arguments = std::get<ListenArguments>(std::move(parsed));
     auto setup = resolve_setup(client_.get(), account_, session, StreamOperation::Listen,
-                               arguments.chat_selectors, std::nullopt, false);
+                               arguments.chat_selectors, std::nullopt, false, probe_);
     if (!setup) {
         return;
     }
-    notify(probe_, testing::StreamCoordinatorProbePoint::AfterResolve);
     const auto current = client_.get().auth_state();
     if (!same_ready_authorization(setup->authorization, current)) {
-        emit_setup_authorization_lost(session, "listen", account_, current);
+        emit_setup_authorization_lost(session, "listen", account_,
+                                      setup_lost_state(*setup, current));
         return;
     }
     const auto ingress = ingress_request(*setup->authorization, StreamOperation::Listen,
@@ -270,14 +283,14 @@ void StreamCoordinator::wait_for(const proto::Request& request, RequestSession& 
         chats.push_back(*arguments.chat_selector);
     }
     auto setup = resolve_setup(client_.get(), account_, session, StreamOperation::WaitFor, chats,
-                               arguments.from_selector, arguments.after.has_value());
+                               arguments.from_selector, arguments.after.has_value(), probe_);
     if (!setup) {
         return;
     }
-    notify(probe_, testing::StreamCoordinatorProbePoint::AfterResolve);
     const auto current = client_.get().auth_state();
     if (!same_ready_authorization(setup->authorization, current)) {
-        emit_setup_authorization_lost(session, "wait-for", account_, current);
+        emit_setup_authorization_lost(session, "wait-for", account_,
+                                      setup_lost_state(*setup, current));
         return;
     }
     const auto ingress =

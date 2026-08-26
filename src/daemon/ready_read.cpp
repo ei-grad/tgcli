@@ -87,6 +87,18 @@ class ReadyReadSession::Impl {
         return latest_;
     }
 
+    [[nodiscard]] std::shared_ptr<const core::AuthStateSnapshot>
+    first_non_ready_after(const core::AuthStateSnapshot& snapshot) const {
+        const std::lock_guard lock(mutex_);
+        const auto found = std::ranges::find_if(pending_, [&](const auto& candidate) {
+            return candidate && candidate->client_id == snapshot.client_id &&
+                   candidate->client_generation == snapshot.client_generation &&
+                   candidate->auth_sequence > snapshot.auth_sequence &&
+                   candidate->data.state != core::AuthState::Ready;
+        });
+        return found == pending_.end() ? nullptr : *found;
+    }
+
     ReadyReadResult read(const ReadyReadStart& start,
                          std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
         for (;;) {
@@ -315,6 +327,11 @@ ReadyReadSession::~ReadyReadSession() = default;
 
 std::shared_ptr<const core::AuthStateSnapshot> ReadyReadSession::current() const {
     return impl_->current();
+}
+
+std::shared_ptr<const core::AuthStateSnapshot>
+ReadyReadSession::first_non_ready_after(const core::AuthStateSnapshot& snapshot) const {
+    return impl_->first_non_ready_after(snapshot);
 }
 
 ReadyReadResult ReadyReadSession::read(const ReadyReadStart& start,

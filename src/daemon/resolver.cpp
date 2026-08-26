@@ -425,6 +425,10 @@ class ResolverRun {
         return snapshot_;
     }
 
+    [[nodiscard]] std::shared_ptr<const AuthStateSnapshot> first_non_ready_after_bound() const {
+        return snapshot_ ? reads_.first_non_ready_after(*snapshot_) : nullptr;
+    }
+
   private:
     ResolverPrincipalOutcome take_error_or_stop() {
         if (error_) {
@@ -1388,6 +1392,10 @@ class ResolverConsumer::Impl {
         return run_.bound_authorization();
     }
 
+    [[nodiscard]] std::shared_ptr<const AuthStateSnapshot> first_non_ready_after_bound() const {
+        return run_.first_non_ready_after_bound();
+    }
+
     ReadyReadResult read_target(const ReadyReadStart& start) {
         return run_.read_target(start);
     }
@@ -1467,6 +1475,11 @@ UserResolverOutcome ResolverConsumer::resolve_user(std::string selector,
 
 std::shared_ptr<const core::AuthStateSnapshot> ResolverConsumer::bound_authorization() const {
     return impl_->bound_authorization();
+}
+
+std::shared_ptr<const core::AuthStateSnapshot>
+ResolverConsumer::first_non_ready_after_bound() const {
+    return impl_->first_non_ready_after_bound();
 }
 
 std::optional<core::TdChat> ResolverConsumer::cached_saved_messages_chat() const {

@@ -194,6 +194,10 @@ class CoordinatorFixture {
         return *runtime_;
     }
 
+    std::size_t ingress_state_count(StreamIngressState state) noexcept {
+        return StreamIngressTestAccess::state_count(service_.ingress_hub(), state);
+    }
+
   private:
     StreamService service_;
     tgcli::test::ScriptedTdRuntime* runtime_ = nullptr;
@@ -400,10 +404,12 @@ TEST_CASE("stream setup rejects generation replacement after the final resolver 
         CHECK_FALSE(outcome.result);
         REQUIRE(outcome.error);
         CHECK(outcome.error->at("code") == "NOT_AUTHED");
-        CHECK(outcome.error->at("details").at("reason") == "authorization_lost");
+        CHECK(outcome.error->at("details") ==
+              json{{"account", "main"}, {"state", "closed"}, {"reason", "authorization_lost"}});
+        CHECK(fixture.ingress_state_count(StreamIngressState::Armed) == 0);
+        CHECK(fixture.ingress_state_count(StreamIngressState::Published) == 0);
         CHECK(std::ranges::none_of(fixture.runtime().sent_functions(), [](const auto& sent) {
-            return sent.client_generation == 2 &&
-                   sent.function.kind() == tgcli::core::TdFunctionKind::GetChatHistory;
+            return sent.function.kind() == tgcli::core::TdFunctionKind::GetChatHistory;
         }));
     }
 }
