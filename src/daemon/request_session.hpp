@@ -188,11 +188,14 @@ class RequestSession final : public ResponseSink {
     void resolve_current(ChallengeOutcome outcome);
     static void notify_in_flight(InFlightState state, const InFlightHook& hook);
     [[nodiscard]] bool begin_terminal_forwarding();
+    [[nodiscard]] bool begin_protocol_terminal_forwarding();
     void finish_terminal_forwarding();
     void release_activity();
     void cancel_stream_transport() noexcept;
     [[nodiscard]] bool claim_stream_terminal(StreamTerminalPayload payload) noexcept;
     [[nodiscard]] bool route_protocol_terminal(StreamTerminalPayload payload) noexcept;
+    DeliveryOutcome forward_protocol_fallback_error(std::string code, std::string message,
+                                                    nlohmann::json details, int exit_code);
     void notify_probe(testing::RequestSessionProbePoint point) const noexcept;
 
     DeliveryOutcome emit_item(nlohmann::json data) override;

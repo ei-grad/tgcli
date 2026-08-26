@@ -96,6 +96,7 @@ class ResponseSink {
     }
 
   private:
+    [[nodiscard]] bool claim_protocol_fallback_terminal();
     DeliveryOutcome forward_stream_result(nlohmann::json data);
     DeliveryOutcome forward_stream_error(std::string code, std::string message,
                                          nlohmann::json details, int exit_code);
@@ -103,6 +104,7 @@ class ResponseSink {
     mutable std::mutex mutex_;
     bool terminal_ = false;
 
+    friend class RequestSession;
     friend class detail::StreamDeliveryRunner;
 };
 

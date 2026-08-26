@@ -181,6 +181,15 @@ DeliveryOutcome ResponseSink::error(std::string code, std::string message, nlohm
     return emit_error(std::move(code), std::move(message), std::move(details), exit_code);
 }
 
+bool ResponseSink::claim_protocol_fallback_terminal() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (terminal_) {
+        return false;
+    }
+    terminal_ = true;
+    return true;
+}
+
 DeliveryOutcome ResponseSink::forward_stream_result(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_) {

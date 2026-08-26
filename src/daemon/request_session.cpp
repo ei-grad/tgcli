@@ -419,11 +419,11 @@ AnswerDisposition RequestSession::receive_answer(proto::Answer answer) {
                                      .metadata_failure = {}});
         notify_probe(testing::RequestSessionProbePoint::AfterProtocolTerminalRoute);
         if (!routed) {
-            static_cast<void>(
-                error("PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
-                      {{"request_id", answer.id},
-                       {"reason", std::string(stream_protocol_answer_invalid_reason_name(reason))}},
-                      kUsage));
+            static_cast<void>(forward_protocol_fallback_error(
+                "PROTOCOL_ANSWER_INVALID", "invalid challenge answer",
+                {{"request_id", answer.id},
+                 {"reason", std::string(stream_protocol_answer_invalid_reason_name(reason))}},
+                kUsage));
         }
         if (current_) {
             resolve_current({ChallengeStatus::ProtocolError, std::monostate{}});
@@ -767,9 +767,17 @@ void RequestSession::notify_in_flight(InFlightState state, const InFlightHook& h
 bool RequestSession::begin_terminal_forwarding() {
     const std::lock_guard lock(activity_mutex_);
     if (activity_state_ != ActivityState::OpenRequest &&
-        activity_state_ != ActivityState::ProtocolTerminating &&
         activity_state_ != ActivityState::OpenLegacySubscription &&
         activity_state_ != ActivityState::OpenStreamSubscription) {
+        return false;
+    }
+    activity_state_ = ActivityState::TerminalForwarding;
+    return true;
+}
+
+bool RequestSession::begin_protocol_terminal_forwarding() {
+    const std::lock_guard lock(activity_mutex_);
+    if (activity_state_ != ActivityState::ProtocolTerminating) {
         return false;
     }
     activity_state_ = ActivityState::TerminalForwarding;
@@ -839,6 +847,28 @@ bool RequestSession::route_protocol_terminal(StreamTerminalPayload payload) noex
     return true;
 }
 
+DeliveryOutcome RequestSession::forward_protocol_fallback_error(std::string code,
+                                                                std::string message,
+                                                                nlohmann::json details,
+                                                                int exit_code) {
+    if (!begin_protocol_terminal_forwarding()) {
+        return DeliveryOutcome::Suppressed;
+    }
+    if (!static_cast<ResponseSink&>(*this).claim_protocol_fallback_terminal()) {
+        finish_terminal_forwarding();
+        return DeliveryOutcome::Suppressed;
+    }
+    try {
+        const auto outcome =
+            transport_->error(std::move(code), std::move(message), std::move(details), exit_code);
+        finish_terminal_forwarding();
+        return outcome;
+    } catch (...) {
+        finish_terminal_forwarding();
+        throw;
+    }
+}
+
 void RequestSession::notify_probe(testing::RequestSessionProbePoint point) const noexcept {
     if (probe_hook_ != nullptr) {
         probe_hook_(probe_context_, point);
@@ -895,7 +925,8 @@ void RequestSession::emit_abort() noexcept {
 
 bool RequestSession::allow_direct_terminal() const noexcept {
     const std::lock_guard lock(activity_mutex_);
-    return activity_state_ != ActivityState::OpenStreamSubscription &&
+    return activity_state_ != ActivityState::ProtocolTerminating &&
+           activity_state_ != ActivityState::OpenStreamSubscription &&
            activity_state_ != ActivityState::TerminalForwarding;
 }
 

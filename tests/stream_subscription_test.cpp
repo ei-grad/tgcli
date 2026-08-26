@@ -1307,6 +1307,89 @@ TEST_CASE("protocol classification and stream promotion share one lifecycle deci
     }
 }
 
+TEST_CASE("protocol fallback excludes concurrent public terminals",
+          "[stream][subscription][challenge][protocol-answer][activation][terminal][concurrency]") {
+    for (const bool public_result : {true, false}) {
+        DYNAMIC_SECTION("public_result=" << public_result) {
+            ProtocolActivationArbitrationGate gate{
+                testing::RequestSessionProbePoint::AfterProtocolTerminalRoute};
+            ActivityTracker tracker([] {});
+            REQUIRE(tracker.daemon_ready(std::nullopt));
+            auto activity = tracker.try_request();
+            REQUIRE(activity);
+            auto hub = std::make_shared<StreamIngressHub>();
+            hub->begin_generation(1001, 7);
+            std::vector<StreamIngressReservation> occupied;
+            occupied.reserve(kStreamSubscriberSlots - 1);
+            for (std::size_t index = 1; index < kStreamSubscriberSlots; ++index) {
+                auto admission = hub->reserve(ingress_request());
+                REQUIRE(std::holds_alternative<StreamIngressReservation>(admission));
+                occupied.push_back(std::move(std::get<StreamIngressReservation>(admission)));
+            }
+            Captured captured;
+            RequestSession session(request(), capturing_sink(captured), 17, {},
+                                   std::move(*activity), {}, RequestDeadline{});
+            testing::RequestSessionTestAccess::install_probe(
+                session, &gate, &ProtocolActivationArbitrationGate::protocol_notify);
+            auto challenge = std::async(
+                std::launch::async, [&session] { return session.challenge(stream_challenge()); });
+            auto invalid = stream_answer(wait_challenge(captured), 1);
+            invalid.answer.erase("nonce");
+
+            StreamSubscriptionActivationResult activation_result =
+                StreamSubscriptionActivationFailure::PublicationFailed;
+            std::thread activation([&] {
+                activation_result = session.activate_stream_subscription(
+                    hub, ingress_request(), StreamActivityMode::TrackedDaemon,
+                    {.context = &gate,
+                     .hook = &ProtocolActivationArbitrationGate::activation_notify,
+                     .subscription_hook = nullptr});
+            });
+            gate.wait_activation();
+            AnswerDisposition disposition = AnswerDisposition::RequestTerminated;
+            std::thread protocol([&] { disposition = session.receive_answer(std::move(invalid)); });
+            gate.wait_protocol();
+
+            const auto public_outcome =
+                public_result
+                    ? session.result({{"source", "public"}})
+                    : session.error("PUBLIC", "public terminal", {{"source", "public"}}, kGeneric);
+            const bool public_set_terminal = session.has_terminal();
+            bool public_emitted_result = false;
+            bool public_emitted_error = false;
+            {
+                const std::lock_guard lock(captured.mutex);
+                public_emitted_result = captured.result.has_value();
+                public_emitted_error = captured.error.has_value();
+            }
+
+            gate.release_activation();
+            activation.join();
+            gate.release_protocol();
+            protocol.join();
+            const auto challenge_status = challenge.get().status();
+
+            CHECK(public_outcome == DeliveryOutcome::Suppressed);
+            CHECK_FALSE(public_set_terminal);
+            CHECK_FALSE(public_emitted_result);
+            CHECK_FALSE(public_emitted_error);
+            CHECK_FALSE(std::holds_alternative<StreamSubscriptionActivated>(activation_result));
+            CHECK(disposition == AnswerDisposition::Rejected);
+            CHECK(challenge_status == ChallengeStatus::ProtocolError);
+            REQUIRE(captured.error);
+            CHECK(captured.error->code == "PROTOCOL_ANSWER_INVALID");
+            CHECK(captured.error->message == "invalid challenge answer");
+            CHECK(captured.error->details == json{{"request_id", 1}, {"reason", "malformed"}});
+            CHECK(captured.error->exit_code == kUsage);
+            CHECK_FALSE(captured.result);
+            CHECK(tracker.snapshot().requests == 0);
+            CHECK(tracker.snapshot().subscriptions == 0);
+            auto replacement = hub->reserve(ingress_request());
+            CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+        }
+    }
+}
+
 TEST_CASE("active malformed and future answers retain exact fixed protocol terminals",
           "[stream][subscription][challenge][protocol-answer]") {
     struct Case {
