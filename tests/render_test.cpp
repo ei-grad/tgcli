@@ -621,3 +621,17 @@ TEST_CASE("fetch human renderer preserves the strict result in its reviewed gold
     CHECK_THAT(result, tgcli::test::matches_json_schema("fetch.result.schema.json"));
     CHECK(tgcli::cli::render_human("fetch", result) == golden("fetch.txt"));
 }
+
+TEST_CASE("wait-for human renderer preserves the matched MessageSummary",
+          "[stream][wait-for][render][golden]") {
+    const json result{{"id", 200},
+                      {"chat_id", -1001},
+                      {"date", "2026-08-26T12:34:56Z"},
+                      {"sender", {{"type", "user"}, {"id", 42}}},
+                      {"is_outgoing", false},
+                      {"topic", {{"kind", "forum"}, {"id", 7}}},
+                      {"type", "text"},
+                      {"text", "hello\tworld"}};
+    CHECK_THAT(result, tgcli::test::matches_json_schema("wait-for.result.schema.json"));
+    CHECK(tgcli::cli::render_human("wait-for", result) == golden("wait-for.txt"));
+}

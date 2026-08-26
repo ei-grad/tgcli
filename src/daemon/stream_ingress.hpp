@@ -76,6 +76,11 @@ enum class StreamTerminalCause : std::uint32_t {
     ClaimingItemBytes,
     ClaimingQueueItems,
     ClaimingQueueBytes,
+    ClaimingHistoryOverlap,
+    ClaimingTdlibError,
+    ClaimingRateLimited,
+    ClaimingPaginationInvalid,
+    ClaimingInternal,
     ClaimingAuthorizationLost,
     ClaimingGenerationReplaced,
     ClaimingShutdown,
@@ -88,6 +93,11 @@ enum class StreamTerminalCause : std::uint32_t {
     ItemBytes,
     QueueItems,
     QueueBytes,
+    HistoryOverlap,
+    TdlibError,
+    RateLimited,
+    PaginationInvalid,
+    Internal,
     AuthorizationLost,
     GenerationReplaced,
     Shutdown,
@@ -122,6 +132,8 @@ struct StreamTerminalPayload {
     std::uint64_t queued_bytes = 0;
     std::uint64_t incoming_bytes = 0;
     std::int32_t auth_state = 0;
+    std::int32_t tdlib_code = 0;
+    std::int32_t retry_after = 0;
     std::uint64_t protocol_request_id = 0;
     StreamProtocolAnswerInvalidReason protocol_reason =
         StreamProtocolAnswerInvalidReason::Malformed;
@@ -388,6 +400,8 @@ class StreamIngressTestAccess {
     [[nodiscard]] static std::size_t retired_count(const StreamIngressHub& hub) noexcept;
     [[nodiscard]] static bool reclaimed_state_is_poisoned(const StreamIngressHub& hub,
                                                           std::size_t index) noexcept;
+    [[nodiscard]] static std::size_t state_count(const StreamIngressHub& hub,
+                                                 StreamIngressState state) noexcept;
 };
 
 } // namespace tgcli::daemon

@@ -166,6 +166,51 @@ class SkipArtifactTests(unittest.TestCase):
                 ]
             )
 
+    def test_m5_result_artifact_is_exact_private_and_round_trips(self) -> None:
+        artifact = self.tree.root / "results" / "tgcli-test-dc-m5.json"
+        record = contract.M5ResultRecord(
+            account="test-user",
+            chat_id=42,
+            anchor_message_id=101,
+            target_message_id=102,
+            target_prefix="tgcli-m5-target-0123456789abcdef0123456789abcdef",
+        )
+        contract.write_m5_result_artifact(artifact, record)
+        self.assertEqual(
+            artifact.read_bytes(),
+            b'{"schema_version":1,"account":"test-user","chat_id":42,'
+            b'"anchor_message_id":101,"target_message_id":102,'
+            b'"target_prefix":"tgcli-m5-target-0123456789abcdef0123456789abcdef"}\n',
+        )
+        self.assertEqual(contract.load_m5_result_artifact(artifact), record)
+        self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+
+    def test_m5_result_artifact_rejects_malformed_and_symlink_inputs(self) -> None:
+        valid = contract.M5ResultRecord(
+            account="test-user",
+            chat_id=42,
+            anchor_message_id=101,
+            target_message_id=102,
+            target_prefix="tgcli-m5-target-0123456789abcdef0123456789abcdef",
+        )
+        for field, value in (
+            ("account", "Bad Account"),
+            ("chat_id", 0),
+            ("anchor_message_id", 0),
+            ("target_message_id", 101),
+            ("target_prefix", "tgcli-m5-target-not-hex"),
+        ):
+            with self.subTest(field=field):
+                values = dict(valid.__dict__)
+                values[field] = value
+                with self.assertRaises(contract.ContractError):
+                    contract.validate_m5_result(contract.M5ResultRecord(**values))
+        target = self.tree.file("m5-target.json", b"{}\n")
+        link = self.tree.root / "m5-link.json"
+        link.symlink_to(target)
+        with self.assertRaises(contract.ContractError):
+            contract.load_m5_result_artifact(link)
+
 
 class CoveragePartitionTests(unittest.TestCase):
     def test_expected_set_is_exactly_the_pinned_states_and_fixture_flows(self) -> None:
@@ -372,6 +417,9 @@ SUBCOMMANDS:
   msg message commands
   delete delete messages
   saved Saved Messages operations
+  resolve resolve a selector
+  listen stream updates
+  wait-for wait for a message
   attach attach a file
 """
 
@@ -498,6 +546,23 @@ print(json.dumps({"account": "test-user", "auth_state": "ready", "user": {"id": 
             frozenset({"phone_number", "authentication_code"}),
         )
         self.assertEqual(result.document["auth_state"], "ready")
+
+    def test_clean_json_runner_rejects_any_stderr_for_stream_acceptance(self) -> None:
+        noisy = self.tree.file(
+            "noisy-tgcli",
+            b"#!/bin/sh\nprintf '%s\\n' '{\"id\":1}'\nprintf '%s\\n' warning >&2\n",
+            0o700,
+        )
+        runner = acceptance.Runner(
+            noisy,
+            {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            {},
+            acceptance.Captures(self.tree.directory("clean-json-captures")),
+            None,
+            5,
+        )
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "unexpected stderr"):
+            runner.run_json_clean("m5-wait-for", [])
 
     def test_preflight_requires_exact_option_tokens_and_subcommand_rows(self) -> None:
         substring_only = """OPTIONS:
@@ -896,6 +961,225 @@ class HarnessInvariantTests(unittest.TestCase):
         with self.assertRaisesRegex(acceptance.AcceptanceError, "M3/M4 cleanup failed"):
             acceptance._m3_write_flow(runner)
         self.assertTrue(runner.cleaned)
+
+    def test_m5_flow_constructs_exact_commands_records_result_and_never_cleans_up(
+        self,
+    ) -> None:
+        token = "0123456789abcdef0123456789abcdef"
+        anchor_text = f"tgcli-m5-anchor-{token}"
+        target_text = f"tgcli-m5-target-{token}"
+        anchor = {
+            "id": 101,
+            "chat_id": 42,
+            "date": "2026-08-26T12:00:00Z",
+            "sender": {"type": "user", "id": 42},
+            "is_outgoing": True,
+            "topic": None,
+            "type": "text",
+            "text": anchor_text,
+            "scheduled": False,
+        }
+        target = {
+            "id": 102,
+            "chat_id": 42,
+            "date": "2026-08-26T12:00:01Z",
+            "sender": {"type": "user", "id": 42},
+            "is_outgoing": True,
+            "topic": None,
+            "type": "text",
+            "text": target_text,
+            "scheduled": False,
+        }
+
+        class FlowRunner:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, list[str]]] = []
+
+            def run_json(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                self.calls.append((label, arguments))
+                if label == "m5-resolve-saved":
+                    return acceptance.CommandResult(
+                        {
+                            "kind": "chat",
+                            "chat": {
+                                "id": 42,
+                                "title": "Saved Messages",
+                                "type": "private",
+                                "is_bot": False,
+                                "usernames": [],
+                            },
+                            "message_id": None,
+                            "topic": None,
+                            "link_type": "saved_messages",
+                            "is_public": None,
+                        },
+                        frozenset(),
+                    )
+                if label == "m5-send-anchor":
+                    return acceptance.CommandResult(anchor, frozenset())
+                if label == "m5-send-target":
+                    return acceptance.CommandResult(target, frozenset())
+                raise AssertionError(label)
+
+            def run_json_clean(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                self.calls.append((label, arguments))
+                if label != "m5-wait-for":
+                    raise AssertionError(label)
+                return acceptance.CommandResult(
+                    {
+                        name: value
+                        for name, value in target.items()
+                        if name != "scheduled"
+                    },
+                    frozenset(),
+                )
+
+            def register_message_cleanup(self, chat_id: int, message_id: int) -> None:
+                raise AssertionError(f"unexpected cleanup: {chat_id}/{message_id}")
+
+        runner = FlowRunner()
+        artifact = self.tree.root / "results" / "tgcli-test-dc-m5.json"
+        with mock.patch.object(acceptance.secrets, "token_hex", return_value=token):
+            acceptance._m5_stream_flow(runner, {"id": 42}, artifact)
+
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    "m5-resolve-saved",
+                    [
+                        "--json",
+                        "--account",
+                        acceptance.USER_ACCOUNT,
+                        "resolve",
+                        "t.me/saved",
+                    ],
+                ),
+                (
+                    "m5-send-anchor",
+                    [
+                        "--json",
+                        "--allow-write",
+                        "--account",
+                        acceptance.USER_ACCOUNT,
+                        "send",
+                        "42",
+                        anchor_text,
+                    ],
+                ),
+                (
+                    "m5-send-target",
+                    [
+                        "--json",
+                        "--allow-write",
+                        "--account",
+                        acceptance.USER_ACCOUNT,
+                        "send",
+                        "42",
+                        target_text,
+                    ],
+                ),
+                (
+                    "m5-wait-for",
+                    [
+                        "--json",
+                        "--timeout",
+                        "30",
+                        "--account",
+                        acceptance.USER_ACCOUNT,
+                        "wait-for",
+                        "--chat",
+                        "42",
+                        "--from",
+                        "42",
+                        "--after",
+                        "101",
+                        "--regex",
+                        f"^{target_text}$",
+                    ],
+                ),
+            ],
+        )
+        self.assertEqual(
+            contract.load_m5_result_artifact(artifact),
+            contract.M5ResultRecord(
+                account=acceptance.USER_ACCOUNT,
+                chat_id=42,
+                anchor_message_id=101,
+                target_message_id=102,
+                target_prefix=target_text,
+            ),
+        )
+
+    def test_m5_flow_rejects_wrong_wait_output_without_record_or_cleanup(self) -> None:
+        class FailedRunner:
+            def run_json(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                del arguments
+                if label == "m5-resolve-saved":
+                    return acceptance.CommandResult(
+                        {
+                            "kind": "chat",
+                            "chat": {
+                                "id": 42,
+                                "title": "Saved Messages",
+                                "type": "private",
+                                "is_bot": False,
+                                "usernames": [],
+                            },
+                            "message_id": None,
+                            "topic": None,
+                            "link_type": "saved_messages",
+                            "is_public": None,
+                        },
+                        frozenset(),
+                    )
+                message_id = 101 if label == "m5-send-anchor" else 102
+                text = (
+                    "tgcli-m5-anchor-0123456789abcdef0123456789abcdef"
+                    if label == "m5-send-anchor"
+                    else "tgcli-m5-target-0123456789abcdef0123456789abcdef"
+                )
+                return acceptance.CommandResult(
+                    {
+                        "id": message_id,
+                        "chat_id": 42,
+                        "date": "2026-08-26T12:00:00Z",
+                        "sender": {"type": "user", "id": 42},
+                        "is_outgoing": True,
+                        "topic": None,
+                        "type": "text",
+                        "text": text,
+                        "scheduled": False,
+                    },
+                    frozenset(),
+                )
+
+            def run_json_clean(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                del label, arguments
+                return acceptance.CommandResult({"id": 999}, frozenset())
+
+            def register_message_cleanup(self, chat_id: int, message_id: int) -> None:
+                raise AssertionError(f"unexpected cleanup: {chat_id}/{message_id}")
+
+        artifact = self.tree.root / "results" / "tgcli-test-dc-m5.json"
+        with (
+            mock.patch.object(
+                acceptance.secrets,
+                "token_hex",
+                return_value="0123456789abcdef0123456789abcdef",
+            ),
+            self.assertRaisesRegex(acceptance.AcceptanceError, "wrong target"),
+        ):
+            acceptance._m5_stream_flow(FailedRunner(), {"id": 42}, artifact)
+        self.assertFalse(artifact.exists())
 
     def test_registered_cleanup_accepts_delete_success_and_verifies_absence(
         self,

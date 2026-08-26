@@ -24,6 +24,7 @@
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
 #include "daemon/server.hpp"
+#include "daemon/stream_coordinator.hpp"
 #include "daemon/stream_service.hpp"
 #include "daemon/write_commands.hpp"
 
@@ -275,6 +276,7 @@ int run_daemon(const std::string& account) {
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency,
                             stop_server);
+    StreamCoordinator streams(td, stream_service, account, StreamActivityMode::TrackedDaemon);
 
     DaemonContext context;
     context.account = account;
@@ -292,6 +294,7 @@ int run_daemon(const std::string& account) {
     context.fetch = &fetch;
     context.resolver = &resolver;
     context.writes = &writes;
+    context.streams = &streams;
     context.idempotency = idempotency;
     context.auth_state = [&td] {
         const auto state = td.auth_state();
@@ -352,7 +355,8 @@ int run_daemon(const std::string& account) {
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
                    std::string& error, const Dispatcher* dispatcher_override,
                    core::TdClient* td_client_override,
-                   const testing::RequestWallClock& request_wall_clock) {
+                   const testing::RequestWallClock& request_wall_clock,
+                   StreamService* stream_service_override) {
     auto admitted_request = proto::admit_request_source(request, error);
     if (!admitted_request) {
         return false;
@@ -412,13 +416,31 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     auto idempotency = std::make_shared<IdempotencyFoundation>(
         std::get<IdempotencyFoundation>(std::move(foundation_result)));
 
+    const bool stream_command = admitted.command == std::vector<std::string>{"listen"} ||
+                                admitted.command == std::vector<std::string>{"wait-for"};
+    std::unique_ptr<StreamService> owned_stream_service;
     std::unique_ptr<core::TdClient> owned_td;
     if (td_client_override == nullptr) {
-        owned_td = std::make_unique<core::TdClient>(core::TdLogConfiguration{
-            .file_path = paths::tdlib_log_file(account, environment),
-            .json_diagnostics = admitted.context.json,
-        });
+        if (stream_command) {
+            owned_stream_service = std::make_unique<StreamService>();
+            stream_service_override = owned_stream_service.get();
+            owned_td = std::make_unique<core::TdClient>(
+                core::TdLogConfiguration{
+                    .file_path = paths::tdlib_log_file(account, environment),
+                    .json_diagnostics = admitted.context.json,
+                },
+                stream_service_override->observer_factory());
+        } else {
+            owned_td = std::make_unique<core::TdClient>(core::TdLogConfiguration{
+                .file_path = paths::tdlib_log_file(account, environment),
+                .json_diagnostics = admitted.context.json,
+            });
+        }
         td_client_override = owned_td.get();
+    } else if (stream_command && stream_service_override == nullptr) {
+        error = "injected stream command requires a paired stream service";
+        ::close(removal_gate_fd);
+        return false;
     }
     core::TdClient& td = *td_client_override;
     const config::Store config_store(paths::config_file(environment), environment.uid);
@@ -444,6 +466,11 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency);
+    std::unique_ptr<StreamCoordinator> streams;
+    if (stream_service_override != nullptr) {
+        streams = std::make_unique<StreamCoordinator>(td, *stream_service_override, account,
+                                                      StreamActivityMode::UntrackedNoDaemon);
+    }
     DaemonContext context;
     context.account = account;
     context.binary_version = kVersion;
@@ -460,6 +487,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.fetch = &fetch;
     context.resolver = &resolver;
     context.writes = &writes;
+    context.streams = streams.get();
     context.idempotency = idempotency;
     context.auth_state = [&td] {
         const auto state = td.auth_state();

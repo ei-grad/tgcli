@@ -31,6 +31,8 @@ enum class M2Operation {
     Resolve,
     ChatInfo,
     ChatMembers,
+    Listen,
+    WaitFor,
 };
 
 std::string_view m2_operation_name(M2Operation operation);

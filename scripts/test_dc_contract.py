@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Iterable, Sequence
@@ -52,6 +53,15 @@ class ContractError(RuntimeError):
 class SkipEntry:
     test: str
     reason: str
+
+
+@dataclass(frozen=True)
+class M5ResultRecord:
+    account: str
+    chat_id: int
+    anchor_message_id: int
+    target_message_id: int
+    target_prefix: str
 
 
 @dataclass(frozen=True, repr=False)
@@ -156,6 +166,57 @@ def write_skip_artifact(target: Path, entries: Iterable[SkipEntry]) -> None:
         ) from error
 
 
+def validate_m5_result(record: M5ResultRecord) -> None:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", record.account) is None:
+        raise ContractError("M5 result account is invalid")
+    if not 1 <= record.chat_id <= 9_007_199_254_740_991:
+        raise ContractError("M5 result chat id is invalid")
+    if (
+        not 1
+        <= record.anchor_message_id
+        < record.target_message_id
+        <= 9_007_199_254_740_991
+    ):
+        raise ContractError("M5 result message ids are invalid")
+    if re.fullmatch(r"tgcli-m5-target-[0-9a-f]{32}", record.target_prefix) is None:
+        raise ContractError("M5 result target prefix is invalid")
+
+
+def write_m5_result_artifact(target: Path, record: M5ResultRecord) -> None:
+    validate_m5_result(record)
+    document = {
+        "schema_version": 1,
+        "account": record.account,
+        "chat_id": record.chat_id,
+        "anchor_message_id": record.anchor_message_id,
+        "target_message_id": record.target_message_id,
+        "target_prefix": record.target_prefix,
+    }
+    payload = (
+        json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode()
+    descriptor, temporary = _open_private_replacement(target)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ContractError(
+            f"cannot publish M5 result artifact: {error.strerror}"
+        ) from error
+
+
 def _open_regular(source: Path, label: str) -> tuple[int, os.stat_result]:
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -210,6 +271,44 @@ def load_skip_artifact(source: Path) -> list[SkipEntry]:
     if entries != canonical:
         raise ContractError("skip entries must be sorted by test then reason")
     return entries
+
+
+def load_m5_result_artifact(source: Path) -> M5ResultRecord:
+    descriptor, status = _open_regular(source, "M5 result artifact")
+    if status.st_size > MAX_CONTRACT_FILE_BYTES:
+        os.close(descriptor)
+        raise ContractError("M5 result artifact exceeds one MiB")
+    try:
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            document = json.loads(stream.read(MAX_CONTRACT_FILE_BYTES + 1))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ContractError("M5 result artifact is not valid UTF-8 JSON") from error
+    fields = {
+        "schema_version",
+        "account",
+        "chat_id",
+        "anchor_message_id",
+        "target_message_id",
+        "target_prefix",
+    }
+    if not isinstance(document, dict) or set(document) != fields:
+        raise ContractError("M5 result artifact fields are invalid")
+    if document["schema_version"] != 1 or not isinstance(document["account"], str):
+        raise ContractError("M5 result artifact identity is invalid")
+    for field in ("chat_id", "anchor_message_id", "target_message_id"):
+        if not isinstance(document[field], int) or isinstance(document[field], bool):
+            raise ContractError("M5 result artifact ids are invalid")
+    if not isinstance(document["target_prefix"], str):
+        raise ContractError("M5 result artifact target prefix is invalid")
+    result = M5ResultRecord(
+        account=document["account"],
+        chat_id=document["chat_id"],
+        anchor_message_id=document["anchor_message_id"],
+        target_message_id=document["target_message_id"],
+        target_prefix=document["target_prefix"],
+    )
+    validate_m5_result(result)
+    return result
 
 
 def _read_secret_fixture_with_status(source: Path) -> tuple[bytes, os.stat_result]:

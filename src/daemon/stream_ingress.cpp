@@ -37,6 +37,16 @@ StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
         return StreamTerminalCause::ClaimingQueueItems;
     case StreamTerminalCause::QueueBytes:
         return StreamTerminalCause::ClaimingQueueBytes;
+    case StreamTerminalCause::HistoryOverlap:
+        return StreamTerminalCause::ClaimingHistoryOverlap;
+    case StreamTerminalCause::TdlibError:
+        return StreamTerminalCause::ClaimingTdlibError;
+    case StreamTerminalCause::RateLimited:
+        return StreamTerminalCause::ClaimingRateLimited;
+    case StreamTerminalCause::PaginationInvalid:
+        return StreamTerminalCause::ClaimingPaginationInvalid;
+    case StreamTerminalCause::Internal:
+        return StreamTerminalCause::ClaimingInternal;
     case StreamTerminalCause::AuthorizationLost:
         return StreamTerminalCause::ClaimingAuthorizationLost;
     case StreamTerminalCause::GenerationReplaced:
@@ -58,6 +68,11 @@ StreamTerminalCause claiming_cause(StreamTerminalCause cause) noexcept {
     case StreamTerminalCause::ClaimingItemBytes:
     case StreamTerminalCause::ClaimingQueueItems:
     case StreamTerminalCause::ClaimingQueueBytes:
+    case StreamTerminalCause::ClaimingHistoryOverlap:
+    case StreamTerminalCause::ClaimingTdlibError:
+    case StreamTerminalCause::ClaimingRateLimited:
+    case StreamTerminalCause::ClaimingPaginationInvalid:
+    case StreamTerminalCause::ClaimingInternal:
     case StreamTerminalCause::ClaimingAuthorizationLost:
     case StreamTerminalCause::ClaimingGenerationReplaced:
     case StreamTerminalCause::ClaimingShutdown:
@@ -1538,6 +1553,14 @@ bool StreamIngressTestAccess::reclaimed_state_is_poisoned(const StreamIngressHub
     const auto& slot = hub.impl_->slots[index];
     return all_poison(slot.staged) && all_poison(slot.projection) &&
            all_poison(slot.terminal_payload);
+}
+
+std::size_t StreamIngressTestAccess::state_count(const StreamIngressHub& hub,
+                                                 StreamIngressState state) noexcept {
+    return static_cast<std::size_t>(
+        std::ranges::count_if(hub.impl_->slots, [state](const StreamIngressSlot& slot) {
+            return load_state(slot) == state;
+        }));
 }
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)

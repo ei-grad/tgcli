@@ -1965,8 +1965,9 @@ TEST_CASE("stream activation closes Open loss capacity and post-promotion termin
         gate.wait();
         gate.release();
         activation.join();
-        CHECK(std::get<StreamSubscriptionActivationFailure>(result) ==
-              StreamSubscriptionActivationFailure::TerminalClaimed);
+        REQUIRE(std::holds_alternative<StreamSubscriptionTerminalClaimed>(result));
+        CHECK(std::get<StreamSubscriptionTerminalClaimed>(result).terminal.cause ==
+              StreamTerminalCause::Shutdown);
         CHECK(tracker.snapshot().requests == 1);
         CHECK(tracker.snapshot().subscriptions == 0);
         static_cast<void>(
@@ -2037,8 +2038,9 @@ TEST_CASE("stream activation rechecks deadline and cancellation before every pro
                                    {}, RequestDeadline{RequestSession::Clock::now()});
 
             auto result = session.activate_stream_subscription(hub, ingress_request(), mode);
-            CHECK(std::get<StreamSubscriptionActivationFailure>(result) ==
-                  StreamSubscriptionActivationFailure::TerminalClaimed);
+            REQUIRE(std::holds_alternative<StreamSubscriptionTerminalClaimed>(result));
+            CHECK(std::get<StreamSubscriptionTerminalClaimed>(result).terminal.cause ==
+                  StreamTerminalCause::Deadline);
             if (mode == StreamActivityMode::TrackedDaemon) {
                 CHECK(tracker.snapshot().requests == 1);
                 CHECK(tracker.snapshot().subscriptions == 0);
@@ -2079,8 +2081,9 @@ TEST_CASE("stream activation rechecks deadline and cancellation before every pro
             gate.release();
             activation.join();
 
-            CHECK(std::get<StreamSubscriptionActivationFailure>(result) ==
-                  StreamSubscriptionActivationFailure::TerminalClaimed);
+            REQUIRE(std::holds_alternative<StreamSubscriptionTerminalClaimed>(result));
+            CHECK(std::get<StreamSubscriptionTerminalClaimed>(result).terminal.cause ==
+                  StreamTerminalCause::Deadline);
             if (mode == StreamActivityMode::TrackedDaemon) {
                 CHECK(tracker.snapshot().requests == 1);
                 CHECK(tracker.snapshot().subscriptions == 0);
@@ -2392,4 +2395,59 @@ TEST_CASE("request session destruction tears down its owned subscription lease e
     CHECK(tracker.snapshot().subscriptions == 0);
     auto replacement = hub->reserve(ingress_request());
     CHECK(std::holds_alternative<StreamIngressReservation>(replacement));
+}
+
+TEST_CASE("request session observes only the actual published activation projection",
+          "[stream][subscription][activation][publication]") {
+    auto hub = std::make_shared<StreamIngressHub>();
+    hub->begin_generation(1001, 7);
+    Captured captured;
+    RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {}, RequestDeadline{});
+    auto activation = session.activate_stream_subscription(
+        hub, ingress_request(StreamOperation::WaitFor), StreamActivityMode::UntrackedNoDaemon);
+    REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+    CHECK_FALSE(session.stream_activation_projection());
+    REQUIRE(hub->activate_armed(1001, 7, 41) == 1);
+    const auto projection = session.stream_activation_projection();
+    REQUIRE(projection);
+    CHECK(projection->client_id == 1001);
+    CHECK(projection->generation == 7);
+    CHECK(projection->activation_receive_sequence == 41);
+    CHECK(projection->operation == StreamOperation::WaitFor);
+}
+
+TEST_CASE("match delivery preserves the ingress descriptor and returns only the message result",
+          "[stream][subscription][match][routing]") {
+    auto hub = std::make_shared<StreamIngressHub>();
+    hub->begin_generation(1001, 7);
+    Captured captured;
+    RequestSession session(request(), capturing_sink(captured), 17, {}, {}, {}, RequestDeadline{});
+    auto wait_request = ingress_request(StreamOperation::WaitFor);
+    wait_request.mode = StreamMode::Match;
+    auto activation = session.activate_stream_subscription(hub, wait_request,
+                                                           StreamActivityMode::UntrackedNoDaemon);
+    REQUIRE(std::holds_alternative<StreamSubscriptionActivated>(activation));
+    REQUIRE(hub->activate_armed(1001, 7, 1) == 1);
+    const json message{{"id", 77}, {"chat_id", 42}, {"text", "target"}};
+    hub->publish(message_item(json{{"event", "message"}, {"message", message}}.dump() + "\n", 9));
+
+    ManualPoll poll;
+    std::optional<StreamIngressDescriptor> observed;
+    CHECK(run_stream_match_delivery(
+              session, {.initial_match = std::nullopt,
+                        .item_matcher = [&](const StreamCopiedItem& item) -> std::optional<json> {
+                            observed = item.descriptor;
+                            CHECK(item.wire_bytes != 0);
+                            return item.data.at("message");
+                        },
+                        .terminal_builder = &terminal_frame,
+                        .hooks = poll.hooks()}) == StreamDeliveryStatus::TerminalComplete);
+    REQUIRE(observed);
+    CHECK(observed->receive_sequence == 9);
+    CHECK(observed->chat_id == 42);
+    CHECK(observed->sender_kind == StreamSenderKind::User);
+    CHECK(observed->sender_id == 7);
+    CHECK(captured.items.empty());
+    REQUIRE(captured.result);
+    CHECK(*captured.result == message);
 }

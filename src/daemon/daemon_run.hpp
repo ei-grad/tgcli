@@ -12,6 +12,8 @@ class TdClient;
 
 namespace tgcli::daemon {
 
+class StreamService;
+
 // Foreground daemon entrypoint (`tgcli daemon run`): binds the account
 // socket, serves until `daemon stop` or SIGTERM/SIGINT, closes tdlib
 // cleanly. Returns a process exit code.
@@ -23,7 +25,8 @@ int run_daemon(const std::string& account);
 bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std::string& account,
                    std::string& error, const Dispatcher* dispatcher_override = nullptr,
                    core::TdClient* td_client_override = nullptr,
-                   const testing::RequestWallClock& request_wall_clock = {});
+                   const testing::RequestWallClock& request_wall_clock = {},
+                   StreamService* stream_service_override = nullptr);
 
 // Reconciles an unmatched account-local logout audit without binding sockets or
 // starting a background daemon. The caller should isolate this bounded DB-open

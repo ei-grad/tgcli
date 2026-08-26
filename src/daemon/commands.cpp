@@ -11,6 +11,7 @@
 #include "daemon/request_session.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
+#include "daemon/stream_coordinator.hpp"
 #include "daemon/write_commands.hpp"
 
 #include <array>
@@ -53,12 +54,13 @@ bool uses_account_removal_preflight(std::string_view command) {
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
-           command == "msg delete" || command == "msg forward" || command == "msg react" ||
-           command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
-           command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
-           command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
-           command == "chat join" || command == "chat leave" || command == "daemon status" ||
-           command == "daemon stop" || command == "daemon restart";
+           command == "listen" || command == "wait-for" || command == "msg delete" ||
+           command == "msg forward" || command == "msg react" || command == "msg pin" ||
+           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
+           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
+           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
+           command == "chat leave" || command == "daemon status" || command == "daemon stop" ||
+           command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
@@ -66,11 +68,12 @@ bool uses_logout_preflight(std::string_view command) {
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
-           command == "msg delete" || command == "msg forward" || command == "msg react" ||
-           command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
-           command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
-           command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
-           command == "chat join" || command == "chat leave";
+           command == "listen" || command == "wait-for" || command == "msg delete" ||
+           command == "msg forward" || command == "msg react" || command == "msg pin" ||
+           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
+           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
+           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
+           command == "chat leave";
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
@@ -157,6 +160,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.writes != nullptr) {
         register_write_commands(dispatcher, *context.writes);
+    }
+    if (context.streams != nullptr) {
+        register_stream_commands(dispatcher, *context.streams);
     }
     configure_request_preflight(dispatcher, context);
     dispatcher.register_command(

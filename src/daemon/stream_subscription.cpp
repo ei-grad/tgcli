@@ -73,6 +73,22 @@ class StreamSubscriptionState {
         return hub_->claim_terminal(reservation_);
     }
 
+    [[nodiscard]] std::optional<StreamTerminalPayload> terminal_snapshot() const noexcept {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return std::nullopt;
+        }
+        return hub_->terminal_snapshot(reservation_);
+    }
+
+    [[nodiscard]] std::optional<StreamActivationProjection> activation_projection() const noexcept {
+        const std::lock_guard lock(ownership_mutex_);
+        if (retired_) {
+            return std::nullopt;
+        }
+        return hub_->activation_projection(reservation_);
+    }
+
     [[nodiscard]] bool begin_item() noexcept {
         const std::lock_guard lock(ownership_mutex_);
         if (retired_) {
@@ -81,12 +97,13 @@ class StreamSubscriptionState {
         return hub_->begin_item_delivery(reservation_);
     }
 
-    [[nodiscard]] std::optional<nlohmann::json> copy_front() {
+    [[nodiscard]] std::optional<StreamCopiedItem> copy_front() {
         const std::lock_guard lock(ownership_mutex_);
         if (retired_) {
             return std::nullopt;
         }
-        CopyContext context{.scratch = &scratch_};
+        CopyContext context{
+            .scratch = &scratch_, .descriptor = std::nullopt, .size = 0, .valid = true};
         const auto result = hub_->visit_front(reservation_, &context, &copy_item);
         if (result == StreamIngressFrontResult::Empty) {
             return std::nullopt;
@@ -96,9 +113,12 @@ class StreamSubscriptionState {
             throw std::runtime_error("invalid stream ingress item");
         }
         using Difference = std::vector<char>::difference_type;
-        return nlohmann::json::parse(scratch_.begin(),
-                                     scratch_.begin() +
-                                         static_cast<Difference>(context.size - std::size_t{1}));
+        return StreamCopiedItem{
+            .descriptor = *context.descriptor,
+            .data = nlohmann::json::parse(
+                scratch_.begin(),
+                scratch_.begin() + static_cast<Difference>(context.size - std::size_t{1})),
+            .wire_bytes = context.size};
     }
 
     [[nodiscard]] bool consume_front() {
@@ -159,6 +179,7 @@ class StreamSubscriptionState {
 
     struct CopyContext {
         std::vector<char>* scratch = nullptr;
+        std::optional<StreamIngressDescriptor> descriptor;
         std::size_t size = 0;
         bool valid = true;
     };
@@ -187,7 +208,9 @@ class StreamSubscriptionState {
         if (!descriptor || descriptor->json_size > context.scratch->size() ||
             !cursor.visit_spans(raw_context, &copy_spans)) {
             context.valid = false;
+            return StreamIngressFrontAction::Keep;
         }
+        context.descriptor = descriptor;
         return StreamIngressFrontAction::Keep;
     }
 
@@ -203,7 +226,7 @@ class StreamSubscriptionState {
     StreamIngressPreparedActivation prepared_;
     std::vector<char> scratch_;
     StreamOperation operation_ = StreamOperation::Listen;
-    std::mutex ownership_mutex_;
+    mutable std::mutex ownership_mutex_;
     ActivityTracker::Token activity_;
     void* probe_context_ = nullptr;
     testing::StreamSubscriptionProbeHook subscription_probe_ = nullptr;
@@ -222,7 +245,47 @@ void stream_subscription_teardown(const std::shared_ptr<StreamSubscriptionState>
     }
 }
 
+std::optional<StreamActivationProjection> stream_subscription_activation_projection(
+    const std::shared_ptr<StreamSubscriptionState>& state) noexcept {
+    return state ? state->activation_projection() : std::nullopt;
+}
+
 } // namespace detail
+
+StreamSubscriptionWorker::StreamSubscriptionWorker(
+    std::shared_ptr<detail::StreamSubscriptionState> state)
+    : state_(std::move(state)) {}
+
+StreamSubscriptionWorker::operator bool() const noexcept {
+    return state_ != nullptr;
+}
+
+std::optional<StreamActivationProjection>
+StreamSubscriptionWorker::activation_projection() const noexcept {
+    return detail::stream_subscription_activation_projection(state_);
+}
+
+std::optional<StreamTerminalPayload> StreamSubscriptionWorker::terminal_snapshot() const noexcept {
+    return state_ ? state_->terminal_snapshot() : std::nullopt;
+}
+
+bool StreamSubscriptionWorker::claim(StreamTerminalPayload payload) noexcept {
+    return detail::stream_subscription_claim(state_, payload);
+}
+
+std::optional<StreamCopiedItem> StreamSubscriptionWorker::pop_front() {
+    if (!state_) {
+        return std::nullopt;
+    }
+    auto item = state_->copy_front();
+    if (!item) {
+        return std::nullopt;
+    }
+    if (!state_->consume_front()) {
+        throw std::runtime_error("stream ingress front changed before consume");
+    }
+    return item;
+}
 
 StreamSubscriptionLease::StreamSubscriptionLease(
     std::shared_ptr<detail::StreamSubscriptionState> state)
@@ -264,9 +327,11 @@ StreamSubscriptionActivationResult RequestSession::activate_stream_subscription(
     auto reservation = std::move(std::get<StreamIngressReservation>(admission));
     auto prepared = hub->prepare_activation(reservation);
     if (!prepared) {
-        return hub->terminal_snapshot(reservation)
-                   ? StreamSubscriptionActivationFailure::TerminalClaimed
-                   : StreamSubscriptionActivationFailure::PublicationFailed;
+        const auto terminal = hub->terminal_snapshot(reservation);
+        return terminal ? StreamSubscriptionActivationResult{StreamSubscriptionTerminalClaimed{
+                              .terminal = *terminal}}
+                        : StreamSubscriptionActivationResult{
+                              StreamSubscriptionActivationFailure::PublicationFailed};
     }
     auto state = std::make_shared<detail::StreamSubscriptionState>(
         hub, std::move(reservation), std::move(*prepared), request.operation, probe);
@@ -283,7 +348,11 @@ StreamSubscriptionActivationResult RequestSession::activate_stream_subscription(
         if (deadline_expired(deadline_)) {
             static_cast<void>(
                 state->claim({.cause = StreamTerminalCause::Deadline, .metadata_failure = {}}));
-            return StreamSubscriptionActivationFailure::TerminalClaimed;
+            const auto terminal = state->terminal_snapshot();
+            return terminal ? StreamSubscriptionActivationResult{StreamSubscriptionTerminalClaimed{
+                                  .terminal = *terminal}}
+                            : StreamSubscriptionActivationResult{
+                                  StreamSubscriptionActivationFailure::PublicationFailed};
         }
         if (cancellation_requested()) {
             static_cast<void>(
@@ -302,7 +371,11 @@ StreamSubscriptionActivationResult RequestSession::activate_stream_subscription(
             promotion_committed = state->commit_promotion();
         }
         if (!promotion_committed) {
-            return StreamSubscriptionActivationFailure::TerminalClaimed;
+            const auto terminal = state->terminal_snapshot();
+            return terminal ? StreamSubscriptionActivationResult{StreamSubscriptionTerminalClaimed{
+                                  .terminal = *terminal}}
+                            : StreamSubscriptionActivationResult{
+                                  StreamSubscriptionActivationFailure::PublicationFailed};
         }
         state->adopt_activity(std::move(activity_));
         activity_state_ = ActivityState::OpenStreamSubscription;
@@ -315,22 +388,54 @@ StreamSubscriptionActivationResult RequestSession::activate_stream_subscription(
     return StreamSubscriptionActivated{};
 }
 
+std::optional<StreamActivationProjection> RequestSession::stream_activation_projection() const {
+    std::shared_ptr<detail::StreamSubscriptionState> state;
+    {
+        const std::lock_guard lock(activity_mutex_);
+        if (activity_state_ != ActivityState::OpenStreamSubscription || !stream_subscription_ ||
+            !stream_subscription_->state_) {
+            return std::nullopt;
+        }
+        state = stream_subscription_->state_;
+    }
+    return detail::stream_subscription_activation_projection(state);
+}
+
+StreamSubscriptionWorker RequestSession::stream_worker() const {
+    const std::lock_guard lock(activity_mutex_);
+    if (activity_state_ != ActivityState::OpenStreamSubscription || !stream_subscription_ ||
+        !stream_subscription_->state_) {
+        return {};
+    }
+    return StreamSubscriptionWorker(stream_subscription_->state_);
+}
+
 class detail::StreamDeliveryRunner {
   public:
     StreamDeliveryRunner(RequestSession& session, std::shared_ptr<StreamSubscriptionState> state,
                          const StreamDeliveryOptions& options)
-        : session_(&session), state_(std::move(state)), options_(&options),
+        : session_(&session), state_(std::move(state)), item_options_(&options),
+          deadline_(session.deadline().expires_at), schedule_(current_time()) {}
+
+    StreamDeliveryRunner(RequestSession& session, std::shared_ptr<StreamSubscriptionState> state,
+                         const StreamMatchDeliveryOptions& options)
+        : session_(&session), state_(std::move(state)), match_options_(&options),
           deadline_(session.deadline().expires_at), schedule_(current_time()) {}
 
     [[nodiscard]] StreamDeliveryStatus run() {
+        if (match_options_ != nullptr && match_options_->initial_match) {
+            if (state_->claim(
+                    {.cause = StreamTerminalCause::PlannedSuccess, .metadata_failure = {}})) {
+                matched_ = match_options_->initial_match;
+            }
+        }
         for (;;) {
             sleep_until(schedule_.next(deadline_));
             const auto current = current_time();
             claim_scheduled_terminal(current);
-            if (options_->hooks && options_->hooks->probe != nullptr) {
-                options_->hooks->probe(
-                    options_->hooks->probe_context,
-                    testing::StreamDeliveryHooks::ProbePoint::AfterScheduledTerminalClaim);
+            if (const auto* const hook = hooks(); hook != nullptr && hook->probe != nullptr) {
+                hook->probe(hook->probe_context,
+                            testing::StreamDeliveryHooks::ProbePoint::AfterScheduledTerminalClaim);
             }
             if (auto status = deliver_terminal()) {
                 return status.value();
@@ -344,13 +449,14 @@ class detail::StreamDeliveryRunner {
 
   private:
     [[nodiscard]] StreamPollSchedule::Clock::time_point current_time() const {
-        return options_->hooks && options_->hooks->now ? options_->hooks->now()
-                                                       : StreamPollSchedule::Clock::now();
+        const auto* const hook = hooks();
+        return hook != nullptr && hook->now ? hook->now() : StreamPollSchedule::Clock::now();
     }
 
     void sleep_until(StreamPollSchedule::Clock::time_point wake) const {
-        if (options_->hooks && options_->hooks->sleep_until) {
-            options_->hooks->sleep_until(wake);
+        const auto* const hook = hooks();
+        if (hook != nullptr && hook->sleep_until) {
+            hook->sleep_until(wake);
             return;
         }
         std::this_thread::sleep_until(wake);
@@ -425,9 +531,30 @@ class detail::StreamDeliveryRunner {
             return finish(StreamDeliveryStatus::Disconnected);
         }
         try {
-            const auto frame = terminal->cause == StreamTerminalCause::ProtocolAnswerInvalid
-                                   ? protocol_answer_invalid_frame(*terminal)
-                                   : options_->terminal_builder(*terminal, delivered_);
+            StreamTerminalFrame frame;
+            if (terminal->cause == StreamTerminalCause::ProtocolAnswerInvalid) {
+                frame = protocol_answer_invalid_frame(*terminal);
+            } else if (terminal->cause == StreamTerminalCause::PlannedSuccess &&
+                       match_options_ != nullptr) {
+                frame =
+                    matched_
+                        ? StreamTerminalFrame{StreamTerminalResultFrame{*matched_}}
+                        : StreamTerminalFrame{StreamTerminalErrorFrame{
+                              .code = "INTERNAL",
+                              .message = "wait-for completed without a message",
+                              .details = {{"operation", "wait_for"}, {"reason", "internal_error"}},
+                              .exit_code = kGeneric}};
+            } else {
+                const auto* const builder = terminal_builder();
+                frame =
+                    builder != nullptr
+                        ? (*builder)(*terminal, delivered_)
+                        : StreamTerminalFrame{StreamTerminalErrorFrame{
+                              .code = "INTERNAL",
+                              .message = "stream terminal mapper is unavailable",
+                              .details = {{"operation", "listen"}, {"reason", "internal_error"}},
+                              .exit_code = kGeneric}};
+            }
             const auto outcome = deliver_terminal_frame(frame);
             if (outcome == DeliveryOutcome::Complete) {
                 return StreamDeliveryStatus::TerminalComplete;
@@ -446,10 +573,23 @@ class detail::StreamDeliveryRunner {
     [[nodiscard]] std::optional<StreamDeliveryStatus> deliver_item() {
         try {
             auto item = state_->copy_front();
-            if (!item || !state_->begin_item()) {
+            if (!item) {
                 return std::nullopt;
             }
-            const auto outcome = session_->item(std::move(item.value()));
+            if (match_options_ != nullptr) {
+                auto match = match_options_->item_matcher ? match_options_->item_matcher(*item)
+                                                          : std::optional<nlohmann::json>{};
+                static_cast<void>(state_->consume_front());
+                if (match && state_->claim({.cause = StreamTerminalCause::PlannedSuccess,
+                                            .metadata_failure = {}})) {
+                    matched_ = std::move(*match);
+                }
+                return std::nullopt;
+            }
+            if (!state_->begin_item()) {
+                return std::nullopt;
+            }
+            const auto outcome = session_->item(std::move(item->data));
             if (outcome != DeliveryOutcome::Complete) {
                 const auto status = outcome == DeliveryOutcome::Suppressed
                                         ? StreamDeliveryStatus::Suppressed
@@ -458,7 +598,7 @@ class detail::StreamDeliveryRunner {
             }
             ++delivered_;
             static_cast<void>(state_->consume_front());
-            if (options_->count && delivered_ == options_->count.value()) {
+            if (item_options_->count && delivered_ == item_options_->count.value()) {
                 static_cast<void>(state_->claim(
                     {.cause = StreamTerminalCause::PlannedSuccess, .metadata_failure = {}}));
             }
@@ -472,10 +612,26 @@ class detail::StreamDeliveryRunner {
 
     RequestSession* session_ = nullptr;
     std::shared_ptr<StreamSubscriptionState> state_;
-    const StreamDeliveryOptions* options_ = nullptr;
+    const StreamDeliveryOptions* item_options_ = nullptr;
+    const StreamMatchDeliveryOptions* match_options_ = nullptr;
     std::optional<StreamPollSchedule::Clock::time_point> deadline_;
     StreamPollSchedule schedule_;
     std::uint64_t delivered_ = 0;
+    std::optional<nlohmann::json> matched_;
+
+    [[nodiscard]] const testing::StreamDeliveryHooks* hooks() const noexcept {
+        if (item_options_ != nullptr) {
+            return item_options_->hooks.get();
+        }
+        return match_options_ != nullptr ? match_options_->hooks.get() : nullptr;
+    }
+
+    [[nodiscard]] const StreamTerminalBuilder* terminal_builder() const noexcept {
+        if (item_options_ != nullptr) {
+            return &item_options_->terminal_builder;
+        }
+        return match_options_ != nullptr ? &match_options_->terminal_builder : nullptr;
+    }
 };
 
 StreamDeliveryStatus run_stream_delivery(RequestSession& session,
@@ -490,6 +646,23 @@ StreamDeliveryStatus run_stream_delivery(RequestSession& session,
         state = session.stream_subscription_->state_;
     }
     if ((options.count && options.count.value() == 0) || !options.terminal_builder) {
+        return StreamDeliveryStatus::InvalidLease;
+    }
+    return detail::StreamDeliveryRunner(session, std::move(state), options).run();
+}
+
+StreamDeliveryStatus run_stream_match_delivery(RequestSession& session,
+                                               const StreamMatchDeliveryOptions& options) {
+    std::shared_ptr<detail::StreamSubscriptionState> state;
+    {
+        const std::lock_guard lock(session.activity_mutex_);
+        if (session.activity_state_ != RequestSession::ActivityState::OpenStreamSubscription ||
+            !session.stream_subscription_ || !*session.stream_subscription_) {
+            return StreamDeliveryStatus::InvalidLease;
+        }
+        state = session.stream_subscription_->state_;
+    }
+    if (!options.terminal_builder || (!options.item_matcher && !options.initial_match)) {
         return StreamDeliveryStatus::InvalidLease;
     }
     return detail::StreamDeliveryRunner(session, std::move(state), options).run();

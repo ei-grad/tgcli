@@ -21,6 +21,7 @@ struct StreamEscapeResult {
 
 bool stream_timestamp_utc(std::int32_t seconds, std::span<char, 20> output) noexcept;
 StreamEscapeResult stream_json_escape(std::string_view value, std::span<char> output) noexcept;
+std::int32_t stream_retry_after_seconds(std::string_view message) noexcept;
 
 enum class StreamNormalizationPhase { Empty, Bootstrap, Ready, Failed };
 enum class StreamFailureKind {

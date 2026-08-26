@@ -1,0 +1,8 @@
+id	200
+chat_id	-1001
+date	"2026-08-26T12:34:56Z"
+sender	{"type":"user","id":42}
+is_outgoing	false
+topic	{"kind":"forum","id":7}
+type	text
+text	"hello\tworld"

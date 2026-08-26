@@ -143,6 +143,7 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] StreamSubscriptionActivationResult activate_stream_subscription(
         const std::shared_ptr<StreamIngressHub>& hub, const StreamIngressRequest& request,
         StreamActivityMode activity_mode, testing::StreamActivationProbe probe = {});
+    [[nodiscard]] std::optional<StreamActivationProjection> stream_activation_projection() const;
 
     bool reserve_in_flight();
     bool reserve_direct_in_flight();
@@ -193,6 +194,7 @@ class RequestSession final : public ResponseSink {
     void release_activity();
     void cancel_stream_transport() noexcept;
     [[nodiscard]] bool claim_stream_terminal(StreamTerminalPayload payload) noexcept;
+    [[nodiscard]] StreamSubscriptionWorker stream_worker() const;
     [[nodiscard]] bool route_protocol_terminal(StreamTerminalPayload payload) noexcept;
     DeliveryOutcome forward_protocol_fallback_error(std::string code, std::string message,
                                                     nlohmann::json details, int exit_code);
@@ -247,9 +249,12 @@ class RequestSession final : public ResponseSink {
     testing::RequestSessionProbeHook probe_hook_ = nullptr;
 
     friend class detail::StreamDeliveryRunner;
+    friend class StreamCoordinator;
     friend class testing::RequestSessionTestAccess;
     friend StreamDeliveryStatus run_stream_delivery(RequestSession& session,
                                                     const StreamDeliveryOptions& options);
+    friend StreamDeliveryStatus
+    run_stream_match_delivery(RequestSession& session, const StreamMatchDeliveryOptions& options);
 };
 
 namespace testing {
@@ -260,6 +265,16 @@ class RequestSessionTestAccess {
                               RequestSessionProbeHook hook) noexcept {
         session.probe_context_ = context;
         session.probe_hook_ = hook;
+    }
+
+    static StreamSubscriptionWorker stream_worker(const RequestSession& session) {
+        return session.stream_worker();
+    }
+
+    static bool has_stream_subscription(const RequestSession& session) {
+        const std::lock_guard lock(session.activity_mutex_);
+        return session.activity_state_ == RequestSession::ActivityState::OpenStreamSubscription &&
+               session.stream_subscription_.has_value();
     }
 };
 

@@ -1215,6 +1215,33 @@ TEST_CASE("Nth completion and every external terminal preserve atomic first caus
     }
 }
 
+TEST_CASE("wait history overlap retains the exact bounded terminal payload",
+          "[stream][ingress][history][terminal]") {
+    StreamIngressHub hub;
+    hub.begin_generation(1001, 7);
+    auto wait_request = request();
+    wait_request.operation = StreamOperation::WaitFor;
+    wait_request.mode = StreamMode::Match;
+    auto reserved = reserve_slot(hub, wait_request);
+    REQUIRE(hub.commit_activation(reserved));
+    REQUIRE(hub.activate_armed(1001, 7, 10) == 1);
+    REQUIRE(hub.claim(reserved, {.cause = StreamTerminalCause::HistoryOverlap,
+                                 .operation = StreamOperation::WaitFor,
+                                 .limit_items = kStreamQueueItems,
+                                 .limit_bytes = kStreamQueueBytes,
+                                 .queued_items = 1024,
+                                 .queued_bytes = 8'388'600,
+                                 .incoming_bytes = 9,
+                                 .metadata_failure = {}}));
+    const auto terminal = hub.terminal_snapshot(reserved);
+    REQUIRE(terminal);
+    CHECK(terminal->cause == StreamTerminalCause::HistoryOverlap);
+    CHECK(terminal->operation == StreamOperation::WaitFor);
+    CHECK(terminal->queued_items == 1024);
+    CHECK(terminal->queued_bytes == 8'388'600);
+    CHECK(terminal->incoming_bytes == 9);
+}
+
 TEST_CASE("one full ingress queue does not alter another subscriber",
           "[stream][ingress][isolation]") {
     StreamIngressHub hub;

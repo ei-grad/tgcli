@@ -79,15 +79,76 @@ bool is_daemon_control_command(const std::vector<std::string>& command) {
     return key == "daemon status" || key == "daemon stop" || key == "daemon restart";
 }
 
+bool is_stream_command(const std::vector<std::string>& command) {
+    return command == std::vector<std::string>{"listen"} ||
+           command == std::vector<std::string>{"wait-for"};
+}
+
+StreamOutputStatus write_stream_stdout(std::string_view line) {
+    errno = 0;
+    const auto written = std::fwrite(line.data(), 1, line.size(), stdout);
+    if (written != line.size()) {
+        return std::ferror(stdout) != 0 ? StreamOutputStatus::WriteFailed
+                                        : StreamOutputStatus::ShortWrite;
+    }
+    if (std::fflush(stdout) != 0) {
+        return StreamOutputStatus::FlushFailed;
+    }
+    return std::ferror(stdout) == 0 ? StreamOutputStatus::Complete
+                                    : StreamOutputStatus::WriteFailed;
+}
+
+std::string_view stream_output_reason(StreamOutputStatus status) {
+    switch (status) {
+    case StreamOutputStatus::Complete:
+        return {};
+    case StreamOutputStatus::ShortWrite:
+        return "stdout_short_write";
+    case StreamOutputStatus::WriteFailed:
+        return "stdout_write_failed";
+    case StreamOutputStatus::FlushFailed:
+        return "stdout_flush_failed";
+    }
+    return "stdout_write_failed";
+}
+
+class ScopedSigpipeIgnore {
+  public:
+    explicit ScopedSigpipeIgnore(bool enabled) : enabled_(enabled) {
+        if (enabled_) {
+            struct sigaction ignored {};
+            ignored.sa_handler = SIG_IGN;
+            sigemptyset(&ignored.sa_mask);
+            ignored.sa_flags = 0;
+            enabled_ = ::sigaction(SIGPIPE, &ignored, &previous_) == 0;
+        }
+    }
+
+    ~ScopedSigpipeIgnore() {
+        if (enabled_) {
+            static_cast<void>(::sigaction(SIGPIPE, &previous_, nullptr));
+        }
+    }
+
+    ScopedSigpipeIgnore(const ScopedSigpipeIgnore&) = delete;
+    ScopedSigpipeIgnore& operator=(const ScopedSigpipeIgnore&) = delete;
+    ScopedSigpipeIgnore(ScopedSigpipeIgnore&&) = delete;
+    ScopedSigpipeIgnore& operator=(ScopedSigpipeIgnore&&) = delete;
+
+  private:
+    struct sigaction previous_ {};
+    bool enabled_ = false;
+};
+
 // Renders response frames and remembers the terminal outcome.
 class FrameRenderer {
   public:
-    FrameRenderer(std::string command, bool json_mode)
-        : command_(std::move(command)), json_(json_mode) {}
+    FrameRenderer(std::string command, bool json_mode,
+                  const StreamOutputWriter* stream_writer = nullptr)
+        : command_(std::move(command)), json_(json_mode), stream_writer_(stream_writer) {}
 
-    static void on_item(const json& data) {
-        // Streams are NDJSON in both modes until a command needs more.
-        std::fputs((data.dump() + "\n").c_str(), stdout);
+    daemon::DeliveryOutcome on_item(const json& data) {
+        return write_stream_line(data.dump() + '\n');
     }
 
     void on_progress(const json& data) const {
@@ -98,14 +159,26 @@ class FrameRenderer {
         }
     }
 
-    void on_result(const json& data) {
-        if (json_) {
+    daemon::DeliveryOutcome on_result(const json& data) {
+        if (command_ == "listen") {
+            exit_code_ = kOk;
+            done_ = true;
+            return daemon::DeliveryOutcome::Complete;
+        }
+        if (command_ == "wait-for") {
+            const auto outcome =
+                write_stream_line(json_ ? data.dump() + '\n' : render_human(command_, data));
+            if (outcome != daemon::DeliveryOutcome::Complete) {
+                return outcome;
+            }
+        } else if (json_) {
             std::fputs((data.dump() + "\n").c_str(), stdout);
         } else {
             std::fputs(render_human(command_, data).c_str(), stdout);
         }
         exit_code_ = kOk;
         done_ = true;
+        return daemon::DeliveryOutcome::Complete;
     }
 
     void on_error(const std::string& code, const std::string& message, const json& details,
@@ -123,8 +196,22 @@ class FrameRenderer {
     }
 
   private:
+    daemon::DeliveryOutcome write_stream_line(const std::string& line) {
+        const auto status =
+            stream_writer_ != nullptr ? (*stream_writer_)(line) : write_stream_stdout(line);
+        if (status == StreamOutputStatus::Complete) {
+            return daemon::DeliveryOutcome::Complete;
+        }
+        print_error("GENERIC", "cannot write stream output",
+                    {{"reason", stream_output_reason(status)}});
+        exit_code_ = kGeneric;
+        done_ = true;
+        return daemon::DeliveryOutcome::Disconnected;
+    }
+
     std::string command_;
     bool json_;
+    const StreamOutputWriter* stream_writer_ = nullptr;
     bool done_ = false;
     int exit_code_ = kGeneric;
 };
@@ -136,15 +223,13 @@ class InProcessSink final : public daemon::ResponseSink {
 
   private:
     daemon::DeliveryOutcome emit_item(json data) override {
-        FrameRenderer::on_item(data);
-        return daemon::DeliveryOutcome::Complete;
+        return renderer_.on_item(data);
     }
     void emit_progress(json data) override {
         renderer_.on_progress(data);
     }
     daemon::DeliveryOutcome emit_result(json data) override {
-        renderer_.on_result(data);
-        return daemon::DeliveryOutcome::Complete;
+        return renderer_.on_result(data);
     }
     daemon::DeliveryOutcome emit_error(std::string code, std::string message, json details,
                                        int exit_code) override {
@@ -1038,7 +1123,8 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
         print_error("GENERIC", "cannot send request: " + io_error, json::object());
         return kGeneric;
     }
-    FrameRenderer renderer(command_key(request.command), options.json);
+    FrameRenderer renderer(command_key(request.command), options.json,
+                           options.stream_output_writer);
     while (!renderer.done()) {
         std::string io_error;
         auto line = reader.read_line(io_error);
@@ -1053,15 +1139,16 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
             print_error("GENERIC", "malformed frame from daemon: " + parse_error, json::object());
             return kGeneric;
         }
+        auto delivery = daemon::DeliveryOutcome::Complete;
         std::visit(
-            [&renderer, &prompt, fd, &request](const auto& f) {
+            [&renderer, &prompt, fd, &request, &delivery](const auto& f) {
                 using T = std::decay_t<decltype(f)>;
                 if constexpr (std::is_same_v<T, proto::Item>) {
-                    FrameRenderer::on_item(f.data);
+                    delivery = renderer.on_item(f.data);
                 } else if constexpr (std::is_same_v<T, proto::Progress>) {
                     renderer.on_progress(f.data);
                 } else if constexpr (std::is_same_v<T, proto::Result>) {
-                    renderer.on_result(f.data);
+                    delivery = renderer.on_result(f.data);
                 } else if constexpr (std::is_same_v<T, proto::Error>) {
                     renderer.on_error(f.code, f.message, f.details, f.exit_code);
                 } else if constexpr (std::is_same_v<T, proto::Challenge>) {
@@ -1069,18 +1156,23 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
                 }
             },
             *frame);
+        if (delivery == daemon::DeliveryOutcome::Disconnected) {
+            static_cast<void>(::shutdown(fd, SHUT_RDWR));
+            return renderer.exit_code();
+        }
     }
     return renderer.exit_code();
 }
 
 int run_in_process(const proto::Request& request, const RunOptions& options,
                    ChallengePrompt& prompt) {
-    FrameRenderer renderer(command_key(request.command), options.json);
+    FrameRenderer renderer(command_key(request.command), options.json,
+                           options.stream_output_writer);
     InProcessSink sink(renderer, prompt, request.context.tty);
     std::string error;
     if (!daemon::run_no_daemon(request, sink, options.account, error, options.in_process_dispatcher,
-                               options.in_process_td_client,
-                               options.in_process_request_wall_clock)) {
+                               options.in_process_td_client, options.in_process_request_wall_clock,
+                               options.in_process_stream_service)) {
         print_error("GENERIC", error, json::object());
         return kGeneric;
     }
@@ -1727,6 +1819,7 @@ int run_command(const proto::Request& request, const RunOptions& options) {
     }
     TerminalPrompt terminal_prompt;
     ChallengePrompt& prompt = options.prompt != nullptr ? *options.prompt : terminal_prompt;
+    const ScopedSigpipeIgnore ignore_sigpipe(is_stream_command(request.command));
     if (request.command == std::vector<std::string>{"logout"} && request.context.dry_run) {
         return run_logout_dry_run(request, options);
     }

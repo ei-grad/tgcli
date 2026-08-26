@@ -14,6 +14,7 @@
 #include "daemon/request_fingerprint.hpp"
 #include "daemon/resolver.hpp"
 #include "daemon/saved_commands.hpp"
+#include "daemon/stream_commands.hpp"
 #include "daemon/write_domain.hpp"
 #include "proto/frame.hpp"
 #include "proto/operation.hpp"
@@ -34,6 +35,7 @@
 #include <string>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <CLI/CLI.hpp>
@@ -605,6 +607,121 @@ struct FetchCliArguments {
     CLI::Option* all_option = nullptr;
 };
 
+struct StreamCliArguments {
+    std::vector<std::string> listen_chats;
+    std::string listen_types;
+    std::string listen_count_raw;
+    std::optional<std::uint64_t> listen_count;
+    std::vector<std::string> listen_type_values;
+    std::string wait_chat;
+    std::string wait_from;
+    std::string wait_regex;
+    std::string wait_after_raw;
+    std::optional<std::int64_t> wait_after;
+    CLI::Option* listen_types_option = nullptr;
+    CLI::Option* listen_count_option = nullptr;
+    CLI::Option* wait_chat_option = nullptr;
+    CLI::Option* wait_from_option = nullptr;
+    CLI::Option* wait_regex_option = nullptr;
+    CLI::Option* wait_after_option = nullptr;
+};
+
+bool parse_canonical_positive_decimal(std::string_view raw, std::uint64_t maximum,
+                                      std::uint64_t& value) noexcept {
+    if (raw.empty() || raw.front() == '0' || !std::ranges::all_of(raw, [](char character) {
+            return character >= '0' && character <= '9';
+        })) {
+        return false;
+    }
+    const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+    return error == std::errc{} && end == raw.data() + raw.size() && value <= maximum;
+}
+
+std::vector<std::string> split_stream_types(std::string_view raw) {
+    std::vector<std::string> values;
+    for (std::size_t begin = 0;;) {
+        const auto end = raw.find(',', begin);
+        values.emplace_back(raw.substr(begin, end - begin));
+        if (end == std::string_view::npos) {
+            return values;
+        }
+        begin = end + 1;
+    }
+}
+
+nlohmann::json stream_request_args(const std::vector<std::string>& command,
+                                   const StreamCliArguments& stream) {
+    if (command == std::vector<std::string>{"listen"}) {
+        return {{"chats", stream.listen_chats},
+                {"types", stream.listen_types_option->count() != 0
+                              ? nlohmann::json(stream.listen_type_values)
+                              : nlohmann::json(nullptr)},
+                {"count", stream.listen_count ? nlohmann::json(*stream.listen_count)
+                                              : nlohmann::json(nullptr)}};
+    }
+    return {{"chat", stream.wait_chat_option->count() != 0 ? nlohmann::json(stream.wait_chat)
+                                                           : nlohmann::json(nullptr)},
+            {"from", stream.wait_from_option->count() != 0 ? nlohmann::json(stream.wait_from)
+                                                           : nlohmann::json(nullptr)},
+            {"regex", stream.wait_regex_option->count() != 0 ? nlohmann::json(stream.wait_regex)
+                                                             : nlohmann::json(nullptr)},
+            {"after",
+             stream.wait_after ? nlohmann::json(*stream.wait_after) : nlohmann::json(nullptr)}};
+}
+
+std::optional<int> normalize_stream_arguments(const std::vector<std::string>& command,
+                                              StreamCliArguments& stream,
+                                              std::optional<double> timeout_seconds) {
+    const bool listen = command == std::vector<std::string>{"listen"};
+    const bool wait_for = command == std::vector<std::string>{"wait-for"};
+    if (!listen && !wait_for) {
+        return std::nullopt;
+    }
+    if (const auto error = tgcli::daemon::validate_stream_timeout(timeout_seconds)) {
+        return report_usage(error->message, error->argument, error->reason);
+    }
+    if (listen) {
+        if (stream.listen_count_option->count() != 0) {
+            std::uint64_t count = 0;
+            if (!parse_canonical_positive_decimal(stream.listen_count_raw,
+                                                  tgcli::daemon::kMaximumStreamCount, count)) {
+                return report_usage("listen count must be a canonical integer from 1 to 1000000",
+                                    "--count");
+            }
+            stream.listen_count = count;
+        }
+        if (stream.listen_types_option->count() != 0) {
+            stream.listen_type_values = split_stream_types(stream.listen_types);
+        }
+        const auto parsed =
+            tgcli::daemon::parse_listen_arguments(stream_request_args(command, stream));
+        if (const auto* error = std::get_if<tgcli::daemon::StreamArgumentError>(&parsed)) {
+            return report_usage(error->message, error->argument, error->reason);
+        }
+        return std::nullopt;
+    }
+    if (stream.wait_after_option->count() != 0) {
+        std::uint64_t after = 0;
+        if (!parse_canonical_positive_decimal(stream.wait_after_raw,
+                                              tgcli::daemon::kMaximumStreamMessageId, after)) {
+            return report_usage("wait-for after must be a canonical positive int53", "--after");
+        }
+        stream.wait_after = static_cast<std::int64_t>(after);
+    }
+    const auto parsed =
+        tgcli::daemon::parse_wait_for_arguments(stream_request_args(command, stream));
+    if (const auto* error = std::get_if<tgcli::daemon::StreamArgumentError>(&parsed)) {
+        return report_usage(error->message, error->argument, error->reason);
+    }
+    if (stream.wait_regex_option->count() != 0) {
+        const auto compiled = tgcli::daemon::compile_stream_regex(stream.wait_regex);
+        if (const auto* error = std::get_if<tgcli::daemon::StreamArgumentError>(&compiled)) {
+            return report_usage(error->message, error->argument, error->reason);
+        }
+    }
+    return std::nullopt;
+}
+
 bool is_saved_tags(const std::vector<std::string>& command) {
     return command == std::vector<std::string>{"saved", "tags"};
 }
@@ -1039,7 +1156,8 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                                     const ChatsCliArguments& chats, const SavedCliArguments& saved,
                                     const MessageCliArguments& messages,
                                     const SendCliArguments& send, const ChatCliArguments& chat,
-                                    const ReadCliArguments& read, const FetchCliArguments& fetch) {
+                                    const ReadCliArguments& read, const FetchCliArguments& fetch,
+                                    const StreamCliArguments& stream) {
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -1059,6 +1177,10 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                 {"all", fetch.all},
                 {"since", fetch.since_option->count() != 0 ? nlohmann::json(fetch.since)
                                                            : nlohmann::json(nullptr)}};
+    }
+    if (command == std::vector<std::string>{"listen"} ||
+        command == std::vector<std::string>{"wait-for"}) {
+        return stream_request_args(command, stream);
     }
     if (is_saved_search(command)) {
         return saved_search_request_args(saved);
@@ -1257,6 +1379,7 @@ int run(int argc, char** argv) {
     ReadCliArguments read;
     ReadCliArguments history;
     FetchCliArguments fetch;
+    StreamCliArguments stream;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -1353,6 +1476,20 @@ int run(int argc, char** argv) {
     fetch.all_option = fetch_cmd->add_flag("--all", fetch.all, "fetch without a numeric limit");
     fetch.since_option =
         fetch_cmd->add_option("--since", fetch.since, "inclusive timestamp lower bound");
+    CLI::App* listen_cmd = app.add_subcommand("listen", "stream Telegram updates");
+    listen_cmd->add_option("--chat", stream.listen_chats, "chat selector")->expected(0, 64);
+    stream.listen_types_option =
+        listen_cmd->add_option("--types", stream.listen_types, "comma-separated event types");
+    stream.listen_count_option =
+        listen_cmd->add_option("--count", stream.listen_count_raw, "stop after N items");
+    CLI::App* wait_for_cmd = app.add_subcommand("wait-for", "wait for a matching message");
+    stream.wait_chat_option = wait_for_cmd->add_option("--chat", stream.wait_chat, "chat selector");
+    stream.wait_from_option =
+        wait_for_cmd->add_option("--from", stream.wait_from, "sender user selector");
+    stream.wait_regex_option =
+        wait_for_cmd->add_option("--regex", stream.wait_regex, "message text RE2 pattern");
+    stream.wait_after_option =
+        wait_for_cmd->add_option("--after", stream.wait_after_raw, "local history anchor");
     CLI::App* msg_cmd = app.add_subcommand("msg", "message reads and mutations");
     msg_cmd->require_subcommand(1);
     CLI::App* msg_get_cmd = msg_cmd->add_subcommand("get", "get messages by id");
@@ -1528,6 +1665,31 @@ int run(int argc, char** argv) {
         command = {"read"};
         selected_read = &history;
     }
+    const bool stream_command = command == std::vector<std::string>{"listen"} ||
+                                command == std::vector<std::string>{"wait-for"};
+    if (stream_command) {
+        if (saved.cursor_option->count() != 0) {
+            return report_usage("--cursor is not supported for stream commands", "--cursor",
+                                "unsupported_mode");
+        }
+        for (const auto& [option, argument] :
+             {std::pair{allow_write_option, std::string_view{"--allow-write"}},
+              std::pair{yes_option, std::string_view{"--yes"}},
+              std::pair{dry_run_option, std::string_view{"--dry-run"}},
+              std::pair{idempotency_key_option, std::string_view{"--idempotency-key"}}}) {
+            if (option->count() != 0) {
+                return report_usage(std::string(argument) + " is not supported for stream commands",
+                                    argument, "unsupported_mode");
+            }
+        }
+        if (const auto stream_exit = normalize_stream_arguments(
+                command, stream,
+                timeout_option->count() != 0 ? std::optional<double>{timeout_seconds}
+                                             : std::nullopt);
+            stream_exit) {
+            return *stream_exit;
+        }
+    }
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
             command, *account_option, *full_option, *allow_write_option, *yes_option,
             *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
@@ -1590,7 +1752,7 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
-                             send, chat, *selected_read, fetch);
+                             send, chat, *selected_read, fetch, stream);
     auto request_context =
         make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd));
     if (idempotency_key_option->count() != 0) {

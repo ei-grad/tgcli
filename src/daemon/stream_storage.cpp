@@ -439,6 +439,10 @@ void write_reaction(JsonWriter& writer, const core::TdReactionType& reaction) no
 
 } // namespace
 
+std::int32_t stream_retry_after_seconds(std::string_view message) noexcept {
+    return stream_retry_after(message);
+}
+
 bool stream_timestamp_utc(std::int32_t seconds, std::span<char, 20> output) noexcept {
     if (seconds <= 0) {
         return false;

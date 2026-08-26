@@ -14,10 +14,13 @@
 #include "core/td_client.hpp"
 #include "daemon/commands.hpp"
 #include "daemon/context.hpp"
+#include "daemon/daemon_run.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
+#include "daemon/stream_ingress.hpp"
+#include "daemon/stream_service.hpp"
 #include "proto/frame.hpp"
 #include "proto/frame_io.hpp"
 #include "proto/operation.hpp"
@@ -146,6 +149,34 @@ class CaptureStream {
     int fd_;
     int saved_;
     std::string path_;
+};
+
+class ClosedPipeStdout {
+  public:
+    ClosedPipeStdout() : saved_(::dup(STDOUT_FILENO)) {
+        std::array<int, 2> descriptors{-1, -1};
+        REQUIRE(saved_ >= 0);
+        REQUIRE(::pipe(descriptors.data()) == 0);
+        REQUIRE(::close(descriptors[0]) == 0);
+        REQUIRE(::dup2(descriptors[1], STDOUT_FILENO) == STDOUT_FILENO);
+        REQUIRE(::close(descriptors[1]) == 0);
+        std::clearerr(stdout);
+    }
+
+    ~ClosedPipeStdout() {
+        static_cast<void>(std::fflush(stdout));
+        static_cast<void>(::dup2(saved_, STDOUT_FILENO));
+        static_cast<void>(::close(saved_));
+        std::clearerr(stdout);
+    }
+
+    ClosedPipeStdout(const ClosedPipeStdout&) = delete;
+    ClosedPipeStdout& operator=(const ClosedPipeStdout&) = delete;
+    ClosedPipeStdout(ClosedPipeStdout&&) = delete;
+    ClosedPipeStdout& operator=(ClosedPipeStdout&&) = delete;
+
+  private:
+    int saved_;
 };
 
 struct RunOutcome {
@@ -522,6 +553,7 @@ struct ChildDaemonOptions {
     bool require_no_dispatch = false;
     bool read_alias_fixture = false;
     bool message_write_fixture = false;
+    bool stream_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
     std::string binary_version = "old-test-binary";
@@ -883,6 +915,31 @@ class ChildProtocolDaemon {
                                                        daemon::M3Operation::ChatLeave});
             dispatcher.register_command("saved attach", {daemon::Tier::Write, normalized, false,
                                                          daemon::M3Operation::SavedAttach});
+        }
+        if (options.stream_fixture) {
+            dispatcher.register_command(
+                "listen", {daemon::Tier::Read,
+                           [](const proto::Request& request, daemon::RequestSession& session) {
+                               static_cast<void>(session.item(
+                                   {{"command", request.command},
+                                    {"args", request.args},
+                                    {"timeout", request.context.timeout_seconds
+                                                    ? json(*request.context.timeout_seconds)
+                                                    : json(nullptr)}}));
+                               static_cast<void>(session.result(json::object()));
+                           },
+                           false, std::nullopt, DeadlineDefault::Unlimited});
+            dispatcher.register_command(
+                "wait-for", {daemon::Tier::Read,
+                             [](const proto::Request& request, daemon::RequestSession& session) {
+                                 static_cast<void>(session.result(
+                                     {{"command", request.command},
+                                      {"args", request.args},
+                                      {"timeout", request.context.timeout_seconds
+                                                      ? json(*request.context.timeout_seconds)
+                                                      : json(nullptr)}}));
+                             },
+                             false, std::nullopt, DeadlineDefault::Unlimited});
         }
         if (!server.start(error)) {
             if (!ready_reported) {
@@ -2330,6 +2387,452 @@ TEST_CASE("Saved Messages no-daemon fake boundary preserves stdout and stderr di
                  {"message", "saved commands require a user account"},
                  {"details", json::object()}}}});
     CHECK(scripted->sent_functions().size() == 4);
+}
+
+TEST_CASE("stream no-daemon injection requires and uses a paired observer service",
+          "[cli][stream][no-daemon][fake-boundary]") {
+    const IsolatedEnv env;
+    configure_main_account();
+
+    daemon::StreamService service;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime), core::TdLogConfiguration{},
+                          core::TdClientEventHooks{}, service.observer_factory());
+    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->clients().size() == 1);
+    const auto td_client = scripted->clients().front();
+
+    const core::TdUserSummary account_user{.id = 42,
+                                           .first_name = "Ada",
+                                           .last_name = "",
+                                           .usernames = {"ada"},
+                                           .phone_number = "12025550123",
+                                           .is_bot = false,
+                                           .is_premium = false,
+                                           .presence = core::TdUserPresence::Online};
+    const core::TdChat private_chat{
+        .id = -1001,
+        .title = "Ada",
+        .kind = core::TdChatKind::Private,
+        .related_id = 42,
+        .tdlib_type_id = 1,
+        .positions = {},
+        .chat_lists = {{.kind = core::TdChatListKind::Main, .folder_id = 0}},
+        .is_marked_unread = false,
+        .unread_count = 0,
+        .unread_mention_count = 0,
+        .unread_reaction_count = 0,
+        .unread_poll_vote_count = 0,
+        .last_message = std::nullopt,
+        .notification_settings = std::nullopt};
+    core::TdCurrentState state;
+    state.updates.push_back(core::TdValue::from(core::TdUpdateUser{.user = account_user}));
+    state.updates.push_back(core::TdValue::from(core::TdUpdateNewChat{.chat = private_chat}));
+    std::optional<std::uint64_t> current_state_query;
+    std::optional<std::uint64_t> authorization_query;
+    for (const auto& call : scripted->sent_functions()) {
+        if (call.function.kind() == core::TdFunctionKind::GetCurrentState) {
+            current_state_query = call.query_id;
+        } else {
+            authorization_query = call.query_id;
+        }
+    }
+    REQUIRE(current_state_query.has_value());
+    REQUIRE(authorization_query.has_value());
+    scripted->push_response(td_client, *current_state_query, core::TdValue::from(std::move(state)));
+    scripted->push_response(td_client, *authorization_query, {},
+                            core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((!client.auth_state() || client.auth_state()->data.state != core::AuthState::Ready ||
+            !service.status().ready_for_admission()) &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(client.auth_state());
+    REQUIRE(client.auth_state()->data.state == core::AuthState::Ready);
+    REQUIRE(service.status().ready_for_admission());
+
+    std::vector<json> items;
+    std::optional<json> result;
+    std::optional<json> terminal_error;
+    daemon::CallbackSink sink([&](json value) { items.push_back(std::move(value)); },
+                              [](const json&) {}, [&](json value) { result = std::move(value); },
+                              [&](std::string code, std::string message, json details, int) {
+                                  terminal_error = json{{"code", std::move(code)},
+                                                        {"message", std::move(message)},
+                                                        {"details", std::move(details)}};
+                              });
+    proto::Request request("main");
+    request.id = 1;
+    request.command = {"listen"};
+    request.args = {
+        {"chats", json::array({"-1001"})}, {"types", json::array({"message"})}, {"count", 1}};
+    request.context.cwd = "/";
+    std::string error;
+    auto pending = std::async(std::launch::async, [&] {
+        return daemon::run_no_daemon(request, sink, "main", error, nullptr, &client, {}, &service);
+    });
+
+    const auto respond = [&](std::size_t count, core::TdFunctionKind kind, core::TdValue value) {
+        REQUIRE(scripted->wait_for_sent(count));
+        const auto sent = scripted->sent_functions();
+        REQUIRE(sent.size() == count);
+        REQUIRE(sent.back().function.kind() == kind);
+        scripted->push_response(td_client, sent.back().query_id, std::move(value));
+    };
+    respond(3, core::TdFunctionKind::GetMe, core::TdValue::from(account_user));
+    respond(4, core::TdFunctionKind::GetChat, core::TdValue::from(private_chat));
+    respond(5, core::TdFunctionKind::GetUser, core::TdValue::from(account_user));
+
+    const auto wait_for_slot_state = [&](daemon::StreamIngressState expected,
+                                         std::size_t expected_count = 1) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (daemon::StreamIngressTestAccess::state_count(service.ingress_hub(), expected) ==
+                expected_count) {
+                return true;
+            }
+            std::this_thread::yield();
+        }
+        return daemon::StreamIngressTestAccess::state_count(service.ingress_hub(), expected) ==
+               expected_count;
+    };
+    REQUIRE(wait_for_slot_state(daemon::StreamIngressState::Armed));
+    scripted->push_response(td_client, 999'999, {});
+    REQUIRE(wait_for_slot_state(daemon::StreamIngressState::Published));
+    scripted->push_update(
+        td_client,
+        core::TdValue::from(core::TdUpdateNewMessage{
+            .message = core::TdMessageSummary{
+                .id = 700,
+                .chat_id = -1001,
+                .date = 1'700'000'000,
+                .sender = {.kind = core::TdMessageSenderKind::User, .id = 42, .tdlib_type_id = 1},
+                .is_outgoing = false,
+                .topic = std::nullopt,
+                .content_kind = core::TdMessageContentKind::Text,
+                .text = "hello"}}));
+
+    REQUIRE(pending.get());
+    CHECK(error.empty());
+    REQUIRE(items.size() == 1);
+    CHECK(items.front()["event"] == "message");
+    CHECK(result == json::object());
+    CHECK_FALSE(terminal_error.has_value());
+
+    proto::Request failed_request = request;
+    failed_request.id = 2;
+    const cli::StreamOutputWriter failed_writer = [](std::string_view) {
+        return cli::StreamOutputStatus::FlushFailed;
+    };
+    cli::RunOptions failed_options;
+    failed_options.account = "main";
+    failed_options.json = true;
+    failed_options.no_daemon = true;
+    failed_options.in_process_td_client = &client;
+    failed_options.in_process_stream_service = &service;
+    failed_options.stream_output_writer = &failed_writer;
+    auto failed_pending = std::async(std::launch::async, [&] {
+        return run_request_captured(failed_request, failed_options, env);
+    });
+    respond(6, core::TdFunctionKind::GetMe, core::TdValue::from(account_user));
+    respond(7, core::TdFunctionKind::GetChat, core::TdValue::from(private_chat));
+    respond(8, core::TdFunctionKind::GetUser, core::TdValue::from(account_user));
+    REQUIRE(wait_for_slot_state(daemon::StreamIngressState::Armed));
+    scripted->push_response(td_client, 999'998, {});
+    REQUIRE(wait_for_slot_state(daemon::StreamIngressState::Published));
+    scripted->push_update(
+        td_client,
+        core::TdValue::from(core::TdUpdateNewMessage{
+            .message = core::TdMessageSummary{
+                .id = 701,
+                .chat_id = -1001,
+                .date = 1'700'000'001,
+                .sender = {.kind = core::TdMessageSenderKind::User, .id = 42, .tdlib_type_id = 1},
+                .is_outgoing = false,
+                .topic = std::nullopt,
+                .content_kind = core::TdMessageContentKind::Text,
+                .text = "failed output"}}));
+    const auto failed = failed_pending.get();
+    CHECK(failed.exit_code == kGeneric);
+    CHECK(failed.out.empty());
+    REQUIRE_FALSE(failed.err.empty());
+    CHECK(json::parse(failed.err)["error"]["details"]["reason"] == "stdout_flush_failed");
+    REQUIRE(wait_for_slot_state(daemon::StreamIngressState::Free, daemon::kStreamSubscriberSlots));
+    client.close();
+
+    std::string unpaired_error;
+    CHECK_FALSE(daemon::run_no_daemon(request, sink, "main", unpaired_error, nullptr, &client));
+    CHECK(unpaired_error == "injected stream command requires a paired stream service");
+}
+
+TEST_CASE("stream client writes items once and consumes listen terminal",
+          "[cli][stream][output][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.stream_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    for (const bool json_mode : {false, true}) {
+        cli::RunOptions options;
+        options.account = "main";
+        options.json = json_mode;
+        options.auto_spawn = false;
+
+        const auto outcome = run_captured({"listen"}, options, env);
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        REQUIRE(std::ranges::count(outcome.out, '\n') == 1);
+        CHECK(json::parse(outcome.out)["command"] == json::array({"listen"}));
+    }
+    CHECK(fixture.running());
+}
+
+TEST_CASE("stream output failures cancel locally without fabricating a terminal",
+          "[cli][stream][output][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.stream_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    for (const auto& [status, reason] :
+         {std::pair{cli::StreamOutputStatus::ShortWrite, "stdout_short_write"},
+          std::pair{cli::StreamOutputStatus::WriteFailed, "stdout_write_failed"},
+          std::pair{cli::StreamOutputStatus::FlushFailed, "stdout_flush_failed"}}) {
+        DYNAMIC_SECTION(reason) {
+            std::size_t writes = 0;
+            const cli::StreamOutputWriter writer = [&](std::string_view line) {
+                ++writes;
+                CHECK(line.ends_with('\n'));
+                return status;
+            };
+            cli::RunOptions options;
+            options.account = "main";
+            options.json = true;
+            options.auto_spawn = false;
+            options.stream_output_writer = &writer;
+            const auto outcome = run_captured({"listen"}, options, env);
+            CHECK(outcome.exit_code == kGeneric);
+            CHECK(outcome.out.empty());
+            REQUIRE_FALSE(outcome.err.empty());
+            const auto error = json::parse(outcome.err);
+            CHECK(error == json{{"error",
+                                 {{"code", "GENERIC"},
+                                  {"message", "cannot write stream output"},
+                                  {"details", {{"reason", reason}}}}}});
+            CHECK(writes == 1);
+        }
+    }
+    std::string wait_line;
+    const cli::StreamOutputWriter complete_writer = [&](std::string_view line) {
+        wait_line = line;
+        return cli::StreamOutputStatus::Complete;
+    };
+    cli::RunOptions wait_options;
+    wait_options.account = "main";
+    wait_options.json = true;
+    wait_options.auto_spawn = false;
+    wait_options.stream_output_writer = &complete_writer;
+    const auto wait = run_captured({"wait-for"}, wait_options, env);
+    CHECK(wait.exit_code == kOk);
+    CHECK(wait.out.empty());
+    CHECK(wait.err.empty());
+    REQUIRE_FALSE(wait_line.empty());
+    CHECK(wait_line.ends_with('\n'));
+    CHECK(json::parse(wait_line)["command"] == json::array({"wait-for"}));
+    CHECK(fixture.running());
+}
+
+TEST_CASE("stream EPIPE is ignored and shuts down only its socket",
+          "[cli][stream][output][epipe][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.stream_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.auto_spawn = false;
+
+    int exit_code = -1;
+    std::string error_output;
+    {
+        const CaptureStream errors(stderr, STDERR_FILENO, env.root() + "/stream-epipe.err");
+        {
+            const ClosedPipeStdout closed_stdout;
+            proto::Request request("main");
+            request.id = 1;
+            request.command = {"listen"};
+            request.args = json::object();
+            request.context.json = true;
+            request.context.cwd = "/";
+            exit_code = cli::run_command(request, options);
+        }
+        error_output = errors.contents();
+    }
+    CHECK(exit_code == kGeneric);
+    REQUIRE_FALSE(error_output.empty());
+    CHECK(json::parse(error_output)["error"]["details"]["reason"] == "stdout_flush_failed");
+
+    const auto isolated = run_captured({"version"}, options, env);
+    CHECK(isolated.exit_code == kOk);
+    CHECK(isolated.err.empty());
+    CHECK(fixture.running());
+}
+
+TEST_CASE("stream CLI emits exact normalized request shapes and unlimited defaults",
+          "[cli][stream][parser][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "stream-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("listen") != std::string::npos);
+    CHECK((root_help.out + root_help.err).find("wait-for") != std::string::npos);
+    const auto listen_help = run_binary_captured({"listen", "--help"}, env, "stream-listen-help");
+    REQUIRE(listen_help.exit_code == kOk);
+    for (const auto* option : {"--chat", "--types", "--count"}) {
+        CHECK((listen_help.out + listen_help.err).find(option) != std::string::npos);
+    }
+    const auto wait_help = run_binary_captured({"wait-for", "--help"}, env, "stream-wait-help");
+    REQUIRE(wait_help.exit_code == kOk);
+    for (const auto* option : {"--chat", "--from", "--regex", "--after"}) {
+        CHECK((wait_help.out + wait_help.err).find(option) != std::string::npos);
+    }
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.stream_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+
+    const auto listen =
+        run_binary_captured({"--json", "--timeout", "0.001", "listen", "--chat", "-1001", "--chat",
+                             "@ada", "--types", "message,delete", "--count", "2"},
+                            env, "stream-listen-normalized");
+    REQUIRE(listen.exit_code == kOk);
+    CHECK(listen.err.empty());
+    const auto listen_item = json::parse(listen.out);
+    CHECK(listen_item["command"] == json::array({"listen"}));
+    CHECK(listen_item["args"] == json{{"chats", json::array({"-1001", "@ada"})},
+                                      {"types", json::array({"message", "delete"})},
+                                      {"count", 2}});
+    CHECK(listen_item["timeout"] == 0.001);
+
+    const auto wait = run_binary_captured({"--json", "--timeout", "31536000", "wait-for", "--chat",
+                                           "-1001", "--from", "@ada", "--regex", "^target$",
+                                           "--after", "9007199254740991"},
+                                          env, "stream-wait-normalized");
+    REQUIRE(wait.exit_code == kOk);
+    CHECK(wait.err.empty());
+    const auto wait_result = json::parse(wait.out);
+    CHECK(wait_result["command"] == json::array({"wait-for"}));
+    CHECK(wait_result["args"] == json{{"chat", "-1001"},
+                                      {"from", "@ada"},
+                                      {"regex", "^target$"},
+                                      {"after", 9'007'199'254'740'991LL}});
+    CHECK(wait_result["timeout"] == 31'536'000);
+
+    const auto listen_defaults =
+        run_binary_captured({"--json", "listen"}, env, "stream-listen-defaults");
+    REQUIRE(listen_defaults.exit_code == kOk);
+    const auto listen_default_item = json::parse(listen_defaults.out);
+    CHECK(listen_default_item["args"] ==
+          json{{"chats", json::array()}, {"types", nullptr}, {"count", nullptr}});
+    CHECK(listen_default_item["timeout"].is_null());
+
+    const auto wait_defaults =
+        run_binary_captured({"--json", "wait-for"}, env, "stream-wait-defaults");
+    REQUIRE(wait_defaults.exit_code == kOk);
+    const auto wait_default_result = json::parse(wait_defaults.out);
+    CHECK(wait_default_result["args"] ==
+          json{{"chat", nullptr}, {"from", nullptr}, {"regex", nullptr}, {"after", nullptr}});
+    CHECK(wait_default_result["timeout"].is_null());
+
+    std::vector<std::string> maximum_listen{
+        "--json", "listen", "--types", "message,edit,delete,reaction,chat", "--count", "1000000"};
+    for (int index = 0; index < 64; ++index) {
+        maximum_listen.emplace_back("--chat");
+        maximum_listen.push_back(std::to_string(index + 1));
+    }
+    const auto maximum = run_binary_captured(maximum_listen, env, "stream-listen-maximum-bounds");
+    REQUIRE(maximum.exit_code == kOk);
+    const auto maximum_item = json::parse(maximum.out);
+    CHECK(maximum_item["args"]["chats"].size() == 64);
+    CHECK(maximum_item["args"]["count"] == 1'000'000);
+    CHECK(maximum_item["args"]["types"] ==
+          json::array({"message", "edit", "delete", "reaction", "chat"}));
+
+    const auto minimum_wait = run_binary_captured(
+        {"--json", "wait-for", "--chat", "1", "--after", "1", "--regex", std::string(4096, 'x')},
+        env, "stream-wait-boundaries");
+    REQUIRE(minimum_wait.exit_code == kOk);
+    const auto minimum_wait_result = json::parse(minimum_wait.out);
+    CHECK(minimum_wait_result["args"]["after"] == 1);
+    CHECK(minimum_wait_result["args"]["regex"].get_ref<const std::string&>().size() == 4096);
+    CHECK(fixture.running());
+}
+
+TEST_CASE("stream CLI rejects every closed grammar boundary before routing",
+          "[cli][stream][parser][process]") {
+    const IsolatedEnv env;
+    std::vector<std::pair<std::string, std::vector<std::string>>> cases{
+        {"listen-types-empty", {"listen", "--types", ""}},
+        {"listen-types-empty-token", {"listen", "--types", "message,,chat"}},
+        {"listen-types-leading-empty", {"listen", "--types", ",message"}},
+        {"listen-types-trailing-empty", {"listen", "--types", "message,"}},
+        {"listen-types-space", {"listen", "--types", "message, chat"}},
+        {"listen-types-duplicate", {"listen", "--types", "message,message"}},
+        {"listen-types-unknown", {"listen", "--types", "message,poll"}},
+        {"listen-types-twice", {"listen", "--types", "message", "--types", "chat"}},
+        {"listen-count-zero", {"listen", "--count", "0"}},
+        {"listen-count-plus", {"listen", "--count", "+1"}},
+        {"listen-count-leading-zero", {"listen", "--count", "01"}},
+        {"listen-count-over", {"listen", "--count", "1000001"}},
+        {"listen-count-negative", {"listen", "--count=-1"}},
+        {"wait-chat-twice", {"wait-for", "--chat", "-1001", "--chat", "-1002"}},
+        {"wait-after-zero", {"wait-for", "--chat", "-1001", "--after", "0"}},
+        {"wait-after-plus", {"wait-for", "--chat", "-1001", "--after", "+1"}},
+        {"wait-after-leading-zero", {"wait-for", "--chat", "-1001", "--after", "01"}},
+        {"wait-after-over", {"wait-for", "--chat", "-1001", "--after", "9007199254740992"}},
+        {"wait-after-negative", {"wait-for", "--chat", "-1001", "--after=-1"}},
+        {"wait-after-no-chat", {"wait-for", "--after", "1"}},
+        {"wait-regex-empty", {"wait-for", "--regex", ""}},
+        {"wait-regex-invalid", {"wait-for", "--regex", "["}},
+        {"stream-timeout-zero", {"--timeout", "0", "listen"}},
+        {"stream-timeout-under", {"--timeout", "0.0009", "wait-for"}},
+        {"stream-timeout-over", {"--timeout", "31536000.001", "listen"}},
+        {"stream-timeout-inf", {"--timeout", "inf", "listen"}},
+        {"stream-timeout-nan", {"--timeout", "nan", "wait-for"}},
+        {"listen-cursor", {"--cursor", "opaque", "listen"}},
+        {"listen-full", {"--full", "listen"}},
+        {"listen-dry-run", {"--dry-run", "listen"}},
+        {"listen-idempotency", {"--idempotency-key", "key", "listen"}},
+        {"listen-local", {"listen", "--local"}},
+        {"listen-allow-write", {"--allow-write", "listen"}},
+        {"wait-yes", {"--yes", "wait-for"}},
+        {"wait-count", {"wait-for", "--count", "1"}},
+        {"listen-after", {"listen", "--after", "1"}},
+        {"wait-types", {"wait-for", "--types", "message"}},
+    };
+    std::vector<std::string> sixty_five{"listen"};
+    for (int index = 0; index < 65; ++index) {
+        sixty_five.emplace_back("--chat");
+        sixty_five.push_back(std::to_string(index + 1));
+    }
+    cases.emplace_back("listen-chat-65", std::move(sixty_five));
+    cases.emplace_back("wait-regex-invalid-utf8",
+                       std::vector<std::string>{"wait-for", "--regex", std::string("\xff", 1)});
+    cases.emplace_back("wait-regex-over",
+                       std::vector<std::string>{"wait-for", "--regex", std::string(4097, 'x')});
+
+    for (const auto& [stem, arguments] : cases) {
+        const auto outcome = run_binary_captured(arguments, env, stem);
+        INFO(stem << ": " << outcome.err);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        REQUIRE_FALSE(outcome.err.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
 }
 
 TEST_CASE("chats parser exposes exact filters and rejects invalid combinations locally",

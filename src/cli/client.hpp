@@ -7,17 +7,22 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace tgcli::cli {
 
 class ChallengePrompt;
 
+enum class StreamOutputStatus { Complete, ShortWrite, WriteFailed, FlushFailed };
+using StreamOutputWriter = std::function<StreamOutputStatus(std::string_view)>;
+
 } // namespace tgcli::cli
 
 namespace tgcli::daemon {
 class Dispatcher;
-}
+class StreamService;
+} // namespace tgcli::daemon
 
 namespace tgcli::core {
 class TdClient;
@@ -47,6 +52,10 @@ struct RunOptions {
     // Shared fake-boundary seam for --no-daemon contract tests. Null creates
     // the production TDLib client; the caller retains ownership when set.
     core::TdClient* in_process_td_client = nullptr;
+    daemon::StreamService* in_process_stream_service = nullptr;
+    // Test/frontend seam for the single checked stream-output operation. Null
+    // uses stdout with full-write, flush, and stream-error checks.
+    const StreamOutputWriter* stream_output_writer = nullptr;
     // Shared fake-boundary seam for request-admission wall-clock tests.
     std::function<std::chrono::system_clock::time_point()> in_process_request_wall_clock;
 };

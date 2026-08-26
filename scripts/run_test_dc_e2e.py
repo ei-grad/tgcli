@@ -26,19 +26,30 @@ from test_dc_contract import (
     PINNED_AUTH_STATES,
     ContractError,
     FrozenSentinel,
+    M5ResultRecord,
     SkipEntry,
     auth_state_test_id,
     freeze_auth_sentinels,
     read_secret_fixture,
     scan_frozen_auth_sentinels,
     validate_m1_coverage,
+    write_m5_result_artifact,
     write_skip_artifact,
 )
 
 USER_ACCOUNT = "test-user"
 BOT_ACCOUNT = "test-bot"
 QR_ACCOUNT = "test-qr"
-REQUIRED_SUBCOMMANDS = ("logout", "chats", "send", "msg", "saved")
+REQUIRED_SUBCOMMANDS = (
+    "logout",
+    "chats",
+    "send",
+    "msg",
+    "saved",
+    "resolve",
+    "listen",
+    "wait-for",
+)
 REQUIRED_OPTIONS = (
     "--allow-write",
     "--yes",
@@ -138,6 +149,7 @@ class CommandResult:
 class JsonExecution:
     document: object
     returncode: int
+    stderr: bytes = b""
 
 
 @dataclass
@@ -227,7 +239,13 @@ class Runner:
         except (OSError, subprocess.SubprocessError) as error:
             raise AcceptanceError(f"command execution failed: {label}") from error
         source = stdout_path if completed.returncode == 0 else stderr_path
-        return JsonExecution(_load_json(source, label), completed.returncode)
+        try:
+            stderr_bytes = stderr_path.read_bytes()
+        except OSError as error:
+            raise AcceptanceError(f"cannot read command stderr: {label}") from error
+        return JsonExecution(
+            _load_json(source, label), completed.returncode, stderr_bytes
+        )
 
     def run_json(self, label: str, arguments: Sequence[str]) -> CommandResult:
         completed = self.run_json_status(label, arguments)
@@ -239,6 +257,14 @@ class Runner:
         completed = self.run_json_status(label, arguments)
         if completed.returncode == 0:
             raise AcceptanceError(f"command unexpectedly succeeded: {label}")
+        return CommandResult(completed.document, frozenset())
+
+    def run_json_clean(self, label: str, arguments: Sequence[str]) -> CommandResult:
+        completed = self.run_json_status(label, arguments)
+        if completed.returncode != 0:
+            raise AcceptanceError(f"command returned non-zero: {label}")
+        if completed.stderr:
+            raise AcceptanceError(f"command returned unexpected stderr: {label}")
         return CommandResult(completed.document, frozenset())
 
     def register_message_cleanup(self, chat_id: int, message_id: int) -> MessageCleanup:
@@ -1265,6 +1291,104 @@ def _m3_write_flow(runner: Runner, key_sentinels: list[bytes] | None = None) -> 
             raise CleanupError("M3/M4 cleanup failed") from cleanup_failure
 
 
+def _saved_messages_chat_id(document: object, self_user_id: int) -> int:
+    fields = {"kind", "chat", "message_id", "topic", "link_type", "is_public"}
+    if not isinstance(document, dict) or set(document) != fields:
+        raise AcceptanceError("M5 Saved Messages resolve result is invalid")
+    chat = document["chat"]
+    if (
+        document["kind"] != "chat"
+        or document["message_id"] is not None
+        or document["topic"] is not None
+        or document["link_type"] != "saved_messages"
+        or document["is_public"] is not None
+        or not isinstance(chat, dict)
+        or set(chat) != {"id", "title", "type", "is_bot", "usernames"}
+        or chat["id"] != self_user_id
+        or chat["type"] != "private"
+        or chat["is_bot"] is not False
+        or not isinstance(chat["title"], str)
+        or not isinstance(chat["usernames"], list)
+        or not all(isinstance(value, str) and value for value in chat["usernames"])
+    ):
+        raise AcceptanceError("M5 Saved Messages resolve identity is invalid")
+    return self_user_id
+
+
+def _m5_stream_flow(
+    runner: Runner, user_identity: Mapping[str, object], result_artifact: Path
+) -> None:
+    self_user_id = user_identity.get("id")
+    if not _int(self_user_id, 1, 9_007_199_254_740_991):
+        raise AcceptanceError("M5 current user identity is invalid")
+    resolved = runner.run_json(
+        "m5-resolve-saved",
+        ["--json", "--account", USER_ACCOUNT, "resolve", "t.me/saved"],
+    ).document
+    chat_id = _saved_messages_chat_id(resolved, self_user_id)
+
+    token = secrets.token_hex(16)
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise AcceptanceError("M5 CSPRNG token is invalid")
+    anchor_text = f"tgcli-m5-anchor-{token}"
+    target_text = f"tgcli-m5-target-{token}"
+    send_prefix = [
+        "--json",
+        "--allow-write",
+        "--account",
+        USER_ACCOUNT,
+        "send",
+        str(chat_id),
+    ]
+    anchor = runner.run_json("m5-send-anchor", [*send_prefix, anchor_text]).document
+    anchor_chat_id, anchor_message_id = _authoritative_send_ids(anchor)
+    _assert_send_result(anchor, anchor_chat_id, anchor_message_id, anchor_text)
+    if anchor_chat_id != chat_id or anchor_message_id <= 0:
+        raise AcceptanceError("M5 anchor returned invalid Saved Messages ids")
+
+    target = runner.run_json("m5-send-target", [*send_prefix, target_text]).document
+    target_chat_id, target_message_id = _authoritative_send_ids(target)
+    _assert_send_result(target, target_chat_id, target_message_id, target_text)
+    if target_chat_id != chat_id or target_message_id <= anchor_message_id:
+        raise AcceptanceError("M5 target did not follow its anchor")
+
+    matched = runner.run_json_clean(
+        "m5-wait-for",
+        [
+            "--json",
+            "--timeout",
+            "30",
+            "--account",
+            USER_ACCOUNT,
+            "wait-for",
+            "--chat",
+            str(chat_id),
+            "--from",
+            str(self_user_id),
+            "--after",
+            str(anchor_message_id),
+            "--regex",
+            f"^{target_text}$",
+        ],
+    ).document
+    expected_match = {
+        name: value for name, value in target.items() if name != "scheduled"
+    }
+    if matched != expected_match:
+        raise AcceptanceError("M5 wait-for returned the wrong target message")
+
+    write_m5_result_artifact(
+        result_artifact,
+        M5ResultRecord(
+            account=USER_ACCOUNT,
+            chat_id=chat_id,
+            anchor_message_id=anchor_message_id,
+            target_message_id=target_message_id,
+            target_prefix=target_text,
+        ),
+    )
+
+
 def _smoke(
     runner: Runner,
     environment: Mapping[str, str],
@@ -1272,6 +1396,7 @@ def _smoke(
     sources: Mapping[str, Path],
     qr_approver: Path | None,
     m3_key_sentinels: list[bytes],
+    m5_result_artifact: Path,
 ) -> set[str]:
     executed: set[str] = set()
     accounts = [USER_ACCOUNT]
@@ -1375,6 +1500,7 @@ def _smoke(
         raise AcceptanceError("me after re-login differs from login identity")
 
     _m3_write_flow(runner, m3_key_sentinels)
+    _m5_stream_flow(runner, relogin_identity, m5_result_artifact)
 
     if QR_ACCOUNT in accounts:
         qr = runner.run_interactive(
@@ -1409,7 +1535,7 @@ def _skip_entries(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the tgcli M1/M2 and mandatory M3/M4 write acceptance flows on test DC"
+        description="Run the tgcli M1-M5 mandatory acceptance flows on test DC"
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -1425,6 +1551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     os.umask(0o077)
     artifact = arguments.build_dir / "test-results" / "tgcli-test-dc-skips.json"
+    m5_result_artifact = arguments.build_dir / "test-results" / "tgcli-test-dc-m5.json"
     entries: list[SkipEntry] = []
     failure: BaseException | None = None
     runner: Runner | None = None
@@ -1480,6 +1607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sources,
                 arguments.qr_approver,
                 m3_key_sentinels,
+                m5_result_artifact,
             )
             validate_m1_coverage(executed, entries)
     except (AcceptanceError, ContractError, OSError) as error:

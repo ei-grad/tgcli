@@ -558,6 +558,23 @@ std::string render_fetch(const nlohmann::json& data) {
         data.at("resume_from_message_id").dump());
 }
 
+std::string render_wait_for(const nlohmann::json& data) {
+    const auto& sender = data.at("sender");
+    const auto rendered_sender = fmt::format(R"({{"type":{},"id":{}}})", sender.at("type").dump(),
+                                             sender.at("id").get<std::int64_t>());
+    const auto& topic = data.at("topic");
+    const auto rendered_topic =
+        topic.is_null() ? std::string("null")
+                        : fmt::format(R"({{"kind":{},"id":{}}})", topic.at("kind").dump(),
+                                      topic.at("id").get<std::int64_t>());
+    return fmt::format("id\t{}\nchat_id\t{}\ndate\t{}\nsender\t{}\nis_outgoing\t{}\ntopic\t{}\n"
+                       "type\t{}\ntext\t{}\n",
+                       data.at("id").get<std::int64_t>(), data.at("chat_id").get<std::int64_t>(),
+                       data.at("date").dump(), rendered_sender, data.at("is_outgoing").dump(),
+                       rendered_topic, data.at("type").get_ref<const std::string&>(),
+                       data.at("text").dump());
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed public command renderer table.
@@ -624,6 +641,9 @@ std::string render_human(const std::string& command_key, const nlohmann::json& d
     }
     if (command_key == "fetch") {
         return render_fetch(data);
+    }
+    if (command_key == "wait-for") {
+        return render_wait_for(data);
     }
     if (command_key == "resolve") {
         return render_resolve(data);
