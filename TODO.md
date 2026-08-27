@@ -362,7 +362,9 @@ before the milestone is closed.
       verbs: exact grammar/args and identifiers, TDLib a17f87c4 boundary,
       generation binding, strict DTOs/errors, tier/bot/secret matrices,
       22-of-24 idempotency allowlist, two-epoch audit/recovery, redaction,
-      no-reread results, daemon/no-daemon parity, schemas and acceptance gates
+      canonical TD-cleaned mutation strings, disjoint folder RMW, complete
+      rights/transition and structural-sum invariants, no-reread results,
+      daemon/no-daemon parity, schemas and acceptance gates
 - [ ] Add the complete dormant typed TD boundary and conversion foundation for
       contacts, folder cache/snapshots, paged topics, chat admin/member/photo/
       invite-link calls and storage statistics/default optimization; pin every

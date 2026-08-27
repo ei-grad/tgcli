@@ -5524,8 +5524,8 @@ and nonempty. `--permissions none` normalizes to an empty array; `none` cannot
 be combined with another value.
 
 All strings are valid Unicode-scalar UTF-8 without NUL. Lengths below are
-Unicode scalar counts unless explicitly called bytes. No NFC/NFKC, case fold,
-whitespace trim or confusable rewrite occurs:
+Unicode scalar counts unless explicitly called bytes. No NFC/NFKC, case fold
+or confusable rewrite occurs:
 
 - contact search query is 1..256 UTF-8 bytes;
 - folder name is 1..12 scalars without CR or LF and contains plain text only;
@@ -5533,6 +5533,42 @@ whitespace trim or confusable rewrite occurs:
 - title is 1..128 scalars and description is 0..255 scalars;
 - invite link is 1..4096 UTF-8 bytes without a C0/C1 control scalar;
 - PATH and its frozen cwd/file rules are exactly §4.5.12.
+
+Folder names, topic names, chat titles and chat descriptions use strict
+canonical caller input. Before normalized args or a request frame exists, the
+client applies the exact pinned cleaner below to a copy and requires byte
+equality with the caller input. The daemon handler independently repeats the
+same check before fingerprint, plan, confirmation or TD dispatch; a forged
+noncanonical frame is `USAGE/invalid_argument`. The bytes are never silently
+rewritten:
+
+| field | exact pinned local pipeline |
+|---|---|
+| caller folder name | empty-entity `fix_formatted_text(...,skip_trim=false)` (including `clean_input_string`), then `clean_name(...,12)` |
+| topic create/edit name | `clean_input_string`, then `clean_name(...,128)` |
+| chat title | `clean_input_string`, then `clean_name(...,128)` |
+| chat description | `clean_input_string`, then `strip_empty_characters(...,255,false)` |
+
+The source authority is pinned `td/telegram/Requests.cpp`'s
+`CLEAN_INPUT_STRING`, `td/telegram/misc.cpp`'s `clean_input_string`,
+`strip_empty_characters` and `clean_name`,
+`td/telegram/MessageEntity.cpp`'s `fix_formatted_text`,
+`td/telegram/DialogFilter.cpp::create_dialog_filter`,
+`ForumTopicManager.cpp::create_forum_topic/edit_forum_topic`,
+`DialogManager.cpp::set_dialog_title/set_dialog_description`, and
+`ChatManager.cpp::set_chat_description/set_channel_description`, all at the
+§4.9 pin. This includes control-to-space conversion, CR removal, removal of
+the pinned U+2028..U+202E and combining-line byte sequences, replacement of
+the pinned Unicode space set, UTF-8 scalar truncation, edge trimming and—for
+`clean_name`—collapse of ASCII space, LF and NBSP runs to one ASCII space.
+
+Consequently leading/trailing/repeated ASCII space, LF and NBSP are rejected
+for folder/topic/title fields whenever the cleaner changes them. For a
+description, leading/trailing space or LF, NBSP and removed Unicode/control
+characters are rejected, while repeated internal ASCII spaces and internal LF
+are accepted because the pinned description pipeline preserves them. Tests
+pin these distinctions, including U+2028 removal; a successful TD mutation
+can therefore not normalize to bytes different from the plan/result.
 
 `int53` is a JSON integer in `[-9007199254740991,9007199254740991]`.
 Chat identifiers are nonzero int53 and user identifiers are positive int53.
@@ -5666,22 +5702,26 @@ pinned `chatFolderIcon.name` values `All`, `Unread`, `Unmuted`, `Bots`,
 `Study`, `Trade`, `Travel`, `Work`, `Airplane`, `Book`, `Light`, `Like`,
 `Money`, `Note`, and `Palette` in the same order; this is not a general title-
 case conversion. Unknown returned names fail closed. `color_id` is -1..6.
-`FolderSummary` has exactly `id`, `name`, `icon`, `color_id`, `is_shareable`
-and `has_my_invite_links`. `FolderSnapshot` has those fields plus
+`FolderName` has exactly `text`, `animate_custom_emoji`, and
+`custom_emoji_entities`. Each entity has exact UTF-16 `offset`, positive
+`length`, and canonical string `custom_emoji_id`; entities are sorted,
+nonoverlapping, in bounds, and are the only permitted formatted-text kind.
+`FolderSummary` has exactly `id`, `name:FolderName`, `icon`, `color_id`,
+`is_shareable` and `has_my_invite_links`. `FolderSnapshot` has those fields plus
 `pinned_chat_ids`, `included_chat_ids`, `excluded_chat_ids`, `exclude_muted`,
 `exclude_read`, `exclude_archived`, `include_contacts`,
 `include_non_contacts`, `include_bots`, `include_groups`, and
 `include_channels`. `FolderSummary.icon` is the non-null effective lowercase
 enum from `chatFolderInfo`; `FolderSnapshot.icon` is the configured lowercase
 enum or null from `chatFolder`. Ids are nonzero int53.
-Each id vector is duplicate-free and preserves TD order. The union of pinned
-and included ids and the excluded vector each contain at most 100 entries.
-Public `name` is the
-exact formatted-text string. The typed internal `FolderRecord` additionally
-retains validated CustomEmoji entity ranges from the pinned `chatFolderName`;
-list/show preserve them internally, an edit without `--name` sends them back
-unchanged, and caller-provided create/edit names use an empty entity vector.
-No other formatted-text entity is accepted.
+Each id vector is duplicate-free, the three vectors are pairwise disjoint, and
+TD order is preserved. The union of pinned and included ids and the excluded
+vector each contain at most 100 entries. Any repeated id within a vector or
+cross-vector duplicate in a TD snapshot is
+`INTERNAL/malformed_tdlib_response` before a plan exists. The typed internal
+`FolderRecord`, strict Result, plan, plan hash and audit snapshot all retain
+the exact text, `animate_custom_emoji` boolean and validated CustomEmoji entity
+ranges; dropping the boolean or hashing only visible text is forbidden.
 
 Every folder command first binds the latest validated `updateChatFolders` for
 the exact Ready generation; cached `chatFolderInfo` supplies the folder id and
@@ -5697,40 +5737,61 @@ generation and does not synthesize a TD request. The result is
 
 `folder show` calls `getChatFolder(folder_id)`, joins it to the cached info
 with that id, and returns
-`{"folder":FolderSnapshot}`. Null, id mismatch, malformed plain name/icon,
-invalid color, duplicate chat id, secret chat id or unknown field variant is a
-whole-response `INTERNAL`. TD's documented not-found response maps to
-`NOT_FOUND/{"folder_id":folder_id}`; other TD errors remain `TDLIB_ERROR`.
+`{"folder":FolderSnapshot}`. A successful top-level null `chatFolder` is the
+exact pinned absence result and maps to
+`NOT_FOUND/{"folder_id":folder_id}`. A null nested name/text/entity or null
+effective `chatFolderInfo.icon`, malformed name/icon, invalid color, duplicate
+chat id or unknown field variant is a whole-response `INTERNAL`; the configured
+`chatFolder.icon` alone may be null. Null is not a general structural-to-
+NOT_FOUND rule. TD errors remain `TDLIB_ERROR` after auth/429 precedence.
+The same call-specific mapping applies to the edit/delete/add-chat/remove-chat
+planner's `getChatFolder`; no mutation is planned from null.
 
 Create resolves every repeated chat selector atomically, sorts/deduplicates
 the resulting ids and requires 1..100 unique non-secret chats. It calls
-`createChatFolder` with the plain name, selected/null icon, chosen color
+`createChatFolder` with
+`FolderName{text=canonical_name,animate_custom_emoji=false,
+custom_emoji_entities=[]}`, selected/null icon, chosen color
 (default -1), `is_shareable=false`, empty pinned/excluded ids, all resolved
 ids as included ids, and every automatic filter boolean false. Its returned
-`chatFolderInfo` supplies the new id and server-normalized summary fields;
+`chatFolderInfo` supplies the new id and returned summary fields;
 the immutable request supplies membership fields. Any disagreement with the
 requested name/color/id is malformed. A configured null icon may legitimately
 produce TDLib's non-null effective default icon in the info; a configured
 non-null icon must match exactly. No `getChatFolder` follows creation.
 
 Edit is metadata-only. It first reads and validates one full snapshot, replaces
-only the explicitly supplied name/icon/color and calls `editChatFolder` with
-every other snapshot field byte-for-byte/logically unchanged. At least one
-field must change; an identical requested value is
+only the explicitly supplied name text/icon/color and calls `editChatFolder`
+with every other snapshot field byte-for-byte/logically unchanged. Without
+`--name`, the complete FolderName is preserved. With `--name`, text is replaced
+by the canonical caller bytes, the explicit caller-supplied plain-text entity
+vector is empty, and the existing `animate_custom_emoji` value is preserved;
+no hidden default changes true to false. At least one field must change; an
+identical requested value is
 `PRECONDITION_FAILED/no_change`. The returned info must match the planned
 metadata and id, with the same configured-null/effective-default icon rule.
 The result snapshot is composed from that response and the
 pre-call preserved membership; no reread is allowed.
+Here and below, “preserve FolderName” means exact preservation of text,
+animation and entities whenever `--name` is absent; explicit `--name` is the
+sole intentional text/entity replacement and still preserves the animation
+boolean.
 
 `folder add-chat` and `folder remove-chat` are full-snapshot read-modify-write
 operations. They resolve the exact chat and read the folder before the commit
-epoch. Add rejects an id already in pinned or included membership, appends it
-to `included_chat_ids`, and requires the resulting union to contain at most
-100 unique ids. Remove rejects an id absent from both vectors and removes it
-from both pinned and included vectors. Excluded ids and every automatic filter
-are preserved. Both call `editChatFolder` once, require matching returned info
+epoch. Add rejects an id already in pinned or included membership; otherwise
+it removes the id from excluded membership when present and appends it to
+`included_chat_ids`. Remove rejects an id absent from both pinned and included,
+removes it from both vectors, and appends it to `excluded_chat_ids`. Both
+require the resulting vectors to remain pairwise disjoint and the chosen union
+to contain at most 100 unique ids. FolderName text/entities/animation,
+unrelated excluded ids and every automatic filter are preserved. Both call
+`editChatFolder` once, require matching returned info
 and synthesize the final snapshot from the plan. They never use
 `addChatToList`, never rewrite Main/Archive placement and never reread.
+The strict plan's `before` and `after` snapshots make every excluded removal
+or append, plus FolderName animation/entities, part of the plan hash and
+audited transition.
 
 Delete reads the full snapshot for confirmation/audit, then calls
 `deleteChatFolder(folder_id,[])`; tgcli never leaves chats as a side effect.
@@ -5798,15 +5859,26 @@ terminal sentinel. Order is the pinned signed int64 field and is nonincreasing
 across page boundaries. An empty page is valid only with the all-zero cursor
 and then terminates; a nonempty page with the all-zero cursor also terminates.
 Approximate `total_count` and a short page never do. A repeated topic or
-nonterminal cursor, an invalid count or a malformed anchor is
-`PAGINATION_INVALID` with
-`operation:"topic_list"`; null/mixed pages are `INTERNAL`. The all-pages
+nonterminal cursor that is equal, previously seen or otherwise nonadvancing is
+`PAGINATION_INVALID/non_advancing_upstream`; this includes an empty page that
+returns a nonzero continuation cursor and any nonterminal cursor component
+outside its pinned date/message/topic-id range. A null top-level page, negative
+or undersized `total_count`, oversized vector, null/malformed topic/info/icon/
+sender, chat mismatch, or invalid topic scalar/date/count/order is structural
+`INTERNAL/{"operation":"topic_list","reason":"malformed_tdlib_response"}`.
+Lifecycle/auth/deadline and an actual TD error arbitrate first; complete
+structural validation then precedes duplicate/cursor progress validation, and
+capacity admission is last. Thus structural corruption cannot be relabeled as
+pagination merely because the same page also repeats an id. The all-pages
 accumulator admits at most 4096 topics, 16,777,216 charged serialized bytes
 and 262,144 bytes for one topic; a `+1` failure is
 `INTERNAL/capacity_exhausted`, never a partial list.
 
 Create returns the converted `forumTopicInfo` directly. Edit/close/reopen first
-call `getForumTopic` to validate the exact topic and precondition; after the
+call `getForumTopic` to validate the exact topic and precondition. A successful
+top-level null `forumTopic` is the pinned absence result and maps to
+`NOT_FOUND/{"chat_id":chat_id,"topic_id":topic_id}`; a non-null topic with a
+null `info` or other null/malformed nested object is `INTERNAL`. After the
 mutation they do not reread. Close requires open, reopen requires closed, and
 edit requires a different name. The strict results are:
 
@@ -5821,8 +5893,9 @@ TopicStateResult  = {"chat":ChatIdentity,"topic_id":int32,"closed":boolean}
 
 All chat-admin commands require an exact non-secret basic group, supergroup or
 channel target and a correlated `getChatMember(chat_id,messageSenderUser(me))`
-preflight. The current member must possess the exact pinned right required by
-the target TD call. A returned member/chat/sender mismatch, unknown status,
+preflight. The current principal must satisfy the explicit Creator/
+Administrator/Member authority matrix below. A returned member/chat/sender
+mismatch, unknown status,
 invalid rights combination or inapplicable right is malformed; a locally
 known missing right is `PRECONDITION_FAILED/missing_right`. TD error text is
 never parsed to manufacture a privilege result.
@@ -5853,20 +5926,57 @@ is never echoed. Because Telegram creates a fresh secret or can revoke before
 a correlated response, both modes share one Destructive descriptor and the
 entire command rejects idempotency keys.
 
-A create response must be one non-null, non-revoked `chatInviteLink` whose
-name, expiration, member limit and join-request flag equal the fixed request.
-A revoke response must have nonnegative `total_count`, one or two non-null
-distinct records, exactly one revoked record whose link equals the transient
-input, and at most one additional active primary replacement. No other record
-or approximate-count EOF inference is accepted. Returned link strings are
-nonempty valid UTF-8 without controls. The result contains the created or
-replacement active link and uses null when a non-primary revoke has no
-replacement.
+Every converted `chatInviteLink` requires a nonempty control-free link,
+0..32-scalar name, positive creator user id, positive int32 creation `date`,
+`edit_date==0 || edit_date>=date`, `expiration_date==0 ||
+expiration_date>=date`, `member_limit` in 0..99999, and nonnegative member,
+expired-member and pending-request counts. A positive member limit bounds
+`member_count`; `creates_join_request:true` requires member_limit 0. The
+optional `starSubscriptionPricing` is strict: period is exactly 60, 300, or
+2592000 pinned seconds and `star_count` is positive int53. A subscription link
+requires zero expiration/member limit, `creates_join_request:false`, and
+`is_primary:false`. A primary record requires empty name, zero expiration/
+member limit, `creates_join_request:false`, and null subscription pricing.
+Null subscription pricing requires `expired_member_count==0`;
+`creates_join_request:false` requires `pending_join_request_count==0`. Any
+malformed present pricing, arithmetic or date/count relation failure is
+structural `INTERNAL`; a null pricing pointer is valid only under the null
+relationships above.
+
+A create response is one non-null, non-primary, non-revoked record with the
+bound principal as creator, empty name, zero edit/expiration/member limit and
+all three counts zero, `creates_join_request:false`, and null subscription.
+A revoke response requires `total_count==invite_links.size()` and exactly one
+or two non-null records with distinct links. Exactly one record equals the
+transient input and is revoked; pinned
+`RevokeChatInviteLinkQuery::on_result` requires it at index 0. If it is
+non-primary, it is the sole record. If it is primary, index 1 is required,
+has the same creator, is a distinct active primary satisfying the primary
+invariants, and is the only
+replacement. No other ordering/cardinality or approximate-total
+interpretation is accepted. The Result exposes the created/replacement active
+link and uses null for a non-primary revoke; the revoked raw link is never
+echoed.
 
 Member commands resolve the target user exactly in the chat domain and call
 `getChatMember(chat_id,messageSenderUser(user_id))` before mutation. The
-target must not be the current principal or creator. Promote accepts this
-closed right enum in pinned field order:
+target must not be the current principal or creator.
+
+The member-absence classifier is call-specific and pinned to
+`Requests.cpp::on_request(getChatMember)`,
+`DialogParticipantManager::do_get_dialog_participant/finish_get_dialog_participant`
+and `GetChannelParticipantQuery::on_error`. After lifecycle/auth/deadline wins
+and 429 normalization, only TD error code 400 with exact case-sensitive message
+`Member not found` maps to
+`NOT_FOUND/{"chat_id":chat_id,"user_id":user_id}`. Every other TD error,
+including another 400 message, is `TDLIB_ERROR`. The upstream
+`USER_NOT_PARTICIPANT` error for a supergroup/channel is converted by pinned
+TDLib to a successful `chatMemberStatusLeft` and is a valid starting status,
+not NOT_FOUND. A successful null `chatMember`, null status/rights/permissions,
+sender mismatch or unknown status remains structural `INTERNAL`. Tests pin
+auth/generation, 429, exact absence, other-400 and structural precedence.
+
+Promote accepts this closed right enum in pinned field order:
 
 ```text
 change-info, post-messages, edit-messages, delete-messages, invite-users,
@@ -5875,22 +5985,75 @@ manage-video-chats, post-stories, edit-stories, delete-stories,
 manage-direct-messages, manage-tags, anonymous
 ```
 
-`can_manage_chat` is never a caller flag; it is true for a promoted member and
-false for demotion. Rights inapplicable to the observed basic-group,
-supergroup or channel kind are `USAGE/invalid_argument`. Requested rights must
-be a subset of the current administrator's delegable rights. Promote admits a
-Member, Restricted member, or editable Administrator and writes
-`chatMemberStatusAdministrator(can_be_edited=true,rights)`; an existing
-administrator may therefore be updated. Demote requires an editable
-Administrator and writes `chatMemberStatusMember(0)`.
+The complete 17-bit applicability matrix is pinned to
+`td_api.tl::chatAdministratorRights`; `yes` means the bit may be true for that
+chat kind, not that the caller possesses it:
 
-Ban requires a Member, Restricted member or Left user and writes
-`chatMemberStatusBanned(0)`. Unban requires Banned and writes
-`chatMemberStatusLeft`. Kick requires Member or Restricted and writes
-`chatMemberStatusLeft`. Creator, noneditable administrator, wrong starting
-state, self-target and chat-sender target are exact
-`PRECONDITION_FAILED` branches. There is no duration, revoke-messages,
-ownership transfer, bulk member or chat-sender surface.
+| pinned right | basic group | forum supergroup | nonforum supergroup | channel |
+|---|:---:|:---:|:---:|:---:|
+| `can_manage_chat` | yes | yes | yes | yes |
+| `change-info` | yes | yes | yes | yes |
+| `post-messages` | no | no | no | yes |
+| `edit-messages` | no | no | no | yes |
+| `delete-messages` | yes | yes | yes | yes |
+| `invite-users` | yes | yes | yes | yes |
+| `restrict-members` | yes | yes | yes | yes |
+| `pin-messages` | yes | yes | yes | no |
+| `manage-topics` | no | yes | no | no |
+| `promote-members` | yes | yes | yes | yes |
+| `manage-video-chats` | yes | yes | yes | yes |
+| `post-stories` | no | yes | yes | yes |
+| `edit-stories` | no | yes | yes | yes |
+| `delete-stories` | no | yes | yes | yes |
+| `manage-direct-messages` | no | no | no | yes |
+| `manage-tags` | yes | yes | yes | no |
+| `anonymous` | no | yes | yes | no |
+
+A current Creator has every applicable delegable right in its column for local
+preflight even though `chatMemberStatusCreator` contains no rights object. A
+current Administrator has only the explicit true bits in its validated
+snapshot; an inapplicable true bit is malformed. A current Member has no
+administrator right. It may use only the pinned member permissions explicitly
+named below: `can_change_info` for title/photo/description in a basic group or
+supergroup, and `can_create_topics` for topic creation. Channel members have no
+M6 admin mutation. Left/Restricted/Banned callers fail the authority
+precondition.
+
+This table combines the generated field comments with pinned
+`DialogParticipant.cpp::AdministratorRights`: broadcast clears pin/topics/
+tags/anonymous, megagroup clears post/edit/direct-message, Unknown/basic clears
+topics, and every nonempty rights set implies `can_manage_chat`. The implied
+bit is therefore structurally accepted for basic-group administrator snapshots
+but remains unavailable as a caller-selected promotion flag.
+
+The exact caller/target transition matrix is:
+
+| operation | supported chat kinds | caller authority | target transition |
+|---|---|---|---|
+| set title/photo/description | basic, forum/nonforum supergroup, channel | Creator; Administrator with `change-info`; basic/supergroup Member with `can_change_info` | no member target |
+| invite-link | basic, forum/nonforum supergroup, channel | Creator or Administrator with `invite-users`; ordinary Member is rejected | no member target |
+| promote | forum/nonforum supergroup, channel; **basic group is `USAGE/unsupported_chat_type`** | Creator or Administrator with `promote-members` | Member/Restricted/editable Administrator → Administrator |
+| demote | basic, forum/nonforum supergroup, channel | Creator or Administrator with `promote-members` | editable Administrator → Member |
+| ban | basic, forum/nonforum supergroup, channel | Creator or Administrator with `restrict-members` | Member/Restricted/Left → Banned |
+| unban | basic, forum/nonforum supergroup, channel | Creator or Administrator with `restrict-members` | Banned → Left |
+| kick | basic, forum/nonforum supergroup, channel | Creator or Administrator with `restrict-members` | Member/Restricted → Left |
+| set-permissions | basic, forum/nonforum supergroup | Creator or Administrator with `restrict-members` | no member target |
+
+Basic-group promotion is intentionally absent because TDLib's basic-group
+administrator status cannot represent the precise caller-selected rights
+surface truthfully. It fails before target-member planning. For supported
+promotion, requested rights must be applicable and a subset of the caller's
+delegable rights; Creator uses the applicable column and Administrator uses
+its explicit snapshot. `can_manage_chat` is never a caller flag and is passed
+as true for the new administrator. Promote writes
+`chatMemberStatusAdministrator(can_be_edited=true,rights)`; demote writes
+`chatMemberStatusMember(0)`, ban writes `chatMemberStatusBanned(0)`, and
+unban/kick write `chatMemberStatusLeft`.
+
+Every target Creator, self target, noneditable Administrator or wrong starting
+status is the exact closed `PRECONDITION_FAILED` branch. Chat-sender targets
+are unsupported. There is no duration, revoke-messages, ownership transfer,
+bulk member or chat-sender surface.
 
 Set-permissions requires `can_restrict_members`, supports only basic groups
 and supergroups, and maps the closed enum below one-to-one to the pinned
@@ -5918,16 +6081,20 @@ ChatDescriptionResult = {"chat":ChatIdentity,"description":string}
 ChatInviteLinkResult  = {"chat":ChatIdentity,"action":"create"|"revoke",
                          "invite_link":string|null}
 ChatPromoteResult     = {"chat":ChatIdentity,"user":UserIdentity,
-                         "status":"administrator","rights":admin_right[]}
+                         "status":"administrator","can_manage_chat":true,
+                         "rights":admin_right[]}
 ChatMemberStateResult = {"chat":ChatIdentity,"user":UserIdentity,
                          "status":"member"|"banned"|"left"}
 ChatPermissionsResult = {"chat":ChatIdentity,
                          "permissions":chat_permission[]}
 ```
 
-Demote emits `member`; ban emits `banned`; unban and kick emit `left`. No
-post-mutation `getChat`, `getChatMember`, `getChatInviteLink` or other reread is
-allowed.
+Promote Result rights are exactly the canonical caller array and
+`can_manage_chat:true` is exactly the TD input implied bit. Demote emits
+`member`; ban emits `banned`; unban and kick emit `left`. Each value becomes
+truth only after the correlated `ok`; it is never guessed before proof or
+rewritten from an unavailable reread. No post-mutation `getChat`,
+`getChatMember`, `getChatInviteLink` or other reread is allowed.
 
 #### 4.9.6 Storage
 
@@ -5968,8 +6135,13 @@ video-story, voice-note, wallpaper
 Unknown variants, negative scalar fields, null entries, more than 101 chat
 rows (100 plus aggregate), more than one zero aggregate row, duplicate nonzero
 chat ids, more than 25 or duplicate file types in one row, or checked sum
-overflow are malformed TD responses. TD order is
-preserved. Stats returns `StorageStatistics` directly; optimize returns
+overflow are malformed TD responses. For every chat row, parent `size` and
+`count` must equal the overflow-checked sums of all file-type children. The
+top-level `size` and `count` must equal the overflow-checked sums of every chat
+row, including the zero aggregate row. Size sums remain within nonnegative
+int53 and count sums within nonnegative int32; no wrap, saturation or omitted
+bucket is accepted. TD order is preserved. Stats returns `StorageStatistics`
+directly; optimize returns
 `{"optimized":true,"statistics":StorageStatistics}`. No filesystem path,
 TDLib database path or deleted-file name is exposed.
 
@@ -6066,7 +6238,7 @@ contact_block/contact_unblock:
   user:UserIdentity, blocked:boolean
 
 folder_create:
-  name:string, icon:folder_icon|null, color_id:int32,
+  name:FolderName, icon:folder_icon|null, color_id:int32,
   chat_ids:nonzero_int53[1..100]
 folder_edit:
   folder_id:int32, before:FolderSnapshot, after:FolderSnapshot
@@ -6094,7 +6266,8 @@ chat_invite_link:
   invite_link_sha256:sha256|null
 chat_promote:
   chat:ChatIdentity, user:UserIdentity,
-  before:MemberStatusSnapshot, rights:admin_right[1..16]
+  before:MemberStatusSnapshot, can_manage_chat:true,
+  rights:admin_right[1..16]
 chat_demote/chat_ban/chat_unban/chat_kick:
   chat:ChatIdentity, user:UserIdentity,
   before:MemberStatusSnapshot, after:"member"|"banned"|"left"
@@ -6223,8 +6396,9 @@ duplicated with a new shape:
 | admin-right precondition | `{"operation":chat_admin_operation,"chat_id":nonzero_int53,"reason":"missing_right","right":admin_right}` |
 | member precondition | `{"operation":chat_admin_operation,"chat_id":nonzero_int53,"user_id":positive_int53,"reason":"self_target"|"creator"|"noneditable_administrator"|"wrong_member_state"}` |
 
-The `chat_id` in folder preconditions is null only for `folder_edit/no_change`
-and `folder_capacity` before one candidate id can be retained. The topic id is
+The `chat_id` in folder preconditions is null only for `folder_edit/no_change`;
+membership and `folder_capacity` branches retain the resolved chat id. The
+topic id is
 null only for create-time `missing_right`. Schema `oneOf` arms enforce those
 relations instead of accepting the broad nullable forms. Resolver
 NOT_FOUND/AMBIGUOUS retains its exact selector/candidates objects and
@@ -6292,22 +6466,35 @@ micro-slices:
 
 1. strict CLI/frame parsing covers every command/args pair, bounds, canonical
    numeric spelling, option matrix, repeated options and rejected global mode;
+   folder/topic/title/description canonical-input fixtures cover leading,
+   trailing and repeated ASCII space/LF, NBSP, U+2028 and every pinned removed
+   sequence in both CLI and forged-frame paths;
 2. typed native/fake conversion covers every pinned function and output
    variant, null/mismatch/unknown objects, exact TD field values and forbidden
    calls; source verification authenticates commit a17f87c4 and the inspected
    declarations/folder clamp without network access;
 3. resolver/generation tests prove exact-only targets, atomic multi-chat
    folder resolution, bot and secret matrices, auth loss at every response
-   gap, and daemon/no-daemon byte/trace parity;
+   gap, daemon/no-daemon byte/trace parity, top-level null folder/topic
+   NOT_FOUND, nested-null INTERNAL, and exact `400/Member not found` versus
+   Left/429/other-error precedence;
 4. folder-cache tests cover generation replacement, update validation,
-   create 1/100/+1, full-snapshot RMW preservation and zero rereads;
+   create 1/100/+1, every within/cross-vector duplicate, excluded-to-included
+   add, pinned/included-to-excluded remove, `animate_custom_emoji` true/false,
+   formatted-entity/plan-hash preservation, full-snapshot RMW and zero rereads;
 5. topic tests cover every icon, all-page cursor progress, short pages, empty
-   terminal probe, duplicate/malformed/4096/+1 and byte-capacity cases;
+   terminal and nonempty zero-cursor completion, duplicate/nonadvancing
+   pagination, structural total/null/nested/order corruption precedence,
+   4096/+1 and byte-capacity cases;
 6. admin tests cover static JPEG/path/spool cutpoints, delete mode, every
-   rights/permission bit and chat-kind matrix, every member precondition,
-   invite create/revoke redaction and zero post-write reads;
-7. storage tests prove the exact default tuple, bounds/conversion, destructive
-   confirmation, no idempotency and no path/file leakage;
+   one of 17 rights across Creator/Administrator/Member and all four chat-kind
+   columns, basic-group promotion rejection, every target transition/member
+   precondition, exact Result truth, invite create/revoke total/cardinality/
+   creator/valid-and-invalid-date/count/null-or-present-subscription/primary
+   relations, redaction and zero post-write reads;
+7. storage tests prove the exact default tuple, null/duplicate/bounds
+   conversion, overflow-safe child-to-parent and row-to-top size/count sums,
+   destructive confirmation, no idempotency and no path/file leakage;
 8. WriteKernel tests cover all 24 operations, both epochs, dry-run zero-current-
    persistence, grant/confirmation, 22-operation idempotency allowlist,
    crash/recovery/first-cause, audit grouping/redaction and proof/no-reread;
