@@ -371,10 +371,47 @@ class InjectedPrompt final : public cli::ChallengePrompt {
     cli::PromptResultKind result_;
 };
 
-void install_client_challenge(daemon::Dispatcher& dispatcher) {
+enum class BoundaryPromptMode { AnswerExact, AnswerOneOver, CancelOneOver };
+
+class BoundaryPrompt final : public cli::ChallengePrompt {
+  public:
+    explicit BoundaryPrompt(BoundaryPromptMode mode) : mode_(mode) {}
+
+    cli::PromptResult prompt(const json& challenge) override {
+        ++calls_;
+        json answer{{"nonce", challenge["nonce"]},
+                    {"sequence", challenge["sequence"]},
+                    {"client_generation", challenge["client_generation"]},
+                    {"auth_sequence", challenge["auth_sequence"]}};
+        if (mode_ == BoundaryPromptMode::CancelOneOver) {
+            answer["cancelled"] = true;
+            answer["nonce"] = std::string(proto::kMaximumSerializedFrameBytes, 'x');
+            return {cli::PromptResultKind::Cancelled, std::move(answer)};
+        }
+        answer["value"] = "";
+        const proto::Frame base{proto::Answer{1, json(answer)}};
+        const auto base_bytes = proto::serialize(base).size();
+        REQUIRE(base_bytes < proto::kMaximumSerializedFrameBytes);
+        const auto value_bytes = proto::kMaximumSerializedFrameBytes - base_bytes +
+                                 (mode_ == BoundaryPromptMode::AnswerOneOver ? 1U : 0U);
+        answer["value"] = std::string(value_bytes, 'x');
+        return {cli::PromptResultKind::Answer, std::move(answer)};
+    }
+
+    [[nodiscard]] int calls() const {
+        return calls_;
+    }
+
+  private:
+    BoundaryPromptMode mode_;
+    int calls_ = 0;
+};
+
+void install_client_challenge(daemon::Dispatcher& dispatcher,
+                              std::atomic<int>* consumed = nullptr) {
     dispatcher.register_command(
         "client challenge",
-        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {
+        {daemon::Tier::Read, [consumed](const proto::Request&, daemon::RequestSession& session) {
              const daemon::ChallengeSpec spec{
                  proto::ChallengeKind::AuthenticationCode,
                  4,
@@ -384,6 +421,9 @@ void install_client_challenge(daemon::Dispatcher& dispatcher) {
              auto outcome = session.challenge(spec);
              switch (outcome.status()) {
              case daemon::ChallengeStatus::Answered:
+                 if (consumed != nullptr) {
+                     consumed->fetch_add(1, std::memory_order_relaxed);
+                 }
                  if (session.reserve_in_flight()) {
                      session.settle_in_flight();
                      std::string value;
@@ -392,6 +432,9 @@ void install_client_challenge(daemon::Dispatcher& dispatcher) {
                  }
                  return;
              case daemon::ChallengeStatus::Cancelled:
+                 if (consumed != nullptr) {
+                     consumed->fetch_add(1, std::memory_order_relaxed);
+                 }
                  session.error("AUTH_CANCELLED", "authentication cancelled",
                                {{"account", "main"},
                                 {"state", "wait_code"},
@@ -414,6 +457,20 @@ void install_client_challenge(daemon::Dispatcher& dispatcher) {
          }});
 }
 
+void install_oversized_client_challenge(daemon::Dispatcher& dispatcher) {
+    dispatcher.register_command(
+        "client challenge",
+        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession& session) {
+             auto spec = daemon::ChallengeSpec{
+                 proto::ChallengeKind::AuthenticationCode,
+                 4,
+                 9,
+                 std::string(proto::kMaximumSerializedFrameBytes, 'x'),
+                 {{"delivery_type", "sms"}, {"expected_length", 5}, {"resend_timeout", 30}}};
+             static_cast<void>(session.challenge(std::move(spec)));
+         }});
+}
+
 proto::Request client_challenge_request() {
     proto::Request request("main");
     request.id = 1;
@@ -422,6 +479,12 @@ proto::Request client_challenge_request() {
     request.context.json = true;
     request.context.timeout_seconds = 2.0;
     request.context.cwd = "/";
+    return request;
+}
+
+proto::Request boundary_client_challenge_request() {
+    auto request = client_challenge_request();
+    request.context.timeout_seconds = 30.0;
     return request;
 }
 
@@ -4334,6 +4397,119 @@ TEST_CASE("socket and no-daemon clients map every prompt result immediately and 
             }
         }
     }
+}
+
+TEST_CASE("socket and no-daemon admit the same exact Answer frame boundary",
+          "[cli][challenge][frame-budget][parity]") {
+    for (const auto mode : {BoundaryPromptMode::AnswerExact, BoundaryPromptMode::AnswerOneOver,
+                            BoundaryPromptMode::CancelOneOver}) {
+        DYNAMIC_SECTION(static_cast<int>(mode)) {
+            const IsolatedEnv env;
+            std::atomic<int> consumed{0};
+            daemon::Dispatcher dispatcher;
+            install_client_challenge(dispatcher, &consumed);
+
+            BoundaryPrompt direct_prompt(mode);
+            cli::RunOptions direct_options;
+            direct_options.json = true;
+            direct_options.no_daemon = true;
+            direct_options.prompt = &direct_prompt;
+            direct_options.in_process_dispatcher = &dispatcher;
+            const auto direct_start = std::chrono::steady_clock::now();
+            const auto direct =
+                run_request_captured(boundary_client_challenge_request(), direct_options, env);
+            const auto direct_elapsed = std::chrono::steady_clock::now() - direct_start;
+
+            const auto real_env = paths::real_environment();
+            std::string error;
+            REQUIRE(paths::ensure_private_dir(paths::runtime_dir(real_env), real_env.uid, error));
+            const auto socket_path = paths::socket_path("main", real_env, error);
+            REQUIRE(socket_path);
+            daemon::Server server({"main", *socket_path, kVersion, proto::kProtocolVersion, {}, {}},
+                                  dispatcher);
+            REQUIRE(server.start(error));
+            BoundaryPrompt socket_prompt(mode);
+            cli::RunOptions socket_options;
+            socket_options.json = true;
+            socket_options.auto_spawn = false;
+            socket_options.prompt = &socket_prompt;
+            const auto socket_start = std::chrono::steady_clock::now();
+            const auto socket =
+                run_request_captured(boundary_client_challenge_request(), socket_options, env);
+            const auto socket_elapsed = std::chrono::steady_clock::now() - socket_start;
+            server.stop();
+
+            CHECK(direct_prompt.calls() == 1);
+            CHECK(socket_prompt.calls() == 1);
+            CHECK(socket.exit_code == direct.exit_code);
+            CHECK(socket.out.size() == direct.out.size());
+            CHECK(std::equal(socket.out.begin(), socket.out.end(), direct.out.begin(),
+                             direct.out.end()));
+            CHECK(socket.err == direct.err);
+            if (mode == BoundaryPromptMode::AnswerExact) {
+                CHECK(consumed.load(std::memory_order_relaxed) == 2);
+                CHECK(direct.exit_code == kOk);
+                CHECK(direct.err.empty());
+            } else {
+                CHECK(consumed.load(std::memory_order_relaxed) == 0);
+                CHECK(direct_elapsed < std::chrono::seconds(5));
+                CHECK(socket_elapsed < std::chrono::seconds(5));
+                CHECK(direct.exit_code == kGeneric);
+                CHECK(direct.out.empty());
+                CHECK(json::parse(direct.err) == json{{"error",
+                                                       {{"code", "GENERIC"},
+                                                        {"message", "daemon closed the connection"},
+                                                        {"details", json::object()}}}});
+            }
+        }
+    }
+}
+
+TEST_CASE("oversized Challenge disconnects before prompting in both delivery modes",
+          "[cli][challenge][frame-budget][parity]") {
+    const IsolatedEnv env;
+    daemon::Dispatcher dispatcher;
+    install_oversized_client_challenge(dispatcher);
+
+    BoundaryPrompt direct_prompt(BoundaryPromptMode::AnswerExact);
+    cli::RunOptions direct_options;
+    direct_options.json = true;
+    direct_options.no_daemon = true;
+    direct_options.prompt = &direct_prompt;
+    direct_options.in_process_dispatcher = &dispatcher;
+    const auto direct_start = std::chrono::steady_clock::now();
+    const auto direct =
+        run_request_captured(boundary_client_challenge_request(), direct_options, env);
+    const auto direct_elapsed = std::chrono::steady_clock::now() - direct_start;
+
+    const auto real_env = paths::real_environment();
+    std::string error;
+    REQUIRE(paths::ensure_private_dir(paths::runtime_dir(real_env), real_env.uid, error));
+    const auto socket_path = paths::socket_path("main", real_env, error);
+    REQUIRE(socket_path);
+    daemon::Server server({"main", *socket_path, kVersion, proto::kProtocolVersion, {}, {}},
+                          dispatcher);
+    REQUIRE(server.start(error));
+    BoundaryPrompt socket_prompt(BoundaryPromptMode::AnswerExact);
+    cli::RunOptions socket_options;
+    socket_options.json = true;
+    socket_options.auto_spawn = false;
+    socket_options.prompt = &socket_prompt;
+    const auto socket_start = std::chrono::steady_clock::now();
+    const auto socket =
+        run_request_captured(boundary_client_challenge_request(), socket_options, env);
+    const auto socket_elapsed = std::chrono::steady_clock::now() - socket_start;
+    server.stop();
+
+    CHECK(direct_elapsed < std::chrono::seconds(5));
+    CHECK(socket_elapsed < std::chrono::seconds(5));
+    CHECK(direct_prompt.calls() == 0);
+    CHECK(socket_prompt.calls() == 0);
+    CHECK(socket.exit_code == direct.exit_code);
+    CHECK(socket.out == direct.out);
+    CHECK(socket.err == direct.err);
+    CHECK(direct.exit_code == kGeneric);
+    CHECK(direct.out.empty());
 }
 
 TEST_CASE("doctor degrades to local diagnostics when the daemon is unreachable", "[cli][schema]") {

@@ -136,7 +136,6 @@ TEST_CASE("non-stream error manifest is the exact accepted command authority",
                           {"daemon stop", {{"error", "daemon.error.schema.json"}}},
                           {"doctor", {{"error", "meta.error.schema.json"}}},
                           {"login", {{"error", "auth.error.schema.json"}}},
-                          {"listen", {{"error", "stream.error.schema.json"}}},
                           {"logout", {{"error", "logout.error.schema.json"}}},
                           {"me", {{"error", "auth.error.schema.json"}}},
                           {"msg delete", {{"error", "m3-write.error.schema.json"}}},
@@ -152,13 +151,14 @@ TEST_CASE("non-stream error manifest is the exact accepted command authority",
                           {"send", {{"error", "m3-write.error.schema.json"}}},
                           {"session list", {{"error", "session.error.schema.json"}}},
                           {"session terminate", {{"error", "session.error.schema.json"}}},
-                          {"version", {{"error", "meta.error.schema.json"}}},
-                          {"wait-for", {{"error", "stream.error.schema.json"}}}}}};
+                          {"version", {{"error", "meta.error.schema.json"}}}}}};
     CHECK(tgcli::test::load_schema_document("error-manifest.json") == expected);
     CHECK_FALSE(expected.at("commands").contains("chats"));
     CHECK_FALSE(expected.at("commands").contains("fetch"));
+    CHECK_FALSE(expected.at("commands").contains("listen"));
     CHECK_FALSE(expected.at("commands").contains("read"));
     CHECK_FALSE(expected.at("commands").contains("unread"));
+    CHECK_FALSE(expected.at("commands").contains("wait-for"));
 }
 
 TEST_CASE("schema target normalization is ASCII-only and history is the sole alias",

@@ -7525,15 +7525,21 @@ type-erased public boundary keeps generated types from leaking across layers.
 
 - **Bootstrap ordering and parameters**: after installing the process-global
   logging cap, a new client generation reserves query id 1 and its first send
-  is `getAuthorizationState`. No other query or auth update is acted on until
-  that response or the generation's first `updateAuthorizationState` installs
-  the initial snapshot. The generation begins at `auth_sequence=0` with no
-  accepted update observed. In response-first order, the response installs its
-  state and increments the sequence to 1 only if that condition still holds;
-  the first later update, even if payload-equal, increments it to 2. In update-
-  first order, the update installs sequence 1 and the later bootstrap response
-  is consumed for query correlation but ignored for state and sequence. Once
-  any update has been accepted, no bootstrap response can install a snapshot.
+  is `getAuthorizationState`. The sole pre-snapshot exception is the core-owned
+  query id 2 `getCurrentState`, sent immediately after query 1 by the same
+  generation-owned bootstrap path. Query 2 is private: its response may settle
+  before query 1, but remains generation-local and may only populate internal
+  update-derived state. It cannot authorize public work, publish authorization
+  or stream readiness, or open the ordinary-query barrier. The query 1 response
+  or the generation's first `updateAuthorizationState` remains that barrier;
+  no other ordinary query is acted on before it. The generation begins at
+  `auth_sequence=0` with no accepted update observed. In response-first order,
+  the query 1 response installs its state and increments the sequence to 1 only
+  if that condition still holds; the first later update, even if payload-equal,
+  increments it to 2. In update-first order, the update installs sequence 1 and
+  the later query 1 response is consumed for query correlation but ignored for
+  state and sequence. Once any update has been accepted, no bootstrap response
+  can install an authorization snapshot.
   `setTdlibParameters` is sent only from `wait_tdlib_parameters`, once its 14
   fields have been resolved as follows:
 

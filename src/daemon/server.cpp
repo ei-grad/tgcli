@@ -249,10 +249,12 @@ class ConnectionSink final : public ResponseSink {
         try {
             if (!connection_->send(proto::Challenge{request_id_, std::move(data)})) {
                 abort();
+                return disconnected_challenge();
             }
         } catch (...) {
             // Challenge serialization failure follows the same transport-abort path.
             abort();
+            return disconnected_challenge();
         }
         return {};
     }
@@ -275,6 +277,12 @@ class ConnectionSink final : public ResponseSink {
     void abort() noexcept {
         connection_->shutdown();
         notify_terminal(false);
+    }
+
+    static ChallengeReply disconnected_challenge() {
+        return {{},
+                ChallengeFailure{"INTERNAL", "transport disconnected", nlohmann::json::object(),
+                                 kGeneric}};
     }
 
     std::shared_ptr<ConnectionState> connection_;

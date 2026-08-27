@@ -265,7 +265,7 @@ class InProcessSink final : public daemon::ResponseSink {
     }
     daemon::ChallengeReply emit_challenge(json challenge) override {
         if (!admit(proto::Challenge{request_id_, challenge})) {
-            return {};
+            return disconnected_challenge();
         }
         if (!tty_) {
             return {{},
@@ -275,8 +275,13 @@ class InProcessSink final : public daemon::ResponseSink {
         auto response = prompt_.prompt(challenge);
         switch (response.kind) {
         case PromptResultKind::Answer:
-        case PromptResultKind::Cancelled:
-            return {std::move(response.answer), std::nullopt};
+        case PromptResultKind::Cancelled: {
+            proto::Frame answer = proto::Answer{request_id_, std::move(response.answer)};
+            if (!admit(answer)) {
+                return disconnected_challenge();
+            }
+            return {std::move(std::get<proto::Answer>(answer).answer), std::nullopt};
+        }
         case PromptResultKind::Unavailable:
         case PromptResultKind::Error:
             return {{},
@@ -286,6 +291,12 @@ class InProcessSink final : public daemon::ResponseSink {
         return {{},
                 daemon::ChallengeFailure{"INTERNAL", "cannot read challenge response",
                                          json::object(), kGeneric}};
+    }
+
+    static daemon::ChallengeReply disconnected_challenge() {
+        return {{},
+                daemon::ChallengeFailure{"INTERNAL", "transport disconnected", json::object(),
+                                         kGeneric}};
     }
 
     void emit_abort() noexcept override {
@@ -1161,8 +1172,7 @@ void handle_challenge(int fd, const proto::Request& request, ChallengePrompt& pr
     std::string io_error;
     if (!proto::write_frame(fd, proto::Answer{challenge.id, std::move(response.answer)},
                             io_error)) {
-        renderer.on_error("INTERNAL", "cannot send challenge response", nlohmann::json::object(),
-                          kGeneric);
+        renderer.on_transport_failure();
     }
 }
 

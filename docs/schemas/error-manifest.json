@@ -58,9 +58,6 @@
     "login": {
       "error": "auth.error.schema.json"
     },
-    "listen": {
-      "error": "stream.error.schema.json"
-    },
     "logout": {
       "error": "logout.error.schema.json"
     },
@@ -108,9 +105,6 @@
     },
     "version": {
       "error": "meta.error.schema.json"
-    },
-    "wait-for": {
-      "error": "stream.error.schema.json"
     }
   }
 }
