@@ -320,10 +320,33 @@ std::string_view auth_function_name(TdFunctionKind function) {
         return core::td_function_name(function);
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetContacts:
+    case TdFunctionKind::SearchContacts:
+    case TdFunctionKind::AddContact:
+    case TdFunctionKind::RemoveContacts:
+    case TdFunctionKind::SetMessageSenderBlockList:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
     case TdFunctionKind::TerminateSession:
+    case TdFunctionKind::GetChatFolder:
+    case TdFunctionKind::CreateChatFolder:
+    case TdFunctionKind::EditChatFolder:
+    case TdFunctionKind::DeleteChatFolder:
+    case TdFunctionKind::GetForumTopics:
+    case TdFunctionKind::GetForumTopic:
+    case TdFunctionKind::CreateForumTopic:
+    case TdFunctionKind::EditForumTopic:
+    case TdFunctionKind::ToggleForumTopicIsClosed:
+    case TdFunctionKind::GetChatMember:
+    case TdFunctionKind::SetChatTitle:
+    case TdFunctionKind::SetChatPhoto:
+    case TdFunctionKind::SetChatDescription:
+    case TdFunctionKind::CreateChatInviteLink:
+    case TdFunctionKind::RevokeChatInviteLink:
+    case TdFunctionKind::SetChatMemberStatus:
+    case TdFunctionKind::SetChatPermissions:
+    case TdFunctionKind::GetStorageStatistics:
+    case TdFunctionKind::OptimizeStorage:
     case TdFunctionKind::GetChat:
     case TdFunctionKind::GetChatHistory:
     case TdFunctionKind::GetChatMessageByDate:

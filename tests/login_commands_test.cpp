@@ -389,10 +389,33 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetCurrentState:
     case core::TdFunctionKind::GetOption:
     case core::TdFunctionKind::GetContacts:
+    case core::TdFunctionKind::SearchContacts:
+    case core::TdFunctionKind::AddContact:
+    case core::TdFunctionKind::RemoveContacts:
+    case core::TdFunctionKind::SetMessageSenderBlockList:
     case core::TdFunctionKind::GetSavedMessagesTags:
     case core::TdFunctionKind::SearchSavedMessages:
     case core::TdFunctionKind::GetActiveSessions:
     case core::TdFunctionKind::TerminateSession:
+    case core::TdFunctionKind::GetChatFolder:
+    case core::TdFunctionKind::CreateChatFolder:
+    case core::TdFunctionKind::EditChatFolder:
+    case core::TdFunctionKind::DeleteChatFolder:
+    case core::TdFunctionKind::GetForumTopics:
+    case core::TdFunctionKind::GetForumTopic:
+    case core::TdFunctionKind::CreateForumTopic:
+    case core::TdFunctionKind::EditForumTopic:
+    case core::TdFunctionKind::ToggleForumTopicIsClosed:
+    case core::TdFunctionKind::GetChatMember:
+    case core::TdFunctionKind::SetChatTitle:
+    case core::TdFunctionKind::SetChatPhoto:
+    case core::TdFunctionKind::SetChatDescription:
+    case core::TdFunctionKind::CreateChatInviteLink:
+    case core::TdFunctionKind::RevokeChatInviteLink:
+    case core::TdFunctionKind::SetChatMemberStatus:
+    case core::TdFunctionKind::SetChatPermissions:
+    case core::TdFunctionKind::GetStorageStatistics:
+    case core::TdFunctionKind::OptimizeStorage:
     case core::TdFunctionKind::GetChat:
     case core::TdFunctionKind::GetChatHistory:
     case core::TdFunctionKind::GetChatMessageByDate:

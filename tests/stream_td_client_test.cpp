@@ -504,3 +504,59 @@ TEST_CASE("current-state observer consumes the response barrier exactly once",
     scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
     REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
 }
+
+TEST_CASE("M6 folder cache is generation bound validated and cleared on non-Ready",
+          "[m6][core][folder-cache][generation][fake-boundary]") {
+    auto runtime = std::make_unique<ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
+    const auto first = scripted->clients().front();
+
+    TdCurrentState initial;
+    initial.updates.push_back(TdValue::from(TdM6ChatFoldersUpdate{
+        .folders =
+            {{.id = 7,
+              .name = {.text = "Work", .animate_custom_emoji = false, .custom_emoji_entities = {}},
+              .icon = TdM6FolderIcon::Work,
+              .color_id = 3,
+              .is_shareable = false,
+              .has_my_invite_links = false}},
+        .main_chat_list_position = 1,
+        .are_tags_enabled = true}));
+    scripted->push_response(first, 2, TdValue::from(std::move(initial)));
+    scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
+    auto authorization = client.auth_state();
+    auto cached = client.m6_chat_folders(authorization);
+    REQUIRE(cached);
+    REQUIRE(cached->folders.size() == 1);
+    CHECK(cached->folders.front().id == 7);
+    CHECK(cached->are_tags_enabled);
+
+    const auto duplicate_info = [](std::int32_t id) {
+        return TdM6FolderInfo{
+            .id = id,
+            .name = {.text = "Bad", .animate_custom_emoji = false, .custom_emoji_entities = {}},
+            .icon = TdM6FolderIcon::Custom,
+            .color_id = -1,
+            .is_shareable = false,
+            .has_my_invite_links = false};
+    };
+    scripted->push_update(first, TdValue::from(TdM6ChatFoldersUpdate{
+                                     .folders = {duplicate_info(8), duplicate_info(8)},
+                                     .main_chat_list_position = 0,
+                                     .are_tags_enabled = false}));
+    REQUIRE(scripted->wait_for_received(3));
+    REQUIRE(eventually([&] {
+        const auto retained = client.m6_chat_folders(authorization);
+        return retained && retained->folders.front().id == 7;
+    }));
+
+    scripted->push_update(first, {}, AuthStateData{AuthState::LoggingOut});
+    REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::LoggingOut; }));
+    scripted->push_update(first, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
+    CHECK_FALSE(client.m6_chat_folders(client.auth_state()));
+    CHECK_FALSE(client.m6_chat_folders(authorization));
+}

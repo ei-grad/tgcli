@@ -4,6 +4,9 @@
 #include "common/exit_codes.hpp"
 #include "common/paths.hpp"
 #include "common/utf8.hpp"
+#include "daemon/m6_audit_contract.hpp"
+#include "daemon/m6_write_policy.hpp"
+#include "daemon/write_operation.hpp"
 #include "proto/destructive_plan.hpp"
 
 #include <algorithm>
@@ -41,7 +44,7 @@ namespace {
 using json = nlohmann::json;
 using namespace account_audit_limits;
 
-constexpr std::array<std::pair<AccountAuditOperation, std::string_view>, 18> kOperations{{
+constexpr std::array<std::pair<AccountAuditOperation, std::string_view>, 42> kOperations{{
     {AccountAuditOperation::Send, "send"},
     {AccountAuditOperation::MsgEdit, "msg_edit"},
     {AccountAuditOperation::MsgDelete, "msg_delete"},
@@ -60,7 +63,41 @@ constexpr std::array<std::pair<AccountAuditOperation, std::string_view>, 18> kOp
     {AccountAuditOperation::ChatLeave, "chat_leave"},
     {AccountAuditOperation::SavedAttach, "saved_attach"},
     {AccountAuditOperation::SessionTerminate, "session_terminate"},
+    {AccountAuditOperation::ContactAdd, "contact_add"},
+    {AccountAuditOperation::ContactRemove, "contact_remove"},
+    {AccountAuditOperation::ContactBlock, "contact_block"},
+    {AccountAuditOperation::ContactUnblock, "contact_unblock"},
+    {AccountAuditOperation::FolderCreate, "folder_create"},
+    {AccountAuditOperation::FolderEdit, "folder_edit"},
+    {AccountAuditOperation::FolderDelete, "folder_delete"},
+    {AccountAuditOperation::FolderAddChat, "folder_add_chat"},
+    {AccountAuditOperation::FolderRemoveChat, "folder_remove_chat"},
+    {AccountAuditOperation::TopicCreate, "topic_create"},
+    {AccountAuditOperation::TopicEdit, "topic_edit"},
+    {AccountAuditOperation::TopicClose, "topic_close"},
+    {AccountAuditOperation::TopicReopen, "topic_reopen"},
+    {AccountAuditOperation::ChatSetTitle, "chat_set_title"},
+    {AccountAuditOperation::ChatSetPhoto, "chat_set_photo"},
+    {AccountAuditOperation::ChatSetDescription, "chat_set_description"},
+    {AccountAuditOperation::ChatInviteLink, "chat_invite_link"},
+    {AccountAuditOperation::ChatPromote, "chat_promote"},
+    {AccountAuditOperation::ChatDemote, "chat_demote"},
+    {AccountAuditOperation::ChatBan, "chat_ban"},
+    {AccountAuditOperation::ChatUnban, "chat_unban"},
+    {AccountAuditOperation::ChatKick, "chat_kick"},
+    {AccountAuditOperation::ChatSetPermissions, "chat_set_permissions"},
+    {AccountAuditOperation::StorageOptimize, "storage_optimize"},
 }};
+
+std::optional<proto::M6Operation> m6_operation_for_audit(AccountAuditOperation operation) noexcept {
+    const auto found = std::ranges::find_if(
+        kOperations, [operation](const auto& entry) { return entry.first == operation; });
+    if (found == kOperations.end()) {
+        return std::nullopt;
+    }
+    const auto parsed = proto::parse_m6_operation(found->second);
+    return parsed && m6_write_policy(*parsed) != nullptr ? parsed : std::nullopt;
+}
 
 constexpr std::array<std::pair<AccountAuditStage, std::string_view>, 6> kStages{{
     {AccountAuditStage::IdempotencyPending, "idempotency_pending"},
@@ -657,6 +694,10 @@ bool valid_arguments(AccountAuditOperation operation, const json& value) {
                valid_utf8_text(value["caption"], 4'096, 1'024, true);
     case AccountAuditOperation::SessionTerminate:
         return exact_fields(value, {"session_id"}) && valid_session_id(value["session_id"]);
+    default: {
+        const auto m6 = m6_operation_for_audit(operation);
+        return m6 && valid_m6_audit_arguments(*m6, value);
+    }
     }
     return false;
 }
@@ -695,6 +736,16 @@ std::set<std::string_view> expected_tdlib_functions(AccountAuditOperation operat
         return {"leaveChat"};
     case AccountAuditOperation::SessionTerminate:
         return {"terminateSession"};
+    default: {
+        const auto m6 = m6_operation_for_audit(operation);
+        const auto* policy = m6 ? m6_write_policy(*m6) : nullptr;
+        if (policy == nullptr) {
+            return {};
+        }
+        return {policy->tdlib_functions.begin(),
+                policy->tdlib_functions.begin() +
+                    static_cast<std::ptrdiff_t>(policy->tdlib_function_count)};
+    }
     }
     return {};
 }
@@ -844,6 +895,10 @@ bool valid_plan(AccountAuditOperation operation, const json& value, std::string_
     case AccountAuditOperation::SessionTerminate:
         return exact_fields(value, {"operation", "account", "tdlib_request", "session"}) &&
                valid_session_target(value["session"]);
+    default: {
+        const auto m6 = m6_operation_for_audit(operation);
+        return m6 && valid_m6_audit_plan(*m6, value, account);
+    }
     }
     return false;
 }
@@ -897,6 +952,10 @@ bool arguments_match_plan(AccountAuditOperation operation, const json& arguments
     case AccountAuditOperation::ChatMarkRead:
     case AccountAuditOperation::ChatLeave:
         return true;
+    default: {
+        const auto m6 = m6_operation_for_audit(operation);
+        return m6 && m6_arguments_match_plan(*m6, arguments, plan);
+    }
     }
     return false;
 }
@@ -1038,6 +1097,10 @@ bool valid_result_data( // NOLINT(readability-function-cognitive-complexity)
     case AccountAuditOperation::SessionTerminate:
         return exact_fields(value, {"session_id", "terminated"}) &&
                valid_session_id(value["session_id"]) && value["terminated"] == true;
+    default: {
+        const auto m6 = m6_operation_for_audit(operation);
+        return m6 && valid_m6_audit_result(*m6, value);
+    }
     }
     return false;
 }
@@ -1067,7 +1130,7 @@ bool valid_json_tree(const json& value, std::size_t depth, std::size_t& nodes) {
         }
         for (const auto& [key, item] : current->items()) {
             if (!common::valid_utf8(key) || contains_nul(key) || key == "idempotency_key" ||
-                key == "invite" || key == "invite_link") {
+                key == "invite") {
                 return false;
             }
             pending.emplace_back(&item, current_depth + 1);
@@ -1147,6 +1210,7 @@ bool valid_forward_timeout_items(const json& items) {
 
 bool legal_completed_stages( // NOLINT(readability-function-cognitive-complexity)
     AccountAuditOperation operation, const std::vector<AccountAuditStage>& completed) {
+    const WriteOperation write_operation(operation);
     const auto is_prefix = [&completed](const std::vector<AccountAuditStage>& complete) {
         return completed.size() <= complete.size() &&
                std::equal(completed.begin(), completed.end(), complete.begin());
@@ -1159,10 +1223,11 @@ bool legal_completed_stages( // NOLINT(readability-function-cognitive-complexity
             for (const bool progress : {false, true}) {
                 for (const bool mutation_proof : {false, true}) {
                     std::vector<AccountAuditStage> complete;
-                    if (keyed && operation != AccountAuditOperation::SessionTerminate) {
+                    if (keyed && write_operation.idempotent()) {
                         complete.push_back(AccountAuditStage::IdempotencyPending);
                     }
-                    if (operation == AccountAuditOperation::SavedAttach) {
+                    if (operation == AccountAuditOperation::SavedAttach ||
+                        (write_operation.uses_photo_spool() && temporary)) {
                         complete.push_back(AccountAuditStage::SpoolReady);
                     }
                     complete.push_back(AccountAuditStage::DispatchStarted);
@@ -1435,8 +1500,9 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
                valid_operation_field(operation, details) && valid_argument_path(details["path"]);
     }
     if (code == "SPOOL_UNAVAILABLE") {
-        if (operation != AccountAuditOperation::SavedAttach || exit != kGeneric ||
-            !exact_fields(details, {"operation", "path", "reason"}) ||
+        if ((operation != AccountAuditOperation::SavedAttach &&
+             !WriteOperation(operation).uses_photo_spool()) ||
+            exit != kGeneric || !exact_fields(details, {"operation", "path", "reason"}) ||
             !valid_operation_field(operation, details) || !valid_argument_path(details["path"]) ||
             !details["reason"].is_string()) {
             return false;
@@ -1511,6 +1577,8 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
         case AccountAuditOperation::ChatJoin:
         case AccountAuditOperation::SessionTerminate:
             return false;
+        default:
+            return false;
         }
         return false;
     }
@@ -1568,6 +1636,9 @@ std::uint64_t terminal_byte_ceiling(AccountAuditOperation operation) {
         operation == AccountAuditOperation::SavedAttach) {
         return kSingleMessageTerminalBytes;
     }
+    if (m6_operation_for_audit(operation)) {
+        return kM6TerminalBytes;
+    }
     return kOtherTerminalBytes;
 }
 
@@ -1616,14 +1687,15 @@ bool valid_checkpoint_data(AccountAuditOperation operation, AccountAuditStage st
                            const json& value) {
     switch (stage) {
     case AccountAuditStage::IdempotencyPending:
-        return operation != AccountAuditOperation::SessionTerminate &&
+        return WriteOperation(operation).idempotent() &&
                exact_fields(value, {"key_hash", "request_fingerprint", "expires_at",
                                     "reserved_terminal_bytes"}) &&
                valid_hash(value["key_hash"]) && valid_hash(value["request_fingerprint"]) &&
                value["expires_at"].is_number_unsigned() &&
                value["reserved_terminal_bytes"].is_number_unsigned();
     case AccountAuditStage::SpoolReady:
-        return operation == AccountAuditOperation::SavedAttach &&
+        return (operation == AccountAuditOperation::SavedAttach ||
+                WriteOperation(operation).uses_photo_spool()) &&
                exact_fields(value, {"file", "relative_path"}) &&
                valid_file_snapshot(value["file"]) && valid_string(value["relative_path"], 4'096);
     case AccountAuditStage::DispatchStarted:
@@ -1652,9 +1724,7 @@ bool valid_checkpoint_data(AccountAuditOperation operation, AccountAuditStage st
 }
 
 bool destructive_operation(AccountAuditOperation operation) {
-    return operation == AccountAuditOperation::MsgDelete ||
-           operation == AccountAuditOperation::ChatLeave ||
-           operation == AccountAuditOperation::SessionTerminate;
+    return WriteOperation(operation).destructive();
 }
 
 bool valid_common_identity(const json& value) {
@@ -1839,13 +1909,15 @@ bool validate_outcome_impl(const json& document, std::string& error) {
          !(mutation == "none" && terminal_proves_explicit_no_mutation(operation, terminal))) ||
         (mutation == "confirmed" && !has_proof && !has_progress) ||
         ((mutation == "possible" || mutation == "confirmed") && !has_dispatch) ||
-        (spool_unavailable &&
-         (operation != AccountAuditOperation::SavedAttach || has_dispatch || mutation != "none" ||
-          std::any_of(completed.begin(), completed.end(),
-                      [](AccountAuditStage stage) {
-                          return stage != AccountAuditStage::IdempotencyPending &&
-                                 stage != AccountAuditStage::SpoolReady;
-                      }))) ||
+        (spool_unavailable && ((operation != AccountAuditOperation::SavedAttach &&
+                                !WriteOperation(operation).uses_photo_spool()) ||
+                               has_dispatch || mutation != "none" ||
+                               std::any_of(completed.begin(), completed.end(),
+                                           [](AccountAuditStage stage) {
+                                               return stage !=
+                                                          AccountAuditStage::IdempotencyPending &&
+                                                      stage != AccountAuditStage::SpoolReady;
+                                           }))) ||
         !serialized_size_at_most(document["terminal"], terminal_byte_ceiling(operation)) ||
         !serialized_size_at_most(document, kVectorJsonBytes)) {
         error = "invalid v2 outcome terminal";
@@ -1856,10 +1928,15 @@ bool validate_outcome_impl(const json& document, std::string& error) {
 }
 
 std::vector<AccountAuditStage> allowed_order(AccountAuditOperation operation) {
+    const WriteOperation write_operation(operation);
     if (operation == AccountAuditOperation::SavedAttach) {
         return {AccountAuditStage::IdempotencyPending, AccountAuditStage::SpoolReady,
                 AccountAuditStage::DispatchStarted, AccountAuditStage::TemporaryIdsObserved,
                 AccountAuditStage::MutationConfirmed};
+    }
+    if (write_operation.uses_photo_spool()) {
+        return {AccountAuditStage::IdempotencyPending, AccountAuditStage::SpoolReady,
+                AccountAuditStage::DispatchStarted, AccountAuditStage::MutationConfirmed};
     }
     if (operation == AccountAuditOperation::MsgForward) {
         return {AccountAuditStage::IdempotencyPending, AccountAuditStage::DispatchStarted,
@@ -1870,7 +1947,7 @@ std::vector<AccountAuditStage> allowed_order(AccountAuditOperation operation) {
         return {AccountAuditStage::IdempotencyPending, AccountAuditStage::DispatchStarted,
                 AccountAuditStage::TemporaryIdsObserved, AccountAuditStage::MutationConfirmed};
     }
-    if (operation == AccountAuditOperation::SessionTerminate) {
+    if (!write_operation.idempotent()) {
         return {AccountAuditStage::DispatchStarted, AccountAuditStage::MutationConfirmed};
     }
     return {AccountAuditStage::IdempotencyPending, AccountAuditStage::DispatchStarted,
@@ -1915,8 +1992,8 @@ bool transition_history(AccountAuditOperation operation,
             return false;
         }
         if (checkpoint.stage == AccountAuditStage::IdempotencyPending &&
-            operation == AccountAuditOperation::SessionTerminate) {
-            error = "session terminate cannot use idempotency";
+            !WriteOperation(operation).idempotent()) {
+            error = "operation cannot use idempotency";
             return false;
         }
         switch (checkpoint.stage) {
@@ -1928,8 +2005,9 @@ bool transition_history(AccountAuditOperation operation,
             saw_idempotency = true;
             break;
         case AccountAuditStage::SpoolReady:
-            if (operation != AccountAuditOperation::SavedAttach || saw_spool || saw_dispatch ||
-                (previous_position && !saw_idempotency)) {
+            if ((operation != AccountAuditOperation::SavedAttach &&
+                 !WriteOperation(operation).uses_photo_spool()) ||
+                saw_spool || saw_dispatch || (previous_position && !saw_idempotency)) {
                 error = "spool checkpoint has an illegal predecessor";
                 return false;
             }
@@ -2371,6 +2449,10 @@ bool terminal_matches_plan(AccountAuditOperation operation, const json& terminal
         return data["chat_id"] == plan["chat"]["id"];
     case AccountAuditOperation::SessionTerminate:
         return data["session_id"] == plan["session"]["id"];
+    default: {
+        const auto m6 = m6_operation_for_audit(operation);
+        return m6 && m6_result_matches_plan(*m6, data, plan);
+    }
     }
     return false;
 }

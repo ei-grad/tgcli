@@ -15,6 +15,12 @@ add_executable(tgcli_unit_tests
     message_td_runtime_conversion_test.cpp
     m3_foundation_test.cpp
     m6_foundation_test.cpp
+    m6_model_test.cpp
+    m6_audit_contract_test.cpp
+    m6_topic_scan_test.cpp
+    m6_write_policy_test.cpp
+    m6_td_boundary_test.cpp
+    m6_td_runtime_conversion_test.cpp
     login_commands_test.cpp
     lock_order_test.cpp
     logout_commands_test.cpp

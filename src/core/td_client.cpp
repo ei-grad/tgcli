@@ -72,9 +72,26 @@ std::optional<DescriptorKind> direct_mutation_tier(TdFunctionKind function) {
     case TdFunctionKind::AddChatToList:
     case TdFunctionKind::JoinChat:
     case TdFunctionKind::JoinChatByInviteLink:
+    case TdFunctionKind::AddContact:
+    case TdFunctionKind::RemoveContacts:
+    case TdFunctionKind::SetMessageSenderBlockList:
+    case TdFunctionKind::CreateChatFolder:
+    case TdFunctionKind::EditChatFolder:
+    case TdFunctionKind::CreateForumTopic:
+    case TdFunctionKind::EditForumTopic:
+    case TdFunctionKind::ToggleForumTopicIsClosed:
+    case TdFunctionKind::SetChatTitle:
+    case TdFunctionKind::SetChatPhoto:
+    case TdFunctionKind::SetChatDescription:
+    case TdFunctionKind::SetChatMemberStatus:
+    case TdFunctionKind::SetChatPermissions:
         return DescriptorKind::Write;
     case TdFunctionKind::DeleteMessages:
     case TdFunctionKind::LeaveChat:
+    case TdFunctionKind::DeleteChatFolder:
+    case TdFunctionKind::CreateChatInviteLink:
+    case TdFunctionKind::RevokeChatInviteLink:
+    case TdFunctionKind::OptimizeStorage:
         return DescriptorKind::Destructive;
     default:
         return std::nullopt;
@@ -106,6 +123,8 @@ TdFunctionKind direct_request_kind(const TdDirectRequest& request) {
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                 return value.is_invite_request() ? TdFunctionKind::JoinChatByInviteLink
                                                  : TdFunctionKind::JoinChat;
+            } else if constexpr (std::is_same_v<Request, TdM6Request>) {
+                return td_m6_request_kind(value);
             } else {
                 static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
                 return TdFunctionKind::LeaveChat;
@@ -204,9 +223,15 @@ class TdClient::Impl {
         if (!authorization ||
             (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
              function != TdFunctionKind::GetContacts &&
+             function != TdFunctionKind::SearchContacts &&
              function != TdFunctionKind::GetSavedMessagesTags &&
              function != TdFunctionKind::SearchSavedMessages &&
              function != TdFunctionKind::GetActiveSessions && function != TdFunctionKind::GetChat &&
+             function != TdFunctionKind::GetChatFolder &&
+             function != TdFunctionKind::GetForumTopics &&
+             function != TdFunctionKind::GetForumTopic &&
+             function != TdFunctionKind::GetChatMember &&
+             function != TdFunctionKind::GetStorageStatistics &&
              function != TdFunctionKind::GetChatHistory &&
              function != TdFunctionKind::GetChatMessageByDate &&
              function != TdFunctionKind::GetMessageThread &&
@@ -257,6 +282,33 @@ class TdClient::Impl {
     std::future<TdValue>
     get_contacts(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
         return send_read(authorization, TdFunctionKind::GetContacts, runtime_->make_get_contacts());
+    }
+
+    std::future<TdValue> m6_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                 TdM6Request request) {
+        if (!valid_td_m6_request(request) || !td_m6_request_is_read(request)) {
+            return failed_future(TdAuthorizationFailure::FunctionDenied);
+        }
+        const auto function = td_m6_request_kind(request);
+        return send_read(authorization, function, runtime_->make_m6_function(std::move(request)));
+    }
+
+    [[nodiscard]] std::optional<TdM6ChatFoldersUpdate>
+    m6_chat_folders(const std::shared_ptr<const AuthStateSnapshot>& authorization) const {
+        if (!authorization || authorization->data.state != AuthState::Ready) {
+            return std::nullopt;
+        }
+        std::shared_ptr<Generation> generation;
+        {
+            const std::lock_guard lock(state_mutex_);
+            generation = current_;
+        }
+        if (!generation || generation->client_id != authorization->client_id ||
+            generation->number != authorization->client_generation) {
+            return std::nullopt;
+        }
+        const std::lock_guard lock(generation->m6_cache_mutex);
+        return generation->m6_chat_folders;
     }
 
     std::future<TdValue>
@@ -670,6 +722,8 @@ class TdClient::Impl {
                         return runtime_->make_add_chat_to_list(input);
                     } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                         return runtime_->make_join_chat(std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request, TdM6Request>) {
+                        return runtime_->make_m6_function(std::forward<decltype(input)>(input));
                     } else {
                         static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
                         return runtime_->make_leave_chat(input);
@@ -1186,6 +1240,7 @@ class TdClient::Impl {
         std::mutex auth_commit_mutex;
         std::mutex outbound_mutex;
         std::mutex closed_decision_mutex;
+        mutable std::mutex m6_cache_mutex;
         std::condition_variable closed_decision_cv;
         std::size_t pending_closed_decisions = 0;
         bool closed_committed = false;
@@ -1202,6 +1257,7 @@ class TdClient::Impl {
         bool close_sent = false;
         bool final = false;
         std::deque<TdValue> pending_updates;
+        std::optional<TdM6ChatFoldersUpdate> m6_chat_folders;
     };
 
     std::shared_ptr<Generation> make_generation() {
@@ -1464,6 +1520,32 @@ class TdClient::Impl {
         }
     }
 
+    static void retain_m6_folder_update(const std::shared_ptr<Generation>& generation,
+                                        const TdValue& update) {
+        const auto* folders = update.get_if<TdM6ChatFoldersUpdate>();
+        if (folders == nullptr || !valid_td_m6_chat_folders_update(*folders)) {
+            return;
+        }
+        const std::lock_guard lock(generation->m6_cache_mutex);
+        generation->m6_chat_folders = *folders;
+    }
+
+    static void retain_m6_current_state(const std::shared_ptr<Generation>& generation,
+                                        TdValue& value) {
+        auto* state = value.get_if<TdCurrentState>();
+        if (state == nullptr) {
+            return;
+        }
+        for (auto& update : state->updates) {
+            auto* folders = update.get_if<TdM6ChatFoldersUpdate>();
+            if (folders == nullptr || !valid_td_m6_chat_folders_update(*folders)) {
+                continue;
+            }
+            const std::lock_guard lock(generation->m6_cache_mutex);
+            generation->m6_chat_folders = std::move(*folders);
+        }
+    }
+
     struct EventPublication {
         std::unique_lock<std::mutex> lock;
         TdEventClock::time_point observed_at;
@@ -1558,6 +1640,9 @@ class TdClient::Impl {
             if (current_state_response && generation->observer != nullptr) {
                 generation->observer->on_current_state(event.object);
             }
+            if (current_state_response) {
+                retain_m6_current_state(generation, event.object);
+            }
             if (install_response) {
                 commit_auth_state_locked(generation, *auth_publication, false);
                 observe_authorization(generation, *event.authorization_state,
@@ -1628,6 +1713,7 @@ class TdClient::Impl {
             }
         }
         if (!pending) {
+            retain_m6_folder_update(generation, event.object);
             updates_.publish(event.object);
         }
         receive_boundary(generation);
@@ -1655,6 +1741,10 @@ class TdClient::Impl {
 
     void commit_auth_state_locked(const std::shared_ptr<Generation>& generation,
                                   AuthPublication& publication, bool from_update) {
+        if (publication.snapshot->data.state != AuthState::Ready) {
+            const std::lock_guard cache_lock(generation->m6_cache_mutex);
+            generation->m6_chat_folders.reset();
+        }
         auth_state_.store(publication.snapshot, std::memory_order_release);
         generation->initial_state_installed = true;
         generation->accepted_auth_update |= from_update;
@@ -1671,6 +1761,7 @@ class TdClient::Impl {
             send_close_locked(generation);
         }
         for (const auto& update : publication.pending_updates) {
+            retain_m6_folder_update(generation, update);
             updates_.publish(update);
         }
         auth_states_.publish(publication.snapshot);
@@ -1942,6 +2033,17 @@ TdClient::get_me(const std::shared_ptr<const AuthStateSnapshot>& authorization) 
 std::future<TdValue>
 TdClient::get_contacts(const std::shared_ptr<const AuthStateSnapshot>& authorization) {
     return impl_->get_contacts(authorization);
+}
+
+std::future<TdValue>
+TdClient::m6_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                  TdM6Request request) {
+    return impl_->m6_read(authorization, std::move(request));
+}
+
+std::optional<TdM6ChatFoldersUpdate>
+TdClient::m6_chat_folders(const std::shared_ptr<const AuthStateSnapshot>& authorization) const {
+    return impl_->m6_chat_folders(authorization);
 }
 
 std::future<TdValue>

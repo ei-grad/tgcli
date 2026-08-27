@@ -40,6 +40,7 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     core::TdValue make_function(core::TdBuiltinFunction function) override;
     core::TdValue make_get_current_state() override;
     core::TdValue make_get_contacts() override;
+    core::TdValue make_m6_function(core::TdM6Request request) override;
     core::TdValue make_set_tdlib_parameters(core::TdlibParameters parameters) override;
     core::TdValue make_auth_function(core::TdAuthRequest request) override;
     core::TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) override;

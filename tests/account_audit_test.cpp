@@ -149,6 +149,8 @@ std::string tdlib_request(daemon::AccountAuditOperation operation) {
         return "leaveChat";
     case O::SessionTerminate:
         return "terminateSession";
+    default:
+        return {};
     }
     return {};
 }
@@ -286,6 +288,8 @@ json plan(daemon::AccountAuditOperation operation) {
     case O::SessionTerminate:
         result.update({{"session", session_target()}});
         break;
+    default:
+        break;
     }
     return result;
 }
@@ -388,6 +392,8 @@ json result_data(daemon::AccountAuditOperation operation) {
         return {{"chat_id", -1001}, {"left", true}};
     case O::SessionTerminate:
         return {{"session_id", "-9223372036854775808"}, {"terminated", true}};
+    default:
+        return {};
     }
     return {};
 }
@@ -723,14 +729,15 @@ TEST_CASE("account audit limits preserve the accepted equations", "[account-audi
     CHECK(kMaximumEscapedChatIdentityBytes == 6'295'469);
     CHECK(kMaximumIntentProofBytes == 130'490'195);
     CHECK(kMaximumSessionIntentProofBytes == 48'300'031);
-    CHECK(kVectorJsonBytes == 4'198'400);
+    CHECK(kM6TerminalBytes == 16'842'700);
+    CHECK(kVectorJsonBytes == 16'846'796);
     CHECK(kMaximumForwardProgressRecords == 101);
     CHECK(kMaximumVectorLinesPerGroup == 103);
-    CHECK(kMaximumGroupBytes == 566'849'643);
-    CHECK(kMaximumGroupTailBytes == 432'631'914);
-    CHECK(kMaximumNonRotatingSegmentBytes == 466'186'346);
-    CHECK(kMaximumSegmentBytes == 566'849'643);
-    CHECK(kMaximumAuditBytes == 2'834'248'215ULL);
+    CHECK(kMaximumGroupBytes == 1'869'634'431);
+    CHECK(kMaximumGroupTailBytes == 1'735'416'702);
+    CHECK(kMaximumNonRotatingSegmentBytes == 1'768'971'134);
+    CHECK(kMaximumSegmentBytes == 1'869'634'431);
+    CHECK(kMaximumAuditBytes == 9'348'172'155ULL);
     CHECK(daemon::account_audit_terminal_reservation(daemon::AccountAuditOperation::MsgForward) ==
           4'194'304);
 }

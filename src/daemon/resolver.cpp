@@ -1438,7 +1438,11 @@ std::string_view resolver_caller_name(const ResolverCaller& caller) {
     if (const auto* operation = std::get_if<M2Operation>(&caller)) {
         return m2_operation_name(*operation);
     }
-    const auto* identity = proto::m3_operation_identity(std::get<proto::M3Operation>(caller));
+    if (const auto* operation = std::get_if<proto::M3Operation>(&caller)) {
+        const auto* identity = proto::m3_operation_identity(*operation);
+        return identity == nullptr ? std::string_view{} : identity->canonical_name;
+    }
+    const auto* identity = proto::m6_operation_identity(std::get<proto::M6Operation>(caller));
     return identity == nullptr ? std::string_view{} : identity->canonical_name;
 }
 

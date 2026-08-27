@@ -238,6 +238,17 @@ DirectOutcome direct_result_from(const core::TdLeaveChatRequest& input,
     return DirectSuccess{.result = DirectLeaveResult{.chat_id = input.chat_id}};
 }
 
+DirectOutcome direct_result_from(const core::TdM6Request& /*input*/, const core::TdValue& value) {
+    const auto* response = value.get_if<core::TdM6Response>();
+    if (response == nullptr) {
+        return DirectMalformed{};
+    }
+    if (const auto* malformed = std::get_if<core::TdM6ConversionError>(response)) {
+        return DirectMalformed{.tdlib_type_id = malformed->tdlib_type_id};
+    }
+    return DirectSuccess{.result = *response};
+}
+
 DirectOutcome success_from(const core::TdDirectRequest& request, core::TdValue& value) {
     if (auto* error = value.get_if<core::TdError>()) {
         secure::WipeObserver wipe_observer;

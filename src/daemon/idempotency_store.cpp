@@ -3,6 +3,7 @@
 #include "common/canonical_json.hpp"
 #include "common/paths.hpp"
 #include "common/utf8.hpp"
+#include "daemon/write_operation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -195,7 +196,7 @@ std::optional<std::uint64_t> mutable_charge(const IdempotencyEntry& entry) {
 
 bool valid_entry(const IdempotencyEntry& entry, std::string_view account) {
     if (!valid_digest(entry.key_hash.value()) || !valid_digest(entry.request_fingerprint.value()) ||
-        entry.operation == AccountAuditOperation::SessionTerminate ||
+        !WriteOperation(entry.operation).idempotent() ||
         !valid_invocation_id(entry.invocation_id) || entry.audit_generation == 0 ||
         entry.created_at > kIdempotencyMaximumUnixSeconds ||
         entry.expires_at > kIdempotencyMaximumUnixSeconds ||
@@ -293,8 +294,7 @@ std::optional<IdempotencyEntry> parse_entry(const json& value, std::string_view 
         parse_idempotency_request_fingerprint(value["request_fingerprint"].get<std::string>());
     const auto operation =
         parse_account_audit_operation(value["operation"].get_ref<const std::string&>());
-    if (!key || !fingerprint || !operation ||
-        *operation == AccountAuditOperation::SessionTerminate) {
+    if (!key || !fingerprint || !operation || !WriteOperation(*operation).idempotent()) {
         return std::nullopt;
     }
     IdempotencyEntryState state{};

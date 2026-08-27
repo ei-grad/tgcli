@@ -25,6 +25,158 @@ namespace tgcli::core {
 
 namespace td_api = td::td_api;
 
+TdFunctionKind td_m6_request_kind(const TdM6Request& request) noexcept {
+    return std::visit(
+        [](const auto& value) {
+            using Request = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<Request, TdM6GetContactsRequest>) {
+                return TdFunctionKind::GetContacts;
+            } else if constexpr (std::is_same_v<Request, TdM6SearchContactsRequest>) {
+                return TdFunctionKind::SearchContacts;
+            } else if constexpr (std::is_same_v<Request, TdM6AddContactRequest>) {
+                return TdFunctionKind::AddContact;
+            } else if constexpr (std::is_same_v<Request, TdM6RemoveContactsRequest>) {
+                return TdFunctionKind::RemoveContacts;
+            } else if constexpr (std::is_same_v<Request, TdM6SetBlockRequest>) {
+                return TdFunctionKind::SetMessageSenderBlockList;
+            } else if constexpr (std::is_same_v<Request, TdM6GetChatFolderRequest>) {
+                return TdFunctionKind::GetChatFolder;
+            } else if constexpr (std::is_same_v<Request, TdM6CreateChatFolderRequest>) {
+                return TdFunctionKind::CreateChatFolder;
+            } else if constexpr (std::is_same_v<Request, TdM6EditChatFolderRequest>) {
+                return TdFunctionKind::EditChatFolder;
+            } else if constexpr (std::is_same_v<Request, TdM6DeleteChatFolderRequest>) {
+                return TdFunctionKind::DeleteChatFolder;
+            } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicsRequest>) {
+                return TdFunctionKind::GetForumTopics;
+            } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicRequest>) {
+                return TdFunctionKind::GetForumTopic;
+            } else if constexpr (std::is_same_v<Request, TdM6CreateForumTopicRequest>) {
+                return TdFunctionKind::CreateForumTopic;
+            } else if constexpr (std::is_same_v<Request, TdM6EditForumTopicRequest>) {
+                return TdFunctionKind::EditForumTopic;
+            } else if constexpr (std::is_same_v<Request, TdM6ToggleForumTopicRequest>) {
+                return TdFunctionKind::ToggleForumTopicIsClosed;
+            } else if constexpr (std::is_same_v<Request, TdM6GetChatMemberRequest>) {
+                return TdFunctionKind::GetChatMember;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatTitleRequest>) {
+                return TdFunctionKind::SetChatTitle;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatPhotoRequest>) {
+                return TdFunctionKind::SetChatPhoto;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatDescriptionRequest>) {
+                return TdFunctionKind::SetChatDescription;
+            } else if constexpr (std::is_same_v<Request, TdM6CreateChatInviteLinkRequest>) {
+                return TdFunctionKind::CreateChatInviteLink;
+            } else if constexpr (std::is_same_v<Request, TdM6RevokeChatInviteLinkRequest>) {
+                return TdFunctionKind::RevokeChatInviteLink;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatMemberStatusRequest>) {
+                return TdFunctionKind::SetChatMemberStatus;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatPermissionsRequest>) {
+                return TdFunctionKind::SetChatPermissions;
+            } else if constexpr (std::is_same_v<Request, TdM6GetStorageStatisticsRequest>) {
+                return TdFunctionKind::GetStorageStatistics;
+            } else {
+                static_assert(std::is_same_v<Request, TdM6OptimizeStorageRequest>);
+                return TdFunctionKind::OptimizeStorage;
+            }
+        },
+        request);
+}
+
+bool valid_td_m6_chat_folders_update(const TdM6ChatFoldersUpdate& update) noexcept {
+    if (update.folders.size() > 100 || update.main_chat_list_position < 0 ||
+        update.main_chat_list_position > static_cast<std::int32_t>(update.folders.size())) {
+        return false;
+    }
+    std::unordered_set<std::int32_t> ids;
+    for (const auto& folder : update.folders) {
+        if (folder.id <= 0 || !ids.insert(folder.id).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool td_m6_request_is_read(const TdM6Request& request) noexcept {
+    switch (td_m6_request_kind(request)) {
+    case TdFunctionKind::GetContacts:
+    case TdFunctionKind::SearchContacts:
+    case TdFunctionKind::GetChatFolder:
+    case TdFunctionKind::GetForumTopics:
+    case TdFunctionKind::GetForumTopic:
+    case TdFunctionKind::GetChatMember:
+    case TdFunctionKind::GetStorageStatistics:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool valid_td_m6_request(const TdM6Request& request) noexcept {
+    return std::visit(
+        [](const auto& value) {
+            using Request = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<Request, TdM6GetContactsRequest>) {
+                return true;
+            } else if constexpr (std::is_same_v<Request, TdM6SearchContactsRequest>) {
+                return !value.query.empty() && value.query.size() <= 256 && value.limit == 100;
+            } else if constexpr (std::is_same_v<Request, TdM6AddContactRequest>) {
+                return value.user_id > 0 && !value.first_name.empty() && !value.share_phone_number;
+            } else if constexpr (std::is_same_v<Request, TdM6RemoveContactsRequest>) {
+                return value.user_ids.size() == 1 && value.user_ids.front() > 0;
+            } else if constexpr (std::is_same_v<Request, TdM6SetBlockRequest>) {
+                return value.user_id > 0;
+            } else if constexpr (std::is_same_v<Request, TdM6GetChatFolderRequest>) {
+                return value.folder_id > 0;
+            } else if constexpr (std::is_same_v<Request, TdM6CreateChatFolderRequest>) {
+                return !value.folder.name.text.empty();
+            } else if constexpr (std::is_same_v<Request, TdM6EditChatFolderRequest>) {
+                return value.folder_id > 0 && !value.folder.name.text.empty();
+            } else if constexpr (std::is_same_v<Request, TdM6DeleteChatFolderRequest>) {
+                return value.folder_id > 0 && value.leave_chat_ids.empty();
+            } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicsRequest>) {
+                return value.chat_id != 0 && value.query.empty() && value.offset_date >= 0 &&
+                       value.offset_message_id >= 0 && value.offset_forum_topic_id >= 0 &&
+                       value.limit == 100;
+            } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicRequest>) {
+                return value.chat_id != 0 && value.topic_id > 0;
+            } else if constexpr (std::is_same_v<Request, TdM6CreateForumTopicRequest>) {
+                return value.chat_id != 0 && !value.name.empty() && !value.is_name_implicit;
+            } else if constexpr (std::is_same_v<Request, TdM6EditForumTopicRequest>) {
+                return value.chat_id != 0 && value.topic_id > 0 && !value.name.empty() &&
+                       !value.edit_icon_custom_emoji && value.icon_custom_emoji_id == 0;
+            } else if constexpr (std::is_same_v<Request, TdM6ToggleForumTopicRequest>) {
+                return value.chat_id != 0 && value.topic_id > 0;
+            } else if constexpr (std::is_same_v<Request, TdM6GetChatMemberRequest>) {
+                return value.chat_id != 0 && value.user_id > 0;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatTitleRequest>) {
+                return value.chat_id != 0 && !value.title.empty();
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatPhotoRequest>) {
+                return value.chat_id != 0 && (!value.local_path || !value.local_path->empty());
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatDescriptionRequest>) {
+                return value.chat_id != 0;
+            } else if constexpr (std::is_same_v<Request, TdM6CreateChatInviteLinkRequest>) {
+                return value.chat_id != 0;
+            } else if constexpr (std::is_same_v<Request, TdM6RevokeChatInviteLinkRequest>) {
+                return value.chat_id != 0 && !value.invite_link.empty();
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatMemberStatusRequest>) {
+                return value.chat_id != 0 && value.user_id > 0 &&
+                       value.status.kind != TdM6MemberStatusKind::Unknown;
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatPermissionsRequest>) {
+                return value.chat_id != 0;
+            } else if constexpr (std::is_same_v<Request, TdM6GetStorageStatisticsRequest>) {
+                return value.chat_limit == 100;
+            } else {
+                static_assert(std::is_same_v<Request, TdM6OptimizeStorageRequest>);
+                return value.size == -1 && value.ttl == -1 && value.count == -1 &&
+                       value.immunity_delay == -1 && value.file_types.empty() &&
+                       value.chat_ids.empty() && value.exclude_chat_ids.empty() &&
+                       !value.return_deleted_file_statistics && value.chat_limit == 100;
+            }
+        },
+        request);
+}
+
 TdJoinChatRequest::TdJoinChatRequest(std::optional<std::int64_t> chat_id_value,
                                      std::optional<secure::SensitiveString> invite_link_value,
                                      std::optional<std::int64_t> expected_invite_chat_id_value)
@@ -1801,6 +1953,9 @@ TdValue convert_delete_messages_update(td_api::updateDeleteMessages& update,
                                                 .from_cache = update.from_cache_});
 }
 
+std::optional<TdM6ChatFoldersUpdate>
+convert_m6_chat_folders_update(const td_api::updateChatFolders& update);
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed TDLib update type union.
 std::optional<TdValue> convert_supported_update(td_api::Object& object,
                                                 std::uint64_t client_generation) {
@@ -1808,6 +1963,12 @@ std::optional<TdValue> convert_supported_update(td_api::Object& object,
         return TdValue::from(malformed_update(kind, reason, object.get_id()));
     };
     switch (object.get_id()) {
+    case td_api::updateChatFolders::ID: {
+        const auto converted =
+            convert_m6_chat_folders_update(static_cast<const td_api::updateChatFolders&>(object));
+        return converted ? TdValue::from(*converted)
+                         : TdValue::from(TdM6ConversionError{.tdlib_type_id = object.get_id()});
+    }
     case td_api::updateNewMessage::ID: {
         const auto& update = static_cast<const td_api::updateNewMessage&>(object);
         if (update.message_ == nullptr) {
@@ -2431,9 +2592,561 @@ TdValue convert_supergroup_members_response(const NativeObjectPtr& object) {
         TdChatMembers{.total_count = members.total_count_, .members = std::move(*converted)});
 }
 
+std::optional<TdM6FolderIcon> convert_m6_folder_icon(const td_api::chatFolderIcon* icon) {
+    if (icon == nullptr) {
+        return std::nullopt;
+    }
+    static constexpr std::array<std::string_view, 30> names{
+        "All",   "Unread", "Unmuted", "Bots",     "Channels", "Groups", "Private", "Custom",
+        "Setup", "Cat",    "Crown",   "Favorite", "Flower",   "Game",   "Home",    "Love",
+        "Mask",  "Party",  "Sport",   "Study",    "Trade",    "Travel", "Work",    "Airplane",
+        "Book",  "Light",  "Like",    "Money",    "Note",     "Palette"};
+    const auto found = std::ranges::find(names, icon->name_);
+    if (found == names.end()) {
+        return std::nullopt;
+    }
+    return static_cast<TdM6FolderIcon>(std::distance(names.begin(), found));
+}
+
+std::optional<TdM6FolderName> convert_m6_folder_name(const td_api::chatFolderName* name) {
+    if (name == nullptr || name->text_ == nullptr || !common::valid_utf8(name->text_->text_)) {
+        return std::nullopt;
+    }
+    TdM6FolderName converted{.text = name->text_->text_,
+                             .animate_custom_emoji = name->animate_custom_emoji_,
+                             .custom_emoji_entities = {}};
+    converted.custom_emoji_entities.reserve(name->text_->entities_.size());
+    for (const auto& entity : name->text_->entities_) {
+        if (entity == nullptr || entity->type_ == nullptr || entity->offset_ < 0 ||
+            entity->length_ <= 0 ||
+            entity->type_->get_id() != td_api::textEntityTypeCustomEmoji::ID) {
+            return std::nullopt;
+        }
+        const auto& type = static_cast<const td_api::textEntityTypeCustomEmoji&>(*entity->type_);
+        converted.custom_emoji_entities.push_back(
+            {.offset = entity->offset_,
+             .length = entity->length_,
+             .custom_emoji_id = std::to_string(type.custom_emoji_id_)});
+    }
+    return converted;
+}
+
+std::optional<TdM6FolderInfo> convert_m6_folder_info(const td_api::chatFolderInfo* info) {
+    if (info == nullptr || info->id_ <= 0 || info->color_id_ < -1 || info->color_id_ > 6) {
+        return std::nullopt;
+    }
+    auto name = convert_m6_folder_name(info->name_.get());
+    auto icon = convert_m6_folder_icon(info->icon_.get());
+    if (!name || !icon) {
+        return std::nullopt;
+    }
+    return TdM6FolderInfo{.id = info->id_,
+                          .name = std::move(*name),
+                          .icon = *icon,
+                          .color_id = info->color_id_,
+                          .is_shareable = info->is_shareable_,
+                          .has_my_invite_links = info->has_my_invite_links_};
+}
+
+std::optional<TdM6ChatFoldersUpdate>
+convert_m6_chat_folders_update(const td_api::updateChatFolders& update) {
+    if (update.main_chat_list_position_ < 0 ||
+        update.main_chat_list_position_ > static_cast<std::int32_t>(update.chat_folders_.size())) {
+        return std::nullopt;
+    }
+    TdM6ChatFoldersUpdate converted{.folders = {},
+                                    .main_chat_list_position = update.main_chat_list_position_,
+                                    .are_tags_enabled = update.are_tags_enabled_};
+    converted.folders.reserve(update.chat_folders_.size());
+    for (const auto& folder : update.chat_folders_) {
+        auto info = convert_m6_folder_info(folder.get());
+        if (!info) {
+            return std::nullopt;
+        }
+        converted.folders.push_back(std::move(*info));
+    }
+    return valid_td_m6_chat_folders_update(converted) ? std::optional{std::move(converted)}
+                                                      : std::nullopt;
+}
+
+std::optional<TdM6ChatFolder> convert_m6_chat_folder(const td_api::chatFolder* folder) {
+    if (folder == nullptr || folder->color_id_ < -1 || folder->color_id_ > 6) {
+        return std::nullopt;
+    }
+    auto name = convert_m6_folder_name(folder->name_.get());
+    if (!name) {
+        return std::nullopt;
+    }
+    std::optional<TdM6FolderIcon> icon;
+    if (folder->icon_ != nullptr) {
+        icon = convert_m6_folder_icon(folder->icon_.get());
+        if (!icon) {
+            return std::nullopt;
+        }
+    }
+    const auto valid_ids = [](const std::vector<std::int64_t>& ids) {
+        return std::ranges::all_of(ids, [](std::int64_t id) { return valid_td_chat_id(id); });
+    };
+    if (!valid_ids(folder->pinned_chat_ids_) || !valid_ids(folder->included_chat_ids_) ||
+        !valid_ids(folder->excluded_chat_ids_)) {
+        return std::nullopt;
+    }
+    return TdM6ChatFolder{.name = std::move(*name),
+                          .icon = icon,
+                          .color_id = folder->color_id_,
+                          .is_shareable = folder->is_shareable_,
+                          .pinned_chat_ids = folder->pinned_chat_ids_,
+                          .included_chat_ids = folder->included_chat_ids_,
+                          .excluded_chat_ids = folder->excluded_chat_ids_,
+                          .exclude_muted = folder->exclude_muted_,
+                          .exclude_read = folder->exclude_read_,
+                          .exclude_archived = folder->exclude_archived_,
+                          .include_contacts = folder->include_contacts_,
+                          .include_non_contacts = folder->include_non_contacts_,
+                          .include_bots = folder->include_bots_,
+                          .include_groups = folder->include_groups_,
+                          .include_channels = folder->include_channels_};
+}
+
+TdValue m6_conversion_error(const NativeObjectPtr& object) {
+    return TdValue::from(TdM6Response{TdM6ConversionError{
+        .tdlib_type_id =
+            object == nullptr ? std::nullopt : std::optional<std::int32_t>{object->get_id()}}});
+}
+
+TdValue convert_m6_contacts_response(const NativeObjectPtr& object) {
+    if (object == nullptr || object->get_id() != td_api::users::ID) {
+        return m6_conversion_error(object);
+    }
+    const auto& users = static_cast<const td_api::users&>(*object);
+    if (users.total_count_ < 0 ||
+        !std::ranges::all_of(users.user_ids_, [](std::int64_t id) { return id > 0; })) {
+        return m6_conversion_error(object);
+    }
+    return TdValue::from(
+        TdM6Response{TdM6Users{.total_count = users.total_count_, .user_ids = users.user_ids_}});
+}
+
+TdValue convert_m6_folder_response(TdFunctionKind function, const NativeObjectPtr& object) {
+    if (function == TdFunctionKind::GetChatFolder) {
+        if (object == nullptr) {
+            return TdValue::from(TdM6Response{TdM6MaybeChatFolder{}});
+        }
+        if (object->get_id() != td_api::chatFolder::ID) {
+            return m6_conversion_error(object);
+        }
+        auto folder = convert_m6_chat_folder(static_cast<const td_api::chatFolder*>(object.get()));
+        return folder
+                   ? TdValue::from(TdM6Response{TdM6MaybeChatFolder{.folder = std::move(*folder)}})
+                   : m6_conversion_error(object);
+    }
+    if (object == nullptr || object->get_id() != td_api::chatFolderInfo::ID) {
+        return m6_conversion_error(object);
+    }
+    auto info = convert_m6_folder_info(static_cast<const td_api::chatFolderInfo*>(object.get()));
+    return info ? TdValue::from(TdM6Response{std::move(*info)}) : m6_conversion_error(object);
+}
+
+std::optional<TdM6Sender> convert_m6_sender(const td_api::MessageSender* sender) {
+    if (sender == nullptr) {
+        return std::nullopt;
+    }
+    switch (sender->get_id()) {
+    case td_api::messageSenderUser::ID: {
+        const auto id = static_cast<const td_api::messageSenderUser&>(*sender).user_id_;
+        return id > 0 ? std::optional<TdM6Sender>{TdM6Sender{.kind = TdM6SenderKind::User,
+                                                             .id = id,
+                                                             .unsupported_tdlib_type_id =
+                                                                 std::nullopt}}
+                      : std::nullopt;
+    }
+    case td_api::messageSenderChat::ID: {
+        const auto id = static_cast<const td_api::messageSenderChat&>(*sender).chat_id_;
+        return valid_td_chat_id(id) ? std::optional<TdM6Sender>{TdM6Sender{
+                                          .kind = TdM6SenderKind::Chat,
+                                          .id = id,
+                                          .unsupported_tdlib_type_id = std::nullopt}}
+                                    : std::nullopt;
+    }
+    default:
+        return TdM6Sender{.kind = TdM6SenderKind::Unknown,
+                          .unsupported_tdlib_type_id = sender->get_id()};
+    }
+}
+
+std::optional<TdM6TopicIcon> convert_m6_topic_icon(const td_api::forumTopicIcon* icon) {
+    if (icon == nullptr) {
+        return std::nullopt;
+    }
+    static constexpr std::array<std::int32_t, 6> colors{0x6FB9F0, 0xFFD67E, 0xCB86DB,
+                                                        0x8EEE98, 0xFF93B2, 0xFB6F5F};
+    const auto found = std::ranges::find(colors, icon->color_);
+    if (found == colors.end()) {
+        return std::nullopt;
+    }
+    return TdM6TopicIcon{.color = static_cast<TdM6TopicColor>(std::distance(colors.begin(), found)),
+                         .custom_emoji_id = std::to_string(icon->custom_emoji_id_)};
+}
+
+std::optional<TdM6ForumTopicInfo> convert_m6_forum_topic_info(const td_api::forumTopicInfo* info) {
+    if (info == nullptr || !valid_td_chat_id(info->chat_id_) || info->forum_topic_id_ <= 0 ||
+        !common::valid_utf8(info->name_) || info->creation_date_ <= 0) {
+        return std::nullopt;
+    }
+    auto icon = convert_m6_topic_icon(info->icon_.get());
+    auto creator = convert_m6_sender(info->creator_id_.get());
+    if (!icon || !creator || creator->kind == TdM6SenderKind::Unknown) {
+        return std::nullopt;
+    }
+    return TdM6ForumTopicInfo{.chat_id = info->chat_id_,
+                              .id = info->forum_topic_id_,
+                              .name = info->name_,
+                              .icon = std::move(*icon),
+                              .creation_date = info->creation_date_,
+                              .creator = std::move(*creator),
+                              .is_general = info->is_general_,
+                              .is_outgoing = info->is_outgoing_,
+                              .is_closed = info->is_closed_,
+                              .is_hidden = info->is_hidden_,
+                              .is_name_implicit = info->is_name_implicit_};
+}
+
+std::optional<TdM6ForumTopic> convert_m6_forum_topic(const td_api::forumTopic* topic) {
+    if (topic == nullptr || topic->unread_count_ < 0 || topic->unread_mention_count_ < 0 ||
+        topic->unread_reaction_count_ < 0 || topic->unread_poll_vote_count_ < 0) {
+        return std::nullopt;
+    }
+    auto info = convert_m6_forum_topic_info(topic->info_.get());
+    if (!info) {
+        return std::nullopt;
+    }
+    return TdM6ForumTopic{.info = std::move(*info),
+                          .order = topic->order_,
+                          .is_pinned = topic->is_pinned_,
+                          .unread_count = topic->unread_count_,
+                          .unread_mention_count = topic->unread_mention_count_,
+                          .unread_reaction_count = topic->unread_reaction_count_,
+                          .unread_poll_vote_count = topic->unread_poll_vote_count_};
+}
+
+TdValue convert_m6_topic_response(TdFunctionKind function, const NativeObjectPtr& object) {
+    if (function == TdFunctionKind::GetForumTopic) {
+        if (object == nullptr) {
+            return TdValue::from(TdM6Response{TdM6MaybeForumTopic{}});
+        }
+        if (object->get_id() != td_api::forumTopic::ID) {
+            return m6_conversion_error(object);
+        }
+        auto topic = convert_m6_forum_topic(static_cast<const td_api::forumTopic*>(object.get()));
+        return topic ? TdValue::from(TdM6Response{TdM6MaybeForumTopic{.topic = std::move(*topic)}})
+                     : m6_conversion_error(object);
+    }
+    if (function == TdFunctionKind::GetForumTopics) {
+        if (object == nullptr || object->get_id() != td_api::forumTopics::ID) {
+            return m6_conversion_error(object);
+        }
+        const auto& page = static_cast<const td_api::forumTopics&>(*object);
+        TdM6ForumTopics converted{.total_count = page.total_count_,
+                                  .topics = {},
+                                  .next_offset_date = page.next_offset_date_,
+                                  .next_offset_message_id = page.next_offset_message_id_,
+                                  .next_offset_forum_topic_id = page.next_offset_forum_topic_id_};
+        converted.topics.reserve(page.topics_.size());
+        for (const auto& topic : page.topics_) {
+            auto item = convert_m6_forum_topic(topic.get());
+            if (!item) {
+                return m6_conversion_error(object);
+            }
+            converted.topics.push_back(std::move(*item));
+        }
+        return TdValue::from(TdM6Response{std::move(converted)});
+    }
+    if (object == nullptr || object->get_id() != td_api::forumTopicInfo::ID) {
+        return m6_conversion_error(object);
+    }
+    auto info =
+        convert_m6_forum_topic_info(static_cast<const td_api::forumTopicInfo*>(object.get()));
+    return info ? TdValue::from(TdM6Response{std::move(*info)}) : m6_conversion_error(object);
+}
+
+std::optional<TdM6AdminRights>
+convert_m6_admin_rights(const td_api::chatAdministratorRights* rights) {
+    if (rights == nullptr) {
+        return std::nullopt;
+    }
+    return TdM6AdminRights{.can_manage_chat = rights->can_manage_chat_,
+                           .can_change_info = rights->can_change_info_,
+                           .can_post_messages = rights->can_post_messages_,
+                           .can_edit_messages = rights->can_edit_messages_,
+                           .can_delete_messages = rights->can_delete_messages_,
+                           .can_invite_users = rights->can_invite_users_,
+                           .can_restrict_members = rights->can_restrict_members_,
+                           .can_pin_messages = rights->can_pin_messages_,
+                           .can_manage_topics = rights->can_manage_topics_,
+                           .can_promote_members = rights->can_promote_members_,
+                           .can_manage_video_chats = rights->can_manage_video_chats_,
+                           .can_post_stories = rights->can_post_stories_,
+                           .can_edit_stories = rights->can_edit_stories_,
+                           .can_delete_stories = rights->can_delete_stories_,
+                           .can_manage_direct_messages = rights->can_manage_direct_messages_,
+                           .can_manage_tags = rights->can_manage_tags_,
+                           .is_anonymous = rights->is_anonymous_};
+}
+
+std::optional<TdM6ChatPermissions>
+convert_m6_permissions(const td_api::chatPermissions* permissions) {
+    if (permissions == nullptr) {
+        return std::nullopt;
+    }
+    return TdM6ChatPermissions{.can_send_basic_messages = permissions->can_send_basic_messages_,
+                               .can_send_audios = permissions->can_send_audios_,
+                               .can_send_documents = permissions->can_send_documents_,
+                               .can_send_photos = permissions->can_send_photos_,
+                               .can_send_videos = permissions->can_send_videos_,
+                               .can_send_video_notes = permissions->can_send_video_notes_,
+                               .can_send_voice_notes = permissions->can_send_voice_notes_,
+                               .can_send_polls = permissions->can_send_polls_,
+                               .can_send_other_messages = permissions->can_send_other_messages_,
+                               .can_add_link_previews = permissions->can_add_link_previews_,
+                               .can_react_to_messages = permissions->can_react_to_messages_,
+                               .can_edit_tag = permissions->can_edit_tag_,
+                               .can_change_info = permissions->can_change_info_,
+                               .can_invite_users = permissions->can_invite_users_,
+                               .can_pin_messages = permissions->can_pin_messages_,
+                               .can_create_topics = permissions->can_create_topics_};
+}
+
+std::optional<TdM6MemberStatus> convert_m6_member_status(const td_api::ChatMemberStatus* status) {
+    if (status == nullptr) {
+        return std::nullopt;
+    }
+    TdM6MemberStatus converted;
+    switch (status->get_id()) {
+    case td_api::chatMemberStatusCreator::ID: {
+        const auto& source = static_cast<const td_api::chatMemberStatusCreator&>(*status);
+        converted.kind = TdM6MemberStatusKind::Creator;
+        converted.is_anonymous = source.is_anonymous_;
+        converted.is_member = source.is_member_;
+        break;
+    }
+    case td_api::chatMemberStatusAdministrator::ID: {
+        const auto& source = static_cast<const td_api::chatMemberStatusAdministrator&>(*status);
+        auto rights = convert_m6_admin_rights(source.rights_.get());
+        if (!rights) {
+            return std::nullopt;
+        }
+        converted.kind = TdM6MemberStatusKind::Administrator;
+        converted.is_member = true;
+        converted.can_be_edited = source.can_be_edited_;
+        converted.rights = std::move(*rights);
+        break;
+    }
+    case td_api::chatMemberStatusMember::ID: {
+        const auto& source = static_cast<const td_api::chatMemberStatusMember&>(*status);
+        converted.kind = TdM6MemberStatusKind::Member;
+        converted.is_member = true;
+        converted.member_until_date = source.member_until_date_;
+        break;
+    }
+    case td_api::chatMemberStatusRestricted::ID: {
+        const auto& source = static_cast<const td_api::chatMemberStatusRestricted&>(*status);
+        auto permissions = convert_m6_permissions(source.permissions_.get());
+        if (!permissions) {
+            return std::nullopt;
+        }
+        converted.kind = TdM6MemberStatusKind::Restricted;
+        converted.is_member = source.is_member_;
+        converted.restricted_until_date = source.restricted_until_date_;
+        converted.permissions = std::move(*permissions);
+        break;
+    }
+    case td_api::chatMemberStatusLeft::ID:
+        converted.kind = TdM6MemberStatusKind::Left;
+        break;
+    case td_api::chatMemberStatusBanned::ID:
+        converted.kind = TdM6MemberStatusKind::Banned;
+        converted.banned_until_date =
+            static_cast<const td_api::chatMemberStatusBanned&>(*status).banned_until_date_;
+        break;
+    default:
+        converted.kind = TdM6MemberStatusKind::Unknown;
+        converted.unsupported_tdlib_type_id = status->get_id();
+        break;
+    }
+    return converted;
+}
+
+TdValue convert_m6_chat_member_response(const NativeObjectPtr& object) {
+    if (object == nullptr || object->get_id() != td_api::chatMember::ID) {
+        return m6_conversion_error(object);
+    }
+    const auto& member = static_cast<const td_api::chatMember&>(*object);
+    auto sender = convert_m6_sender(member.member_id_.get());
+    auto status = convert_m6_member_status(member.status_.get());
+    if (!sender || sender->kind == TdM6SenderKind::Unknown || !status ||
+        status->kind == TdM6MemberStatusKind::Unknown || member.inviter_user_id_ < 0 ||
+        member.joined_chat_date_ < 0 || !common::valid_utf8(member.tag_)) {
+        return m6_conversion_error(object);
+    }
+    return TdValue::from(TdM6Response{TdM6ChatMember{.member = std::move(*sender),
+                                                     .inviter_user_id = member.inviter_user_id_,
+                                                     .joined_chat_date = member.joined_chat_date_,
+                                                     .status = std::move(*status)}});
+}
+
+std::optional<TdM6ChatInviteLink> convert_m6_chat_invite_link(const td_api::chatInviteLink* link) {
+    if (link == nullptr || !common::valid_utf8(link->invite_link_) ||
+        !common::valid_utf8(link->name_)) {
+        return std::nullopt;
+    }
+    std::optional<TdM6StarSubscriptionPricing> pricing;
+    if (link->subscription_pricing_ != nullptr) {
+        pricing =
+            TdM6StarSubscriptionPricing{.period = link->subscription_pricing_->period_,
+                                        .star_count = link->subscription_pricing_->star_count_};
+    }
+    return TdM6ChatInviteLink{.invite_link = link->invite_link_,
+                              .name = link->name_,
+                              .creator_user_id = link->creator_user_id_,
+                              .date = link->date_,
+                              .edit_date = link->edit_date_,
+                              .expiration_date = link->expiration_date_,
+                              .member_limit = link->member_limit_,
+                              .member_count = link->member_count_,
+                              .expired_member_count = link->expired_member_count_,
+                              .pending_join_request_count = link->pending_join_request_count_,
+                              .creates_join_request = link->creates_join_request_,
+                              .is_primary = link->is_primary_,
+                              .is_revoked = link->is_revoked_,
+                              .subscription_pricing = pricing};
+}
+
+TdValue convert_m6_invite_link_response(TdFunctionKind function, const NativeObjectPtr& object) {
+    if (function == TdFunctionKind::CreateChatInviteLink) {
+        if (object == nullptr || object->get_id() != td_api::chatInviteLink::ID) {
+            return m6_conversion_error(object);
+        }
+        auto link =
+            convert_m6_chat_invite_link(static_cast<const td_api::chatInviteLink*>(object.get()));
+        return link ? TdValue::from(TdM6Response{std::move(*link)}) : m6_conversion_error(object);
+    }
+    if (object == nullptr || object->get_id() != td_api::chatInviteLinks::ID) {
+        return m6_conversion_error(object);
+    }
+    const auto& links = static_cast<const td_api::chatInviteLinks&>(*object);
+    TdM6ChatInviteLinks converted{.total_count = links.total_count_, .invite_links = {}};
+    converted.invite_links.reserve(links.invite_links_.size());
+    for (const auto& link : links.invite_links_) {
+        auto item = convert_m6_chat_invite_link(link.get());
+        if (!item) {
+            return m6_conversion_error(object);
+        }
+        converted.invite_links.push_back(std::move(*item));
+    }
+    return TdValue::from(TdM6Response{std::move(converted)});
+}
+
+std::optional<TdM6StorageFileType> convert_m6_storage_file_type(const td_api::FileType* type) {
+    if (type == nullptr) {
+        return std::nullopt;
+    }
+    switch (type->get_id()) {
+    case td_api::fileTypeNone::ID:
+        return TdM6StorageFileType::None;
+    case td_api::fileTypeAnimation::ID:
+        return TdM6StorageFileType::Animation;
+    case td_api::fileTypeAudio::ID:
+        return TdM6StorageFileType::Audio;
+    case td_api::fileTypeDocument::ID:
+        return TdM6StorageFileType::Document;
+    case td_api::fileTypeLivePhotoVideo::ID:
+        return TdM6StorageFileType::LivePhotoVideo;
+    case td_api::fileTypeNotificationSound::ID:
+        return TdM6StorageFileType::NotificationSound;
+    case td_api::fileTypePhoto::ID:
+        return TdM6StorageFileType::Photo;
+    case td_api::fileTypePhotoStory::ID:
+        return TdM6StorageFileType::PhotoStory;
+    case td_api::fileTypeProfilePhoto::ID:
+        return TdM6StorageFileType::ProfilePhoto;
+    case td_api::fileTypeSecret::ID:
+        return TdM6StorageFileType::Secret;
+    case td_api::fileTypeSecretThumbnail::ID:
+        return TdM6StorageFileType::SecretThumbnail;
+    case td_api::fileTypeSecure::ID:
+        return TdM6StorageFileType::Secure;
+    case td_api::fileTypeSelfDestructingLivePhotoVideo::ID:
+        return TdM6StorageFileType::SelfDestructingLivePhotoVideo;
+    case td_api::fileTypeSelfDestructingPhoto::ID:
+        return TdM6StorageFileType::SelfDestructingPhoto;
+    case td_api::fileTypeSelfDestructingVideo::ID:
+        return TdM6StorageFileType::SelfDestructingVideo;
+    case td_api::fileTypeSelfDestructingVideoNote::ID:
+        return TdM6StorageFileType::SelfDestructingVideoNote;
+    case td_api::fileTypeSelfDestructingVoiceNote::ID:
+        return TdM6StorageFileType::SelfDestructingVoiceNote;
+    case td_api::fileTypeSticker::ID:
+        return TdM6StorageFileType::Sticker;
+    case td_api::fileTypeThumbnail::ID:
+        return TdM6StorageFileType::Thumbnail;
+    case td_api::fileTypeUnknown::ID:
+        return TdM6StorageFileType::Unknown;
+    case td_api::fileTypeVideo::ID:
+        return TdM6StorageFileType::Video;
+    case td_api::fileTypeVideoNote::ID:
+        return TdM6StorageFileType::VideoNote;
+    case td_api::fileTypeVideoStory::ID:
+        return TdM6StorageFileType::VideoStory;
+    case td_api::fileTypeVoiceNote::ID:
+        return TdM6StorageFileType::VoiceNote;
+    case td_api::fileTypeWallpaper::ID:
+        return TdM6StorageFileType::Wallpaper;
+    default:
+        return std::nullopt;
+    }
+}
+
+TdValue convert_m6_storage_response(const NativeObjectPtr& object) {
+    if (object == nullptr || object->get_id() != td_api::storageStatistics::ID) {
+        return m6_conversion_error(object);
+    }
+    const auto& source = static_cast<const td_api::storageStatistics&>(*object);
+    TdM6StorageStatistics converted{.size = source.size_, .count = source.count_, .by_chat = {}};
+    converted.by_chat.reserve(source.by_chat_.size());
+    for (const auto& chat : source.by_chat_) {
+        if (chat == nullptr) {
+            return m6_conversion_error(object);
+        }
+        TdM6StorageByChat row{.chat_id = chat->chat_id_,
+                              .size = chat->size_,
+                              .count = chat->count_,
+                              .by_file_type = {}};
+        row.by_file_type.reserve(chat->by_file_type_.size());
+        for (const auto& item : chat->by_file_type_) {
+            if (item == nullptr) {
+                return m6_conversion_error(object);
+            }
+            const auto type = convert_m6_storage_file_type(item->file_type_.get());
+            if (!type) {
+                return m6_conversion_error(object);
+            }
+            row.by_file_type.push_back(
+                {.file_type = *type, .size = item->size_, .count = item->count_});
+        }
+        converted.by_chat.push_back(std::move(row));
+    }
+    return TdValue::from(TdM6Response{std::move(converted)});
+}
+
 TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
                              std::uint64_t client_generation = 0) {
     if (object == nullptr) {
+        if (function == TdFunctionKind::GetChatFolder) {
+            return convert_m6_folder_response(function, object);
+        }
+        if (function == TdFunctionKind::GetForumTopic) {
+            return convert_m6_topic_response(function, object);
+        }
         return TdValue::from(TdDirectConversionError{});
     }
     if (object->get_id() == td_api::error::ID) {
@@ -2444,6 +3157,24 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
         return convert_current_state_response(object, client_generation);
     case TdFunctionKind::GetContacts:
         return convert_contacts_response(object);
+    case TdFunctionKind::SearchContacts:
+        return convert_m6_contacts_response(object);
+    case TdFunctionKind::GetChatFolder:
+    case TdFunctionKind::CreateChatFolder:
+    case TdFunctionKind::EditChatFolder:
+        return convert_m6_folder_response(function, object);
+    case TdFunctionKind::GetForumTopics:
+    case TdFunctionKind::GetForumTopic:
+    case TdFunctionKind::CreateForumTopic:
+        return convert_m6_topic_response(function, object);
+    case TdFunctionKind::GetChatMember:
+        return convert_m6_chat_member_response(object);
+    case TdFunctionKind::CreateChatInviteLink:
+    case TdFunctionKind::RevokeChatInviteLink:
+        return convert_m6_invite_link_response(function, object);
+    case TdFunctionKind::GetStorageStatistics:
+    case TdFunctionKind::OptimizeStorage:
+        return convert_m6_storage_response(object);
     case TdFunctionKind::GetBasicGroupFullInfo:
         return convert_basic_group_full_info_response(object);
     case TdFunctionKind::GetSupergroupMembers:
@@ -2498,6 +3229,21 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
             return TdValue::from(TdOk{});
         }
         return unexpected_direct_response(object);
+    case TdFunctionKind::AddContact:
+    case TdFunctionKind::RemoveContacts:
+    case TdFunctionKind::SetMessageSenderBlockList:
+    case TdFunctionKind::DeleteChatFolder:
+    case TdFunctionKind::EditForumTopic:
+    case TdFunctionKind::ToggleForumTopicIsClosed:
+    case TdFunctionKind::SetChatTitle:
+    case TdFunctionKind::SetChatPhoto:
+    case TdFunctionKind::SetChatDescription:
+    case TdFunctionKind::SetChatMemberStatus:
+    case TdFunctionKind::SetChatPermissions:
+        if (object->get_id() == td_api::ok::ID) {
+            return TdValue::from(TdM6Response{TdM6Ok{}});
+        }
+        return m6_conversion_error(object);
     default:
         return convert_response(std::move(object));
     }
@@ -2533,6 +3279,14 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getMe::ID;
     case TdFunctionKind::GetContacts:
         return function.get_id() == td_api::getContacts::ID;
+    case TdFunctionKind::SearchContacts:
+        return function.get_id() == td_api::searchContacts::ID;
+    case TdFunctionKind::AddContact:
+        return function.get_id() == td_api::addContact::ID;
+    case TdFunctionKind::RemoveContacts:
+        return function.get_id() == td_api::removeContacts::ID;
+    case TdFunctionKind::SetMessageSenderBlockList:
+        return function.get_id() == td_api::setMessageSenderBlockList::ID;
     case TdFunctionKind::GetSavedMessagesTags:
         return function.get_id() == td_api::getSavedMessagesTags::ID;
     case TdFunctionKind::SearchSavedMessages:
@@ -2541,6 +3295,44 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getActiveSessions::ID;
     case TdFunctionKind::TerminateSession:
         return function.get_id() == td_api::terminateSession::ID;
+    case TdFunctionKind::GetChatFolder:
+        return function.get_id() == td_api::getChatFolder::ID;
+    case TdFunctionKind::CreateChatFolder:
+        return function.get_id() == td_api::createChatFolder::ID;
+    case TdFunctionKind::EditChatFolder:
+        return function.get_id() == td_api::editChatFolder::ID;
+    case TdFunctionKind::DeleteChatFolder:
+        return function.get_id() == td_api::deleteChatFolder::ID;
+    case TdFunctionKind::GetForumTopics:
+        return function.get_id() == td_api::getForumTopics::ID;
+    case TdFunctionKind::GetForumTopic:
+        return function.get_id() == td_api::getForumTopic::ID;
+    case TdFunctionKind::CreateForumTopic:
+        return function.get_id() == td_api::createForumTopic::ID;
+    case TdFunctionKind::EditForumTopic:
+        return function.get_id() == td_api::editForumTopic::ID;
+    case TdFunctionKind::ToggleForumTopicIsClosed:
+        return function.get_id() == td_api::toggleForumTopicIsClosed::ID;
+    case TdFunctionKind::GetChatMember:
+        return function.get_id() == td_api::getChatMember::ID;
+    case TdFunctionKind::SetChatTitle:
+        return function.get_id() == td_api::setChatTitle::ID;
+    case TdFunctionKind::SetChatPhoto:
+        return function.get_id() == td_api::setChatPhoto::ID;
+    case TdFunctionKind::SetChatDescription:
+        return function.get_id() == td_api::setChatDescription::ID;
+    case TdFunctionKind::CreateChatInviteLink:
+        return function.get_id() == td_api::createChatInviteLink::ID;
+    case TdFunctionKind::RevokeChatInviteLink:
+        return function.get_id() == td_api::revokeChatInviteLink::ID;
+    case TdFunctionKind::SetChatMemberStatus:
+        return function.get_id() == td_api::setChatMemberStatus::ID;
+    case TdFunctionKind::SetChatPermissions:
+        return function.get_id() == td_api::setChatPermissions::ID;
+    case TdFunctionKind::GetStorageStatistics:
+        return function.get_id() == td_api::getStorageStatistics::ID;
+    case TdFunctionKind::OptimizeStorage:
+        return function.get_id() == td_api::optimizeStorage::ID;
     case TdFunctionKind::GetChat:
         return function.get_id() == td_api::getChat::ID;
     case TdFunctionKind::GetChatHistory:
@@ -3340,6 +4132,287 @@ class ProductionTdRuntime final : public TdRuntime {
         return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::GetContacts});
     }
 
+    TdValue make_m6_function(TdM6Request request) override {
+        const auto kind = td_m6_request_kind(request);
+        return std::visit(
+            [kind](auto&& input) -> TdValue {
+                using Request = std::decay_t<decltype(input)>;
+                NativeFunctionPtr native;
+                std::vector<TdFunctionField> fields;
+                if constexpr (std::is_same_v<Request, TdM6GetContactsRequest>) {
+                    native = td_api::make_object<td_api::getContacts>();
+                } else if constexpr (std::is_same_v<Request, TdM6SearchContactsRequest>) {
+                    NativeFunctionPtr native =
+                        td_api::make_object<td_api::searchContacts>(input.query, input.limit);
+                    return TdValue::function(
+                        std::move(native),
+                        TdFunctionData{kind,
+                                       {{"query", std::move(input.query)},
+                                        {"limit", static_cast<std::int64_t>(input.limit)}}});
+                } else if constexpr (std::is_same_v<Request, TdM6AddContactRequest>) {
+                    auto contact = td_api::make_object<td_api::importedContact>();
+                    contact->phone_number_ = input.phone_number;
+                    contact->first_name_ = input.first_name;
+                    contact->last_name_ = input.last_name;
+                    contact->note_ = nullptr;
+                    native = td_api::make_object<td_api::addContact>(
+                        input.user_id, std::move(contact), input.share_phone_number);
+                    secure::wipe(input.phone_number);
+                    fields = {{"user_id", input.user_id},
+                              {"phone_number", TdRedactedValue::Credential},
+                              {"first_name", std::move(input.first_name)},
+                              {"last_name", std::move(input.last_name)},
+                              {"share_phone_number", input.share_phone_number}};
+                } else if constexpr (std::is_same_v<Request, TdM6RemoveContactsRequest>) {
+                    fields = {{"user_ids", input.user_ids}};
+                    native = td_api::make_object<td_api::removeContacts>(std::move(input.user_ids));
+                } else if constexpr (std::is_same_v<Request, TdM6SetBlockRequest>) {
+                    auto sender = td_api::make_object<td_api::messageSenderUser>(input.user_id);
+                    td_api::object_ptr<td_api::BlockList> block_list;
+                    if (input.blocked) {
+                        block_list = td_api::make_object<td_api::blockListMain>();
+                    }
+                    native = td_api::make_object<td_api::setMessageSenderBlockList>(
+                        std::move(sender), std::move(block_list));
+                    fields = {{"user_id", input.user_id}, {"blocked", input.blocked}};
+                } else if constexpr (std::is_same_v<Request, TdM6GetChatFolderRequest>) {
+                    native = td_api::make_object<td_api::getChatFolder>(input.folder_id);
+                    fields = {{"folder_id", static_cast<std::int64_t>(input.folder_id)}};
+                } else if constexpr (std::is_same_v<Request, TdM6CreateChatFolderRequest> ||
+                                     std::is_same_v<Request, TdM6EditChatFolderRequest>) {
+                    const auto& source = input.folder;
+                    auto formatted = td_api::make_object<td_api::formattedText>();
+                    formatted->text_ = source.name.text;
+                    for (const auto& entity : source.name.custom_emoji_entities) {
+                        std::int64_t custom_emoji_id = 0;
+                        static_cast<void>(std::from_chars(entity.custom_emoji_id.data(),
+                                                          entity.custom_emoji_id.data() +
+                                                              entity.custom_emoji_id.size(),
+                                                          custom_emoji_id));
+                        formatted->entities_.push_back(td_api::make_object<td_api::textEntity>(
+                            entity.offset, entity.length,
+                            td_api::make_object<td_api::textEntityTypeCustomEmoji>(
+                                custom_emoji_id)));
+                    }
+                    auto folder_name = td_api::make_object<td_api::chatFolderName>();
+                    folder_name->text_ = std::move(formatted);
+                    folder_name->animate_custom_emoji_ = source.name.animate_custom_emoji;
+                    auto folder = td_api::make_object<td_api::chatFolder>();
+                    folder->name_ = std::move(folder_name);
+                    if (source.icon) {
+                        static constexpr std::array<std::string_view, 30> icon_names{
+                            "All",     "Unread", "Unmuted", "Bots",   "Channels", "Groups",
+                            "Private", "Custom", "Setup",   "Cat",    "Crown",    "Favorite",
+                            "Flower",  "Game",   "Home",    "Love",   "Mask",     "Party",
+                            "Sport",   "Study",  "Trade",   "Travel", "Work",     "Airplane",
+                            "Book",    "Light",  "Like",    "Money",  "Note",     "Palette"};
+                        folder->icon_ = td_api::make_object<td_api::chatFolderIcon>(
+                            std::string(icon_names.at(static_cast<std::size_t>(*source.icon))));
+                    }
+                    folder->color_id_ = source.color_id;
+                    folder->is_shareable_ = source.is_shareable;
+                    folder->pinned_chat_ids_ = source.pinned_chat_ids;
+                    folder->included_chat_ids_ = source.included_chat_ids;
+                    folder->excluded_chat_ids_ = source.excluded_chat_ids;
+                    folder->exclude_muted_ = source.exclude_muted;
+                    folder->exclude_read_ = source.exclude_read;
+                    folder->exclude_archived_ = source.exclude_archived;
+                    folder->include_contacts_ = source.include_contacts;
+                    folder->include_non_contacts_ = source.include_non_contacts;
+                    folder->include_bots_ = source.include_bots;
+                    folder->include_groups_ = source.include_groups;
+                    folder->include_channels_ = source.include_channels;
+                    fields = {{"name", source.name.text}};
+                    if constexpr (std::is_same_v<Request, TdM6CreateChatFolderRequest>) {
+                        native = td_api::make_object<td_api::createChatFolder>(std::move(folder));
+                    } else {
+                        fields.emplace_back("folder_id",
+                                            static_cast<std::int64_t>(input.folder_id));
+                        native = td_api::make_object<td_api::editChatFolder>(input.folder_id,
+                                                                             std::move(folder));
+                    }
+                } else if constexpr (std::is_same_v<Request, TdM6DeleteChatFolderRequest>) {
+                    fields = {{"folder_id", static_cast<std::int64_t>(input.folder_id)},
+                              {"leave_chat_ids", input.leave_chat_ids}};
+                    native = td_api::make_object<td_api::deleteChatFolder>(
+                        input.folder_id, std::move(input.leave_chat_ids));
+                } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicsRequest>) {
+                    native = td_api::make_object<td_api::getForumTopics>(
+                        input.chat_id, input.query, input.offset_date, input.offset_message_id,
+                        input.offset_forum_topic_id, input.limit);
+                    fields = {{"chat_id", input.chat_id},
+                              {"query", std::move(input.query)},
+                              {"offset_date", static_cast<std::int64_t>(input.offset_date)},
+                              {"offset_message_id", input.offset_message_id},
+                              {"offset_forum_topic_id",
+                               static_cast<std::int64_t>(input.offset_forum_topic_id)},
+                              {"limit", static_cast<std::int64_t>(input.limit)}};
+                } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicRequest>) {
+                    native =
+                        td_api::make_object<td_api::getForumTopic>(input.chat_id, input.topic_id);
+                    fields = {{"chat_id", input.chat_id},
+                              {"topic_id", static_cast<std::int64_t>(input.topic_id)}};
+                } else if constexpr (std::is_same_v<Request, TdM6CreateForumTopicRequest>) {
+                    static constexpr std::array<std::int32_t, 6> colors{
+                        0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F};
+                    auto icon = td_api::make_object<td_api::forumTopicIcon>(
+                        colors.at(static_cast<std::size_t>(input.icon.color)), 0);
+                    native = td_api::make_object<td_api::createForumTopic>(
+                        input.chat_id, input.name, input.is_name_implicit, std::move(icon));
+                    fields = {{"chat_id", input.chat_id},
+                              {"name", std::move(input.name)},
+                              {"icon", static_cast<std::int64_t>(input.icon.color)},
+                              {"is_name_implicit", input.is_name_implicit}};
+                } else if constexpr (std::is_same_v<Request, TdM6EditForumTopicRequest>) {
+                    native = td_api::make_object<td_api::editForumTopic>(
+                        input.chat_id, input.topic_id, input.name, input.edit_icon_custom_emoji,
+                        input.icon_custom_emoji_id);
+                    fields = {{"chat_id", input.chat_id},
+                              {"topic_id", static_cast<std::int64_t>(input.topic_id)},
+                              {"name", std::move(input.name)},
+                              {"edit_icon_custom_emoji", input.edit_icon_custom_emoji},
+                              {"icon_custom_emoji_id", input.icon_custom_emoji_id}};
+                } else if constexpr (std::is_same_v<Request, TdM6ToggleForumTopicRequest>) {
+                    native = td_api::make_object<td_api::toggleForumTopicIsClosed>(
+                        input.chat_id, input.topic_id, input.is_closed);
+                    fields = {{"chat_id", input.chat_id},
+                              {"topic_id", static_cast<std::int64_t>(input.topic_id)},
+                              {"is_closed", input.is_closed}};
+                } else if constexpr (std::is_same_v<Request, TdM6GetChatMemberRequest>) {
+                    native = td_api::make_object<td_api::getChatMember>(
+                        input.chat_id,
+                        td_api::make_object<td_api::messageSenderUser>(input.user_id));
+                    fields = {{"chat_id", input.chat_id}, {"user_id", input.user_id}};
+                } else if constexpr (std::is_same_v<Request, TdM6SetChatTitleRequest>) {
+                    native = td_api::make_object<td_api::setChatTitle>(input.chat_id, input.title);
+                    fields = {{"chat_id", input.chat_id}, {"title", std::move(input.title)}};
+                } else if constexpr (std::is_same_v<Request, TdM6SetChatPhotoRequest>) {
+                    td_api::object_ptr<td_api::InputChatPhoto> photo;
+                    if (input.local_path) {
+                        auto local = td_api::make_object<td_api::inputFileLocal>(*input.local_path);
+                        photo = td_api::make_object<td_api::inputChatPhotoStatic>(std::move(local));
+                    }
+                    native =
+                        td_api::make_object<td_api::setChatPhoto>(input.chat_id, std::move(photo));
+                    fields = {{"chat_id", input.chat_id},
+                              {"delete", !input.local_path.has_value()}};
+                } else if constexpr (std::is_same_v<Request, TdM6SetChatDescriptionRequest>) {
+                    native = td_api::make_object<td_api::setChatDescription>(input.chat_id,
+                                                                             input.description);
+                    fields = {{"chat_id", input.chat_id},
+                              {"description", std::move(input.description)}};
+                } else if constexpr (std::is_same_v<Request, TdM6CreateChatInviteLinkRequest>) {
+                    native = td_api::make_object<td_api::createChatInviteLink>(input.chat_id, "", 0,
+                                                                               0, false);
+                    fields = {{"chat_id", input.chat_id}};
+                } else if constexpr (std::is_same_v<Request, TdM6RevokeChatInviteLinkRequest>) {
+                    native = td_api::make_object<td_api::revokeChatInviteLink>(input.chat_id,
+                                                                               input.invite_link);
+                    secure::wipe(input.invite_link);
+                    fields = {{"chat_id", input.chat_id},
+                              {"invite_link", TdRedactedValue::InviteLink}};
+                } else if constexpr (std::is_same_v<Request, TdM6SetChatMemberStatusRequest>) {
+                    td_api::object_ptr<td_api::ChatMemberStatus> status;
+                    switch (input.status.kind) {
+                    case TdM6MemberStatusKind::Administrator: {
+                        auto rights = td_api::make_object<td_api::chatAdministratorRights>();
+                        rights->can_manage_chat_ = input.status.rights.can_manage_chat;
+                        rights->can_change_info_ = input.status.rights.can_change_info;
+                        rights->can_post_messages_ = input.status.rights.can_post_messages;
+                        rights->can_edit_messages_ = input.status.rights.can_edit_messages;
+                        rights->can_delete_messages_ = input.status.rights.can_delete_messages;
+                        rights->can_invite_users_ = input.status.rights.can_invite_users;
+                        rights->can_restrict_members_ = input.status.rights.can_restrict_members;
+                        rights->can_pin_messages_ = input.status.rights.can_pin_messages;
+                        rights->can_manage_topics_ = input.status.rights.can_manage_topics;
+                        rights->can_promote_members_ = input.status.rights.can_promote_members;
+                        rights->can_manage_video_chats_ =
+                            input.status.rights.can_manage_video_chats;
+                        rights->can_post_stories_ = input.status.rights.can_post_stories;
+                        rights->can_edit_stories_ = input.status.rights.can_edit_stories;
+                        rights->can_delete_stories_ = input.status.rights.can_delete_stories;
+                        rights->can_manage_direct_messages_ =
+                            input.status.rights.can_manage_direct_messages;
+                        rights->can_manage_tags_ = input.status.rights.can_manage_tags;
+                        rights->is_anonymous_ = input.status.rights.is_anonymous;
+                        auto administrator =
+                            td_api::make_object<td_api::chatMemberStatusAdministrator>();
+                        administrator->can_be_edited_ = input.status.can_be_edited;
+                        administrator->rights_ = std::move(rights);
+                        status = std::move(administrator);
+                        break;
+                    }
+                    case TdM6MemberStatusKind::Member:
+                        status = td_api::make_object<td_api::chatMemberStatusMember>(
+                            input.status.member_until_date);
+                        break;
+                    case TdM6MemberStatusKind::Restricted:
+                    case TdM6MemberStatusKind::Creator:
+                    case TdM6MemberStatusKind::Unknown:
+                        break;
+                    case TdM6MemberStatusKind::Left:
+                        status = td_api::make_object<td_api::chatMemberStatusLeft>();
+                        break;
+                    case TdM6MemberStatusKind::Banned:
+                        status = td_api::make_object<td_api::chatMemberStatusBanned>(
+                            input.status.banned_until_date);
+                        break;
+                    }
+                    native = td_api::make_object<td_api::setChatMemberStatus>(
+                        input.chat_id,
+                        td_api::make_object<td_api::messageSenderUser>(input.user_id),
+                        std::move(status));
+                    fields = {{"chat_id", input.chat_id},
+                              {"user_id", input.user_id},
+                              {"status", static_cast<std::int64_t>(input.status.kind)}};
+                } else if constexpr (std::is_same_v<Request, TdM6SetChatPermissionsRequest>) {
+                    auto permissions = td_api::make_object<td_api::chatPermissions>();
+                    permissions->can_send_basic_messages_ =
+                        input.permissions.can_send_basic_messages;
+                    permissions->can_send_audios_ = input.permissions.can_send_audios;
+                    permissions->can_send_documents_ = input.permissions.can_send_documents;
+                    permissions->can_send_photos_ = input.permissions.can_send_photos;
+                    permissions->can_send_videos_ = input.permissions.can_send_videos;
+                    permissions->can_send_video_notes_ = input.permissions.can_send_video_notes;
+                    permissions->can_send_voice_notes_ = input.permissions.can_send_voice_notes;
+                    permissions->can_send_polls_ = input.permissions.can_send_polls;
+                    permissions->can_send_other_messages_ =
+                        input.permissions.can_send_other_messages;
+                    permissions->can_add_link_previews_ = input.permissions.can_add_link_previews;
+                    permissions->can_react_to_messages_ = input.permissions.can_react_to_messages;
+                    permissions->can_edit_tag_ = input.permissions.can_edit_tag;
+                    permissions->can_change_info_ = input.permissions.can_change_info;
+                    permissions->can_invite_users_ = input.permissions.can_invite_users;
+                    permissions->can_pin_messages_ = input.permissions.can_pin_messages;
+                    permissions->can_create_topics_ = input.permissions.can_create_topics;
+                    native = td_api::make_object<td_api::setChatPermissions>(
+                        input.chat_id, std::move(permissions));
+                    fields = {{"chat_id", input.chat_id}};
+                } else if constexpr (std::is_same_v<Request, TdM6GetStorageStatisticsRequest>) {
+                    native = td_api::make_object<td_api::getStorageStatistics>(input.chat_limit);
+                    fields = {{"chat_limit", static_cast<std::int64_t>(input.chat_limit)}};
+                } else {
+                    static_assert(std::is_same_v<Request, TdM6OptimizeStorageRequest>);
+                    std::vector<td_api::object_ptr<td_api::FileType>> file_types;
+                    native = td_api::make_object<td_api::optimizeStorage>(
+                        input.size, input.ttl, input.count, input.immunity_delay,
+                        std::move(file_types), std::move(input.chat_ids),
+                        std::move(input.exclude_chat_ids), input.return_deleted_file_statistics,
+                        input.chat_limit);
+                    fields = {
+                        {"size", input.size},
+                        {"ttl", static_cast<std::int64_t>(input.ttl)},
+                        {"count", static_cast<std::int64_t>(input.count)},
+                        {"immunity_delay", static_cast<std::int64_t>(input.immunity_delay)},
+                        {"return_deleted_file_statistics", input.return_deleted_file_statistics},
+                        {"chat_limit", static_cast<std::int64_t>(input.chat_limit)}};
+                }
+                return TdValue::function(std::move(native),
+                                         TdFunctionData{kind, std::move(fields)});
+            },
+            std::move(request));
+    }
+
     TdValue make_set_tdlib_parameters(TdlibParameters parameters) override {
         auto description = describe_tdlib_parameters(parameters);
         NativeFunctionPtr native = td_api::make_object<td_api::setTdlibParameters>(
@@ -3794,6 +4867,19 @@ TdValue make_production_get_contacts_for_test() {
     return runtime.make_get_contacts();
 }
 
+TdValue make_production_m6_function_for_test(TdM6Request request) {
+    ProductionTdRuntime runtime;
+    return runtime.make_m6_function(std::move(request));
+}
+
+TdValue convert_production_m6_response_for_test(TdFunctionKind function, TdValue object) {
+    auto* native = object.get_if<NativeObjectPtr>();
+    if (native == nullptr) {
+        return TdValue::from(TdM6Response{TdM6ConversionError{}});
+    }
+    return convert_response_for(function, std::move(*native), 1);
+}
+
 TdValue make_production_terminate_session_for_test(std::int64_t session_id) {
     return make_native_terminate_session(session_id);
 }
@@ -3934,6 +5020,9 @@ TdValue make_production_direct_request_for_test(const TdDirectRequest& request) 
                 return make_native_add_chat_to_list(value);
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                 return make_native_join_chat(value);
+            } else if constexpr (std::is_same_v<Request, TdM6Request>) {
+                ProductionTdRuntime runtime;
+                return runtime.make_m6_function(value);
             } else {
                 static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
                 return make_native_leave_chat(value);
@@ -4490,6 +5579,10 @@ bool native_direct_request_matches(const td_api::Function& function,
                                    const TdLeaveChatRequest& expected) {
     return function.get_id() == td_api::leaveChat::ID &&
            static_cast<const td_api::leaveChat&>(function).chat_id_ == expected.chat_id;
+}
+
+bool native_direct_request_matches(const td_api::Function& function, const TdM6Request& expected) {
+    return native_function_matches(function, td_m6_request_kind(expected));
 }
 
 bool production_direct_request_matches_for_test(const TdValue& function,

@@ -96,7 +96,8 @@ struct DirectLeaveResult {
 using DirectResult =
     std::variant<core::TdMessageWriteResult, DirectDeleteResult, DirectReactionResult,
                  DirectMessagePinResult, DirectMarkReadResult, DirectMuteResult,
-                 DirectChatPinResult, DirectArchiveResult, DirectJoinResult, DirectLeaveResult>;
+                 DirectChatPinResult, DirectArchiveResult, DirectJoinResult, DirectLeaveResult,
+                 core::TdM6Response>;
 
 struct DirectSuccess {
     DirectResult result;

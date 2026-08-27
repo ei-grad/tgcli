@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/secure_wipe.hpp"
+#include "core/m6_td.hpp"
 #include "core/td_log.hpp"
 
 #include <chrono>
@@ -35,10 +36,33 @@ enum class TdFunctionKind {
     GetMe,
     GetCurrentState,
     GetContacts,
+    SearchContacts,
+    AddContact,
+    RemoveContacts,
+    SetMessageSenderBlockList,
     GetSavedMessagesTags,
     SearchSavedMessages,
     GetActiveSessions,
     TerminateSession,
+    GetChatFolder,
+    CreateChatFolder,
+    EditChatFolder,
+    DeleteChatFolder,
+    GetForumTopics,
+    GetForumTopic,
+    CreateForumTopic,
+    EditForumTopic,
+    ToggleForumTopicIsClosed,
+    GetChatMember,
+    SetChatTitle,
+    SetChatPhoto,
+    SetChatDescription,
+    CreateChatInviteLink,
+    RevokeChatInviteLink,
+    SetChatMemberStatus,
+    SetChatPermissions,
+    GetStorageStatistics,
+    OptimizeStorage,
     GetChat,
     GetChatHistory,
     GetChatMessageByDate,
@@ -84,6 +108,10 @@ enum class TdFunctionKind {
     Close,
 };
 
+[[nodiscard]] TdFunctionKind td_m6_request_kind(const TdM6Request& request) noexcept;
+[[nodiscard]] bool valid_td_m6_request(const TdM6Request& request) noexcept;
+[[nodiscard]] bool td_m6_request_is_read(const TdM6Request& request) noexcept;
+
 constexpr std::string_view td_function_name(TdFunctionKind function) {
     switch (function) {
     case TdFunctionKind::GetAuthorizationState:
@@ -114,6 +142,14 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getCurrentState";
     case TdFunctionKind::GetContacts:
         return "getContacts";
+    case TdFunctionKind::SearchContacts:
+        return "searchContacts";
+    case TdFunctionKind::AddContact:
+        return "addContact";
+    case TdFunctionKind::RemoveContacts:
+        return "removeContacts";
+    case TdFunctionKind::SetMessageSenderBlockList:
+        return "setMessageSenderBlockList";
     case TdFunctionKind::GetSavedMessagesTags:
         return "getSavedMessagesTags";
     case TdFunctionKind::SearchSavedMessages:
@@ -122,6 +158,44 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getActiveSessions";
     case TdFunctionKind::TerminateSession:
         return "terminateSession";
+    case TdFunctionKind::GetChatFolder:
+        return "getChatFolder";
+    case TdFunctionKind::CreateChatFolder:
+        return "createChatFolder";
+    case TdFunctionKind::EditChatFolder:
+        return "editChatFolder";
+    case TdFunctionKind::DeleteChatFolder:
+        return "deleteChatFolder";
+    case TdFunctionKind::GetForumTopics:
+        return "getForumTopics";
+    case TdFunctionKind::GetForumTopic:
+        return "getForumTopic";
+    case TdFunctionKind::CreateForumTopic:
+        return "createForumTopic";
+    case TdFunctionKind::EditForumTopic:
+        return "editForumTopic";
+    case TdFunctionKind::ToggleForumTopicIsClosed:
+        return "toggleForumTopicIsClosed";
+    case TdFunctionKind::GetChatMember:
+        return "getChatMember";
+    case TdFunctionKind::SetChatTitle:
+        return "setChatTitle";
+    case TdFunctionKind::SetChatPhoto:
+        return "setChatPhoto";
+    case TdFunctionKind::SetChatDescription:
+        return "setChatDescription";
+    case TdFunctionKind::CreateChatInviteLink:
+        return "createChatInviteLink";
+    case TdFunctionKind::RevokeChatInviteLink:
+        return "revokeChatInviteLink";
+    case TdFunctionKind::SetChatMemberStatus:
+        return "setChatMemberStatus";
+    case TdFunctionKind::SetChatPermissions:
+        return "setChatPermissions";
+    case TdFunctionKind::GetStorageStatistics:
+        return "getStorageStatistics";
+    case TdFunctionKind::OptimizeStorage:
+        return "optimizeStorage";
     case TdFunctionKind::GetChat:
         return "getChat";
     case TdFunctionKind::GetChatHistory:
@@ -1391,7 +1465,7 @@ using TdDirectRequest =
     std::variant<TdEditMessageTextRequest, TdDeleteMessagesRequest, TdMessageReactionRequest,
                  TdPinMessageRequest, TdViewMessagesRequest, TdSetChatNotificationSettingsRequest,
                  TdToggleChatIsPinnedRequest, TdAddChatToListRequest, TdJoinChatRequest,
-                 TdLeaveChatRequest>;
+                 TdLeaveChatRequest, TdM6Request>;
 
 [[nodiscard]] bool valid_td_message_locator(std::int64_t chat_id, std::int64_t message_id) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdEditMessageTextRequest& request) noexcept;
@@ -1405,6 +1479,7 @@ valid_td_direct_request(const TdSetChatNotificationSettingsRequest& request) noe
 [[nodiscard]] bool valid_td_direct_request(const TdAddChatToListRequest& request) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdJoinChatRequest& request);
 [[nodiscard]] bool valid_td_direct_request(const TdLeaveChatRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdM6Request& request) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdDirectRequest& request);
 
 enum class TdChatJoinResultKind {
@@ -1871,6 +1946,7 @@ class TdRuntime {
     virtual TdValue make_function(TdBuiltinFunction function) = 0;
     virtual TdValue make_get_current_state() = 0;
     virtual TdValue make_get_contacts() = 0;
+    virtual TdValue make_m6_function(TdM6Request request) = 0;
     virtual TdValue make_set_tdlib_parameters(TdlibParameters parameters) = 0;
     virtual TdValue make_auth_function(TdAuthRequest request) = 0;
     virtual TdValue make_get_saved_messages_tags(std::int64_t saved_messages_topic_id) = 0;

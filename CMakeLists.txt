@@ -258,6 +258,10 @@ add_library(tgcli_daemon STATIC
     src/daemon/chat_summary.cpp
     src/daemon/local_selector.cpp
     src/daemon/m6_domain.cpp
+    src/daemon/m6_model.cpp
+    src/daemon/m6_audit_contract.cpp
+    src/daemon/m6_topic_scan.cpp
+    src/daemon/m6_write_policy.cpp
     src/daemon/message_summary.cpp
     src/daemon/read_domain.cpp
     src/daemon/read_commands.cpp
@@ -268,6 +272,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/request_fingerprint.cpp
     src/daemon/resolver.cpp
     src/daemon/write_contract.cpp
+    src/daemon/write_operation.cpp
     src/daemon/write_domain.cpp
     src/daemon/write_commands.cpp
     src/daemon/write_kernel.cpp

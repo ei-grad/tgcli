@@ -14,6 +14,8 @@ TdValue convert_production_sessions_for_test(TdValue object);
 TdValue make_production_get_active_sessions_for_test();
 TdValue make_production_get_current_state_for_test();
 TdValue make_production_get_contacts_for_test();
+TdValue make_production_m6_function_for_test(TdM6Request request);
+TdValue convert_production_m6_response_for_test(TdFunctionKind function, TdValue object);
 TdValue make_production_terminate_session_for_test(std::int64_t session_id);
 TdValue make_production_get_basic_group_full_info_for_test(std::int64_t basic_group_id);
 TdValue make_production_get_supergroup_members_for_test(std::int64_t supergroup_id,

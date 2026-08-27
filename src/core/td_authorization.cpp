@@ -37,9 +37,15 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetMe:
     case TdFunctionKind::GetContacts:
+    case TdFunctionKind::SearchContacts:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:
     case TdFunctionKind::GetActiveSessions:
+    case TdFunctionKind::GetChatFolder:
+    case TdFunctionKind::GetForumTopics:
+    case TdFunctionKind::GetForumTopic:
+    case TdFunctionKind::GetChatMember:
+    case TdFunctionKind::GetStorageStatistics:
     case TdFunctionKind::GetChat:
     case TdFunctionKind::GetChatHistory:
     case TdFunctionKind::GetChatMessageByDate:
@@ -80,10 +86,27 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::AddChatToList:
     case TdFunctionKind::JoinChat:
     case TdFunctionKind::JoinChatByInviteLink:
+    case TdFunctionKind::AddContact:
+    case TdFunctionKind::RemoveContacts:
+    case TdFunctionKind::SetMessageSenderBlockList:
+    case TdFunctionKind::CreateChatFolder:
+    case TdFunctionKind::EditChatFolder:
+    case TdFunctionKind::CreateForumTopic:
+    case TdFunctionKind::EditForumTopic:
+    case TdFunctionKind::ToggleForumTopicIsClosed:
+    case TdFunctionKind::SetChatTitle:
+    case TdFunctionKind::SetChatPhoto:
+    case TdFunctionKind::SetChatDescription:
+    case TdFunctionKind::SetChatMemberStatus:
+    case TdFunctionKind::SetChatPermissions:
         return {DescriptorKind::Write, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::DeleteMessages:
     case TdFunctionKind::LeaveChat:
     case TdFunctionKind::TerminateSession:
+    case TdFunctionKind::DeleteChatFolder:
+    case TdFunctionKind::CreateChatInviteLink:
+    case TdFunctionKind::RevokeChatInviteLink:
+    case TdFunctionKind::OptimizeStorage:
     case TdFunctionKind::LogOut:
         return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::Close:

@@ -98,6 +98,8 @@ TdValue make_scripted(tgcli::test::ScriptedTdRuntime& runtime, const TdDirectReq
                 return runtime.make_add_chat_to_list(value);
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                 return runtime.make_join_chat(value);
+            } else if constexpr (std::is_same_v<Request, TdM6Request>) {
+                return runtime.make_m6_function(value);
             } else {
                 static_assert(std::is_same_v<Request, TdLeaveChatRequest>);
                 return runtime.make_leave_chat(value);

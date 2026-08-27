@@ -73,6 +73,109 @@ core::TdValue ScriptedTdRuntime::make_get_contacts() {
         core::TdFunctionData{core::TdFunctionKind::GetContacts});
 }
 
+core::TdValue ScriptedTdRuntime::make_m6_function(core::TdM6Request request) {
+    const auto kind = core::td_m6_request_kind(request);
+    before_make(kind);
+    auto fields = std::visit(
+        [](auto&& input) -> std::vector<core::TdFunctionField> {
+            using Request = std::decay_t<decltype(input)>;
+            if constexpr (std::is_same_v<Request, core::TdM6GetContactsRequest>) {
+                return {};
+            } else if constexpr (std::is_same_v<Request, core::TdM6SearchContactsRequest>) {
+                return {{"query", std::move(input.query)},
+                        {"limit", static_cast<std::int64_t>(input.limit)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6AddContactRequest>) {
+                return {{"user_id", input.user_id},
+                        {"phone_number", core::TdRedactedValue::Credential},
+                        {"first_name", std::move(input.first_name)},
+                        {"last_name", std::move(input.last_name)},
+                        {"share_phone_number", input.share_phone_number}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6RemoveContactsRequest>) {
+                return {{"user_ids", std::move(input.user_ids)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6SetBlockRequest>) {
+                return {{"user_id", input.user_id}, {"blocked", input.blocked}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6GetChatFolderRequest>) {
+                return {{"folder_id", static_cast<std::int64_t>(input.folder_id)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6CreateChatFolderRequest>) {
+                return {{"name", std::move(input.folder.name.text)},
+                        {"included_chat_ids", std::move(input.folder.included_chat_ids)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6EditChatFolderRequest>) {
+                return {{"folder_id", static_cast<std::int64_t>(input.folder_id)},
+                        {"name", std::move(input.folder.name.text)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6DeleteChatFolderRequest>) {
+                return {{"folder_id", static_cast<std::int64_t>(input.folder_id)},
+                        {"leave_chat_ids", std::move(input.leave_chat_ids)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6GetForumTopicsRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"query", std::move(input.query)},
+                        {"offset_date", static_cast<std::int64_t>(input.offset_date)},
+                        {"offset_message_id", input.offset_message_id},
+                        {"offset_forum_topic_id",
+                         static_cast<std::int64_t>(input.offset_forum_topic_id)},
+                        {"limit", static_cast<std::int64_t>(input.limit)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6GetForumTopicRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"topic_id", static_cast<std::int64_t>(input.topic_id)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6CreateForumTopicRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"name", std::move(input.name)},
+                        {"icon", static_cast<std::int64_t>(input.icon.color)},
+                        {"is_name_implicit", input.is_name_implicit}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6EditForumTopicRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"topic_id", static_cast<std::int64_t>(input.topic_id)},
+                        {"name", std::move(input.name)},
+                        {"edit_icon_custom_emoji", input.edit_icon_custom_emoji},
+                        {"icon_custom_emoji_id", input.icon_custom_emoji_id}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6ToggleForumTopicRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"topic_id", static_cast<std::int64_t>(input.topic_id)},
+                        {"is_closed", input.is_closed}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6GetChatMemberRequest>) {
+                return {{"chat_id", input.chat_id}, {"user_id", input.user_id}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6SetChatTitleRequest>) {
+                return {{"chat_id", input.chat_id}, {"title", std::move(input.title)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6SetChatPhotoRequest>) {
+                return {{"chat_id", input.chat_id}, {"delete", !input.local_path.has_value()}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6SetChatDescriptionRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"description", std::move(input.description)}};
+            } else if constexpr (std::is_same_v<Request,
+                                                core::TdM6CreateChatInviteLinkRequest>) {
+                return {{"chat_id", input.chat_id}};
+            } else if constexpr (std::is_same_v<Request,
+                                                core::TdM6RevokeChatInviteLinkRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"invite_link", core::TdRedactedValue::InviteLink}};
+            } else if constexpr (std::is_same_v<Request,
+                                                core::TdM6SetChatMemberStatusRequest>) {
+                return {{"chat_id", input.chat_id},
+                        {"user_id", input.user_id},
+                        {"status", static_cast<std::int64_t>(input.status.kind)}};
+            } else if constexpr (std::is_same_v<Request,
+                                                core::TdM6SetChatPermissionsRequest>) {
+                return {{"chat_id", input.chat_id}};
+            } else if constexpr (std::is_same_v<Request,
+                                                core::TdM6GetStorageStatisticsRequest>) {
+                return {{"chat_limit", static_cast<std::int64_t>(input.chat_limit)}};
+            } else {
+                static_assert(std::is_same_v<Request, core::TdM6OptimizeStorageRequest>);
+                return {{"size", input.size},
+                        {"ttl", static_cast<std::int64_t>(input.ttl)},
+                        {"count", static_cast<std::int64_t>(input.count)},
+                        {"immunity_delay", static_cast<std::int64_t>(input.immunity_delay)},
+                        {"chat_ids", std::move(input.chat_ids)},
+                        {"exclude_chat_ids", std::move(input.exclude_chat_ids)},
+                        {"return_deleted_file_statistics",
+                         input.return_deleted_file_statistics},
+                        {"chat_limit", static_cast<std::int64_t>(input.chat_limit)}};
+            }
+        },
+        std::move(request));
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{kind, std::move(fields)});
+}
+
 core::TdValue ScriptedTdRuntime::make_set_tdlib_parameters(core::TdlibParameters parameters) {
     return core::TdValue::scripted_function(core::describe_tdlib_parameters(parameters));
 }

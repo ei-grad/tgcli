@@ -37,7 +37,7 @@ enum class M2Operation {
 
 std::string_view m2_operation_name(M2Operation operation);
 
-using ResolverCaller = std::variant<M2Operation, proto::M3Operation>;
+using ResolverCaller = std::variant<M2Operation, proto::M3Operation, proto::M6Operation>;
 
 std::string_view resolver_caller_name(const ResolverCaller& caller);
 

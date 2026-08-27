@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/frame_budget.hpp"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -21,11 +23,12 @@ inline constexpr std::size_t kForwardItemCount = 100;
 inline constexpr std::uint64_t kForwardTerminalBytes = 4'194'304;
 inline constexpr std::uint64_t kSingleMessageTerminalBytes = 65'536;
 inline constexpr std::uint64_t kOtherTerminalBytes = 32'768;
+inline constexpr std::uint64_t kM6TerminalBytes = frame_budget::kMinimumResultPayloadBytes;
 inline constexpr std::uint64_t kAuditEnvelopeBytes = 4'096;
 
 inline constexpr std::uint64_t kIntentJsonBytes = 134'217'728;
 inline constexpr std::uint64_t kNonVectorJsonBytes = 65'536;
-inline constexpr std::uint64_t kVectorJsonBytes = kForwardTerminalBytes + kAuditEnvelopeBytes;
+inline constexpr std::uint64_t kVectorJsonBytes = kM6TerminalBytes + kAuditEnvelopeBytes;
 inline constexpr std::uint64_t kIntentLineBytes = kIntentJsonBytes + 1;
 inline constexpr std::uint64_t kNonVectorLineBytes = kNonVectorJsonBytes + 1;
 inline constexpr std::uint64_t kVectorLineBytes = kVectorJsonBytes + 1;
@@ -56,12 +59,13 @@ static_assert(kMaximumEscapedChatIdentityBytes == 6'295'469);
 static_assert(kMaximumIntentProofBytes == 130'490'195);
 static_assert(kMaximumIntentProofBytes < kIntentJsonBytes);
 static_assert(kMaximumSessionIntentProofBytes == 48'300'031);
-static_assert(kVectorJsonBytes == 4'198'400);
+static_assert(kM6TerminalBytes == 16'842'700);
+static_assert(kVectorJsonBytes == 16'846'796);
 static_assert(kMaximumVectorLinesPerGroup == 103);
-static_assert(kMaximumGroupBytes == 566'849'643);
-static_assert(kMaximumGroupTailBytes == 432'631'914);
-static_assert(kMaximumNonRotatingSegmentBytes == 466'186'346);
-static_assert(kMaximumSegmentBytes == 566'849'643);
-static_assert(kMaximumAuditBytes == 2'834'248'215ULL);
+static_assert(kMaximumGroupBytes == 1'869'634'431);
+static_assert(kMaximumGroupTailBytes == 1'735'416'702);
+static_assert(kMaximumNonRotatingSegmentBytes == 1'768'971'134);
+static_assert(kMaximumSegmentBytes == 1'869'634'431);
+static_assert(kMaximumAuditBytes == 9'348'172'155ULL);
 
 } // namespace tgcli::daemon::account_audit_limits

@@ -38,7 +38,7 @@ struct WriteKernelResult {
 };
 
 struct WriteKernelRequest {
-    proto::M3Operation operation = proto::M3Operation::Send;
+    WriteOperation operation = proto::M3Operation::Send;
     std::string account;
     std::optional<IdempotencyKeyHash> idempotency_key_hash;
     std::string invocation_id;

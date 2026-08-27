@@ -37,19 +37,16 @@ namespace {
 
 using nlohmann::json;
 
-std::optional<AccountAuditOperation> audit_operation(proto::M3Operation operation) {
-    const auto* identity = proto::m3_operation_identity(operation);
-    return identity == nullptr ? std::nullopt
-                               : parse_account_audit_operation(identity->canonical_name);
+std::optional<AccountAuditOperation> audit_operation(WriteOperation operation) {
+    return operation.audit();
 }
 
-std::string_view operation_name(proto::M3Operation operation) {
-    const auto* identity = proto::m3_operation_identity(operation);
-    return identity == nullptr ? std::string_view{} : identity->canonical_name;
+std::string_view operation_name(WriteOperation operation) {
+    return operation.name();
 }
 
-bool destructive(proto::M3Operation operation) {
-    return operation == proto::M3Operation::MsgDelete || operation == proto::M3Operation::ChatLeave;
+bool destructive(WriteOperation operation) {
+    return operation.destructive();
 }
 
 json error_terminal(std::string code, std::string message, json details, int exit_code) {
@@ -68,7 +65,7 @@ WriteKernelResult plain_audit_fatal() {
     return {WriteKernelStatus::AuditFatal, std::nullopt, std::nullopt};
 }
 
-json timeout_terminal(proto::M3Operation operation, std::string_view phase,
+json timeout_terminal(WriteOperation operation, std::string_view phase,
                       std::string_view idempotency, std::string_view outcome = "not_started") {
     return error_terminal("TIMEOUT", "request timed out",
                           {{"operation", operation_name(operation)},
@@ -87,7 +84,7 @@ std::string_view post_intent_idempotency(const WriteKernelRequest& request) {
     return request.idempotency_key_hash ? "removed" : "not_requested";
 }
 
-std::optional<write_contract::StoredTerminal> cancellation_terminal(proto::M3Operation operation) {
+std::optional<write_contract::StoredTerminal> cancellation_terminal(WriteOperation operation) {
     std::string error;
     return write_contract::make_error_terminal(operation, "DAEMON_SHUTDOWN",
                                                "daemon is shutting down",
@@ -120,7 +117,7 @@ json audit_unavailable_terminal(std::string_view account, std::string_view path,
                           kDenied);
 }
 
-json spool_unavailable_terminal(proto::M3Operation operation, const FileSpoolError& failure) {
+json spool_unavailable_terminal(WriteOperation operation, const FileSpoolError& failure) {
     const auto durability_name = [](DurabilityReason reason) -> std::string_view {
         switch (reason) {
         case DurabilityReason::PathInvalid:
@@ -398,7 +395,8 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
     };
     try {
         const auto operation = audit_operation(request.operation);
-        if (!operation || request.request_source_bytes == 0 ||
+        if (!operation || (request.idempotency_key_hash && !request.operation.idempotent()) ||
+            request.request_source_bytes == 0 ||
             request.request_source_bytes > proto::kMaximumRequestSourceBytes ||
             request.config_path.empty() || !hooks.admit || !hooks.plan ||
             (!request.dry_run && (!request.sample_now || !hooks.audit_fatal_shutdown))) {
@@ -683,7 +681,8 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
         }
         if (post_intent.spool) {
-            if (request.operation != proto::M3Operation::SavedAttach ||
+            if ((request.operation != proto::M3Operation::SavedAttach &&
+                 !request.operation.uses_photo_spool()) ||
                 !validate_account_audit_persisted_spool(*post_intent.spool,
                                                         request.invocation_id) ||
                 !append_checkpoint(*foundation_, epoch, request, hooks, *operation,
@@ -706,7 +705,10 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             if (!current_spool_hold) {
                 return audit_fatal();
             }
-        } else if (request.operation == proto::M3Operation::SavedAttach &&
+        } else if ((request.operation == proto::M3Operation::SavedAttach ||
+                    (request.operation.uses_photo_spool() &&
+                     proposed_plan.value().contains("file") &&
+                     proposed_plan.value()["file"].is_object())) &&
                    !post_intent.terminal_without_dispatch) {
             return audit_fatal();
         }

@@ -1,6 +1,7 @@
 #include "daemon/idempotency_reconciliation.hpp"
 
 #include "common/daemon_lock.hpp"
+#include "daemon/write_operation.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -597,8 +598,7 @@ IdempotencyFoundation::close_unexpected_incumbent(const AccountAuditAppendReceip
         open.intent["invocation_id"] != intent_receipt.invocation_id ||
         open.intent["request_fingerprint"] != intent_receipt.request_fingerprint || !operation ||
         *operation != intent_receipt.operation ||
-        intent_receipt.operation == AccountAuditOperation::SessionTerminate ||
-        !open.checkpoints.empty()) {
+        !WriteOperation(intent_receipt.operation).idempotent() || !open.checkpoints.empty()) {
         return {IdempotencyUnexpectedIncumbentClosureStatus::AuditFatal,
                 {},
                 {AccountAuditDurabilityReason::Contradiction,
