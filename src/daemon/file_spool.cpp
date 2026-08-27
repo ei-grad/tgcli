@@ -15,6 +15,7 @@
 #include <map>
 #include <ranges>
 #include <set>
+#include <span>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -318,6 +319,56 @@ class Sha256 final {
     common::Sha256 digest_;
 };
 
+class SourceContentValidator final {
+  public:
+    explicit SourceContentValidator(SourceContentPolicy policy) : policy_(policy) {}
+
+    void update(const unsigned char* bytes, std::size_t size) noexcept {
+        if (policy_ != SourceContentPolicy::StaticJpeg) {
+            return;
+        }
+        for (const auto byte : std::span(bytes, size)) {
+            if (size_ < first_.size()) {
+                first_.at(size_) = byte;
+            }
+            last_.front() = last_.back();
+            last_.back() = byte;
+            ++size_;
+        }
+    }
+
+    [[nodiscard]] bool valid() const noexcept {
+        return policy_ != SourceContentPolicy::StaticJpeg ||
+               (size_ >= 4 && first_[0] == 0xffU && first_[1] == 0xd8U && last_[0] == 0xffU &&
+                last_[1] == 0xd9U);
+    }
+
+  private:
+    SourceContentPolicy policy_ = SourceContentPolicy::Any;
+    std::array<unsigned char, 2> first_{};
+    std::array<unsigned char, 2> last_{};
+    std::size_t size_ = 0;
+};
+
+bool valid_source_name(std::string_view name, SourceContentPolicy policy) {
+    if (policy != SourceContentPolicy::StaticJpeg) {
+        return true;
+    }
+    const auto suffix_matches = [&](std::string_view suffix) {
+        if (name.size() < suffix.size()) {
+            return false;
+        }
+        const auto candidate = name.substr(name.size() - suffix.size());
+        return std::ranges::equal(candidate, suffix, [](char left, char right) {
+            if (left >= 'A' && left <= 'Z') {
+                left = static_cast<char>(left - 'A' + 'a');
+            }
+            return left == right;
+        });
+    };
+    return suffix_matches(".jpg") || suffix_matches(".jpeg");
+}
+
 std::optional<std::string> canonical_display(std::string_view caller_path,
                                              std::string_view frozen_cwd) {
     const bool absolute = caller_path.starts_with('/');
@@ -599,7 +650,8 @@ write_all(int descriptor, const unsigned char* bytes, std::size_t size,
 // NOLINTBEGIN(readability-function-cognitive-complexity)
 std::variant<FileSnapshot, FileSpoolError>
 run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapshot* expected,
-                int destination, const FileSpoolControl& control,
+                int destination, SourceContentPolicy content_policy,
+                const FileSpoolControl& control,
                 const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
     auto start = pass_start(locator, control);
     if (auto* error = std::get_if<FileSpoolError>(&start)) {
@@ -721,6 +773,7 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
     }
 
     Sha256 digest;
+    SourceContentValidator content(content_policy);
     std::array<unsigned char, kBufferSize> buffer{};
     std::uint64_t total = 0;
     const auto io = pass == SourcePass::First ? FileSpoolIo::Pass1Read : FileSpoolIo::Pass2Read;
@@ -755,6 +808,7 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
             return durability_error(DurabilityReason::ReadFailed);
         }
         digest.update(buffer.data(), converted);
+        content.update(buffer.data(), converted);
         if (destination >= 0) {
             if (const auto error =
                     write_all(destination, buffer.data(), converted, control, hooks)) {
@@ -762,6 +816,11 @@ run_source_pass(const SourceLocator& locator, SourcePass pass, const FileSnapsho
             }
         }
         total += converted;
+    }
+
+    if (!content.valid()) {
+        return pass == SourcePass::First ? simple_error(FileSpoolErrorKind::InvalidInput)
+                                         : simple_error(FileSpoolErrorKind::InputChanged);
     }
     for (;;) {
         if (const auto error = control_error(control)) {
@@ -1546,6 +1605,7 @@ enumerate_open_root(RootHandle& root, uid_t expected_uid, const FileSpoolControl
 struct PreparedSource::Impl {
     SourceLocator locator;
     FileSnapshot snapshot;
+    SourceContentPolicy content_policy = SourceContentPolicy::Any;
 };
 
 PreparedSource::PreparedSource(std::unique_ptr<Impl> implementation)
@@ -1562,12 +1622,16 @@ const FileSnapshot& PreparedSource::snapshot() const {
 PrepareSpoolSourceResult
 prepare_spool_source(std::string_view caller_path, std::string_view frozen_cwd,
                      const FileSpoolControl& control,
-                     const std::shared_ptr<const testing::FileSpoolHooks>& hooks) {
+                     const std::shared_ptr<const testing::FileSpoolHooks>& hooks,
+                     SourceContentPolicy content_policy) {
     if (const auto error = control_error(control)) {
         return *error;
     }
     auto locator = make_locator(caller_path, frozen_cwd);
     if (!locator) {
+        return simple_error(FileSpoolErrorKind::InvalidInput);
+    }
+    if (!valid_source_name(locator->name, content_policy)) {
         return simple_error(FileSpoolErrorKind::InvalidInput);
     }
     if (!locator->absolute) {
@@ -1581,13 +1645,15 @@ prepare_spool_source(std::string_view caller_path, std::string_view frozen_cwd,
         }
         locator->cwd = std::move(std::get<Descriptor>(cwd));
     }
-    auto pass = run_source_pass(*locator, SourcePass::First, nullptr, -1, control, hooks);
+    auto pass =
+        run_source_pass(*locator, SourcePass::First, nullptr, -1, content_policy, control, hooks);
     if (auto* error = std::get_if<FileSpoolError>(&pass)) {
         return *error;
     }
     auto implementation = std::make_unique<PreparedSource::Impl>();
     implementation->locator = std::move(*locator);
     implementation->snapshot = std::move(std::get<FileSnapshot>(pass));
+    implementation->content_policy = content_policy;
     return PreparedSource(std::move(implementation));
 }
 
@@ -1627,7 +1693,7 @@ create_spool_file(PreparedSource& source, std::string account_state, std::string
     auto destination = std::move(std::get<DestinationHandle>(destination_result));
     auto pass = run_source_pass(source.implementation_->locator, SourcePass::Second,
                                 &source.implementation_->snapshot, destination.descriptor.get(),
-                                control, hooks);
+                                source.implementation_->content_policy, control, hooks);
     if (auto* error = std::get_if<FileSpoolError>(&pass)) {
         return with_cleanup(*error, reference);
     }

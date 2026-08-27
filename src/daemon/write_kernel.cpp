@@ -379,6 +379,8 @@ std::optional<json> config_cas_terminal(const WriteKernelRequest& request,
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                                    const WriteKernelHooks& hooks) const {
+    const bool absent_idempotency_by_policy =
+        request.operation.audit() == AccountAuditOperation::SessionTerminate;
     bool intent_may_be_durable = false;
     const auto audit_fatal = [&]() noexcept {
         if (intent_may_be_durable && hooks.audit_fatal_shutdown) {
@@ -395,7 +397,10 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
     };
     try {
         const auto operation = audit_operation(request.operation);
-        if (!operation || (request.idempotency_key_hash && !request.operation.idempotent()) ||
+        if (!operation ||
+            (request.idempotency_key_hash &&
+             (!request.operation.idempotent() || absent_idempotency_by_policy)) ||
+            (request.recovery_preflight_complete != absent_idempotency_by_policy) ||
             request.request_source_bytes == 0 ||
             request.request_source_bytes > proto::kMaximumRequestSourceBytes ||
             request.config_path.empty() || !hooks.admit || !hooks.plan ||
@@ -412,7 +417,7 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
             if (auto interruption =
                     post_hook_interruption(request, pre_intent_idempotency(request))) {
-                return std::move(*interruption);
+                return std::move(interruption).value();
             }
             if (auto* terminal = std::get_if<json>(&*admitted)) {
                 return rejected(std::move(*terminal));
@@ -429,7 +434,7 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
             if (auto interruption =
                     post_hook_interruption(request, pre_intent_idempotency(request))) {
-                return std::move(*interruption);
+                return std::move(interruption).value();
             }
             if (auto* terminal = std::get_if<json>(&*planning)) {
                 return rejected(std::move(*terminal));
@@ -447,8 +452,40 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         const AccountAuditScanControl scan_control{request.deadline, request.cancelled};
         const FileSpoolControl spool_control{request.deadline.expires_at,
                                              request.cancellation_token, request.cancelled};
+        const auto run_gate = [&](const AccountAuditCoordinator::Guard& epoch,
+                                  std::uint64_t sampled_now) {
+            return absent_idempotency_by_policy
+                       ? foundation_->run_absent_by_policy_gate(epoch, sampled_now, {},
+                                                                spool_control, hooks.spool_hooks)
+                       : foundation_->run_core_gate(epoch, sampled_now, {}, spool_control,
+                                                    hooks.spool_hooks);
+        };
         std::optional<WriteAdmission> admission;
-        {
+        const auto admit = [&]() -> std::optional<WriteKernelResult> {
+            std::optional<WriteAdmissionOutcome> admitted;
+            try {
+                admitted.emplace(hooks.admit());
+            } catch (...) {
+                return WriteKernelResult{WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+            }
+            if (auto interruption =
+                    post_hook_interruption(request, pre_intent_idempotency(request))) {
+                return interruption;
+            }
+            if (auto* terminal = std::get_if<json>(&*admitted)) {
+                return rejected(std::move(*terminal));
+            }
+            admission.emplace(std::get<WriteAdmission>(std::move(*admitted)));
+            if (admission->arguments.operation() != request.operation) {
+                return audit_fatal();
+            }
+            return std::nullopt;
+        };
+        if (request.recovery_preflight_complete) {
+            if (auto failure = admit()) {
+                return std::move(failure).value();
+            }
+        } else {
             auto epoch_result = foundation_->acquire_epoch(scan_control);
             if (auto* failure = std::get_if<AccountAuditFailure>(&epoch_result)) {
                 return failure->interruption == AccountAuditFailure::Interruption::Deadline
@@ -459,35 +496,24 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
             auto epoch = std::get<AccountAuditCoordinator::Guard>(std::move(epoch_result));
             const auto initial_sampled_now = request.sample_now();
-            const auto gate = foundation_->run_core_gate(epoch, initial_sampled_now, {},
-                                                         spool_control, hooks.spool_hooks);
+            const auto gate = run_gate(epoch, initial_sampled_now);
             if (gate.status != IdempotencyCoreGateStatus::Clean) {
                 return gate_failure(request, gate, *foundation_);
             }
-            std::optional<WriteAdmissionOutcome> admitted;
-            try {
-                admitted.emplace(hooks.admit());
-            } catch (...) {
-                return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+            if (auto failure = admit()) {
+                return std::move(failure).value();
             }
-            if (auto interruption =
-                    post_hook_interruption(request, pre_intent_idempotency(request))) {
-                return std::move(*interruption);
-            }
-            if (auto* terminal = std::get_if<json>(&*admitted)) {
-                return rejected(std::move(*terminal));
-            }
-            admission.emplace(std::get<WriteAdmission>(std::move(*admitted)));
-            if (admission->arguments.operation() != request.operation) {
+            if (!admission) {
                 return audit_fatal();
             }
+            const auto& admitted_request = admission.value();
             if (request.idempotency_key_hash) {
-                const auto lookup = IdempotencyStore::lookup(
-                    gate.snapshot, *request.idempotency_key_hash, admission->request_fingerprint);
-                if (auto result =
-                        incumbent_result(request, hooks, lookup, *request.idempotency_key_hash,
-                                         admission->request_fingerprint)) {
-                    return std::move(*result);
+                const auto& key_hash = request.idempotency_key_hash.value();
+                const auto lookup = IdempotencyStore::lookup(gate.snapshot, key_hash,
+                                                             admitted_request.request_fingerprint);
+                if (auto result = incumbent_result(request, hooks, lookup, key_hash,
+                                                   admitted_request.request_fingerprint)) {
+                    return std::move(result).value();
                 }
             }
         }
@@ -522,8 +548,7 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
         }
         auto epoch = std::get<AccountAuditCoordinator::Guard>(std::move(epoch_result));
         const auto commit_sampled_now = request.sample_now();
-        const auto gate = foundation_->run_core_gate(epoch, commit_sampled_now, {}, spool_control,
-                                                     hooks.spool_hooks);
+        const auto gate = run_gate(epoch, commit_sampled_now);
         if (gate.status != IdempotencyCoreGateStatus::Clean) {
             return gate_failure(request, gate, *foundation_);
         }
@@ -609,8 +634,11 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             return audit_fatal();
         }
         AccountAuditAppendPermit permit;
-        const auto append_inspection = foundation_->audit().prepare_append(
-            *intent, AccountAuditPinSource{IdempotencyStore::pins(gate.snapshot)}, epoch, permit);
+        const auto pin_source = absent_idempotency_by_policy
+                                    ? AccountAuditPinSource{AbsentAccountAuditPinsByPolicy{}}
+                                    : AccountAuditPinSource{IdempotencyStore::pins(gate.snapshot)};
+        const auto append_inspection =
+            foundation_->audit().prepare_append(*intent, pin_source, epoch, permit);
         if (append_inspection.status != AccountAuditInspectionStatus::Clean || !permit.valid()) {
             IdempotencyCoreGateResult failure;
             failure.status = append_inspection.status == AccountAuditInspectionStatus::Interrupted

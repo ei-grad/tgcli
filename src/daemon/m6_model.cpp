@@ -176,10 +176,12 @@ std::vector<std::string> right_names(const core::TdM6AdminRights& rights) {
     };
     std::vector<std::string> result;
     const auto names = m6_admin_right_names();
-    for (std::size_t index = 0; index < enabled.size(); ++index) {
-        if (enabled[index]) {
-            result.emplace_back(names[index]);
+    auto name = names.begin();
+    for (const bool is_enabled : enabled) {
+        if (is_enabled) {
+            result.emplace_back(*name);
         }
+        ++name;
     }
     return result;
 }
@@ -197,10 +199,12 @@ std::vector<std::string> permission_names(const core::TdM6ChatPermissions& permi
     };
     std::vector<std::string> result;
     const auto names = m6_chat_permission_names();
-    for (std::size_t index = 0; index < enabled.size(); ++index) {
-        if (enabled[index]) {
-            result.emplace_back(names[index]);
+    auto name = names.begin();
+    for (const bool is_enabled : enabled) {
+        if (is_enabled) {
+            result.emplace_back(*name);
         }
+        ++name;
     }
     return result;
 }
@@ -234,7 +238,7 @@ std::string_view storage_file_type_name(core::TdM6StorageFileType type) {
         "wallpaper",
     };
     const auto index = static_cast<std::size_t>(type);
-    return index < names.size() ? names[index] : std::string_view{};
+    return index < names.size() ? names.at(index) : std::string_view{};
 }
 
 } // namespace
@@ -348,6 +352,26 @@ std::optional<json> m6_session_list_json(const core::TdSessions& sessions) {
     return json{{"items", std::move(items)},
                 {"inactive_session_ttl_days", sessions.inactive_session_ttl_days},
                 {"next", nullptr}};
+}
+
+std::optional<json> m6_session_terminate_target_json(const core::TdSession& session) {
+    auto projected =
+        m6_session_list_json(core::TdSessions{.items = {session}, .inactive_session_ttl_days = 1});
+    if (!projected || (*projected)["items"].size() != 1 || session.is_current) {
+        return std::nullopt;
+    }
+    const auto& item = (*projected)["items"].front();
+    return json{{"id", item["id"]},
+                {"is_current", false},
+                {"is_password_pending", item["is_password_pending"]},
+                {"is_unconfirmed", item["is_unconfirmed"]},
+                {"device_type", item["device_type"]},
+                {"application_name", item["application_name"]},
+                {"application_version", item["application_version"]},
+                {"device_model", item["device_model"]},
+                {"platform", item["platform"]},
+                {"system_version", item["system_version"]},
+                {"last_active_date", item["last_active_date"]}};
 }
 
 std::optional<json> m6_folder_summary_json(const core::TdM6FolderInfo& info) {

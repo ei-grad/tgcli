@@ -1229,3 +1229,43 @@ TEST_CASE("file spool concurrent distinct invocations remain independent",
     CHECK(std::holds_alternative<CreatedSpool>(*first));
     CHECK(std::holds_alternative<CreatedSpool>(*second));
 }
+
+TEST_CASE("file spool validates the closed static JPEG source policy", "[file-spool][jpeg]") {
+    const TempTree temp;
+    const std::string jpeg{static_cast<char>(0xff), static_cast<char>(0xd8), 'x',
+                           static_cast<char>(0xff), static_cast<char>(0xd9)};
+
+    SECTION("case-insensitive JPEG suffix and exact markers are accepted in both passes") {
+        temp.write(temp.source("photo.JPEG"), jpeg);
+        auto source = require_source(prepare_spool_source(temp.source("photo.JPEG").string(), "/",
+                                                          {}, {}, SourceContentPolicy::StaticJpeg));
+        const auto created = require_created(
+            create_spool_file(source, temp.state().string(), std::string(kInvocation), ::getuid()));
+        CHECK(read_all(created.local_path) == jpeg);
+    }
+
+    SECTION("suffix, SOI, EOI, and trailing bytes fail locally") {
+        temp.write(temp.source("photo.png"), jpeg);
+        CHECK(require_error(prepare_spool_source(temp.source("photo.png").string(), "/", {}, {},
+                                                 SourceContentPolicy::StaticJpeg))
+                  .kind == FileSpoolErrorKind::InvalidInput);
+        const std::string bad_soi{
+            'a', 'b', 'c', 'd', static_cast<char>(0xff), static_cast<char>(0xd9)};
+        temp.write(temp.source("bad-soi.jpg"), bad_soi);
+        CHECK(require_error(prepare_spool_source(temp.source("bad-soi.jpg").string(), "/", {}, {},
+                                                 SourceContentPolicy::StaticJpeg))
+                  .kind == FileSpoolErrorKind::InvalidInput);
+        const std::string bad_eoi{
+            static_cast<char>(0xff), static_cast<char>(0xd8), 'a', 'b', 'c', 'd'};
+        temp.write(temp.source("bad-eoi.jpg"), bad_eoi);
+        CHECK(require_error(prepare_spool_source(temp.source("bad-eoi.jpg").string(), "/", {}, {},
+                                                 SourceContentPolicy::StaticJpeg))
+                  .kind == FileSpoolErrorKind::InvalidInput);
+        const std::string trailing{static_cast<char>(0xff), static_cast<char>(0xd8), 'x',
+                                   static_cast<char>(0xff), static_cast<char>(0xd9), 'x'};
+        temp.write(temp.source("trailing.jpg"), trailing);
+        CHECK(require_error(prepare_spool_source(temp.source("trailing.jpg").string(), "/", {}, {},
+                                                 SourceContentPolicy::StaticJpeg))
+                  .kind == FileSpoolErrorKind::InvalidInput);
+    }
+}

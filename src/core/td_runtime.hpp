@@ -747,6 +747,8 @@ struct TdUserSummary {
     bool is_bot = false;
     bool is_premium = false;
     TdUserPresence presence = TdUserPresence::Hidden;
+    bool bot_has_topics = false;
+    bool bot_allows_users_to_create_topics = false;
 
     bool operator==(const TdUserSummary&) const = default;
 };
@@ -1461,11 +1463,17 @@ struct TdLeaveChatRequest {
     bool operator==(const TdLeaveChatRequest&) const = default;
 };
 
+struct TdTerminateSessionRequest {
+    std::int64_t session_id = 0;
+
+    bool operator==(const TdTerminateSessionRequest&) const = default;
+};
+
 using TdDirectRequest =
     std::variant<TdEditMessageTextRequest, TdDeleteMessagesRequest, TdMessageReactionRequest,
                  TdPinMessageRequest, TdViewMessagesRequest, TdSetChatNotificationSettingsRequest,
                  TdToggleChatIsPinnedRequest, TdAddChatToListRequest, TdJoinChatRequest,
-                 TdLeaveChatRequest, TdM6Request>;
+                 TdLeaveChatRequest, TdTerminateSessionRequest, TdM6Request>;
 
 [[nodiscard]] bool valid_td_message_locator(std::int64_t chat_id, std::int64_t message_id) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdEditMessageTextRequest& request) noexcept;
@@ -1479,6 +1487,7 @@ valid_td_direct_request(const TdSetChatNotificationSettingsRequest& request) noe
 [[nodiscard]] bool valid_td_direct_request(const TdAddChatToListRequest& request) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdJoinChatRequest& request);
 [[nodiscard]] bool valid_td_direct_request(const TdLeaveChatRequest& request) noexcept;
+[[nodiscard]] bool valid_td_direct_request(const TdTerminateSessionRequest& request) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdM6Request& request) noexcept;
 [[nodiscard]] bool valid_td_direct_request(const TdDirectRequest& request);
 

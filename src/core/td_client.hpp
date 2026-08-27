@@ -214,7 +214,7 @@ class TdClient {
     std::future<TdValue>
     get_contacts(const std::shared_ptr<const AuthStateSnapshot>& authorization);
     std::future<TdValue> m6_read(const std::shared_ptr<const AuthStateSnapshot>& authorization,
-                                TdM6Request request);
+                                 TdM6Request request);
     [[nodiscard]] std::optional<TdM6ChatFoldersUpdate>
     m6_chat_folders(const std::shared_ptr<const AuthStateSnapshot>& authorization) const;
     std::future<TdValue>

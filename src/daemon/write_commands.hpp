@@ -43,6 +43,9 @@ class WriteCoordinator final {
     void archive_chat(const proto::Request& request, RequestSession& session, bool archived);
     void join_chat(const proto::Request& request, RequestSession& session);
     void leave_chat(const proto::Request& request, RequestSession& session);
+    void m6_mutation(proto::M6Operation operation, const proto::Request& request,
+                     RequestSession& session);
+    void terminate_session(const proto::Request& request, RequestSession& session);
 
   private:
     std::reference_wrapper<core::TdClient> client_;

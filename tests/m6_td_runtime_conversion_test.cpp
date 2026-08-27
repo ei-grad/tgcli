@@ -20,9 +20,7 @@ namespace td_api = td::td_api;
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
 
 TdM6ChatFolder folder() {
-    return {.name = {.text = "Work",
-                     .animate_custom_emoji = false,
-                     .custom_emoji_entities = {}},
+    return {.name = {.text = "Work", .animate_custom_emoji = false, .custom_emoji_entities = {}},
             .icon = TdM6FolderIcon::Work,
             .color_id = 2,
             .is_shareable = false,
@@ -68,8 +66,7 @@ std::vector<TdM6Request> requests() {
         TdM6GetForumTopicRequest{.chat_id = -1001, .topic_id = 4},
         TdM6CreateForumTopicRequest{.chat_id = -1001,
                                     .name = "Topic",
-                                    .icon = {.color = TdM6TopicColor::Blue,
-                                             .custom_emoji_id = "0"},
+                                    .icon = {.color = TdM6TopicColor::Blue, .custom_emoji_id = "0"},
                                     .is_name_implicit = false},
         TdM6EditForumTopicRequest{.chat_id = -1001,
                                   .topic_id = 4,
@@ -82,11 +79,8 @@ std::vector<TdM6Request> requests() {
         TdM6SetChatPhotoRequest{.chat_id = -1001, .local_path = std::nullopt},
         TdM6SetChatDescriptionRequest{.chat_id = -1001, .description = "Description"},
         TdM6CreateChatInviteLinkRequest{.chat_id = -1001},
-        TdM6RevokeChatInviteLinkRequest{.chat_id = -1001,
-                                        .invite_link = "https://t.me/+secret"},
-        TdM6SetChatMemberStatusRequest{.chat_id = -1001,
-                                       .user_id = 7,
-                                       .status = administrator},
+        TdM6RevokeChatInviteLinkRequest{.chat_id = -1001, .invite_link = "https://t.me/+secret"},
+        TdM6SetChatMemberStatusRequest{.chat_id = -1001, .user_id = 7, .status = administrator},
         TdM6SetChatPermissionsRequest{.chat_id = -1001, .permissions = {}},
         TdM6GetStorageStatisticsRequest{.chat_limit = 100},
         TdM6OptimizeStorageRequest{},
@@ -102,8 +96,7 @@ TEST_CASE("production M6 factories and native matchers cover every request varia
         auto native = detail::make_production_m6_function_for_test(request);
         REQUIRE(native.function_data().has_value());
         CHECK(native.function_data()->kind() == td_m6_request_kind(request));
-        CHECK(detail::production_function_matches_for_test(native,
-                                                           td_m6_request_kind(request)));
+        CHECK(detail::production_function_matches_for_test(native, td_m6_request_kind(request)));
     }
 }
 
@@ -114,8 +107,7 @@ TEST_CASE("production M6 converters retain strict folder topic member invite and
         users->total_count_ = 2;
         users->user_ids_ = {7, 8};
         auto value = detail::convert_production_m6_response_for_test(
-            TdFunctionKind::SearchContacts,
-            TdValue::from(NativeObjectPtr{std::move(users)}));
+            TdFunctionKind::SearchContacts, TdValue::from(NativeObjectPtr{std::move(users)}));
         const auto* response = value.get_if<TdM6Response>();
         REQUIRE(response != nullptr);
         REQUIRE(std::get_if<TdM6Users>(response) != nullptr);
@@ -126,14 +118,14 @@ TEST_CASE("production M6 converters retain strict folder topic member invite and
         auto folder_value = detail::convert_production_m6_response_for_test(
             TdFunctionKind::GetChatFolder, TdValue::from(NativeObjectPtr{}));
         REQUIRE(folder_value.get_if<TdM6Response>() != nullptr);
-        CHECK_FALSE(std::get<TdM6MaybeChatFolder>(*folder_value.get_if<TdM6Response>())
-                        .folder.has_value());
+        CHECK_FALSE(
+            std::get<TdM6MaybeChatFolder>(*folder_value.get_if<TdM6Response>()).folder.has_value());
 
         auto topic_value = detail::convert_production_m6_response_for_test(
             TdFunctionKind::GetForumTopic, TdValue::from(NativeObjectPtr{}));
         REQUIRE(topic_value.get_if<TdM6Response>() != nullptr);
-        CHECK_FALSE(std::get<TdM6MaybeForumTopic>(*topic_value.get_if<TdM6Response>())
-                        .topic.has_value());
+        CHECK_FALSE(
+            std::get<TdM6MaybeForumTopic>(*topic_value.get_if<TdM6Response>()).topic.has_value());
     }
 
     SECTION("storage") {

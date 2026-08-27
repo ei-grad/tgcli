@@ -27,11 +27,16 @@ TEST_CASE("M6 durable policy covers exactly all 24 mutations", "[m6][write-polic
         CHECK(daemon::m6_write_policy(policy.operation) == &policy);
         REQUIRE(policy.tdlib_function_count >= 1);
         REQUIRE(policy.tdlib_function_count <= policy.tdlib_functions.size());
-        for (std::size_t index = 0; index < policy.tdlib_function_count; ++index) {
-            CHECK(daemon::valid_m6_tdlib_function(policy.operation, policy.tdlib_functions[index]));
+        for (const auto function :
+             std::span(policy.tdlib_functions).first(policy.tdlib_function_count)) {
+            CHECK(daemon::valid_m6_tdlib_function(policy.operation, function));
         }
-        idempotent += policy.idempotent;
-        photo_spool += policy.uses_photo_spool;
+        if (policy.idempotent) {
+            ++idempotent;
+        }
+        if (policy.uses_photo_spool) {
+            ++photo_spool;
+        }
     }
     CHECK(idempotent == 22);
     CHECK(photo_spool == 1);

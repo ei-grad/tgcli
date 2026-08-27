@@ -6,6 +6,7 @@
 #include "daemon/fetch_commands.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
+#include "daemon/m6_commands.hpp"
 #include "daemon/message_commands.hpp"
 #include "daemon/read_commands.hpp"
 #include "daemon/request_session.hpp"
@@ -160,6 +161,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.writes != nullptr) {
         register_write_commands(dispatcher, *context.writes);
+    }
+    if (context.m6 != nullptr && context.writes != nullptr) {
+        register_m6_commands(dispatcher, *context.m6, *context.writes);
     }
     if (context.streams != nullptr) {
         register_stream_commands(dispatcher, *context.streams);

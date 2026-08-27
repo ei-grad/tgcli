@@ -163,6 +163,8 @@ struct CommandDescriptor {
     bool m1_destructive_kernel = false;
     std::optional<M3Operation> m3_operation = std::nullopt;
     DeadlineDefault deadline_default = DeadlineDefault::Default60;
+    std::optional<proto::M6Operation> m6_operation = std::nullopt;
+    std::optional<proto::SessionOperation> session_operation = std::nullopt;
 };
 
 // The daemon-side dispatch table and the single safety chokepoint (DESIGN.md

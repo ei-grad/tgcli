@@ -171,6 +171,7 @@ TEST_CASE("session schemas are self-contained strict Draft 2020-12 documents",
                                      "#/$defs/tdlibError",
                                      "#/$defs/rateLimitedError",
                                      "#/$defs/internalError",
+                                     "#/$defs/dispatcherInternalError",
                                      "#/$defs/timeoutError"}));
     CHECK(error_schema["$defs"]["filesystemDiagnosticPath"]["properties"]["value"]["pattern"] ==
           "^2f(?:0[1-9a-f]|[1-9a-f][0-9a-f])+$");

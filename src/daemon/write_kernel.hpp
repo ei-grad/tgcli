@@ -52,6 +52,7 @@ struct WriteKernelRequest {
     RequestDeadline deadline;
     std::stop_token cancellation_token;
     std::function<bool()> cancelled;
+    bool recovery_preflight_complete = false;
 };
 
 struct WriteAdmission {

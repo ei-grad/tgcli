@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import fcntl
 import json
 import os
 import pty
@@ -49,6 +50,12 @@ REQUIRED_SUBCOMMANDS = (
     "resolve",
     "listen",
     "wait-for",
+    "contact",
+    "folder",
+    "topic",
+    "chat",
+    "storage",
+    "session",
 )
 REQUIRED_OPTIONS = (
     "--allow-write",
@@ -90,6 +97,56 @@ PROMPT_AUTH_STATES = {
     "registration_last_name": "wait_registration",
     "password": "wait_password",
 }
+M6_STORAGE_FILE_TYPES = frozenset(
+    {
+        "none",
+        "animation",
+        "audio",
+        "document",
+        "live-photo-video",
+        "notification-sound",
+        "photo",
+        "photo-story",
+        "profile-photo",
+        "secret",
+        "secret-thumbnail",
+        "secure",
+        "self-destructing-live-photo-video",
+        "self-destructing-photo",
+        "self-destructing-video",
+        "self-destructing-video-note",
+        "self-destructing-voice-note",
+        "sticker",
+        "thumbnail",
+        "unknown",
+        "video",
+        "video-note",
+        "video-story",
+        "voice-note",
+        "wallpaper",
+    }
+)
+M6_SESSION_DEVICE_TYPES = frozenset(
+    {
+        "android",
+        "apple",
+        "brave",
+        "chrome",
+        "edge",
+        "firefox",
+        "ipad",
+        "iphone",
+        "linux",
+        "mac",
+        "opera",
+        "safari",
+        "ubuntu",
+        "unknown",
+        "vivaldi",
+        "windows",
+        "xbox",
+    }
+)
 
 
 class AcceptanceError(RuntimeError):
@@ -559,6 +616,71 @@ class Runner:
                 daemon.stderr.close()
         if failure is not None:
             raise AcceptanceError("daemon cleanup failed") from failure
+
+    def stop_daemon_verified(self, account: str) -> None:
+        daemon = next((item for item in self.daemons if item.account == account), None)
+        if daemon is None:
+            raise AcceptanceError(f"tracked daemon is unavailable: {account}")
+        self.run_json_clean(
+            f"m6-stop-{account}", ["--json", "--account", account, "daemon", "stop"]
+        )
+        try:
+            daemon.process.wait(timeout=min(self.timeout, 10))
+        except subprocess.TimeoutExpired as error:
+            raise AcceptanceError(f"daemon did not stop: {account}") from error
+        if daemon.process.returncode != 0:
+            raise AcceptanceError(f"daemon returned non-zero while stopping: {account}")
+
+        namespace = (
+            "tgcli-test" if self.environment.get("TGCLI_TEST_DC") == "1" else "tgcli"
+        )
+        runtime_base = self.environment.get("XDG_RUNTIME_DIR")
+        if runtime_base is None:
+            runtime_base = str(
+                Path(self.environment.get("TMPDIR", "/tmp"))
+                / f"{namespace}-{os.getuid()}"
+            )
+            runtime_directory = Path(runtime_base)
+        else:
+            runtime_directory = Path(runtime_base) / namespace
+        socket = runtime_directory / f"{account}.sock"
+        deadline = time.monotonic() + min(self.timeout, 10)
+        while socket.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if socket.exists():
+            raise AcceptanceError(f"daemon socket remained after stop: {account}")
+
+        state_base = self.environment.get("XDG_STATE_HOME")
+        if state_base is None:
+            home = self.environment.get("HOME")
+            if home is None:
+                raise AcceptanceError(
+                    "HOME is unavailable for daemon lock verification"
+                )
+            state_base = str(Path(home) / ".local" / "state")
+        lock = Path(state_base) / namespace / "accounts" / account / "daemon.lock"
+        flags = os.O_RDWR | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(lock, flags)
+            status = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or status.st_uid != os.getuid()
+                or status.st_mode & 0o077
+            ):
+                raise AcceptanceError("daemon lock identity is invalid after stop")
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError as error:
+            raise AcceptanceError(f"daemon lock remained held: {account}") from error
+        finally:
+            if "descriptor" in locals():
+                os.close(descriptor)
+        daemon.stdout.close()
+        daemon.stderr.close()
+        self.daemons.remove(daemon)
 
 
 def _load_json(source: Path, label: str) -> object:
@@ -1389,6 +1511,287 @@ def _m5_stream_flow(
     )
 
 
+def _assert_m6_storage_stats(document: object) -> None:
+    if not isinstance(document, dict) or set(document) != {"size", "count", "by_chat"}:
+        raise AcceptanceError("M6 storage stats result has an invalid envelope")
+    size = document["size"]
+    count = document["count"]
+    chats = document["by_chat"]
+    if (
+        not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or not 0 <= count <= 2_147_483_647
+        or not isinstance(chats, list)
+        or len(chats) > 101
+    ):
+        raise AcceptanceError("M6 storage stats result has invalid bounds")
+    chat_ids: set[int] = set()
+    summed_size = 0
+    summed_count = 0
+    for chat in chats:
+        if not isinstance(chat, dict) or set(chat) != {
+            "chat_id",
+            "size",
+            "count",
+            "by_file_type",
+        }:
+            raise AcceptanceError("M6 storage stats chat row is malformed")
+        chat_id = chat["chat_id"]
+        file_types = chat["by_file_type"]
+        if (
+            not isinstance(chat_id, int)
+            or isinstance(chat_id, bool)
+            or not -9_007_199_254_740_991 <= chat_id <= 9_007_199_254_740_991
+            or chat_id in chat_ids
+            or not isinstance(file_types, list)
+            or len(file_types) > 25
+        ):
+            raise AcceptanceError("M6 storage stats chat identity is invalid")
+        chat_ids.add(chat_id)
+        child_size = 0
+        child_count = 0
+        file_type_names: set[str] = set()
+        for item in file_types:
+            if not isinstance(item, dict) or set(item) != {
+                "file_type",
+                "size",
+                "count",
+            }:
+                raise AcceptanceError("M6 storage stats file-type row is malformed")
+            file_type = item["file_type"]
+            item_size = item["size"]
+            item_count = item["count"]
+            if (
+                not isinstance(file_type, str)
+                or file_type not in M6_STORAGE_FILE_TYPES
+                or file_type in file_type_names
+                or not isinstance(item_size, int)
+                or isinstance(item_size, bool)
+                or item_size < 0
+                or not isinstance(item_count, int)
+                or isinstance(item_count, bool)
+                or not 0 <= item_count <= 2_147_483_647
+            ):
+                raise AcceptanceError("M6 storage stats file-type values are invalid")
+            file_type_names.add(file_type)
+            child_size += item_size
+            child_count += item_count
+        if chat["size"] != child_size or chat["count"] != child_count:
+            raise AcceptanceError("M6 storage stats chat sums are inconsistent")
+        summed_size += child_size
+        summed_count += child_count
+    if size != summed_size or count != summed_count:
+        raise AcceptanceError("M6 storage stats top-level sums are inconsistent")
+
+
+def _m6_storage_stats_flow(runner: Runner) -> None:
+    arguments = ["--account", USER_ACCOUNT, "storage", "stats"]
+    json_result = runner.run_json_clean("m6-storage-stats-json", ["--json", *arguments])
+    _assert_m6_storage_stats(json_result.document)
+    human_result = runner.run_json_clean("m6-storage-stats-human", arguments)
+    _assert_m6_storage_stats(human_result.document)
+    if human_result.document != json_result.document:
+        raise AcceptanceError("M6 storage stats human and JSON results diverged")
+
+
+def _m6_control_snapshot(
+    environment: Mapping[str, str], account: str
+) -> tuple[object, ...]:
+    namespace = "tgcli-test" if environment.get("TGCLI_TEST_DC") == "1" else "tgcli"
+    home = environment.get("HOME")
+    config_base = environment.get("XDG_CONFIG_HOME")
+    state_base = environment.get("XDG_STATE_HOME")
+    if config_base is None:
+        if home is None:
+            raise AcceptanceError("HOME is unavailable for M6 control snapshot")
+        config_base = str(Path(home) / ".config")
+    if state_base is None:
+        if home is None:
+            raise AcceptanceError("HOME is unavailable for M6 control snapshot")
+        state_base = str(Path(home) / ".local" / "state")
+    state = Path(state_base) / namespace / "accounts" / account
+    sources = [
+        Path(config_base) / namespace / "config.toml",
+        *(
+            state / name
+            for name in (
+                "audit.log",
+                "audit.log.1",
+                "audit.log.2",
+                "audit.log.3",
+                "audit.log.4",
+            )
+        ),
+        state / "idempotency.db",
+        state / ".idempotency.db.tmp",
+    ]
+
+    def capture(source: Path) -> object:
+        try:
+            status = source.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid():
+            raise AcceptanceError(f"M6 control file identity is invalid: {source.name}")
+        try:
+            return (stat.S_IMODE(status.st_mode), source.read_bytes())
+        except OSError as error:
+            raise AcceptanceError(
+                f"M6 control file is unreadable: {source.name}"
+            ) from error
+
+    spool = state / "spool"
+    spool_entries: list[tuple[str, object]] = []
+    if spool.exists():
+        if not spool.is_dir() or spool.is_symlink():
+            raise AcceptanceError("M6 spool identity is invalid")
+        for source in sorted(spool.rglob("*")):
+            relative = str(source.relative_to(spool))
+            status = source.lstat()
+            if stat.S_ISDIR(status.st_mode):
+                spool_entries.append(
+                    (relative, ("directory", stat.S_IMODE(status.st_mode)))
+                )
+            elif stat.S_ISREG(status.st_mode) and status.st_uid == os.getuid():
+                spool_entries.append(
+                    (
+                        relative,
+                        ("file", stat.S_IMODE(status.st_mode), source.read_bytes()),
+                    )
+                )
+            else:
+                raise AcceptanceError("M6 spool contains an invalid entry")
+    return (
+        *((str(source), capture(source)) for source in sources),
+        tuple(spool_entries),
+    )
+
+
+def _assert_m6_session_list(document: object) -> list[str]:
+    if not isinstance(document, dict) or set(document) != {
+        "items",
+        "inactive_session_ttl_days",
+        "next",
+    }:
+        raise AcceptanceError("M6 session list result has an invalid envelope")
+    items = document["items"]
+    ttl = document["inactive_session_ttl_days"]
+    if (
+        not isinstance(items, list)
+        or not items
+        or not isinstance(ttl, int)
+        or isinstance(ttl, bool)
+        or not 1 <= ttl <= 366
+        or document["next"] is not None
+    ):
+        raise AcceptanceError("M6 session list result has invalid bounds")
+    fields = {
+        "id",
+        "is_current",
+        "is_password_pending",
+        "is_unconfirmed",
+        "can_accept_secret_chats",
+        "can_accept_calls",
+        "device_type",
+        "api_id",
+        "application_name",
+        "application_version",
+        "is_official_application",
+        "device_model",
+        "platform",
+        "system_version",
+        "log_in_date",
+        "last_active_date",
+        "ip_address",
+        "location",
+    }
+    ids: list[str] = []
+    current_count = 0
+    for item in items:
+        if not isinstance(item, dict) or set(item) != fields:
+            raise AcceptanceError("M6 session list row is malformed")
+        identifier = item["id"]
+        if (
+            not isinstance(identifier, str)
+            or re.fullmatch(r"0|-?[1-9][0-9]{0,18}", identifier) is None
+        ):
+            raise AcceptanceError("M6 session id is noncanonical")
+        parsed = int(identifier)
+        if not -(1 << 63) <= parsed <= (1 << 63) - 1 or identifier in ids:
+            raise AcceptanceError("M6 session id is out of range or duplicated")
+        ids.append(identifier)
+        boolean_fields = {
+            "is_current",
+            "is_password_pending",
+            "is_unconfirmed",
+            "can_accept_secret_chats",
+            "can_accept_calls",
+            "is_official_application",
+        }
+        if any(not isinstance(item[field], bool) for field in boolean_fields):
+            raise AcceptanceError("M6 session boolean field is invalid")
+        current_count += int(item["is_current"])
+        if item["device_type"] not in M6_SESSION_DEVICE_TYPES:
+            raise AcceptanceError("M6 session device type is invalid")
+        if (
+            not isinstance(item["api_id"], int)
+            or isinstance(item["api_id"], bool)
+            or not -(1 << 31) <= item["api_id"] <= (1 << 31) - 1
+        ):
+            raise AcceptanceError("M6 session api_id is invalid")
+        for field in (
+            "application_name",
+            "application_version",
+            "device_model",
+            "platform",
+            "system_version",
+            "ip_address",
+            "location",
+        ):
+            if not isinstance(item[field], str):
+                raise AcceptanceError("M6 session text field is invalid")
+        for field in ("log_in_date", "last_active_date"):
+            value = item[field]
+            if value is not None and (
+                not isinstance(value, str)
+                or re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+                    value,
+                )
+                is None
+            ):
+                raise AcceptanceError("M6 session timestamp is invalid")
+    if current_count != 1:
+        raise AcceptanceError(
+            "M6 session list must contain exactly one current session"
+        )
+    return ids
+
+
+def _m6_session_list_flow(runner: Runner, environment: Mapping[str, str]) -> None:
+    arguments = ["--json", "--account", USER_ACCOUNT, "session", "list"]
+    before = _m6_control_snapshot(environment, USER_ACCOUNT)
+    first = runner.run_json_clean("m6-session-list-daemon-1", arguments)
+    first_ids = _assert_m6_session_list(first.document)
+    second = runner.run_json_clean("m6-session-list-daemon-2", arguments)
+    if _assert_m6_session_list(second.document) != first_ids:
+        raise AcceptanceError(
+            "M6 session list order changed across an unchanged vector"
+        )
+    if _m6_control_snapshot(environment, USER_ACCOUNT) != before:
+        raise AcceptanceError(
+            "M6 session list mutated config, audit, idempotency or spool state"
+        )
+    runner.stop_daemon_verified(USER_ACCOUNT)
+    no_daemon = runner.run_json_clean(
+        "m6-session-list-no-daemon", ["--no-daemon", *arguments]
+    )
+    _assert_m6_session_list(no_daemon.document)
+
+
 def _smoke(
     runner: Runner,
     environment: Mapping[str, str],
@@ -1501,6 +1904,7 @@ def _smoke(
 
     _m3_write_flow(runner, m3_key_sentinels)
     _m5_stream_flow(runner, relogin_identity, m5_result_artifact)
+    _m6_storage_stats_flow(runner)
 
     if QR_ACCOUNT in accounts:
         qr = runner.run_interactive(
@@ -1513,6 +1917,7 @@ def _smoke(
         _require_qr_approval(runner)
         executed.add(M1_QR_TEST)
         executed.add(auth_state_test_id("wait_other_device_confirmation"))
+    _m6_session_list_flow(runner, environment)
     return executed
 
 

@@ -30,6 +30,8 @@ struct ChatIdentityResult {
     std::optional<core::TdError> error;
     std::optional<std::int64_t> private_user_id;
     std::optional<core::TdUserPresence> private_user_presence;
+    std::optional<core::TdUserSummary> observed_user = std::nullopt;
+    std::optional<core::TdSupergroup> observed_supergroup = std::nullopt;
 };
 
 using ChatIdentityRead = std::function<std::optional<ReadyReadResult>(const ReadyReadStart& start)>;

@@ -17,6 +17,7 @@ std::optional<nlohmann::json> m6_contact_list_json(const core::TdM6Users& users,
                                                    bool search);
 std::optional<nlohmann::json> m6_folder_list_json(const core::TdM6ChatFoldersUpdate& update);
 std::optional<nlohmann::json> m6_session_list_json(const core::TdSessions& sessions);
+std::optional<nlohmann::json> m6_session_terminate_target_json(const core::TdSession& session);
 
 std::optional<nlohmann::json> m6_folder_summary_json(const core::TdM6FolderInfo& info);
 std::optional<nlohmann::json> m6_folder_snapshot_json(std::int32_t folder_id,

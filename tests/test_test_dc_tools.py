@@ -420,6 +420,12 @@ SUBCOMMANDS:
   resolve resolve a selector
   listen stream updates
   wait-for wait for a message
+  contact contact operations
+  folder folder operations
+  topic topic operations
+  chat chat administration
+  storage storage operations
+  session session operations
   attach attach a file
 """
 
@@ -1180,6 +1186,191 @@ class HarnessInvariantTests(unittest.TestCase):
         ):
             acceptance._m5_stream_flow(FailedRunner(), {"id": 42}, artifact)
         self.assertFalse(artifact.exists())
+
+    def test_m6_storage_flow_constructs_exact_commands_and_registers_no_cleanup(
+        self,
+    ) -> None:
+        result = {
+            "size": 7,
+            "count": 3,
+            "by_chat": [
+                {
+                    "chat_id": -1001,
+                    "size": 7,
+                    "count": 3,
+                    "by_file_type": [
+                        {"file_type": "photo", "size": 5, "count": 1},
+                        {"file_type": "video", "size": 2, "count": 2},
+                    ],
+                }
+            ],
+        }
+
+        class FlowRunner:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, list[str]]] = []
+
+            def run_json_clean(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                self.calls.append((label, arguments))
+                return acceptance.CommandResult(result, frozenset())
+
+            def register_message_cleanup(self, chat_id: int, message_id: int) -> None:
+                raise AssertionError(f"unexpected cleanup: {chat_id}/{message_id}")
+
+        runner = FlowRunner()
+        acceptance._m6_storage_stats_flow(runner)
+        self.assertEqual(
+            runner.calls,
+            [
+                (
+                    "m6-storage-stats-json",
+                    [
+                        "--json",
+                        "--account",
+                        acceptance.USER_ACCOUNT,
+                        "storage",
+                        "stats",
+                    ],
+                ),
+                (
+                    "m6-storage-stats-human",
+                    ["--account", acceptance.USER_ACCOUNT, "storage", "stats"],
+                ),
+            ],
+        )
+
+    def test_m6_storage_evidence_rejects_unknown_types_and_inconsistent_sums(
+        self,
+    ) -> None:
+        valid = {
+            "size": 1,
+            "count": 1,
+            "by_chat": [
+                {
+                    "chat_id": -1001,
+                    "size": 1,
+                    "count": 1,
+                    "by_file_type": [{"file_type": "photo", "size": 1, "count": 1}],
+                }
+            ],
+        }
+        acceptance._assert_m6_storage_stats(valid)
+        for mutate in (
+            lambda value: value["by_chat"][0]["by_file_type"][0].update(
+                {"file_type": "future"}
+            ),
+            lambda value: value["by_chat"][0].update({"size": 2}),
+            lambda value: value.update({"count": 2}),
+        ):
+            candidate = json.loads(json.dumps(valid))
+            mutate(candidate)
+            with self.assertRaises(acceptance.AcceptanceError):
+                acceptance._assert_m6_storage_stats(candidate)
+
+    def test_m6_session_flow_orders_daemon_stop_lock_proof_and_no_daemon(self) -> None:
+        current = {
+            "id": "0",
+            "is_current": True,
+            "is_password_pending": False,
+            "is_unconfirmed": False,
+            "can_accept_secret_chats": True,
+            "can_accept_calls": True,
+            "device_type": "linux",
+            "api_id": 1,
+            "application_name": "tgcli",
+            "application_version": "1",
+            "is_official_application": False,
+            "device_model": "Test",
+            "platform": "Linux",
+            "system_version": "1",
+            "log_in_date": None,
+            "last_active_date": "2026-08-27T12:00:00Z",
+            "ip_address": "192.0.2.1",
+            "location": "TestDC",
+        }
+        other = dict(current)
+        other.update({"id": "-9223372036854775808", "is_current": False})
+        result = {
+            "items": [current, other],
+            "inactive_session_ttl_days": 30,
+            "next": None,
+        }
+
+        class FlowRunner:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, list[str]]] = []
+
+            def run_json_clean(
+                self, label: str, arguments: list[str]
+            ) -> acceptance.CommandResult:
+                self.calls.append((label, arguments))
+                return acceptance.CommandResult(result, frozenset())
+
+            def stop_daemon_verified(self, account: str) -> None:
+                self.calls.append(("stop-verified", [account]))
+
+            def register_message_cleanup(self, chat_id: int, message_id: int) -> None:
+                raise AssertionError(f"unexpected cleanup: {chat_id}/{message_id}")
+
+        runner = FlowRunner()
+        environment = {"HOME": str(self.tree.root), "TGCLI_TEST_DC": "1"}
+        acceptance._m6_session_list_flow(runner, environment)
+        common = [
+            "--json",
+            "--account",
+            acceptance.USER_ACCOUNT,
+            "session",
+            "list",
+        ]
+        self.assertEqual(
+            runner.calls,
+            [
+                ("m6-session-list-daemon-1", common),
+                ("m6-session-list-daemon-2", common),
+                ("stop-verified", [acceptance.USER_ACCOUNT]),
+                ("m6-session-list-no-daemon", ["--no-daemon", *common]),
+            ],
+        )
+
+    def test_m6_session_evidence_rejects_duplicate_or_missing_current_rows(
+        self,
+    ) -> None:
+        row = {
+            "id": "7",
+            "is_current": True,
+            "is_password_pending": False,
+            "is_unconfirmed": False,
+            "can_accept_secret_chats": True,
+            "can_accept_calls": True,
+            "device_type": "linux",
+            "api_id": 1,
+            "application_name": "tgcli",
+            "application_version": "1",
+            "is_official_application": False,
+            "device_model": "Test",
+            "platform": "Linux",
+            "system_version": "1",
+            "log_in_date": None,
+            "last_active_date": None,
+            "ip_address": "",
+            "location": "",
+        }
+        document = {
+            "items": [row],
+            "inactive_session_ttl_days": 30,
+            "next": None,
+        }
+        self.assertEqual(acceptance._assert_m6_session_list(document), ["7"])
+        duplicate = json.loads(json.dumps(document))
+        duplicate["items"].append(dict(row))
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._assert_m6_session_list(duplicate)
+        missing = json.loads(json.dumps(document))
+        missing["items"][0]["is_current"] = False
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._assert_m6_session_list(missing)
 
     def test_registered_cleanup_accepts_delete_success_and_verifies_absence(
         self,

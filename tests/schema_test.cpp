@@ -1,3 +1,4 @@
+#include "proto/operation.hpp"
 #include "schema_matcher.hpp"
 
 #include <algorithm>
@@ -337,53 +338,58 @@ json terminal_error(std::string code, json details) {
 
 TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]") {
     const auto manifest = tgcli::test::load_schema_document("manifest.json");
-    const json expected{
-        {"schemaDialect", kDialect},
-        {"commands",
-         {{"account add", {{"result", "account-add.result.schema.json"}}},
-          {"account list", {{"result", "account-list.result.schema.json"}}},
-          {"account remove", {{"result", "account-remove.result.schema.json"}}},
-          {"account show", {{"result", "account-show.result.schema.json"}}},
-          {"account use", {{"result", "account-use.result.schema.json"}}},
-          {"chat archive", {{"result", "chat-archive.result.schema.json"}}},
-          {"chat join", {{"result", "chat-join.result.schema.json"}}},
-          {"chat leave", {{"result", "chat-leave.result.schema.json"}}},
-          {"chat mark-read", {{"result", "chat-mark-read.result.schema.json"}}},
-          {"chat mute", {{"result", "chat-mute.result.schema.json"}}},
-          {"chat pin", {{"result", "chat-pin.result.schema.json"}}},
-          {"chat unarchive", {{"result", "chat-unarchive.result.schema.json"}}},
-          {"chat unmute", {{"result", "chat-unmute.result.schema.json"}}},
-          {"chat unpin", {{"result", "chat-unpin.result.schema.json"}}},
-          {"chats", {{"result", "chats.result.schema.json"}}},
-          {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
-          {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
-          {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
-          {"doctor", {{"result", "doctor.result.schema.json"}}},
-          {"fetch", {{"result", "fetch.result.schema.json"}}},
-          {"login", {{"result", "login.result.schema.json"}}},
-          {"logout", {{"result", "logout.result.schema.json"}}},
-          {"me", {{"result", "me.result.schema.json"}}},
-          {"msg delete", {{"result", "msg-delete.result.schema.json"}}},
-          {"msg edit", {{"result", "msg-edit.result.schema.json"}}},
-          {"msg forward", {{"result", "msg-forward.result.schema.json"}}},
-          {"msg get", {{"result", "msg-get.result.schema.json"}}},
-          {"msg link", {{"result", "msg-link.result.schema.json"}}},
-          {"msg pin", {{"result", "msg-pin.result.schema.json"}}},
-          {"msg react", {{"result", "msg-react.result.schema.json"}}},
-          {"msg unpin", {{"result", "msg-unpin.result.schema.json"}}},
-          {"read", {{"result", "read.result.schema.json"}}},
-          {"resolve", {{"result", "resolve.result.schema.json"}}},
-          {"saved attach", {{"result", "saved-attach.result.schema.json"}}},
-          {"saved search", {{"result", "saved-search.result.schema.json"}}},
-          {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
-          {"send", {{"result", "send.result.schema.json"}}},
-          {"session list", {{"result", "session-list.result.schema.json"}}},
-          {"session terminate", {{"result", "session-terminate.result.schema.json"}}},
-          {"unread", {{"result", "unread.result.schema.json"}}},
-          {"version", {{"result", "version.result.schema.json"}}},
-          {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
+    json expected{{"schemaDialect", kDialect},
+                  {"commands",
+                   {{"account add", {{"result", "account-add.result.schema.json"}}},
+                    {"account list", {{"result", "account-list.result.schema.json"}}},
+                    {"account remove", {{"result", "account-remove.result.schema.json"}}},
+                    {"account show", {{"result", "account-show.result.schema.json"}}},
+                    {"account use", {{"result", "account-use.result.schema.json"}}},
+                    {"chat archive", {{"result", "chat-archive.result.schema.json"}}},
+                    {"chat join", {{"result", "chat-join.result.schema.json"}}},
+                    {"chat leave", {{"result", "chat-leave.result.schema.json"}}},
+                    {"chat mark-read", {{"result", "chat-mark-read.result.schema.json"}}},
+                    {"chat mute", {{"result", "chat-mute.result.schema.json"}}},
+                    {"chat pin", {{"result", "chat-pin.result.schema.json"}}},
+                    {"chat unarchive", {{"result", "chat-unarchive.result.schema.json"}}},
+                    {"chat unmute", {{"result", "chat-unmute.result.schema.json"}}},
+                    {"chat unpin", {{"result", "chat-unpin.result.schema.json"}}},
+                    {"chats", {{"result", "chats.result.schema.json"}}},
+                    {"daemon restart", {{"result", "daemon-restart.result.schema.json"}}},
+                    {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
+                    {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
+                    {"doctor", {{"result", "doctor.result.schema.json"}}},
+                    {"fetch", {{"result", "fetch.result.schema.json"}}},
+                    {"login", {{"result", "login.result.schema.json"}}},
+                    {"logout", {{"result", "logout.result.schema.json"}}},
+                    {"me", {{"result", "me.result.schema.json"}}},
+                    {"msg delete", {{"result", "msg-delete.result.schema.json"}}},
+                    {"msg edit", {{"result", "msg-edit.result.schema.json"}}},
+                    {"msg forward", {{"result", "msg-forward.result.schema.json"}}},
+                    {"msg get", {{"result", "msg-get.result.schema.json"}}},
+                    {"msg link", {{"result", "msg-link.result.schema.json"}}},
+                    {"msg pin", {{"result", "msg-pin.result.schema.json"}}},
+                    {"msg react", {{"result", "msg-react.result.schema.json"}}},
+                    {"msg unpin", {{"result", "msg-unpin.result.schema.json"}}},
+                    {"read", {{"result", "read.result.schema.json"}}},
+                    {"resolve", {{"result", "resolve.result.schema.json"}}},
+                    {"saved attach", {{"result", "saved-attach.result.schema.json"}}},
+                    {"saved search", {{"result", "saved-search.result.schema.json"}}},
+                    {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
+                    {"send", {{"result", "send.result.schema.json"}}},
+                    {"session list", {{"result", "session-list.result.schema.json"}}},
+                    {"session terminate", {{"result", "session-terminate.result.schema.json"}}},
+                    {"unread", {{"result", "unread.result.schema.json"}}},
+                    {"version", {{"result", "version.result.schema.json"}}},
+                    {"wait-for", {{"result", "wait-for.result.schema.json"}}}}}};
+    for (const auto& identity : tgcli::proto::m6_operation_identities()) {
+        std::string filename(identity.command_path);
+        std::ranges::replace(filename, ' ', '-');
+        expected["commands"][identity.command_path] = {
+            {"result", filename + ".result.schema.json"}};
+    }
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 42);
+    CHECK(manifest["commands"].size() == 72);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

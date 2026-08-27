@@ -617,6 +617,7 @@ struct ChildDaemonOptions {
     bool require_no_dispatch = false;
     bool read_alias_fixture = false;
     bool message_write_fixture = false;
+    bool m6_fixture = false;
     bool stream_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
@@ -979,6 +980,40 @@ class ChildProtocolDaemon {
                                                        daemon::M3Operation::ChatLeave});
             dispatcher.register_command("saved attach", {daemon::Tier::Write, normalized, false,
                                                          daemon::M3Operation::SavedAttach});
+        }
+        if (options.m6_fixture) {
+            const auto normalized = [](const proto::Request& request,
+                                       daemon::RequestSession& session) {
+                session.result({{"command", request.command}, {"args", request.args}});
+            };
+            for (const auto& identity : proto::m6_operation_identities()) {
+                daemon::CommandDescriptor descriptor;
+                switch (identity.tier) {
+                case proto::M6Tier::Read:
+                    descriptor.tier = daemon::Tier::Read;
+                    break;
+                case proto::M6Tier::Write:
+                    descriptor.tier = daemon::Tier::Write;
+                    break;
+                case proto::M6Tier::Destructive:
+                    descriptor.tier = daemon::Tier::Destructive;
+                    break;
+                }
+                descriptor.handler = normalized;
+                descriptor.m6_operation = identity.operation;
+                dispatcher.register_command(std::string(identity.command_path),
+                                            std::move(descriptor));
+            }
+            daemon::CommandDescriptor list;
+            list.tier = daemon::Tier::Read;
+            list.handler = normalized;
+            list.session_operation = proto::SessionOperation::List;
+            dispatcher.register_command("session list", std::move(list));
+            daemon::CommandDescriptor terminate;
+            terminate.tier = daemon::Tier::Destructive;
+            terminate.handler = normalized;
+            terminate.session_operation = proto::SessionOperation::Terminate;
+            dispatcher.register_command("session terminate", std::move(terminate));
         }
         if (options.stream_fixture) {
             dispatcher.register_command(
@@ -3535,6 +3570,277 @@ TEST_CASE("chat mutation subprocesses emit exact normalized socket frames",
         CHECK(normalized["args"] == test_case.args);
     }
     CHECK(fixture.running());
+}
+
+TEST_CASE("all M6 and session CLI paths emit their exact normalized request shapes",
+          "[cli][m6][normalization][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.m6_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    struct Case {
+        std::string stem;
+        std::vector<std::string> arguments;
+        std::vector<std::string> command;
+        json args;
+    };
+    const std::vector<Case> cases{
+        {"m6-contact-list", {"--json", "contact", "list"}, {"contact", "list"}, json::object()},
+        {"m6-contact-search",
+         {"--json", "contact", "search", "ada"},
+         {"contact", "search"},
+         {{"query", "ada"}}},
+        {"m6-contact-add",
+         {"--json", "contact", "add", "@ada"},
+         {"contact", "add"},
+         {{"user", "@ada"}}},
+        {"m6-contact-remove",
+         {"--json", "contact", "remove", "77"},
+         {"contact", "remove"},
+         {{"user", "77"}}},
+        {"m6-contact-block",
+         {"--json", "contact", "block", "77"},
+         {"contact", "block"},
+         {{"user", "77"}}},
+        {"m6-contact-unblock",
+         {"--json", "contact", "unblock", "77"},
+         {"contact", "unblock"},
+         {{"user", "77"}}},
+        {"m6-folder-list", {"--json", "folder", "list"}, {"folder", "list"}, json::object()},
+        {"m6-folder-show",
+         {"--json", "folder", "show", "7"},
+         {"folder", "show"},
+         {{"folder_id", 7}}},
+        {"m6-folder-create",
+         {"--json", "folder", "create", "Work", "--chat", "-1001", "--chat", "@team", "--icon",
+          "work", "--color", "2"},
+         {"folder", "create"},
+         {{"name", "Work"},
+          {"chats", json::array({"-1001", "@team"})},
+          {"icon", "work"},
+          {"color_id", 2}}},
+        {"m6-folder-edit",
+         {"--json", "folder", "edit", "7", "--icon", "default"},
+         {"folder", "edit"},
+         {{"folder_id", 7},
+          {"name", nullptr},
+          {"icon", nullptr},
+          {"use_default_icon", true},
+          {"color_id", nullptr}}},
+        {"m6-folder-delete",
+         {"--json", "--yes", "folder", "delete", "7"},
+         {"folder", "delete"},
+         {{"folder_id", 7}}},
+        {"m6-folder-add",
+         {"--json", "folder", "add-chat", "7", "-1001"},
+         {"folder", "add-chat"},
+         {{"folder_id", 7}, {"chat", "-1001"}}},
+        {"m6-folder-remove",
+         {"--json", "folder", "remove-chat", "7", "-1001"},
+         {"folder", "remove-chat"},
+         {{"folder_id", 7}, {"chat", "-1001"}}},
+        {"m6-topic-list",
+         {"--json", "topic", "list", "-1001"},
+         {"topic", "list"},
+         {{"chat", "-1001"}}},
+        {"m6-topic-create",
+         {"--json", "topic", "create", "-1001", "Updates", "--icon", "purple"},
+         {"topic", "create"},
+         {{"chat", "-1001"}, {"name", "Updates"}, {"icon", "purple"}}},
+        {"m6-topic-edit",
+         {"--json", "topic", "edit", "-1001", "9", "News"},
+         {"topic", "edit"},
+         {{"chat", "-1001"}, {"topic_id", 9}, {"name", "News"}}},
+        {"m6-topic-close",
+         {"--json", "topic", "close", "-1001", "9"},
+         {"topic", "close"},
+         {{"chat", "-1001"}, {"topic_id", 9}}},
+        {"m6-topic-reopen",
+         {"--json", "topic", "reopen", "-1001", "9"},
+         {"topic", "reopen"},
+         {{"chat", "-1001"}, {"topic_id", 9}}},
+        {"m6-title",
+         {"--json", "chat", "set-title", "-1001", "Renamed"},
+         {"chat", "set-title"},
+         {{"chat", "-1001"}, {"title", "Renamed"}}},
+        {"m6-photo",
+         {"--json", "chat", "set-photo", "-1001", "/tmp/photo.jpg"},
+         {"chat", "set-photo"},
+         {{"chat", "-1001"}, {"path", "/tmp/photo.jpg"}}},
+        {"m6-photo-delete",
+         {"--json", "chat", "set-photo", "-1001", "--delete"},
+         {"chat", "set-photo"},
+         {{"chat", "-1001"}, {"delete", true}}},
+        {"m6-description",
+         {"--json", "chat", "set-description", "-1001", "A chat"},
+         {"chat", "set-description"},
+         {{"chat", "-1001"}, {"description", "A chat"}}},
+        {"m6-invite",
+         {"--json", "--yes", "chat", "invite-link", "-1001"},
+         {"chat", "invite-link"},
+         {{"chat", "-1001"}, {"revoke", nullptr}}},
+        {"m6-promote",
+         {"--json", "chat", "promote", "-1001", "77", "--rights", "change-info,invite-users"},
+         {"chat", "promote"},
+         {{"chat", "-1001"},
+          {"user", "77"},
+          {"rights", json::array({"change-info", "invite-users"})}}},
+        {"m6-demote",
+         {"--json", "chat", "demote", "-1001", "77"},
+         {"chat", "demote"},
+         {{"chat", "-1001"}, {"user", "77"}}},
+        {"m6-ban",
+         {"--json", "--yes", "chat", "ban", "-1001", "77"},
+         {"chat", "ban"},
+         {{"chat", "-1001"}, {"user", "77"}}},
+        {"m6-unban",
+         {"--json", "chat", "unban", "-1001", "77"},
+         {"chat", "unban"},
+         {{"chat", "-1001"}, {"user", "77"}}},
+        {"m6-kick",
+         {"--json", "--yes", "chat", "kick", "-1001", "77"},
+         {"chat", "kick"},
+         {{"chat", "-1001"}, {"user", "77"}}},
+        {"m6-permissions",
+         {"--json", "chat", "set-permissions", "-1001", "--permissions", "none"},
+         {"chat", "set-permissions"},
+         {{"chat", "-1001"}, {"permissions", json::array()}}},
+        {"m6-storage-stats", {"--json", "storage", "stats"}, {"storage", "stats"}, json::object()},
+        {"m6-storage-optimize",
+         {"--json", "--yes", "storage", "optimize"},
+         {"storage", "optimize"},
+         json::object()},
+        {"m6-session-list", {"--json", "session", "list"}, {"session", "list"}, json::object()},
+        {"m6-session-terminate",
+         {"--json", "--yes", "session", "terminate", "0"},
+         {"session", "terminate"},
+         {{"session_id", "0"}}},
+    };
+    for (const auto& test_case : cases) {
+        const auto outcome = run_binary_captured(test_case.arguments, env, test_case.stem);
+        INFO(test_case.stem << ": " << outcome.err);
+        REQUIRE(outcome.exit_code == kOk);
+        CHECK(outcome.err.empty());
+        const auto normalized = json::parse(outcome.out);
+        CHECK(normalized["command"] == test_case.command);
+        CHECK(normalized["args"] == test_case.args);
+    }
+    CHECK(fixture.running());
+}
+
+TEST_CASE("M6 storage stats no-daemon uses the registered production coordinator",
+          "[cli][m6][storage][no-daemon][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    REQUIRE(scripted->clients().size() == 1);
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->data.state != core::AuthState::Ready &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->data.state == core::AuthState::Ready);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+
+    proto::Request request("main");
+    request.id = 71;
+    request.command = {"storage", "stats"};
+    request.args = json::object();
+    request.context.json = true;
+    request.context.cwd = "/";
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+    REQUIRE(scripted->wait_for_sent(2));
+    auto sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                                    .first_name = "Ada",
+                                                                    .last_name = "",
+                                                                    .usernames = {"ada"},
+                                                                    .phone_number = "12025550123",
+                                                                    .is_bot = false,
+                                                                    .is_premium = false}));
+    REQUIRE(scripted->wait_for_sent(3));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetStorageStatistics);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdM6Response{core::TdM6StorageStatistics{}}));
+    const auto outcome = pending.get();
+    REQUIRE(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    const auto result = json::parse(outcome.out);
+    CHECK(result == json{{"size", 0}, {"count", 0}, {"by_chat", json::array()}});
+    CHECK_THAT(result, test::matches_json_schema("storage-stats.result.schema.json"));
+}
+
+TEST_CASE("M6 CLI rejects canonical spelling bounds and forbidden global modes locally",
+          "[cli][m6][parser][process]") {
+    const IsolatedEnv env;
+    std::vector<std::pair<std::string, std::vector<std::string>>> cases{
+        {"m6-contact-query-empty", {"contact", "search", ""}},
+        {"m6-contact-selector-name", {"contact", "add", "ada"}},
+        {"m6-folder-zero", {"folder", "show", "0"}},
+        {"m6-folder-plus", {"folder", "show", "+1"}},
+        {"m6-folder-leading-zero", {"folder", "show", "01"}},
+        {"m6-folder-over", {"folder", "show", "2147483648"}},
+        {"m6-folder-create-no-chat", {"folder", "create", "Work"}},
+        {"m6-folder-create-space", {"folder", "create", " Work", "--chat", "-1001"}},
+        {"m6-folder-icon", {"folder", "create", "Work", "--chat", "-1001", "--icon", "future"}},
+        {"m6-folder-color", {"folder", "create", "Work", "--chat", "-1001", "--color", "7"}},
+        {"m6-folder-edit-empty", {"folder", "edit", "7"}},
+        {"m6-topic-selector", {"topic", "list", "project"}},
+        {"m6-topic-name", {"topic", "create", "-1001", " Updates", "--icon", "blue"}},
+        {"m6-topic-icon", {"topic", "create", "-1001", "Updates", "--icon", "orange"}},
+        {"m6-topic-zero", {"topic", "close", "-1001", "0"}},
+        {"m6-title-space", {"chat", "set-title", "-1001", " Renamed"}},
+        {"m6-photo-both", {"chat", "set-photo", "-1001", "/tmp/a.jpg", "--delete"}},
+        {"m6-invite-invalid", {"chat", "invite-link", "-1001", "--revoke", "bad\nlink"}},
+        {"m6-right-unknown", {"chat", "promote", "-1001", "77", "--rights", "future"}},
+        {"m6-right-duplicate",
+         {"chat", "promote", "-1001", "77", "--rights", "change-info,change-info"}},
+        {"m6-permission-unknown", {"chat", "set-permissions", "-1001", "--permissions", "future"}},
+        {"m6-permission-duplicate",
+         {"chat", "set-permissions", "-1001", "--permissions",
+          "send-basic-messages,send-basic-messages"}},
+        {"m6-session-plus", {"session", "terminate", "+1"}},
+        {"m6-session-leading-zero", {"session", "terminate", "01"}},
+        {"m6-session-over", {"session", "terminate", "9223372036854775808"}},
+        {"m6-session-under", {"session", "terminate", "-9223372036854775809"}},
+        {"m6-read-cursor", {"--cursor", "opaque", "contact", "list"}},
+        {"m6-read-idempotency", {"--idempotency-key", "key", "storage", "stats"}},
+        {"m6-nonidempotent-key", {"--idempotency-key", "key", "storage", "optimize"}},
+        {"m6-session-key", {"--idempotency-key", "key", "session", "terminate", "7"}},
+        {"m6-read-dry-run", {"--dry-run", "contact", "list"}},
+        {"m6-read-local", {"--local", "folder", "list"}},
+        {"m6-read-full", {"--full", "topic", "list", "-1001"}},
+    };
+    std::vector<std::string> too_many_chats{"folder", "create", "Work"};
+    for (int index = 0; index < 101; ++index) {
+        too_many_chats.emplace_back("--chat");
+        too_many_chats.push_back(std::to_string(index + 1));
+    }
+    cases.emplace_back("m6-folder-101-chats", std::move(too_many_chats));
+
+    for (const auto& [stem, arguments] : cases) {
+        const auto outcome = run_binary_captured(arguments, env, stem);
+        INFO(stem << ": " << outcome.err);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        REQUIRE_FALSE(outcome.err.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
 }
 
 TEST_CASE("msg forward socket and no-daemon dispatch preserve the same normalized frame",

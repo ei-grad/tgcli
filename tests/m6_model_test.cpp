@@ -104,12 +104,12 @@ TEST_CASE("M6 folder and session list projection retain exact upstream order", "
 
 TEST_CASE("M6 folder snapshot rejects every duplicate and cross-list duplicate", "[m6][model]") {
     const auto info = folder_info();
-    core::TdM6ChatFolder folder{.name = info.name,
-                                .icon = core::TdM6FolderIcon::Work,
-                                .color_id = 3,
-                                .pinned_chat_ids = {-1001},
-                                .included_chat_ids = {-1002},
-                                .excluded_chat_ids = {-1003}};
+    const core::TdM6ChatFolder folder{.name = info.name,
+                                      .icon = core::TdM6FolderIcon::Work,
+                                      .color_id = 3,
+                                      .pinned_chat_ids = {-1001},
+                                      .included_chat_ids = {-1002},
+                                      .excluded_chat_ids = {-1003}};
     REQUIRE(daemon::m6_folder_snapshot_json(7, folder, info));
 
     for (const auto duplicate : {-1001LL, -1002LL, -1003LL}) {

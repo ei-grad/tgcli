@@ -19,8 +19,20 @@
     "chat archive": {
       "result": "chat-archive.result.schema.json"
     },
+    "chat ban": {
+      "result": "chat-ban.result.schema.json"
+    },
+    "chat demote": {
+      "result": "chat-demote.result.schema.json"
+    },
+    "chat invite-link": {
+      "result": "chat-invite-link.result.schema.json"
+    },
     "chat join": {
       "result": "chat-join.result.schema.json"
+    },
+    "chat kick": {
+      "result": "chat-kick.result.schema.json"
     },
     "chat leave": {
       "result": "chat-leave.result.schema.json"
@@ -34,8 +46,26 @@
     "chat pin": {
       "result": "chat-pin.result.schema.json"
     },
+    "chat promote": {
+      "result": "chat-promote.result.schema.json"
+    },
+    "chat set-description": {
+      "result": "chat-set-description.result.schema.json"
+    },
+    "chat set-permissions": {
+      "result": "chat-set-permissions.result.schema.json"
+    },
+    "chat set-photo": {
+      "result": "chat-set-photo.result.schema.json"
+    },
+    "chat set-title": {
+      "result": "chat-set-title.result.schema.json"
+    },
     "chat unarchive": {
       "result": "chat-unarchive.result.schema.json"
+    },
+    "chat unban": {
+      "result": "chat-unban.result.schema.json"
     },
     "chat unmute": {
       "result": "chat-unmute.result.schema.json"
@@ -46,8 +76,23 @@
     "chats": {
       "result": "chats.result.schema.json"
     },
-    "daemon stop": {
-      "result": "daemon-stop.result.schema.json"
+    "contact add": {
+      "result": "contact-add.result.schema.json"
+    },
+    "contact block": {
+      "result": "contact-block.result.schema.json"
+    },
+    "contact list": {
+      "result": "contact-list.result.schema.json"
+    },
+    "contact remove": {
+      "result": "contact-remove.result.schema.json"
+    },
+    "contact search": {
+      "result": "contact-search.result.schema.json"
+    },
+    "contact unblock": {
+      "result": "contact-unblock.result.schema.json"
     },
     "daemon restart": {
       "result": "daemon-restart.result.schema.json"
@@ -55,11 +100,35 @@
     "daemon status": {
       "result": "daemon-status.result.schema.json"
     },
+    "daemon stop": {
+      "result": "daemon-stop.result.schema.json"
+    },
     "doctor": {
       "result": "doctor.result.schema.json"
     },
     "fetch": {
       "result": "fetch.result.schema.json"
+    },
+    "folder add-chat": {
+      "result": "folder-add-chat.result.schema.json"
+    },
+    "folder create": {
+      "result": "folder-create.result.schema.json"
+    },
+    "folder delete": {
+      "result": "folder-delete.result.schema.json"
+    },
+    "folder edit": {
+      "result": "folder-edit.result.schema.json"
+    },
+    "folder list": {
+      "result": "folder-list.result.schema.json"
+    },
+    "folder remove-chat": {
+      "result": "folder-remove-chat.result.schema.json"
+    },
+    "folder show": {
+      "result": "folder-show.result.schema.json"
     },
     "login": {
       "result": "login.result.schema.json"
@@ -117,6 +186,27 @@
     },
     "session terminate": {
       "result": "session-terminate.result.schema.json"
+    },
+    "storage optimize": {
+      "result": "storage-optimize.result.schema.json"
+    },
+    "storage stats": {
+      "result": "storage-stats.result.schema.json"
+    },
+    "topic close": {
+      "result": "topic-close.result.schema.json"
+    },
+    "topic create": {
+      "result": "topic-create.result.schema.json"
+    },
+    "topic edit": {
+      "result": "topic-edit.result.schema.json"
+    },
+    "topic list": {
+      "result": "topic-list.result.schema.json"
+    },
+    "topic reopen": {
+      "result": "topic-reopen.result.schema.json"
     },
     "unread": {
       "result": "unread.result.schema.json"

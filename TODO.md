@@ -367,33 +367,33 @@ before the milestone is closed.
       closed family-local absence schemas, structural-before-progress topic
       cursor precedence with exact server-MessageId validation,
       daemon/no-daemon parity, schemas and acceptance gates
-- [ ] Add the complete dormant typed TD boundary and conversion foundation for
+- [x] Add the complete dormant typed TD boundary and conversion foundation for
       contacts, folder cache/snapshots, paged topics, chat admin/member/photo/
       invite-link calls and storage statistics/default optimization; pin every
       constructor, field, variant, bound and forbidden call to a17f87c4
-- [ ] Add strict shared M6 CLI/frame parsing, canonical numeric/string ids,
+- [x] Add strict shared M6 CLI/frame parsing, canonical numeric/string ids,
       exact-only mutation selectors, closed folder/topic/right/permission/file-
       type enums and the common 60-second admission/generation lifecycle
-- [ ] Extend WriteKernel/audit/recovery atomically with all 24 mutation
+- [x] Extend WriteKernel/audit/recovery atomically with all 24 mutation
       operations, the exact 22-operation idempotency allowlist, auth-bound
       dry-run planning, redaction, photo spool proof and no-post-mutation-read
       enforcement
-- [ ] Implement the five domain coordinators bottom-up: contact typed-user
+- [x] Implement the five domain coordinators bottom-up: contact typed-user
       hydration; generation-scoped folder update cache and full-snapshot RMW;
       bounded all-page topics; member/right/photo/invite administration; and
       Ready-bound storage defaults
-- [ ] Add all 30 strict result schemas and five family error schemas together
+- [x] Add all 30 strict result schemas and five family error schemas together
       with result/error catalogs, generated embedded/package assets and the
       24-operation audit schema union; keep source/catalog/runtime bijections
       exact and expose no partially implemented command
-- [ ] Atomically activate/register the 30-command CLI/frame/safety surface only
+- [x] Atomically activate/register the 30-command CLI/frame/safety surface only
       after handlers, native/fake boundaries, WriteKernel, schemas, human
       pretty-JSON fallback and focused tests are complete and green
-- [ ] Add exhaustive parser/native/fake/generation/pagination/member/spool/
+- [x] Add exhaustive parser/native/fake/generation/pagination/member/spool/
       redaction/crash/TSan/schema/package tests for the §4.9 matrix, plus the
       non-mutating `m6.storage.stats` TestDC evidence flow; run no live
       mutation and keep macOS runtime evidence in CI
-- [ ] Freeze the §4.7 session-only grammar/frame args, full signed-int64 string
+- [x] Freeze the §4.7 session-only grammar/frame args, full signed-int64 string
       identity including zero, 17-value device enum, strict DTO/error/human
       output, bot/current/business-bot semantics, deadlines, TDLib acceptance
       meaning and no-idempotency decision
@@ -401,7 +401,7 @@ before the milestone is closed.
       `terminateSession` runtime factories/descriptors/native matchers,
       scripted-fake seams and unregistered safety-policy descriptors at pinned
       TDLib 1.8.65 / a17f87c4cff7b90b278d12b91ba0614383aaee82
-- [ ] Extend the dormant audit-v2 contract with session_terminate,
+- [x] Extend the dormant audit-v2 contract with session_terminate,
       idempotency_key_hash:null and pre-Ready/step-6 prior-group inspection;
       enforce AbsentByPolicy store access, block keyed incomplete groups, and
       use only non-evicting capacity without pin knowledge; expose no command
@@ -411,18 +411,18 @@ before the milestone is closed.
       `schema` CLI deferred M7
 - [x] Add the exact self-contained session error schema with all common,
       session-specific and account-global spool branches
-- [ ] Implement dormant complete list and terminate handlers with exact
+- [x] Implement dormant complete list and terminate handlers with exact
       Ready/getMe/bot/deadline ordering; wire terminate dispatch only through
       the already-integrated destructive authority/confirmation/config-CAS/
       audit-intent/dispatch/proof/outcome path, never around it
-- [ ] Add exhaustive dormant handler/CLI-frame/schema/human/fake/native/crash/
+- [x] Add exhaustive dormant handler/CLI-frame/schema/human/fake/native/crash/
       auth-loss/deadline tests, including zero and int64-outside-int53 ids, all
       device variants, current-session refusal, public-Ok semantics and
       business-bot exclusion
-- [ ] Atomically activate/register the complete `session list|terminate`
+- [x] Atomically activate/register the complete `session list|terminate`
       CLI/frame surface only after both handlers, safety policy, audit v2,
       schemas/renderers and focused tests are present and passing
-- [ ] Add the no-skip non-mutating Saved TestDC `m6.session.list` flow with
+- [x] Add the no-skip non-mutating Saved TestDC `m6.session.list` flow with
       verified daemon stop/lock release before `--no-daemon`, plus release-
       provenance checks; do not terminate a live/TestDC session
 - [ ] Review gate: session-only M6 semantic diff vs DESIGN.md §4.7 and pinned

@@ -121,7 +121,8 @@ ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core:
                 .identity = std::move(identity),
                 .error = std::nullopt,
                 .private_user_id = chat.related_id,
-                .private_user_presence = user->presence};
+                .private_user_presence = user->presence,
+                .observed_user = *user};
     }
     auto response =
         read([&](const auto& current) { return client.get_supergroup(current, chat.related_id); });
@@ -142,7 +143,8 @@ ChatIdentityResult materialize_chat_identity(core::TdClient& client, const core:
             .identity = std::move(identity),
             .error = std::nullopt,
             .private_user_id = std::nullopt,
-            .private_user_presence = std::nullopt};
+            .private_user_presence = std::nullopt,
+            .observed_supergroup = *supergroup};
 }
 
 nlohmann::json chat_identity_json(const ChatIdentity& identity) {

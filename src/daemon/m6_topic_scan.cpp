@@ -58,7 +58,7 @@ M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
     auto previous_order = previous_order_;
     std::size_t accepted_bytes = 0;
     for (const auto& topic : page.topics) {
-        const auto projected = m6_topic_row_json(topic);
+        auto projected = m6_topic_row_json(topic);
         if (!projected || topic.info.chat_id != chat_id_ || topic.info.id <= 0 ||
             topic_ids_.contains(topic.info.id) ||
             std::ranges::find(accepted_ids, topic.info.id) != accepted_ids.end() ||

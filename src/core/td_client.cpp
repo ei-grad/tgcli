@@ -92,6 +92,7 @@ std::optional<DescriptorKind> direct_mutation_tier(TdFunctionKind function) {
     case TdFunctionKind::CreateChatInviteLink:
     case TdFunctionKind::RevokeChatInviteLink:
     case TdFunctionKind::OptimizeStorage:
+    case TdFunctionKind::TerminateSession:
         return DescriptorKind::Destructive;
     default:
         return std::nullopt;
@@ -123,6 +124,8 @@ TdFunctionKind direct_request_kind(const TdDirectRequest& request) {
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                 return value.is_invite_request() ? TdFunctionKind::JoinChatByInviteLink
                                                  : TdFunctionKind::JoinChat;
+            } else if constexpr (std::is_same_v<Request, TdTerminateSessionRequest>) {
+                return TdFunctionKind::TerminateSession;
             } else if constexpr (std::is_same_v<Request, TdM6Request>) {
                 return td_m6_request_kind(value);
             } else {
@@ -722,6 +725,8 @@ class TdClient::Impl {
                         return runtime_->make_add_chat_to_list(input);
                     } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                         return runtime_->make_join_chat(std::forward<decltype(input)>(input));
+                    } else if constexpr (std::is_same_v<Request, TdTerminateSessionRequest>) {
+                        return runtime_->make_terminate_session(input.session_id);
                     } else if constexpr (std::is_same_v<Request, TdM6Request>) {
                         return runtime_->make_m6_function(std::forward<decltype(input)>(input));
                     } else {
@@ -1576,6 +1581,7 @@ class TdClient::Impl {
         return {std::move(lock), observed_at};
     }
 
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity): atomic auth/query event arbiter.
     void handle_event(TdRuntimeEvent event) {
         std::shared_ptr<Generation> generation;
         {

@@ -1,4 +1,5 @@
 #include "cli/schema_catalog.hpp"
+#include "proto/operation.hpp"
 #include "schema_matcher.hpp"
 
 #include <algorithm>
@@ -115,43 +116,60 @@ TEST_CASE("embedded schema catalogs and documents preserve exact source bytes",
 
 TEST_CASE("non-stream error manifest is the exact accepted command authority",
           "[schema][catalog][error]") {
-    const json expected{{"schemaDialect", "https://json-schema.org/draft/2020-12/schema"},
-                        {"commands",
-                         {{"account add", {{"error", "account.error.schema.json"}}},
-                          {"account list", {{"error", "account.error.schema.json"}}},
-                          {"account remove", {{"error", "account-remove.error.schema.json"}}},
-                          {"account show", {{"error", "account.error.schema.json"}}},
-                          {"account use", {{"error", "account.error.schema.json"}}},
-                          {"chat archive", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat join", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat leave", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat mark-read", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat mute", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat pin", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat unarchive", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat unmute", {{"error", "m3-write.error.schema.json"}}},
-                          {"chat unpin", {{"error", "m3-write.error.schema.json"}}},
-                          {"daemon restart", {{"error", "daemon.error.schema.json"}}},
-                          {"daemon status", {{"error", "daemon.error.schema.json"}}},
-                          {"daemon stop", {{"error", "daemon.error.schema.json"}}},
-                          {"doctor", {{"error", "meta.error.schema.json"}}},
-                          {"login", {{"error", "auth.error.schema.json"}}},
-                          {"logout", {{"error", "logout.error.schema.json"}}},
-                          {"me", {{"error", "auth.error.schema.json"}}},
-                          {"msg delete", {{"error", "m3-write.error.schema.json"}}},
-                          {"msg edit", {{"error", "m3-write.error.schema.json"}}},
-                          {"msg forward", {{"error", "m3-write.error.schema.json"}}},
-                          {"msg pin", {{"error", "m3-write.error.schema.json"}}},
-                          {"msg react", {{"error", "m3-write.error.schema.json"}}},
-                          {"msg unpin", {{"error", "m3-write.error.schema.json"}}},
-                          {"resolve", {{"error", "resolve.error.schema.json"}}},
-                          {"saved attach", {{"error", "m3-write.error.schema.json"}}},
-                          {"saved search", {{"error", "saved.error.schema.json"}}},
-                          {"saved tags", {{"error", "saved.error.schema.json"}}},
-                          {"send", {{"error", "m3-write.error.schema.json"}}},
-                          {"session list", {{"error", "session.error.schema.json"}}},
-                          {"session terminate", {{"error", "session.error.schema.json"}}},
-                          {"version", {{"error", "meta.error.schema.json"}}}}}};
+    json expected{{"schemaDialect", "https://json-schema.org/draft/2020-12/schema"},
+                  {"commands",
+                   {{"account add", {{"error", "account.error.schema.json"}}},
+                    {"account list", {{"error", "account.error.schema.json"}}},
+                    {"account remove", {{"error", "account-remove.error.schema.json"}}},
+                    {"account show", {{"error", "account.error.schema.json"}}},
+                    {"account use", {{"error", "account.error.schema.json"}}},
+                    {"chat archive", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat join", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat leave", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat mark-read", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat mute", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat pin", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat unarchive", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat unmute", {{"error", "m3-write.error.schema.json"}}},
+                    {"chat unpin", {{"error", "m3-write.error.schema.json"}}},
+                    {"daemon restart", {{"error", "daemon.error.schema.json"}}},
+                    {"daemon status", {{"error", "daemon.error.schema.json"}}},
+                    {"daemon stop", {{"error", "daemon.error.schema.json"}}},
+                    {"doctor", {{"error", "meta.error.schema.json"}}},
+                    {"login", {{"error", "auth.error.schema.json"}}},
+                    {"logout", {{"error", "logout.error.schema.json"}}},
+                    {"me", {{"error", "auth.error.schema.json"}}},
+                    {"msg delete", {{"error", "m3-write.error.schema.json"}}},
+                    {"msg edit", {{"error", "m3-write.error.schema.json"}}},
+                    {"msg forward", {{"error", "m3-write.error.schema.json"}}},
+                    {"msg pin", {{"error", "m3-write.error.schema.json"}}},
+                    {"msg react", {{"error", "m3-write.error.schema.json"}}},
+                    {"msg unpin", {{"error", "m3-write.error.schema.json"}}},
+                    {"resolve", {{"error", "resolve.error.schema.json"}}},
+                    {"saved attach", {{"error", "m3-write.error.schema.json"}}},
+                    {"saved search", {{"error", "saved.error.schema.json"}}},
+                    {"saved tags", {{"error", "saved.error.schema.json"}}},
+                    {"send", {{"error", "m3-write.error.schema.json"}}},
+                    {"session list", {{"error", "session.error.schema.json"}}},
+                    {"session terminate", {{"error", "session.error.schema.json"}}},
+                    {"version", {{"error", "meta.error.schema.json"}}}}}};
+    const auto m6_error_schema = [](std::string_view operation) {
+        if (operation.starts_with("contact_")) {
+            return "contact.error.schema.json";
+        }
+        if (operation.starts_with("folder_")) {
+            return "folder.error.schema.json";
+        }
+        if (operation.starts_with("topic_")) {
+            return "topic.error.schema.json";
+        }
+        return operation.starts_with("chat_") ? "chat-admin.error.schema.json"
+                                              : "storage.error.schema.json";
+    };
+    for (const auto& identity : tgcli::proto::m6_operation_identities()) {
+        const auto* const family = m6_error_schema(identity.canonical_name);
+        expected["commands"][identity.command_path] = {{"error", family}};
+    }
     CHECK(tgcli::test::load_schema_document("error-manifest.json") == expected);
     CHECK_FALSE(expected.at("commands").contains("chats"));
     CHECK_FALSE(expected.at("commands").contains("fetch"));

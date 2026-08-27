@@ -19,8 +19,20 @@
     "chat archive": {
       "error": "m3-write.error.schema.json"
     },
+    "chat ban": {
+      "error": "chat-admin.error.schema.json"
+    },
+    "chat demote": {
+      "error": "chat-admin.error.schema.json"
+    },
+    "chat invite-link": {
+      "error": "chat-admin.error.schema.json"
+    },
     "chat join": {
       "error": "m3-write.error.schema.json"
+    },
+    "chat kick": {
+      "error": "chat-admin.error.schema.json"
     },
     "chat leave": {
       "error": "m3-write.error.schema.json"
@@ -34,14 +46,50 @@
     "chat pin": {
       "error": "m3-write.error.schema.json"
     },
+    "chat promote": {
+      "error": "chat-admin.error.schema.json"
+    },
+    "chat set-description": {
+      "error": "chat-admin.error.schema.json"
+    },
+    "chat set-permissions": {
+      "error": "chat-admin.error.schema.json"
+    },
+    "chat set-photo": {
+      "error": "chat-admin.error.schema.json"
+    },
+    "chat set-title": {
+      "error": "chat-admin.error.schema.json"
+    },
     "chat unarchive": {
       "error": "m3-write.error.schema.json"
+    },
+    "chat unban": {
+      "error": "chat-admin.error.schema.json"
     },
     "chat unmute": {
       "error": "m3-write.error.schema.json"
     },
     "chat unpin": {
       "error": "m3-write.error.schema.json"
+    },
+    "contact add": {
+      "error": "contact.error.schema.json"
+    },
+    "contact block": {
+      "error": "contact.error.schema.json"
+    },
+    "contact list": {
+      "error": "contact.error.schema.json"
+    },
+    "contact remove": {
+      "error": "contact.error.schema.json"
+    },
+    "contact search": {
+      "error": "contact.error.schema.json"
+    },
+    "contact unblock": {
+      "error": "contact.error.schema.json"
     },
     "daemon restart": {
       "error": "daemon.error.schema.json"
@@ -54,6 +102,27 @@
     },
     "doctor": {
       "error": "meta.error.schema.json"
+    },
+    "folder add-chat": {
+      "error": "folder.error.schema.json"
+    },
+    "folder create": {
+      "error": "folder.error.schema.json"
+    },
+    "folder delete": {
+      "error": "folder.error.schema.json"
+    },
+    "folder edit": {
+      "error": "folder.error.schema.json"
+    },
+    "folder list": {
+      "error": "folder.error.schema.json"
+    },
+    "folder remove-chat": {
+      "error": "folder.error.schema.json"
+    },
+    "folder show": {
+      "error": "folder.error.schema.json"
     },
     "login": {
       "error": "auth.error.schema.json"
@@ -102,6 +171,27 @@
     },
     "session terminate": {
       "error": "session.error.schema.json"
+    },
+    "storage optimize": {
+      "error": "storage.error.schema.json"
+    },
+    "storage stats": {
+      "error": "storage.error.schema.json"
+    },
+    "topic close": {
+      "error": "topic.error.schema.json"
+    },
+    "topic create": {
+      "error": "topic.error.schema.json"
+    },
+    "topic edit": {
+      "error": "topic.error.schema.json"
+    },
+    "topic list": {
+      "error": "topic.error.schema.json"
+    },
+    "topic reopen": {
+      "error": "topic.error.schema.json"
     },
     "version": {
       "error": "meta.error.schema.json"

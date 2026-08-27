@@ -214,6 +214,10 @@ bool valid_td_direct_request(const TdLeaveChatRequest& request) noexcept {
     return valid_td_chat_id(request.chat_id);
 }
 
+bool valid_td_direct_request(const TdTerminateSessionRequest& request) noexcept {
+    return request.session_id != 0;
+}
+
 bool valid_td_direct_request(const TdM6Request& request) noexcept {
     return valid_td_m6_request(request) && !td_m6_request_is_read(request);
 }

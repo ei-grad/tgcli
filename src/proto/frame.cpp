@@ -29,11 +29,15 @@ bool invite_request(const std::vector<std::string>& command, const nlohmann::jso
 void wipe_invite_request_args(const std::vector<std::string>& command, nlohmann::json& args,
                               const secure::WipeObserver& observer,
                               std::string_view stage) noexcept {
-    if (!invite_request(command, args)) {
-        return;
-    }
     try {
-        secure::wipe(args["target"].get_ref<std::string&>(), observer, stage);
+        if (invite_request(command, args)) {
+            secure::wipe(args["target"].get_ref<std::string&>(), observer, stage);
+            return;
+        }
+        if (command == std::vector<std::string>{"chat", "invite-link"} && args.is_object() &&
+            args.contains("revoke") && args["revoke"].is_string()) {
+            secure::wipe(args["revoke"].get_ref<std::string&>(), observer, stage);
+        }
     } catch (...) {
         return;
     }

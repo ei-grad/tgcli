@@ -47,12 +47,12 @@ std::span<const M6WritePolicy> m6_write_policies() noexcept {
 }
 
 const M6WritePolicy* m6_write_policy(proto::M6Operation operation) noexcept {
-    const auto found = std::ranges::find(kPolicies, operation, &M6WritePolicy::operation);
+    const auto* const found = std::ranges::find(kPolicies, operation, &M6WritePolicy::operation);
     return found == kPolicies.end() ? nullptr : &*found;
 }
 
 std::optional<proto::M6Operation> parse_m6_write_operation(std::string_view audit_name) noexcept {
-    const auto found = std::ranges::find(kPolicies, audit_name, &M6WritePolicy::audit_name);
+    const auto* const found = std::ranges::find(kPolicies, audit_name, &M6WritePolicy::audit_name);
     return found == kPolicies.end() ? std::nullopt : std::optional{found->operation};
 }
 

@@ -1,0 +1,940 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli chat unban result",
+  "$defs": {
+    "account": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "int53": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": {
+        "const": 0
+      }
+    },
+    "positiveInt53": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "positiveInt32": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "nonnegativeInt32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "int32": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "int64String": {
+      "type": "string",
+      "pattern": "^(?:0|-?[1-9][0-9]{0,18})$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "chat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "is_bot",
+        "usernames"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/int53"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "private",
+            "basic_group",
+            "supergroup",
+            "channel"
+          ]
+        },
+        "is_bot": {
+          "type": "boolean"
+        },
+        "usernames": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_]{1,32}$"
+          }
+        }
+      }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "display_name",
+        "usernames",
+        "is_bot"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/positiveInt53"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "usernames": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "is_bot": {
+          "type": "boolean"
+        }
+      }
+    },
+    "folderName": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "animate_custom_emoji",
+        "custom_emoji_entities"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12
+        },
+        "animate_custom_emoji": {
+          "type": "boolean"
+        },
+        "custom_emoji_entities": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "offset",
+              "length",
+              "custom_emoji_id"
+            ],
+            "properties": {
+              "offset": {
+                "$ref": "#/$defs/nonnegativeInt32"
+              },
+              "length": {
+                "$ref": "#/$defs/positiveInt32"
+              },
+              "custom_emoji_id": {
+                "$ref": "#/$defs/int64String"
+              }
+            }
+          }
+        }
+      }
+    },
+    "folderSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "icon",
+        "color_id",
+        "is_shareable",
+        "has_my_invite_links"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/positiveInt32"
+        },
+        "name": {
+          "$ref": "#/$defs/folderName"
+        },
+        "icon": {
+          "enum": [
+            "all",
+            "unread",
+            "unmuted",
+            "bots",
+            "channels",
+            "groups",
+            "private",
+            "custom",
+            "setup",
+            "cat",
+            "crown",
+            "favorite",
+            "flower",
+            "game",
+            "home",
+            "love",
+            "mask",
+            "party",
+            "sport",
+            "study",
+            "trade",
+            "travel",
+            "work",
+            "airplane",
+            "book",
+            "light",
+            "like",
+            "money",
+            "note",
+            "palette"
+          ]
+        },
+        "color_id": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 6
+        },
+        "is_shareable": {
+          "type": "boolean"
+        },
+        "has_my_invite_links": {
+          "type": "boolean"
+        }
+      }
+    },
+    "folderSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "icon",
+        "color_id",
+        "is_shareable",
+        "has_my_invite_links",
+        "pinned_chat_ids",
+        "included_chat_ids",
+        "excluded_chat_ids",
+        "exclude_muted",
+        "exclude_read",
+        "exclude_archived",
+        "include_contacts",
+        "include_non_contacts",
+        "include_bots",
+        "include_groups",
+        "include_channels"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/positiveInt32"
+        },
+        "name": {
+          "$ref": "#/$defs/folderName"
+        },
+        "icon": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "all",
+                "unread",
+                "unmuted",
+                "bots",
+                "channels",
+                "groups",
+                "private",
+                "custom",
+                "setup",
+                "cat",
+                "crown",
+                "favorite",
+                "flower",
+                "game",
+                "home",
+                "love",
+                "mask",
+                "party",
+                "sport",
+                "study",
+                "trade",
+                "travel",
+                "work",
+                "airplane",
+                "book",
+                "light",
+                "like",
+                "money",
+                "note",
+                "palette"
+              ]
+            }
+          ]
+        },
+        "color_id": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 6
+        },
+        "is_shareable": {
+          "type": "boolean"
+        },
+        "has_my_invite_links": {
+          "type": "boolean"
+        },
+        "pinned_chat_ids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/int53"
+          }
+        },
+        "included_chat_ids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/int53"
+          }
+        },
+        "excluded_chat_ids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/int53"
+          }
+        },
+        "exclude_muted": {
+          "type": "boolean"
+        },
+        "exclude_read": {
+          "type": "boolean"
+        },
+        "exclude_archived": {
+          "type": "boolean"
+        },
+        "include_contacts": {
+          "type": "boolean"
+        },
+        "include_non_contacts": {
+          "type": "boolean"
+        },
+        "include_bots": {
+          "type": "boolean"
+        },
+        "include_groups": {
+          "type": "boolean"
+        },
+        "include_channels": {
+          "type": "boolean"
+        }
+      }
+    },
+    "sender": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "user"
+            },
+            "id": {
+              "$ref": "#/$defs/positiveInt53"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "chat"
+            },
+            "id": {
+              "$ref": "#/$defs/int53"
+            }
+          }
+        }
+      ]
+    },
+    "topicIcon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "color",
+        "custom_emoji_id"
+      ],
+      "properties": {
+        "color": {
+          "enum": [
+            "blue",
+            "yellow",
+            "purple",
+            "green",
+            "pink",
+            "red"
+          ]
+        },
+        "custom_emoji_id": {
+          "$ref": "#/$defs/int64String"
+        }
+      }
+    },
+    "topicInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chat_id",
+        "id",
+        "name",
+        "icon",
+        "creation_date",
+        "creator",
+        "is_general",
+        "is_outgoing",
+        "is_closed",
+        "is_hidden",
+        "is_name_implicit"
+      ],
+      "properties": {
+        "chat_id": {
+          "$ref": "#/$defs/int53"
+        },
+        "id": {
+          "$ref": "#/$defs/positiveInt32"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "icon": {
+          "$ref": "#/$defs/topicIcon"
+        },
+        "creation_date": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "creator": {
+          "$ref": "#/$defs/sender"
+        },
+        "is_general": {
+          "type": "boolean"
+        },
+        "is_outgoing": {
+          "type": "boolean"
+        },
+        "is_closed": {
+          "type": "boolean"
+        },
+        "is_hidden": {
+          "type": "boolean"
+        },
+        "is_name_implicit": {
+          "type": "boolean"
+        }
+      }
+    },
+    "topicRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chat_id",
+        "id",
+        "name",
+        "icon",
+        "creation_date",
+        "creator",
+        "is_general",
+        "is_outgoing",
+        "is_closed",
+        "is_hidden",
+        "is_name_implicit",
+        "is_pinned",
+        "unread_count",
+        "unread_mention_count",
+        "unread_reaction_count",
+        "unread_poll_vote_count"
+      ],
+      "properties": {
+        "chat_id": {
+          "$ref": "#/$defs/int53"
+        },
+        "id": {
+          "$ref": "#/$defs/positiveInt32"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "icon": {
+          "$ref": "#/$defs/topicIcon"
+        },
+        "creation_date": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "creator": {
+          "$ref": "#/$defs/sender"
+        },
+        "is_general": {
+          "type": "boolean"
+        },
+        "is_outgoing": {
+          "type": "boolean"
+        },
+        "is_closed": {
+          "type": "boolean"
+        },
+        "is_hidden": {
+          "type": "boolean"
+        },
+        "is_name_implicit": {
+          "type": "boolean"
+        },
+        "is_pinned": {
+          "type": "boolean"
+        },
+        "unread_count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        },
+        "unread_mention_count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        },
+        "unread_reaction_count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        },
+        "unread_poll_vote_count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        }
+      }
+    },
+    "fileSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "name",
+        "size",
+        "sha256",
+        "device",
+        "inode",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "device": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mtime_ns": {
+          "type": "integer"
+        },
+        "ctime_ns": {
+          "type": "integer"
+        }
+      }
+    },
+    "memberStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "is_anonymous",
+            "is_member"
+          ],
+          "properties": {
+            "kind": {
+              "const": "creator"
+            },
+            "is_anonymous": {
+              "type": "boolean"
+            },
+            "is_member": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "can_be_edited",
+            "can_manage_chat",
+            "rights"
+          ],
+          "properties": {
+            "kind": {
+              "const": "administrator"
+            },
+            "can_be_edited": {
+              "type": "boolean"
+            },
+            "can_manage_chat": {
+              "const": true
+            },
+            "rights": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "change-info",
+                  "post-messages",
+                  "edit-messages",
+                  "delete-messages",
+                  "invite-users",
+                  "restrict-members",
+                  "pin-messages",
+                  "manage-topics",
+                  "promote-members",
+                  "manage-video-chats",
+                  "post-stories",
+                  "edit-stories",
+                  "delete-stories",
+                  "manage-direct-messages",
+                  "manage-tags",
+                  "anonymous"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "member_until_date"
+          ],
+          "properties": {
+            "kind": {
+              "const": "member"
+            },
+            "member_until_date": {
+              "$ref": "#/$defs/int32"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "is_member",
+            "restricted_until_date",
+            "permissions"
+          ],
+          "properties": {
+            "kind": {
+              "const": "restricted"
+            },
+            "is_member": {
+              "type": "boolean"
+            },
+            "restricted_until_date": {
+              "$ref": "#/$defs/int32"
+            },
+            "permissions": {
+              "type": "array",
+              "minItems": 0,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "send-basic-messages",
+                  "send-audios",
+                  "send-documents",
+                  "send-photos",
+                  "send-videos",
+                  "send-video-notes",
+                  "send-voice-notes",
+                  "send-polls",
+                  "send-other-messages",
+                  "add-link-previews",
+                  "react-to-messages",
+                  "edit-tag",
+                  "change-info",
+                  "invite-users",
+                  "pin-messages",
+                  "create-topics"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "left"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "banned_until_date"
+          ],
+          "properties": {
+            "kind": {
+              "const": "banned"
+            },
+            "banned_until_date": {
+              "$ref": "#/$defs/int32"
+            }
+          }
+        }
+      ]
+    },
+    "storageType": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_type",
+        "size",
+        "count"
+      ],
+      "properties": {
+        "file_type": {
+          "enum": [
+            "none",
+            "animation",
+            "audio",
+            "document",
+            "live-photo-video",
+            "notification-sound",
+            "photo",
+            "photo-story",
+            "profile-photo",
+            "secret",
+            "secret-thumbnail",
+            "secure",
+            "self-destructing-live-photo-video",
+            "self-destructing-photo",
+            "self-destructing-video",
+            "self-destructing-video-note",
+            "self-destructing-voice-note",
+            "sticker",
+            "thumbnail",
+            "unknown",
+            "video",
+            "video-note",
+            "video-story",
+            "voice-note",
+            "wallpaper"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        }
+      }
+    },
+    "storageChat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chat_id",
+        "size",
+        "count",
+        "by_file_type"
+      ],
+      "properties": {
+        "chat_id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        },
+        "by_file_type": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 25,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/storageType"
+          }
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "count",
+        "by_chat"
+      ],
+      "properties": {
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "count": {
+          "$ref": "#/$defs/nonnegativeInt32"
+        },
+        "by_chat": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 101,
+          "items": {
+            "$ref": "#/$defs/storageChat"
+          }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chat",
+        "user",
+        "status"
+      ],
+      "properties": {
+        "chat": {
+          "$ref": "#/$defs/chat"
+        },
+        "user": {
+          "$ref": "#/$defs/user"
+        },
+        "status": {
+          "const": "left"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run",
+        "plan"
+      ],
+      "properties": {
+        "dry_run": {
+          "const": true
+        },
+        "plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "account",
+            "tdlib_request",
+            "chat",
+            "user",
+            "before",
+            "after"
+          ],
+          "properties": {
+            "operation": {
+              "const": "chat_unban"
+            },
+            "account": {
+              "$ref": "#/$defs/account"
+            },
+            "tdlib_request": {
+              "const": "setChatMemberStatus"
+            },
+            "chat": {
+              "$ref": "#/$defs/chat"
+            },
+            "user": {
+              "$ref": "#/$defs/user"
+            },
+            "before": {
+              "$ref": "#/$defs/memberStatus"
+            },
+            "after": {
+              "const": "left"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

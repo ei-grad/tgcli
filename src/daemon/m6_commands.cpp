@@ -1,11 +1,14 @@
 #include "daemon/m6_commands.hpp"
 
 #include "common/exit_codes.hpp"
+#include "daemon/dispatch.hpp"
+#include "daemon/idempotency_reconciliation.hpp"
 #include "daemon/m6_domain.hpp"
 #include "daemon/m6_model.hpp"
 #include "daemon/m6_topic_scan.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/resolver.hpp"
+#include "daemon/write_commands.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -35,6 +38,25 @@ bool exact_fields(const json& value, std::initializer_list<std::string_view> fie
 std::string_view operation_name(proto::M6Operation operation) {
     const auto* identity = proto::m6_operation_identity(operation);
     return identity == nullptr ? std::string_view{} : identity->canonical_name;
+}
+
+std::string_view spool_reason_name(DurabilityReason reason) {
+    switch (reason) {
+    case DurabilityReason::PathInvalid:
+        return "path_invalid";
+    case DurabilityReason::WrongOwner:
+        return "wrong_owner";
+    case DurabilityReason::WrongType:
+        return "wrong_type";
+    case DurabilityReason::WrongMode:
+        return "wrong_mode";
+    case DurabilityReason::OpenFailed:
+        return "open_failed";
+    case DurabilityReason::ReadFailed:
+        return "read_failed";
+    default:
+        return "contradiction";
+    }
 }
 
 void usage(RequestSession& session, std::string_view message, const json& argument) {
@@ -157,10 +179,96 @@ class UpdateSubscription final {
     std::uint64_t id_ = 0;
 };
 
+} // namespace
+
+bool run_session_recovery_preflight(
+    const std::shared_ptr<IdempotencyFoundation>& foundation, proto::SessionOperation operation,
+    RequestSession& session, const std::shared_ptr<const testing::FileSpoolHooks>& spool_hooks) {
+    const auto operation_name = proto::session_operation_name(operation);
+    if (!foundation) {
+        session.error(
+            "AUDIT_UNAVAILABLE", "account audit log is unavailable",
+            {{"account", session.request().account}, {"path", ""}, {"reason", "open_failed"}},
+            kDenied);
+        return false;
+    }
+    const AccountAuditScanControl scan_control{
+        session.deadline(), [&session] { return session.cancellation_requested(); }};
+    auto epoch_result = foundation->acquire_epoch(scan_control);
+    if (auto* failure = std::get_if<AccountAuditFailure>(&epoch_result)) {
+        if (failure->interruption == AccountAuditFailure::Interruption::Deadline) {
+            if (operation == proto::SessionOperation::List) {
+                session.error("TIMEOUT", "request timed out",
+                              {{"operation", operation_name}, {"state", nullptr}}, kTimeout);
+            } else {
+                session.error("TIMEOUT", "request timed out",
+                              {{"operation", operation_name},
+                               {"phase", "preflight"},
+                               {"state", nullptr},
+                               {"outcome", "not_started"},
+                               {"idempotency", "not_requested"}},
+                              kTimeout);
+            }
+        }
+        return false;
+    }
+    auto epoch = std::get<AccountAuditCoordinator::Guard>(std::move(epoch_result));
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+    const auto sampled_now = seconds < 0 ? std::numeric_limits<std::uint64_t>::max()
+                                         : static_cast<std::uint64_t>(seconds);
+    const FileSpoolControl spool_control{session.deadline().expires_at,
+                                         session.cancellation_token(),
+                                         [&session] { return session.cancellation_requested(); }};
+    const auto gate =
+        foundation->run_absent_by_policy_gate(epoch, sampled_now, {}, spool_control, spool_hooks);
+    if (gate.status == IdempotencyCoreGateStatus::Clean) {
+        return true;
+    }
+    if (gate.status == IdempotencyCoreGateStatus::Interrupted) {
+        if (gate.audit_failure.interruption == AccountAuditFailure::Interruption::Deadline) {
+            if (operation == proto::SessionOperation::List) {
+                session.error("TIMEOUT", "request timed out",
+                              {{"operation", operation_name}, {"state", nullptr}}, kTimeout);
+            } else {
+                session.error("TIMEOUT", "request timed out",
+                              {{"operation", operation_name},
+                               {"phase", "preflight"},
+                               {"state", nullptr},
+                               {"outcome", "not_started"},
+                               {"idempotency", "not_requested"}},
+                              kTimeout);
+            }
+        }
+        return false;
+    }
+    if (gate.terminal) {
+        const auto& value = *gate.terminal;
+        session.error(value.at("code").get<std::string>(), value.at("message").get<std::string>(),
+                      value.at("details"), value.at("exit_code").get<int>());
+        return false;
+    }
+    if (gate.status == IdempotencyCoreGateStatus::SpoolUnavailable && gate.spool_failure) {
+        const auto reason = gate.spool_failure->durability_reason
+                                ? spool_reason_name(*gate.spool_failure->durability_reason)
+                                : std::string_view{"contradiction"};
+        session.error("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
+                      {{"operation", operation_name}, {"path", "spool/"}, {"reason", reason}},
+                      kGeneric);
+        return false;
+    }
+    session.error("AUDIT_UNAVAILABLE", "account audit log is unavailable",
+                  {{"account", session.request().account},
+                   {"path", foundation->audit().path()},
+                   {"reason", account_audit_durability_reason_name(gate.audit_failure.reason)}},
+                  kDenied);
+    return false;
+}
+
 std::optional<core::TdM6ChatFoldersUpdate>
-wait_for_folders(core::TdClient& client,
-                 const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
-                 RequestSession& session) {
+m6_wait_for_folders(core::TdClient& client,
+                    const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
+                    RequestSession& session) {
     if (auto cached = client.m6_chat_folders(authorization)) {
         return cached;
     }
@@ -190,6 +298,8 @@ wait_for_folders(core::TdClient& client,
     }
     return std::nullopt;
 }
+
+namespace {
 
 std::optional<ResolvedChatTarget> resolve_exact(ResolverConsumer& resolver, std::string selector,
                                                 const ResolverCaller& caller,
@@ -281,7 +391,8 @@ void M6Coordinator::folder_list(const proto::Request& request, RequestSession& s
     if (!bind(resolver, caller, session, true)) {
         return;
     }
-    const auto folders = wait_for_folders(client_.get(), resolver.bound_authorization(), session);
+    const auto folders =
+        m6_wait_for_folders(client_.get(), resolver.bound_authorization(), session);
     if (!folders) {
         const auto current = client_.get().auth_state();
         if (!session.cancellation_requested() && !session.shutdown_requested()) {
@@ -325,7 +436,8 @@ void M6Coordinator::folder_show(const proto::Request& request, RequestSession& s
     if (!bind(resolver, caller, session, true)) {
         return;
     }
-    const auto folders = wait_for_folders(client_.get(), resolver.bound_authorization(), session);
+    const auto folders =
+        m6_wait_for_folders(client_.get(), resolver.bound_authorization(), session);
     if (!folders) {
         internal(session, operation_name(operation));
         return;
@@ -474,6 +586,9 @@ void M6Coordinator::session_list(const proto::Request& request, RequestSession& 
         usage(session, "session list received malformed arguments", nullptr);
         return;
     }
+    if (!run_session_recovery_preflight(foundation_, operation, session)) {
+        return;
+    }
     const ResolverCaller caller{operation};
     ResolverConsumer resolver(client_.get(), account_, session);
     if (!bind(resolver, caller, session, true)) {
@@ -495,6 +610,65 @@ void M6Coordinator::session_list(const proto::Request& request, RequestSession& 
         return;
     }
     session.result(std::move(*projected));
+}
+
+void register_m6_commands(Dispatcher& dispatcher, M6Coordinator& reads, WriteCoordinator& writes) {
+    for (const auto& identity : proto::m6_operation_identities()) {
+        CommandDescriptor descriptor;
+        switch (identity.tier) {
+        case proto::M6Tier::Read:
+            descriptor.tier = Tier::Read;
+            break;
+        case proto::M6Tier::Write:
+            descriptor.tier = Tier::Write;
+            break;
+        case proto::M6Tier::Destructive:
+            descriptor.tier = Tier::Destructive;
+            break;
+        }
+        descriptor.m6_operation = identity.operation;
+        descriptor.handler = [&reads, &writes, operation = identity.operation](
+                                 const proto::Request& request, RequestSession& session) {
+            switch (operation) {
+            case proto::M6Operation::ContactList:
+            case proto::M6Operation::ContactSearch:
+                reads.contact(operation, request, session);
+                return;
+            case proto::M6Operation::FolderList:
+                reads.folder_list(request, session);
+                return;
+            case proto::M6Operation::FolderShow:
+                reads.folder_show(request, session);
+                return;
+            case proto::M6Operation::TopicList:
+                reads.topic_list(request, session);
+                return;
+            case proto::M6Operation::StorageStats:
+                reads.storage_stats(request, session);
+                return;
+            default:
+                writes.m6_mutation(operation, request, session);
+                return;
+            }
+        };
+        dispatcher.register_command(std::string(identity.command_path), std::move(descriptor));
+    }
+
+    CommandDescriptor list;
+    list.tier = Tier::Read;
+    list.session_operation = proto::SessionOperation::List;
+    list.handler = [&reads](const proto::Request& request, RequestSession& session) {
+        reads.session_list(request, session);
+    };
+    dispatcher.register_command("session list", std::move(list));
+
+    CommandDescriptor terminate;
+    terminate.tier = Tier::Destructive;
+    terminate.session_operation = proto::SessionOperation::Terminate;
+    terminate.handler = [&writes](const proto::Request& request, RequestSession& session) {
+        writes.terminate_session(request, session);
+    };
+    dispatcher.register_command("session terminate", std::move(terminate));
 }
 
 } // namespace tgcli::daemon

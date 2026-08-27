@@ -165,6 +165,8 @@ struct FileSpoolHooks {
 
 } // namespace testing
 
+enum class SourceContentPolicy { Any, StaticJpeg };
+
 struct CreatedSpool;
 
 class PreparedSource final {
@@ -186,7 +188,8 @@ class PreparedSource final {
     friend std::variant<PreparedSource, FileSpoolError>
     prepare_spool_source(std::string_view caller_path, std::string_view frozen_cwd,
                          const FileSpoolControl& control,
-                         const std::shared_ptr<const testing::FileSpoolHooks>& hooks);
+                         const std::shared_ptr<const testing::FileSpoolHooks>& hooks,
+                         SourceContentPolicy content_policy);
     friend std::variant<CreatedSpool, FileSpoolError>
     create_spool_file(PreparedSource& source, std::string account_state,
                       std::string_view invocation_id, uid_t expected_uid,
@@ -199,7 +202,8 @@ using PrepareSpoolSourceResult = std::variant<PreparedSource, FileSpoolError>;
 [[nodiscard]] PrepareSpoolSourceResult
 prepare_spool_source(std::string_view caller_path, std::string_view frozen_cwd,
                      const FileSpoolControl& control = {},
-                     const std::shared_ptr<const testing::FileSpoolHooks>& hooks = {});
+                     const std::shared_ptr<const testing::FileSpoolHooks>& hooks = {},
+                     SourceContentPolicy content_policy = SourceContentPolicy::Any);
 
 [[nodiscard]] std::optional<std::string> canonical_source_display_path(std::string_view caller_path,
                                                                        std::string_view frozen_cwd);

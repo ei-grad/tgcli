@@ -404,7 +404,9 @@ class ResolverRun {
                                   .link_type = result.link_type,
                                   .is_public = result.is_public,
                                   .private_user_id = last_private_user_id_,
-                                  .private_user_presence = last_private_user_presence_};
+                                  .private_user_presence = last_private_user_presence_,
+                                  .observed_user = last_observed_user_,
+                                  .observed_supergroup = last_observed_supergroup_};
     }
 
     ReadyReadResult read_target(const ReadyReadStart& start) {
@@ -826,12 +828,16 @@ class ResolverRun {
     std::optional<ChatIdentity> identity(const core::TdChat& chat, bool reject_secret = true) {
         last_private_user_id_.reset();
         last_private_user_presence_.reset();
+        last_observed_user_.reset();
+        last_observed_supergroup_.reset();
         const auto materialized = materialize_chat_identity(
             client_, chat, [&](const auto& start) { return read(start); });
         switch (materialized.status) {
         case ChatIdentityStatus::Success:
             last_private_user_id_ = materialized.private_user_id;
             last_private_user_presence_ = materialized.private_user_presence;
+            last_observed_user_ = materialized.observed_user;
+            last_observed_supergroup_ = materialized.observed_supergroup;
             return materialized.identity;
         case ChatIdentityStatus::Secret:
             if (reject_secret) {
@@ -1329,6 +1335,8 @@ class ResolverRun {
     std::optional<ResolverError> error_;
     std::optional<std::int64_t> last_private_user_id_;
     std::optional<core::TdUserPresence> last_private_user_presence_;
+    std::optional<core::TdUserSummary> last_observed_user_;
+    std::optional<core::TdSupergroup> last_observed_supergroup_;
     bool bound_ = false;
 };
 

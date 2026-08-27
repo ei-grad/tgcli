@@ -25,8 +25,11 @@ namespace tgcli::core {
 
 namespace td_api = td::td_api;
 
+// NOLINTBEGIN(bugprone-exception-escape,readability-function-cognitive-complexity): closed variant
+// map.
 TdFunctionKind td_m6_request_kind(const TdM6Request& request) noexcept {
     return std::visit(
+        // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed variant map.
         [](const auto& value) {
             using Request = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<Request, TdM6GetContactsRequest>) {
@@ -82,6 +85,7 @@ TdFunctionKind td_m6_request_kind(const TdM6Request& request) noexcept {
         },
         request);
 }
+// NOLINTEND(bugprone-exception-escape,readability-function-cognitive-complexity)
 
 bool valid_td_m6_chat_folders_update(const TdM6ChatFoldersUpdate& update) noexcept {
     if (update.folders.size() > 100 || update.main_chat_list_position < 0 ||
@@ -112,8 +116,11 @@ bool td_m6_request_is_read(const TdM6Request& request) noexcept {
     }
 }
 
+// NOLINTBEGIN(bugprone-exception-escape,readability-function-cognitive-complexity): closed variant
+// validator.
 bool valid_td_m6_request(const TdM6Request& request) noexcept {
     return std::visit(
+        // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed variant validator.
         [](const auto& value) {
             using Request = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<Request, TdM6GetContactsRequest>) {
@@ -138,32 +145,29 @@ bool valid_td_m6_request(const TdM6Request& request) noexcept {
                 return value.chat_id != 0 && value.query.empty() && value.offset_date >= 0 &&
                        value.offset_message_id >= 0 && value.offset_forum_topic_id >= 0 &&
                        value.limit == 100;
-            } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicRequest>) {
+            } else if constexpr (std::is_same_v<Request, TdM6GetForumTopicRequest> ||
+                                 std::is_same_v<Request, TdM6ToggleForumTopicRequest>) {
                 return value.chat_id != 0 && value.topic_id > 0;
             } else if constexpr (std::is_same_v<Request, TdM6CreateForumTopicRequest>) {
                 return value.chat_id != 0 && !value.name.empty() && !value.is_name_implicit;
             } else if constexpr (std::is_same_v<Request, TdM6EditForumTopicRequest>) {
                 return value.chat_id != 0 && value.topic_id > 0 && !value.name.empty() &&
                        !value.edit_icon_custom_emoji && value.icon_custom_emoji_id == 0;
-            } else if constexpr (std::is_same_v<Request, TdM6ToggleForumTopicRequest>) {
-                return value.chat_id != 0 && value.topic_id > 0;
             } else if constexpr (std::is_same_v<Request, TdM6GetChatMemberRequest>) {
                 return value.chat_id != 0 && value.user_id > 0;
             } else if constexpr (std::is_same_v<Request, TdM6SetChatTitleRequest>) {
                 return value.chat_id != 0 && !value.title.empty();
             } else if constexpr (std::is_same_v<Request, TdM6SetChatPhotoRequest>) {
                 return value.chat_id != 0 && (!value.local_path || !value.local_path->empty());
-            } else if constexpr (std::is_same_v<Request, TdM6SetChatDescriptionRequest>) {
-                return value.chat_id != 0;
-            } else if constexpr (std::is_same_v<Request, TdM6CreateChatInviteLinkRequest>) {
+            } else if constexpr (std::is_same_v<Request, TdM6SetChatDescriptionRequest> ||
+                                 std::is_same_v<Request, TdM6CreateChatInviteLinkRequest> ||
+                                 std::is_same_v<Request, TdM6SetChatPermissionsRequest>) {
                 return value.chat_id != 0;
             } else if constexpr (std::is_same_v<Request, TdM6RevokeChatInviteLinkRequest>) {
                 return value.chat_id != 0 && !value.invite_link.empty();
             } else if constexpr (std::is_same_v<Request, TdM6SetChatMemberStatusRequest>) {
                 return value.chat_id != 0 && value.user_id > 0 &&
                        value.status.kind != TdM6MemberStatusKind::Unknown;
-            } else if constexpr (std::is_same_v<Request, TdM6SetChatPermissionsRequest>) {
-                return value.chat_id != 0;
             } else if constexpr (std::is_same_v<Request, TdM6GetStorageStatisticsRequest>) {
                 return value.chat_limit == 100;
             } else {
@@ -176,6 +180,7 @@ bool valid_td_m6_request(const TdM6Request& request) noexcept {
         },
         request);
 }
+// NOLINTEND(bugprone-exception-escape,readability-function-cognitive-complexity)
 
 TdJoinChatRequest::TdJoinChatRequest(std::optional<std::int64_t> chat_id_value,
                                      std::optional<secure::SensitiveString> invite_link_value,
@@ -1739,6 +1744,11 @@ TdUserSummary convert_user(td_api::user& user) {
                                     user.type_->get_id() == td_api::userTypeBot::ID,
                           .is_premium = user.is_premium_,
                           .presence = presence};
+    if (summary.is_bot) {
+        const auto& bot = static_cast<const td_api::userTypeBot&>(*user.type_);
+        summary.bot_has_topics = bot.has_topics_;
+        summary.bot_allows_users_to_create_topics = bot.allows_users_to_create_topics_;
+    }
     if (user.usernames_ != nullptr) {
         summary.usernames = std::move(user.usernames_->active_usernames_);
     }
@@ -2601,7 +2611,7 @@ std::optional<TdM6FolderIcon> convert_m6_folder_icon(const td_api::chatFolderIco
         "Setup", "Cat",    "Crown",   "Favorite", "Flower",   "Game",   "Home",    "Love",
         "Mask",  "Party",  "Sport",   "Study",    "Trade",    "Travel", "Work",    "Airplane",
         "Book",  "Light",  "Like",    "Money",    "Note",     "Palette"};
-    const auto found = std::ranges::find(names, icon->name_);
+    const auto* const found = std::ranges::find(names, icon->name_);
     if (found == names.end()) {
         return std::nullopt;
     }
@@ -2737,7 +2747,7 @@ TdValue convert_m6_folder_response(TdFunctionKind function, const NativeObjectPt
         }
         auto folder = convert_m6_chat_folder(static_cast<const td_api::chatFolder*>(object.get()));
         return folder
-                   ? TdValue::from(TdM6Response{TdM6MaybeChatFolder{.folder = std::move(*folder)}})
+                   ? TdValue::from(TdM6Response{TdM6MaybeChatFolder{.folder = std::move(folder)}})
                    : m6_conversion_error(object);
     }
     if (object == nullptr || object->get_id() != td_api::chatFolderInfo::ID) {
@@ -2780,7 +2790,7 @@ std::optional<TdM6TopicIcon> convert_m6_topic_icon(const td_api::forumTopicIcon*
     }
     static constexpr std::array<std::int32_t, 6> colors{0x6FB9F0, 0xFFD67E, 0xCB86DB,
                                                         0x8EEE98, 0xFF93B2, 0xFB6F5F};
-    const auto found = std::ranges::find(colors, icon->color_);
+    const auto* const found = std::ranges::find(colors, icon->color_);
     if (found == colors.end()) {
         return std::nullopt;
     }
@@ -2803,7 +2813,7 @@ std::optional<TdM6ForumTopicInfo> convert_m6_forum_topic_info(const td_api::foru
                               .name = info->name_,
                               .icon = std::move(*icon),
                               .creation_date = info->creation_date_,
-                              .creator = std::move(*creator),
+                              .creator = *creator,
                               .is_general = info->is_general_,
                               .is_outgoing = info->is_outgoing_,
                               .is_closed = info->is_closed_,
@@ -2838,7 +2848,7 @@ TdValue convert_m6_topic_response(TdFunctionKind function, const NativeObjectPtr
             return m6_conversion_error(object);
         }
         auto topic = convert_m6_forum_topic(static_cast<const td_api::forumTopic*>(object.get()));
-        return topic ? TdValue::from(TdM6Response{TdM6MaybeForumTopic{.topic = std::move(*topic)}})
+        return topic ? TdValue::from(TdM6Response{TdM6MaybeForumTopic{.topic = std::move(topic)}})
                      : m6_conversion_error(object);
     }
     if (function == TdFunctionKind::GetForumTopics) {
@@ -2938,7 +2948,7 @@ std::optional<TdM6MemberStatus> convert_m6_member_status(const td_api::ChatMembe
         converted.kind = TdM6MemberStatusKind::Administrator;
         converted.is_member = true;
         converted.can_be_edited = source.can_be_edited_;
-        converted.rights = std::move(*rights);
+        converted.rights = *rights;
         break;
     }
     case td_api::chatMemberStatusMember::ID: {
@@ -2957,7 +2967,7 @@ std::optional<TdM6MemberStatus> convert_m6_member_status(const td_api::ChatMembe
         converted.kind = TdM6MemberStatusKind::Restricted;
         converted.is_member = source.is_member_;
         converted.restricted_until_date = source.restricted_until_date_;
-        converted.permissions = std::move(*permissions);
+        converted.permissions = *permissions;
         break;
     }
     case td_api::chatMemberStatusLeft::ID:
@@ -2988,10 +2998,10 @@ TdValue convert_m6_chat_member_response(const NativeObjectPtr& object) {
         member.joined_chat_date_ < 0 || !common::valid_utf8(member.tag_)) {
         return m6_conversion_error(object);
     }
-    return TdValue::from(TdM6Response{TdM6ChatMember{.member = std::move(*sender),
+    return TdValue::from(TdM6Response{TdM6ChatMember{.member = *sender,
                                                      .inviter_user_id = member.inviter_user_id_,
                                                      .joined_chat_date = member.joined_chat_date_,
-                                                     .status = std::move(*status)}});
+                                                     .status = *status}});
 }
 
 std::optional<TdM6ChatInviteLink> convert_m6_chat_invite_link(const td_api::chatInviteLink* link) {
@@ -4132,10 +4142,13 @@ class ProductionTdRuntime final : public TdRuntime {
         return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::GetContacts});
     }
 
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity): exhaustive TD function factory.
     TdValue make_m6_function(TdM6Request request) override {
         const auto kind = td_m6_request_kind(request);
         return std::visit(
-            [kind](auto&& input) -> TdValue {
+            // NOLINTNEXTLINE(readability-function-cognitive-complexity): exhaustive TD function
+            // factory.
+            [kind](auto&& input) -> TdValue { // NOLINT(readability-function-cognitive-complexity)
                 using Request = std::decay_t<decltype(input)>;
                 NativeFunctionPtr native;
                 std::vector<TdFunctionField> fields;
@@ -5020,6 +5033,8 @@ TdValue make_production_direct_request_for_test(const TdDirectRequest& request) 
                 return make_native_add_chat_to_list(value);
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                 return make_native_join_chat(value);
+            } else if constexpr (std::is_same_v<Request, TdTerminateSessionRequest>) {
+                return make_native_terminate_session(value.session_id);
             } else if constexpr (std::is_same_v<Request, TdM6Request>) {
                 ProductionTdRuntime runtime;
                 return runtime.make_m6_function(value);
@@ -5579,6 +5594,13 @@ bool native_direct_request_matches(const td_api::Function& function,
                                    const TdLeaveChatRequest& expected) {
     return function.get_id() == td_api::leaveChat::ID &&
            static_cast<const td_api::leaveChat&>(function).chat_id_ == expected.chat_id;
+}
+
+bool native_direct_request_matches(const td_api::Function& function,
+                                   const TdTerminateSessionRequest& expected) {
+    return function.get_id() == td_api::terminateSession::ID &&
+           static_cast<const td_api::terminateSession&>(function).session_id_ ==
+               expected.session_id;
 }
 
 bool native_direct_request_matches(const td_api::Function& function, const TdM6Request& expected) {

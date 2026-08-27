@@ -657,6 +657,12 @@ TEST_CASE("dispatcher fallback is operation-specific for every descriptor family
         if (entry.command == "fetch" || entry.command == "listen") {
             descriptor.deadline_default = DeadlineDefault::Unlimited;
         }
+        if (entry.command == "session list") {
+            descriptor.session_operation = proto::SessionOperation::List;
+        }
+        if (entry.command == "contact list") {
+            descriptor.m6_operation = proto::M6Operation::ContactList;
+        }
         dispatcher.register_command(std::string(entry.command), std::move(descriptor));
         const auto outcome = dispatch(dispatcher, command_parts(entry.command));
         CHECK(outcome.error_code == "INTERNAL");

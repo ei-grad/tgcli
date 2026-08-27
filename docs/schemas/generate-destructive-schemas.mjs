@@ -71,6 +71,94 @@ const auditStages = [
   'state_removed',
   'outcome_synced',
 ];
+const m6MutationSchemas = [
+  ['contact-add', 'contact_add'],
+  ['contact-remove', 'contact_remove'],
+  ['contact-block', 'contact_block'],
+  ['contact-unblock', 'contact_unblock'],
+  ['folder-create', 'folder_create'],
+  ['folder-edit', 'folder_edit'],
+  ['folder-delete', 'folder_delete'],
+  ['folder-add-chat', 'folder_add_chat'],
+  ['folder-remove-chat', 'folder_remove_chat'],
+  ['topic-create', 'topic_create'],
+  ['topic-edit', 'topic_edit'],
+  ['topic-close', 'topic_close'],
+  ['topic-reopen', 'topic_reopen'],
+  ['chat-set-title', 'chat_set_title'],
+  ['chat-set-photo', 'chat_set_photo'],
+  ['chat-set-description', 'chat_set_description'],
+  ['chat-invite-link', 'chat_invite_link'],
+  ['chat-promote', 'chat_promote'],
+  ['chat-demote', 'chat_demote'],
+  ['chat-ban', 'chat_ban'],
+  ['chat-unban', 'chat_unban'],
+  ['chat-kick', 'chat_kick'],
+  ['chat-set-permissions', 'chat_set_permissions'],
+  ['storage-optimize', 'storage_optimize'],
+];
+const m6OperationNames = new Set(m6MutationSchemas.map(([, operation]) => operation));
+const m6NonIdempotentOperations = new Set(['chat_invite_link', 'storage_optimize']);
+const m6DestructiveOperations = new Set([
+  'folder_delete',
+  'chat_invite_link',
+  'chat_ban',
+  'chat_kick',
+  'storage_optimize',
+]);
+const m6PhotoOperations = new Set(['chat_set_photo']);
+const rewriteM6References = (value, prefix) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => rewriteM6References(item, prefix));
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (key === '$ref' && typeof item === 'string' && item.startsWith('#/$defs/')) {
+      return [key, `#/$defs/${prefix}${item.slice('#/$defs/'.length)}`];
+    }
+    return [key, rewriteM6References(item, prefix)];
+  }));
+};
+const m6SchemaDocuments = m6MutationSchemas.map(([stem, operation]) => [
+  operation,
+  JSON.parse(readFileSync(join(directory, `${stem}.result.schema.json`), 'utf8')),
+]);
+const serializedM6Definitions = JSON.stringify(m6SchemaDocuments[0][1].$defs);
+if (!m6SchemaDocuments.every(([, document]) =>
+  JSON.stringify(document.$defs) === serializedM6Definitions)) {
+  throw new Error('M6 result schemas must share one definitions inventory');
+}
+const m6DefinitionPrefix = 'm6_';
+const m6AuditContracts = new Map(m6SchemaDocuments.map(([operation, document]) => {
+  const plan = structuredClone(document.oneOf[1].properties.plan);
+  const argumentsSchema = structuredClone(plan);
+  argumentsSchema.required = argumentsSchema.required.filter(
+    (field) => !['operation', 'account', 'tdlib_request'].includes(field),
+  );
+  for (const field of ['operation', 'account', 'tdlib_request']) {
+    delete argumentsSchema.properties[field];
+  }
+  return [operation, {
+    arguments: rewriteM6References(argumentsSchema, m6DefinitionPrefix),
+    plan: rewriteM6References(plan, m6DefinitionPrefix),
+    result: rewriteM6References(document.oneOf[0], m6DefinitionPrefix),
+  }];
+}));
+const m6AuditDefinitions = Object.fromEntries(
+  Object.entries(m6SchemaDocuments[0][1].$defs).map(([name, value]) => [
+    `${m6DefinitionPrefix}${name}`,
+    rewriteM6References(value, m6DefinitionPrefix),
+  ]),
+);
+const m6AuditResultDefinitions = Object.fromEntries(
+  [...m6AuditContracts].map(([operation, contract]) => [
+    `m6_${operation}_resultData`,
+    contract.result,
+  ]),
+);
+
 const v2Operations = [
   'send',
   'msg_edit',
@@ -90,6 +178,7 @@ const v2Operations = [
   'chat_leave',
   'saved_attach',
   'session_terminate',
+  ...m6MutationSchemas.map(([, operation]) => operation),
 ];
 const v2Stages = [
   'idempotency_pending',
@@ -158,8 +247,11 @@ const v2CompletedStagePrefixes = (operation) => {
       for (const progress of [false, true]) {
         for (const mutation of [false, true]) {
           const complete = [];
-          if (keyed && operation !== 'session_terminate') complete.push('idempotency_pending');
-          if (operation === 'saved_attach') complete.push('spool_ready');
+          const idempotent = operation !== 'session_terminate' &&
+            !m6NonIdempotentOperations.has(operation);
+          if (keyed && idempotent) complete.push('idempotency_pending');
+          if (operation === 'saved_attach' ||
+              (temporary && m6PhotoOperations.has(operation))) complete.push('spool_ready');
           complete.push('dispatch_started');
           if (temporary && ['send', 'msg_forward', 'saved_attach'].includes(operation)) {
             complete.push('temporary_ids_observed');
@@ -518,7 +610,12 @@ const v2Definitions = () => ({
     ],
   },
 });
-const auditDefinitions = () => ({ ...definitions(), ...v2Definitions() });
+const auditDefinitions = ({ results = false } = {}) => ({
+  ...definitions(),
+  ...v2Definitions(),
+  ...m6AuditDefinitions,
+  ...(results ? m6AuditResultDefinitions : {}),
+});
 
 const messageIdArray = (minimum = 1) => ({
   type: 'array',
@@ -534,6 +631,9 @@ const muteDuration = () => ({
   ],
 });
 const v2Arguments = (operation) => {
+  if (m6AuditContracts.has(operation)) {
+    return m6AuditContracts.get(operation).arguments;
+  }
   const string = nonemptyNoNulString({ maxScalars: 16842751, maxBytes: 16842751 });
   const byOperation = {
     send: object(['chat', 'text', 'parse_mode', 'reply_to', 'topic', 'silent', 'schedule'], {
@@ -615,6 +715,9 @@ const v2Arguments = (operation) => {
 };
 
 const v2Plan = (operation) => {
+  if (m6AuditContracts.has(operation)) {
+    return m6AuditContracts.get(operation).plan;
+  }
   const common = {
     operation: { const: operation },
     account: reference('account'),
@@ -780,6 +883,9 @@ const v2Plan = (operation) => {
 };
 
 const v2ResultData = (operation) => {
+  if (m6AuditContracts.has(operation)) {
+    return reference(`m6_${operation}_resultData`);
+  }
   const byOperation = {
     send: reference('messageWriteResult'),
     msg_edit: reference('messageWriteResult'),
@@ -1085,7 +1191,7 @@ const v2StoredErrorBranches = (operation) => {
       path: auditArgumentPath(),
     }), 1));
   }
-  if (operation === 'saved_attach') {
+  if (operation === 'saved_attach' || m6PhotoOperations.has(operation)) {
     branches.push(storedError('SPOOL_UNAVAILABLE', operationDetails(
       operation, ['path', 'reason'], {
         path: auditArgumentPath(),
@@ -1143,6 +1249,51 @@ const v2MutationTerminal = (operation) => {
       ...forwardTimeout,
     ],
   };
+};
+const m6AuditStoredErrorDefinitions = Object.fromEntries(
+  [...m6OperationNames].flatMap((operation) => {
+    const definitionsForOperation = [[
+      `m6_${operation}_storedErrorTerminal`,
+      v2StoredErrorTerminal(operation),
+    ]];
+    if (m6PhotoOperations.has(operation)) {
+      definitionsForOperation.push(
+        [
+          `m6_${operation}_storedErrorTerminalWithoutSpool`,
+          v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE']),
+        ],
+        [
+          `m6_${operation}_storedSpoolErrorTerminal`,
+          v2StoredErrorTerminal(operation, ['SPOOL_UNAVAILABLE']),
+        ],
+      );
+    }
+    return definitionsForOperation;
+  }),
+);
+const v2OutcomeErrorTerminal = (operation, allowedCodes, excludedCodes = []) => {
+  if (!m6OperationNames.has(operation)) {
+    return v2StoredErrorTerminal(operation, allowedCodes, excludedCodes);
+  }
+  if (allowedCodes !== undefined) {
+    if (m6PhotoOperations.has(operation) && allowedCodes.length === 1 &&
+        allowedCodes[0] === 'SPOOL_UNAVAILABLE') {
+      return reference(`m6_${operation}_storedSpoolErrorTerminal`);
+    }
+    throw new Error(`unsupported M6 stored-error subset for ${operation}`);
+  }
+  if (excludedCodes.length > 0) {
+    if (m6PhotoOperations.has(operation) && excludedCodes.length === 1 &&
+        excludedCodes[0] === 'SPOOL_UNAVAILABLE') {
+      return reference(`m6_${operation}_storedErrorTerminalWithoutSpool`);
+    }
+    if (!m6PhotoOperations.has(operation) && excludedCodes.length === 1 &&
+        excludedCodes[0] === 'SPOOL_UNAVAILABLE') {
+      return reference(`m6_${operation}_storedErrorTerminal`);
+    }
+    throw new Error(`unsupported M6 stored-error exclusion for ${operation}`);
+  }
+  return reference(`m6_${operation}_storedErrorTerminal`);
 };
 
 const detail = object;
@@ -1586,11 +1737,14 @@ const v2IntentBranches = v2Operations.map((operation) =>
     request_fingerprint: reference('sha256'),
     config_snapshot: reference('v2ConfigSnapshot'),
     authority_source: { enum: ['request', 'config'] },
-    confirmation_source: ['msg_delete', 'chat_leave', 'session_terminate'].includes(operation)
+    confirmation_source: ['msg_delete', 'chat_leave', 'session_terminate'].includes(operation) ||
+      m6DestructiveOperations.has(operation)
       ? { enum: ['yes', 'tty'] }
       : { type: 'null' },
     idempotency_key_hash:
-      operation === 'session_terminate' ? { type: 'null' } : nullable(reference('sha256')),
+      operation === 'session_terminate' || m6NonIdempotentOperations.has(operation)
+        ? { type: 'null' }
+        : nullable(reference('sha256')),
   }),
 );
 const intentSchema = auditSchema('audit-intent.schema.json', 'tgcli destructive audit intent',
@@ -1657,6 +1811,30 @@ const dispatchFunctions = {
   chat_leave: ['leaveChat'],
   saved_attach: ['sendMessage'],
   session_terminate: ['terminateSession'],
+  contact_add: ['addContact'],
+  contact_remove: ['removeContacts'],
+  contact_block: ['setMessageSenderBlockList'],
+  contact_unblock: ['setMessageSenderBlockList'],
+  folder_create: ['createChatFolder'],
+  folder_edit: ['editChatFolder'],
+  folder_delete: ['deleteChatFolder'],
+  folder_add_chat: ['editChatFolder'],
+  folder_remove_chat: ['editChatFolder'],
+  topic_create: ['createForumTopic'],
+  topic_edit: ['editForumTopic'],
+  topic_close: ['toggleForumTopicIsClosed'],
+  topic_reopen: ['toggleForumTopicIsClosed'],
+  chat_set_title: ['setChatTitle'],
+  chat_set_photo: ['setChatPhoto'],
+  chat_set_description: ['setChatDescription'],
+  chat_invite_link: ['createChatInviteLink', 'revokeChatInviteLink'],
+  chat_promote: ['setChatMemberStatus'],
+  chat_demote: ['setChatMemberStatus'],
+  chat_ban: ['setChatMemberStatus'],
+  chat_unban: ['setChatMemberStatus'],
+  chat_kick: ['setChatMemberStatus'],
+  chat_set_permissions: ['setChatPermissions'],
+  storage_optimize: ['optimizeStorage'],
 };
 const v2CheckpointBranch = (operation, stage, data) =>
   object(v2CheckpointFields, {
@@ -1672,7 +1850,7 @@ const v2CheckpointBranch = (operation, stage, data) =>
   });
 const v2CheckpointBranches = [];
 for (const operation of v2Operations) {
-  if (operation !== 'session_terminate') {
+  if (operation !== 'session_terminate' && !m6NonIdempotentOperations.has(operation)) {
     v2CheckpointBranches.push(
       v2CheckpointBranch(
         operation,
@@ -1686,7 +1864,7 @@ for (const operation of v2Operations) {
       ),
     );
   }
-  if (operation === 'saved_attach') {
+  if (operation === 'saved_attach' || m6PhotoOperations.has(operation)) {
     v2CheckpointBranches.push(
       v2CheckpointBranch(
         operation,
@@ -1749,7 +1927,7 @@ for (const operation of v2Operations) {
 const checkpointSchema = auditSchema(
   'audit-checkpoint.schema.json',
   'tgcli logout audit checkpoint',
-  auditDefinitions(),
+  auditDefinitions({ results: true }),
   {
     oneOf: [
       object(
@@ -1859,7 +2037,7 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
   const branches = [
     v2OutcomeBranch(operation, true, 'confirmed', successful, v2ResultTerminal(operation)),
     v2OutcomeBranch(operation, false, 'none', none,
-      v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
+      v2OutcomeErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
   ];
   if (operation === 'chat_mark_read') {
     branches.push(v2OutcomeBranch(
@@ -1883,7 +2061,7 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
       false,
       'none',
       ambiguous,
-      v2StoredErrorTerminal(operation, ['JOIN_APPROVAL_REQUIRED', 'JOIN_DECLINED']),
+      v2OutcomeErrorTerminal(operation, ['JOIN_APPROVAL_REQUIRED', 'JOIN_DECLINED']),
     ));
   }
   if (['send', 'saved_attach'].includes(operation)) {
@@ -1892,23 +2070,23 @@ const v2OutcomeBranches = v2Operations.flatMap((operation) => {
       false,
       'none',
       ambiguous,
-      v2StoredErrorTerminal(operation, ['TDLIB_ERROR', 'RATE_LIMITED']),
+      v2OutcomeErrorTerminal(operation, ['TDLIB_ERROR', 'RATE_LIMITED']),
     ));
   }
   branches.push(
     v2OutcomeBranch(operation, false, 'possible', ambiguous,
-      v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
+      v2OutcomeErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
     v2OutcomeBranch(operation, false, 'confirmed', confirmed,
-      v2StoredErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
+      v2OutcomeErrorTerminal(operation, undefined, ['SPOOL_UNAVAILABLE'])),
   );
-  if (operation === 'saved_attach') {
+  if (operation === 'saved_attach' || m6PhotoOperations.has(operation)) {
     const spoolPrefixes = undispatched;
     branches.push(v2OutcomeBranch(
       operation,
       false,
       'none',
       spoolPrefixes,
-      v2StoredErrorTerminal(operation, ['SPOOL_UNAVAILABLE']),
+      v2OutcomeErrorTerminal(operation, ['SPOOL_UNAVAILABLE']),
     ));
   }
   return branches;
@@ -2006,7 +2184,13 @@ for (const state of ['none', 'possible', 'confirmed']) {
 const outcomeSchema = auditSchema(
   'audit-outcome.schema.json',
   'tgcli destructive audit outcome',
-  { ...outcomeDefinitions, ...v2Definitions() },
+  {
+    ...outcomeDefinitions,
+    ...v2Definitions(),
+    ...m6AuditDefinitions,
+    ...m6AuditResultDefinitions,
+    ...m6AuditStoredErrorDefinitions,
+  },
   {
     oneOf: [
       constrained(outcomeBase, outcomeRelations),

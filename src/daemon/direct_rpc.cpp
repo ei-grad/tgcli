@@ -238,6 +238,14 @@ DirectOutcome direct_result_from(const core::TdLeaveChatRequest& input,
     return DirectSuccess{.result = DirectLeaveResult{.chat_id = input.chat_id}};
 }
 
+DirectOutcome direct_result_from(const core::TdTerminateSessionRequest& input,
+                                 const core::TdValue& value) {
+    if (!is_ok_response(value)) {
+        return DirectMalformed{};
+    }
+    return DirectSuccess{.result = DirectTerminateSessionResult{input.session_id}};
+}
+
 DirectOutcome direct_result_from(const core::TdM6Request& /*input*/, const core::TdValue& value) {
     const auto* response = value.get_if<core::TdM6Response>();
     if (response == nullptr) {
@@ -264,10 +272,15 @@ DirectOutcome success_from(const core::TdDirectRequest& request, core::TdValue& 
     return std::visit([&](const auto& input) { return direct_result_from(input, value); }, request);
 }
 
-void wipe_invite(core::TdDirectRequest& request) {
+void wipe_request_secrets(core::TdDirectRequest& request) {
     if (auto* join = std::get_if<core::TdJoinChatRequest>(&request);
         join != nullptr && join->has_invite_link()) {
         join->clear_invite_link();
+    }
+    if (auto* m6 = std::get_if<core::TdM6Request>(&request)) {
+        if (auto* revoke = std::get_if<core::TdM6RevokeChatInviteLinkRequest>(m6)) {
+            secure::wipe(revoke->invite_link);
+        }
     }
 }
 
@@ -293,7 +306,7 @@ class DirectRpcCoordinator::Impl {
 
     ~Impl() {
         if (request_) {
-            wipe_invite(*request_);
+            wipe_request_secrets(*request_);
         }
         settle_in_flight();
         client_.unsubscribe_response_completions(response_subscription_);
@@ -352,12 +365,12 @@ class DirectRpcCoordinator::Impl {
         in_flight_ = true;
         request_ = request;
         if (request_) {
-            wipe_invite(*request_);
+            wipe_request_secrets(*request_);
         }
         authorization_ = authorization;
         prepared_write_ =
             client_.prepare_direct_mutation(authorization, std::move(request), std::move(lifetime));
-        wipe_invite(request);
+        wipe_request_secrets(request);
         if (!prepared_write_) {
             const auto failure = prepared_write_.authorization_failure();
             const auto auth = first_auth_competitor(*authorization);

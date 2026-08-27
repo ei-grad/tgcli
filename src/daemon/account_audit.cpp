@@ -90,7 +90,7 @@ constexpr std::array<std::pair<AccountAuditOperation, std::string_view>, 42> kOp
 }};
 
 std::optional<proto::M6Operation> m6_operation_for_audit(AccountAuditOperation operation) noexcept {
-    const auto found = std::ranges::find_if(
+    const auto* const found = std::ranges::find_if(
         kOperations, [operation](const auto& entry) { return entry.first == operation; });
     if (found == kOperations.end()) {
         return std::nullopt;
@@ -1575,8 +1575,6 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
         case AccountAuditOperation::ChatArchive:
         case AccountAuditOperation::ChatUnarchive:
         case AccountAuditOperation::ChatJoin:
-        case AccountAuditOperation::SessionTerminate:
-            return false;
         default:
             return false;
         }
@@ -3578,25 +3576,21 @@ bool validate_account_audit_stage_history(AccountAuditOperation operation,
 
 bool validate_account_audit_persisted_plan(AccountAuditOperation operation, const json& plan,
                                            std::string_view account) {
-    return operation != AccountAuditOperation::SessionTerminate &&
-           valid_plan(operation, plan, account);
+    return valid_plan(operation, plan, account);
 }
 
 bool validate_account_audit_persisted_arguments(AccountAuditOperation operation,
                                                 const json& arguments) {
-    return operation != AccountAuditOperation::SessionTerminate &&
-           valid_arguments(operation, arguments);
+    return valid_arguments(operation, arguments);
 }
 
 bool validate_account_audit_persisted_result(AccountAuditOperation operation, const json& result) {
-    return operation != AccountAuditOperation::SessionTerminate &&
-           valid_result_data(operation, result);
+    return valid_result_data(operation, result);
 }
 
 bool validate_account_audit_persisted_stored_terminal(AccountAuditOperation operation,
                                                       const json& terminal) {
-    return operation != AccountAuditOperation::SessionTerminate &&
-           valid_terminal(operation, terminal);
+    return valid_terminal(operation, terminal);
 }
 
 bool validate_account_audit_persisted_terminal(AccountAuditOperation operation,
@@ -4556,8 +4550,9 @@ AccountAuditLog::hold_current_spool(const AccountAuditAppendReceipt& receipt, co
                                     const AccountAuditCoordinator::Guard& guard,
                                     AccountAuditFailure& failure) const {
     if (!guard.valid() || receipt.coordinator_ != guard.owner_ || receipt.audit_generation == 0 ||
-        receipt.operation != AccountAuditOperation::SavedAttach || receipt.invocation_id.empty() ||
-        !valid_spool_reference(spool, receipt.invocation_id)) {
+        (receipt.operation != AccountAuditOperation::SavedAttach &&
+         !WriteOperation(receipt.operation).uses_photo_spool()) ||
+        receipt.invocation_id.empty() || !valid_spool_reference(spool, receipt.invocation_id)) {
         failure = {AccountAuditDurabilityReason::Contradiction,
                    "current spool hold does not match its durable intent receipt"};
         return std::nullopt;

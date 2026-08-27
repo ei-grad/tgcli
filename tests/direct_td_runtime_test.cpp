@@ -98,6 +98,8 @@ TdValue make_scripted(tgcli::test::ScriptedTdRuntime& runtime, const TdDirectReq
                 return runtime.make_add_chat_to_list(value);
             } else if constexpr (std::is_same_v<Request, TdJoinChatRequest>) {
                 return runtime.make_join_chat(value);
+            } else if constexpr (std::is_same_v<Request, TdTerminateSessionRequest>) {
+                return runtime.make_terminate_session(value.session_id);
             } else if constexpr (std::is_same_v<Request, TdM6Request>) {
                 return runtime.make_m6_function(value);
             } else {
@@ -149,6 +151,7 @@ std::vector<TdDirectRequest> direct_requests() {
         TdJoinChatRequest{std::nullopt, invite_owner("https://t.me/+private-token"), std::nullopt},
         TdJoinChatRequest{std::nullopt, invite_owner("https://t.me/+known-private-token"), -1001},
         TdLeaveChatRequest{.chat_id = -1001},
+        TdTerminateSessionRequest{.session_id = 77},
     };
 }
 
@@ -222,7 +225,7 @@ TEST_CASE("direct native factories match the scripted descriptor boundary exactl
           "[core][tdlib][direct][factory]") {
     tgcli::test::ScriptedTdRuntime scripted;
     const auto requests = direct_requests();
-    REQUIRE(requests.size() == 17);
+    REQUIRE(requests.size() == 18);
     for (const auto& request : requests) {
         auto native = detail::make_production_direct_request_for_test(request);
         auto fake = make_scripted(scripted, request);

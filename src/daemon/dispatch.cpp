@@ -139,12 +139,38 @@ bool reject_invalid_idempotency(const proto::Request& request, RequestSession& s
                       kUsage);
         return true;
     }
-    if (!proto::m3_operation_for_command(request.command)) {
+    const auto m3 = proto::m3_operation_for_command(request.command);
+    const auto m6 = proto::m6_operation_for_command(request.command);
+    const auto* m6_identity = m6 ? proto::m6_operation_identity(*m6) : nullptr;
+    if (!m3 && (m6_identity == nullptr || !m6_identity->idempotent)) {
         session.error("USAGE", "idempotency key is unsupported for this command",
                       {{"argument", "--idempotency-key"}, {"reason", "unsupported_mode"}}, kUsage);
         return true;
     }
     return false;
+}
+
+constexpr Tier tier_for(proto::M6Tier tier) noexcept {
+    switch (tier) {
+    case proto::M6Tier::Read:
+        return Tier::Read;
+    case proto::M6Tier::Write:
+        return Tier::Write;
+    case proto::M6Tier::Destructive:
+        return Tier::Destructive;
+    }
+    return Tier::Read;
+}
+
+constexpr std::optional<proto::SessionOperation>
+session_operation_for_command(std::string_view path) noexcept {
+    if (path == "session list") {
+        return proto::SessionOperation::List;
+    }
+    if (path == "session terminate") {
+        return proto::SessionOperation::Terminate;
+    }
+    return std::nullopt;
 }
 
 constexpr bool publicly_active_m3(const std::optional<M3Operation>& operation) noexcept {
@@ -292,6 +318,7 @@ void ResponseSink::abort_transport() noexcept {
     emit_abort();
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): one closed descriptor policy gate.
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
     if ((descriptor.deadline_default == DeadlineDefault::Unlimited) !=
         allows_unlimited_default(path)) {
@@ -302,6 +329,14 @@ void Dispatcher::register_command(const std::string& path, CommandDescriptor des
         throw std::invalid_argument("M1 destructive bypass does not match its static policy");
     }
     const auto reserved_operation = m3_operation_for_command(path);
+    const auto reserved_m6 = proto::m6_operation_for_command(path);
+    const auto reserved_session = session_operation_for_command(path);
+    const auto identity_count = static_cast<int>(descriptor.m3_operation.has_value()) +
+                                static_cast<int>(descriptor.m6_operation.has_value()) +
+                                static_cast<int>(descriptor.session_operation.has_value());
+    if (identity_count > 1) {
+        throw std::invalid_argument("command descriptor has conflicting operation identities");
+    }
     if (!descriptor.m3_operation) {
         if (reserved_operation) {
             throw std::invalid_argument("M3 command descriptor is missing its operation identity");
@@ -311,6 +346,29 @@ void Dispatcher::register_command(const std::string& path, CommandDescriptor des
         if (policy == nullptr || policy->command_path != path || policy->tier != descriptor.tier ||
             descriptor.m1_destructive_kernel) {
             throw std::invalid_argument("M3 command descriptor does not match its static policy");
+        }
+    }
+    if (!descriptor.m6_operation) {
+        if (reserved_m6) {
+            throw std::invalid_argument("M6 command descriptor is missing its operation identity");
+        }
+    } else {
+        const auto* identity = proto::m6_operation_identity(*descriptor.m6_operation);
+        if (identity == nullptr || identity->command_path != path ||
+            tier_for(identity->tier) != descriptor.tier || descriptor.m1_destructive_kernel) {
+            throw std::invalid_argument("M6 command descriptor does not match its static policy");
+        }
+    }
+    if (descriptor.session_operation != reserved_session) {
+        throw std::invalid_argument("session command descriptor does not match its static policy");
+    }
+    if (descriptor.session_operation) {
+        const auto expected_tier =
+            descriptor.session_operation.value() == proto::SessionOperation::List
+                ? Tier::Read
+                : Tier::Destructive;
+        if (descriptor.tier != expected_tier || descriptor.m1_destructive_kernel) {
+            throw std::invalid_argument("session command descriptor tier is invalid");
         }
     }
     commands_.emplace(path, std::move(descriptor));
@@ -323,7 +381,17 @@ DeadlineDefault Dispatcher::deadline_default(const proto::Request& request) cons
 
 bool Dispatcher::requires_frozen_config_admission(const proto::Request& request) const {
     const auto found = commands_.find(command_key(request.command));
-    return found != commands_.end() && found->second.m3_operation.has_value();
+    if (found == commands_.end()) {
+        return false;
+    }
+    const auto& descriptor = found->second;
+    const auto* m6_identity = static_cast<const proto::M6OperationIdentity*>(nullptr);
+    if (descriptor.m6_operation) {
+        m6_identity = proto::m6_operation_identity(descriptor.m6_operation.value());
+    }
+    return descriptor.m3_operation.has_value() ||
+           (m6_identity != nullptr && m6_identity->mutation) ||
+           descriptor.session_operation == proto::SessionOperation::Terminate;
 }
 
 void Dispatcher::set_request_preflight(
@@ -353,8 +421,10 @@ void Dispatcher::dispatch(RequestSession& session) const {
     const bool m1_destructive = is_m1_destructive_command(key) &&
                                 it->second.tier == Tier::Destructive &&
                                 it->second.m1_destructive_kernel;
-    const bool active_m3 = publicly_active_m3(it->second.m3_operation);
-    if (it->second.tier != Tier::Read && !m1_destructive && !active_m3) {
+    const bool active_write = publicly_active_m3(it->second.m3_operation) ||
+                              it->second.m6_operation.has_value() ||
+                              it->second.session_operation == proto::SessionOperation::Terminate;
+    if (it->second.tier != Tier::Read && !m1_destructive && !active_write) {
         session.error("DENIED", "write-tier commands are not implemented yet (fail-closed gate)",
                       nlohmann::json::object(), kDenied);
         return;

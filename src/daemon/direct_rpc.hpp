@@ -93,11 +93,17 @@ struct DirectLeaveResult {
     bool operator==(const DirectLeaveResult&) const = default;
 };
 
+struct DirectTerminateSessionResult {
+    std::int64_t session_id = 0;
+
+    bool operator==(const DirectTerminateSessionResult&) const = default;
+};
+
 using DirectResult =
     std::variant<core::TdMessageWriteResult, DirectDeleteResult, DirectReactionResult,
                  DirectMessagePinResult, DirectMarkReadResult, DirectMuteResult,
                  DirectChatPinResult, DirectArchiveResult, DirectJoinResult, DirectLeaveResult,
-                 core::TdM6Response>;
+                 DirectTerminateSessionResult, core::TdM6Response>;
 
 struct DirectSuccess {
     DirectResult result;

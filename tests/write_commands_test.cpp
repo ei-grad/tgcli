@@ -5,9 +5,11 @@
 #include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/idempotency_reconciliation.hpp"
+#include "daemon/m6_model.hpp"
 #include "daemon/request_fingerprint.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/write_commands.hpp"
+#include "daemon/write_contract.hpp"
 #include "daemon/write_domain.hpp"
 #include "schema_matcher.hpp"
 #include "support/scripted_td_runtime.hpp"
@@ -387,6 +389,73 @@ class FakeWrites final {
         });
     }
 
+    std::future<Outcome> m6_mutation(proto::M6Operation operation, const proto::Request& request) {
+        std::string error;
+        auto frozen = proto::admit_request_source(request, error);
+        INFO(error);
+        REQUIRE(frozen);
+        auto outcome = std::make_shared<Outcome>();
+        auto sink = std::make_shared<daemon::CallbackSink>(
+            [](const json&) {}, [](const json&) {},
+            [outcome](json result) {
+                outcome->result = std::move(result);
+                outcome->exit_code = kOk;
+                ++outcome->terminal_count;
+            },
+            [outcome](std::string code, std::string message, json details, int exit_code) {
+                outcome->error = json{{"error",
+                                       {{"code", std::move(code)},
+                                        {"message", std::move(message)},
+                                        {"details", std::move(details)}}}};
+                outcome->exit_code = exit_code;
+                ++outcome->terminal_count;
+            });
+        auto session = std::make_shared<daemon::RequestSession>(
+            std::move(*frozen), sink, 0, daemon::RequestSession::NonceGenerator{},
+            daemon::ActivityTracker::Token{}, admitted_, std::nullopt,
+            daemon::ConfigAdmissionMode::FrozenRuntime);
+        return std::async(std::launch::async, [this, operation, outcome, session] {
+            coordinator_->m6_mutation(operation, session->request(), *session);
+            return *outcome;
+        });
+    }
+
+    std::future<Outcome>
+    terminate_session(const proto::Request& request,
+                      std::shared_ptr<daemon::RequestSession>* exposed_session = nullptr) {
+        std::string error;
+        auto frozen = proto::admit_request_source(request, error);
+        INFO(error);
+        REQUIRE(frozen);
+        auto outcome = std::make_shared<Outcome>();
+        auto sink = std::make_shared<daemon::CallbackSink>(
+            [](const json&) {}, [](const json&) {},
+            [outcome](json result) {
+                outcome->result = std::move(result);
+                outcome->exit_code = kOk;
+                ++outcome->terminal_count;
+            },
+            [outcome](std::string code, std::string message, json details, int exit_code) {
+                outcome->error = json{{"error",
+                                       {{"code", std::move(code)},
+                                        {"message", std::move(message)},
+                                        {"details", std::move(details)}}}};
+                outcome->exit_code = exit_code;
+                ++outcome->terminal_count;
+            });
+        auto session = std::make_shared<daemon::RequestSession>(
+            std::move(*frozen), sink, 0, daemon::RequestSession::NonceGenerator{},
+            daemon::ActivityTracker::Token{}, admitted_, std::nullopt,
+            daemon::ConfigAdmissionMode::FrozenRuntime);
+        if (exposed_session != nullptr) {
+            *exposed_session = session;
+        }
+        return std::async(std::launch::async, [this, outcome, session] {
+            coordinator_->terminate_session(session->request(), *session);
+            return *outcome;
+        });
+    }
+
     template <typename T> core::TdFunctionData respond(core::TdFunctionKind expected, T value) {
         CAPTURE(core::td_function_name(expected), sent_count_);
         REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
@@ -448,6 +517,10 @@ class FakeWrites final {
 
     void push_authorization(core::AuthStateData state) {
         runtime_->push_update(client_id_, {}, std::move(state));
+    }
+
+    template <typename T> void push_update(T value) {
+        runtime_->push_update(client_id_, core::TdValue::from(std::move(value)));
     }
 
     void push_forward_success(std::int64_t temporary_id,
@@ -522,6 +595,24 @@ class FakeWrites final {
         } else {
             coordinator_hooks_->direct_rpc.before_request = std::move(advance_authorization);
         }
+    }
+
+    void lose_authorization_before_direct_request() {
+        coordinator_hooks_->direct_rpc.before_request = [this] {
+            const auto initial = client_->auth_state();
+            REQUIRE(initial);
+            const auto sequence = initial->auth_sequence;
+            runtime_->push_update(client_id_, {}, core::AuthStateData{core::AuthState::LoggingOut});
+            const auto deadline = std::chrono::steady_clock::now() + 1s;
+            while (std::chrono::steady_clock::now() < deadline) {
+                const auto current = client_->auth_state();
+                if (!current || current->auth_sequence != sequence ||
+                    current->data.state != core::AuthState::Ready) {
+                    return;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+        };
     }
 
     void expire_direct_before_request() {
@@ -632,6 +723,230 @@ proto::Request saved_attach_request(const WriteTree& tree, bool dry_run = false,
     request.context.dry_run = dry_run;
     request.context.idempotency_key = std::move(key);
     return request;
+}
+
+proto::Request contact_mutation_request(std::string command,
+                                        std::optional<std::string> key = std::nullopt,
+                                        bool dry_run = false) {
+    proto::Request request("main");
+    request.id = 61;
+    request.command = {"contact", std::move(command)};
+    request.args = {{"user", "77"}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.idempotency_key = std::move(key);
+    request.context.dry_run = dry_run;
+    return request;
+}
+
+proto::Request folder_create_request(bool dry_run = false) {
+    proto::Request request("main");
+    request.id = 62;
+    request.command = {"folder", "create"};
+    request.args = {{"name", "Work"},
+                    {"chats", json::array({"-1002", "-1001", "-1001"})},
+                    {"icon", "work"},
+                    {"color_id", 2}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.dry_run = dry_run;
+    return request;
+}
+
+proto::Request folder_membership_request(bool add) {
+    proto::Request request("main");
+    request.id = 63;
+    request.command = {"folder", add ? "add-chat" : "remove-chat"};
+    request.args = {{"folder_id", 7}, {"chat", add ? "-1002" : "-1001"}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    return request;
+}
+
+proto::Request folder_edit_request() {
+    proto::Request request("main");
+    request.id = 68;
+    request.command = {"folder", "edit"};
+    request.args = {{"folder_id", 7},
+                    {"name", "Other"},
+                    {"icon", nullptr},
+                    {"use_default_icon", false},
+                    {"color_id", nullptr}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    return request;
+}
+
+proto::Request folder_delete_request() {
+    proto::Request request("main");
+    request.id = 69;
+    request.command = {"folder", "delete"};
+    request.args = {{"folder_id", 7}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.yes = true;
+    return request;
+}
+
+core::TdM6FolderInfo folder_info() {
+    return {.id = 7,
+            .name = {.text = "Work", .animate_custom_emoji = true, .custom_emoji_entities = {}},
+            .icon = core::TdM6FolderIcon::Work,
+            .color_id = 2,
+            .is_shareable = false,
+            .has_my_invite_links = false};
+}
+
+core::TdM6ChatFolder folder_snapshot() {
+    return {.name = {.text = "Work", .animate_custom_emoji = true, .custom_emoji_entities = {}},
+            .icon = core::TdM6FolderIcon::Work,
+            .color_id = 2,
+            .is_shareable = false,
+            .pinned_chat_ids = {},
+            .included_chat_ids = {-1001},
+            .excluded_chat_ids = {-1002},
+            .exclude_muted = false,
+            .exclude_read = false,
+            .exclude_archived = false,
+            .include_contacts = false,
+            .include_non_contacts = false,
+            .include_bots = false,
+            .include_groups = false,
+            .include_channels = false};
+}
+
+proto::Request topic_mutation_request(const std::string& action) {
+    proto::Request request("main");
+    request.id = 64;
+    request.command = {"topic", action};
+    if (action == "create") {
+        request.args = {{"chat", "-1001"}, {"name", "Updates"}, {"icon", "blue"}};
+    } else if (action == "edit") {
+        request.args = {{"chat", "-1001"}, {"topic_id", 9}, {"name", "Other"}};
+    } else {
+        request.args = {{"chat", "-1001"}, {"topic_id", 9}};
+    }
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    return request;
+}
+
+core::TdSupergroup forum_supergroup() {
+    return {.id = 55, .usernames = {"project"}, .is_channel = false, .is_forum = true};
+}
+
+core::TdM6MemberStatus topic_admin_status() {
+    core::TdM6MemberStatus status;
+    status.kind = core::TdM6MemberStatusKind::Administrator;
+    status.can_be_edited = true;
+    status.rights.can_manage_chat = true;
+    status.rights.can_manage_topics = true;
+    return status;
+}
+
+core::TdM6ForumTopicInfo topic_info(bool closed = false) {
+    return {.chat_id = -1001,
+            .id = 9,
+            .name = "Updates",
+            .icon = {.color = core::TdM6TopicColor::Blue, .custom_emoji_id = "0"},
+            .creation_date = 1'700'000'000,
+            .creator = {.kind = core::TdM6SenderKind::User,
+                        .id = 42,
+                        .unsupported_tdlib_type_id = std::nullopt},
+            .is_general = false,
+            .is_outgoing = true,
+            .is_closed = closed,
+            .is_hidden = false,
+            .is_name_implicit = false};
+}
+
+proto::Request chat_admin_request(const std::string& action) {
+    proto::Request request("main");
+    request.id = 65;
+    request.command = {"chat", action};
+    if (action == "set-title") {
+        request.args = {{"chat", "-1001"}, {"title", "Renamed"}};
+    } else if (action == "set-description") {
+        request.args = {{"chat", "-1001"}, {"description", "Description"}};
+    } else if (action == "promote") {
+        request.args = {
+            {"chat", "-1001"}, {"user", "77"}, {"rights", json::array({"change-info"})}};
+    } else if (action == "set-permissions") {
+        request.args = {{"chat", "-1001"}, {"permissions", json::array({"send-basic-messages"})}};
+    } else {
+        request.args = {{"chat", "-1001"}, {"user", "77"}};
+    }
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    return request;
+}
+
+proto::Request invite_link_request(std::optional<std::string> revoke = std::nullopt) {
+    proto::Request request("main");
+    request.id = 70;
+    request.command = {"chat", "invite-link"};
+    request.args = {{"chat", "-1001"}, {"revoke", revoke ? json(*revoke) : json(nullptr)}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.yes = true;
+    return request;
+}
+
+proto::Request storage_optimize_request() {
+    proto::Request request("main");
+    request.id = 66;
+    request.command = {"storage", "optimize"};
+    request.args = json::object();
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.yes = true;
+    return request;
+}
+
+proto::Request session_terminate_request(bool dry_run = false) {
+    proto::Request request("main");
+    request.id = 67;
+    request.command = {"session", "terminate"};
+    request.args = {{"session_id", "7"}};
+    request.context.cwd = "/";
+    request.context.timeout_seconds = 2.0;
+    request.context.yes = true;
+    request.context.dry_run = dry_run;
+    return request;
+}
+
+core::TdSessions active_sessions() {
+    return {.items = {{.id = "7",
+                       .is_current = false,
+                       .is_password_pending = false,
+                       .is_unconfirmed = false,
+                       .can_accept_secret_chats = true,
+                       .can_accept_calls = true,
+                       .device_type = core::TdSessionDeviceType::Linux,
+                       .api_id = 123,
+                       .application_name = "Telegram Desktop",
+                       .application_version = "5.1",
+                       .is_official_application = true,
+                       .device_model = "ThinkPad",
+                       .platform = "Linux",
+                       .system_version = "6.10",
+                       .log_in_date = "2023-11-14T22:13:20Z",
+                       .last_active_date = "2023-11-14T22:13:21Z",
+                       .ip_address = "192.0.2.1",
+                       .location = "Test"}},
+            .inactive_session_ttl_days = 30};
+}
+
+core::TdM6MemberStatus chat_admin_status(bool promote = false) {
+    core::TdM6MemberStatus status;
+    status.kind = core::TdM6MemberStatusKind::Administrator;
+    status.can_be_edited = true;
+    status.rights.can_manage_chat = true;
+    status.rights.can_change_info = true;
+    status.rights.can_invite_users = true;
+    status.rights.can_restrict_members = true;
+    status.rights.can_promote_members = promote;
+    return status;
 }
 
 proto::Request delete_request(std::int64_t message_id = 101,
@@ -2504,7 +2819,7 @@ TEST_CASE("msg forward aggregates partial and rate-limited vectors exactly",
         fake.push_authorization(core::AuthStateData{core::AuthState::LoggingOut});
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
-        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        REQUIRE((*outcome.error)["error"]["code"] == "NOT_AUTHED");
         check_completed_possible_with_pending(fake);
         const auto audit = read_bytes(fake.tree().audit_path());
         CHECK(audit.find(R"("mutation_state":"confirmed")") != std::string::npos);
@@ -3576,4 +3891,659 @@ TEST_CASE("chat mutation handlers enforce the closed bot matrix before target re
     fake.respond(core::TdFunctionKind::LeaveChat, core::TdOk{});
     REQUIRE(pending.get().result);
     CHECK(fake.count(core::TdFunctionKind::LeaveChat) == 1);
+}
+
+TEST_CASE("M6 contact mutations use the shared audited direct-write kernel",
+          "[m6][write-command][contact][fake-boundary]") {
+    const std::array cases{
+        std::pair{proto::M6Operation::ContactAdd, core::TdFunctionKind::AddContact},
+        std::pair{proto::M6Operation::ContactRemove, core::TdFunctionKind::RemoveContacts},
+        std::pair{proto::M6Operation::ContactBlock,
+                  core::TdFunctionKind::SetMessageSenderBlockList},
+        std::pair{proto::M6Operation::ContactUnblock,
+                  core::TdFunctionKind::SetMessageSenderBlockList},
+    };
+    for (const auto& [operation, function] : cases) {
+        CAPTURE(proto::m6_operation_identity(operation)->canonical_name);
+        FakeWrites fake;
+        const auto command = std::string(proto::m6_operation_identity(operation)->command_path);
+        auto pending = fake.m6_mutation(
+            operation, contact_mutation_request(command.substr(command.find(' ') + 1)));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        const auto descriptor = fake.respond(function, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK((*outcome.result)["user"]["id"] == 77);
+        if (operation == proto::M6Operation::ContactAdd ||
+            operation == proto::M6Operation::ContactRemove) {
+            CHECK((*outcome.result)["is_contact"] == (operation == proto::M6Operation::ContactAdd));
+        } else {
+            CHECK((*outcome.result)["blocked"] == (operation == proto::M6Operation::ContactBlock));
+        }
+        CHECK(descriptor.kind() == function);
+    }
+
+    SECTION("dry-run performs planning but no mutating TD call or persistence") {
+        FakeWrites fake(false);
+        auto pending = fake.m6_mutation(proto::M6Operation::ContactAdd,
+                                        contact_mutation_request("add", std::nullopt, true));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["dry_run"] == true);
+        CHECK((*outcome.result)["plan"]["phone_number_sha256"].get<std::string>().starts_with(
+            "sha256:"));
+        CHECK(fake.count(core::TdFunctionKind::AddContact) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+}
+
+TEST_CASE("M6 folder mutations preserve full snapshots through the shared kernel",
+          "[m6][write-command][folder][fake-boundary]") {
+    SECTION("create resolves all chats atomically and sorts unique ids") {
+        FakeWrites fake;
+        auto pending = fake.m6_mutation(proto::M6Operation::FolderCreate, folder_create_request());
+        bind_principal(fake);
+        for (const auto id : {-1002, -1001, -1001}) {
+            auto chat = basic_chat();
+            chat.id = id;
+            fake.respond(core::TdFunctionKind::GetChat, chat);
+        }
+        auto created = folder_info();
+        created.name.animate_custom_emoji = false;
+        fake.respond(core::TdFunctionKind::CreateChatFolder, core::TdM6Response{created});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["folder"]["included_chat_ids"] == json::array({-1002, -1001}));
+        CHECK((*outcome.result)["folder"]["name"]["animate_custom_emoji"] == false);
+        CHECK((*outcome.result)["folder"]["icon"] == "work");
+    }
+
+    SECTION("add-chat removes excluded membership and preserves animated folder name") {
+        FakeWrites fake;
+        fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::FolderAddChat, folder_membership_request(true));
+        bind_principal(fake);
+        auto chat = basic_chat();
+        chat.id = -1002;
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        fake.respond(core::TdFunctionKind::GetChatFolder,
+                     core::TdM6Response{core::TdM6MaybeChatFolder{folder_snapshot()}});
+        fake.respond(core::TdFunctionKind::EditChatFolder, core::TdM6Response{folder_info()});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["included"] == true);
+        CHECK((*outcome.result)["folder"]["included_chat_ids"] == json::array({-1001, -1002}));
+        CHECK((*outcome.result)["folder"]["excluded_chat_ids"].empty());
+        CHECK((*outcome.result)["folder"]["name"]["animate_custom_emoji"] == true);
+    }
+
+    SECTION("remove-chat moves included membership to excluded without a reread") {
+        FakeWrites fake;
+        fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
+        auto pending = fake.m6_mutation(proto::M6Operation::FolderRemoveChat,
+                                        folder_membership_request(false));
+        bind_principal(fake);
+        auto chat = basic_chat();
+        chat.id = -1001;
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        fake.respond(core::TdFunctionKind::GetChatFolder,
+                     core::TdM6Response{core::TdM6MaybeChatFolder{folder_snapshot()}});
+        fake.respond(core::TdFunctionKind::EditChatFolder, core::TdM6Response{folder_info()});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["included"] == false);
+        CHECK((*outcome.result)["folder"]["included_chat_ids"].empty());
+        CHECK((*outcome.result)["folder"]["excluded_chat_ids"] == json::array({-1002, -1001}));
+        CHECK(fake.count(core::TdFunctionKind::GetChatFolder) == 1);
+    }
+
+    SECTION("edit changes only metadata and preserves animation and membership") {
+        FakeWrites fake;
+        fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
+        auto pending = fake.m6_mutation(proto::M6Operation::FolderEdit, folder_edit_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChatFolder,
+                     core::TdM6Response{core::TdM6MaybeChatFolder{folder_snapshot()}});
+        auto edited = folder_info();
+        edited.name.text = "Other";
+        fake.respond(core::TdFunctionKind::EditChatFolder, core::TdM6Response{edited});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["folder"]["name"]["text"] == "Other");
+        CHECK((*outcome.result)["folder"]["name"]["animate_custom_emoji"] == true);
+        CHECK((*outcome.result)["folder"]["included_chat_ids"] == json::array({-1001}));
+    }
+
+    SECTION("delete confirms the frozen folder and performs one mutation") {
+        FakeWrites fake;
+        fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
+        auto pending = fake.m6_mutation(proto::M6Operation::FolderDelete, folder_delete_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChatFolder,
+                     core::TdM6Response{core::TdM6MaybeChatFolder{folder_snapshot()}});
+        fake.respond(core::TdFunctionKind::DeleteChatFolder, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"folder_id", 7}, {"deleted", true}});
+        CHECK(fake.count(core::TdFunctionKind::DeleteChatFolder) == 1);
+    }
+}
+
+TEST_CASE("M6 topic mutations bind forum capability and strict topic state",
+          "[m6][write-command][topic][fake-boundary]") {
+    SECTION("create binds forum membership before one typed mutation") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::TopicCreate, topic_mutation_request("create"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = topic_admin_status()}});
+        fake.respond(core::TdFunctionKind::CreateForumTopic, core::TdM6Response{topic_info()});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["topic"]["id"] == 9);
+        CHECK((*outcome.result)["topic"]["name"] == "Updates");
+    }
+
+    SECTION("close validates current topic then returns planned state without reread") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::TopicClose, topic_mutation_request("close"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+        fake.respond(core::TdFunctionKind::GetForumTopic,
+                     core::TdM6Response{core::TdM6MaybeForumTopic{
+                         core::TdM6ForumTopic{.info = topic_info(false)}}});
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = topic_admin_status()}});
+        fake.respond(core::TdFunctionKind::ToggleForumTopicIsClosed,
+                     core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["chat"]["id"] == -1001);
+        CHECK((*outcome.result)["topic_id"] == 9);
+        CHECK((*outcome.result)["closed"] == true);
+        CHECK(fake.count(core::TdFunctionKind::GetForumTopic) == 1);
+    }
+
+    SECTION("edit returns the frozen name without a post-mutation topic read") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::TopicEdit, topic_mutation_request("edit"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+        fake.respond(core::TdFunctionKind::GetForumTopic,
+                     core::TdM6Response{core::TdM6MaybeForumTopic{
+                         core::TdM6ForumTopic{.info = topic_info(false)}}});
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = topic_admin_status()}});
+        fake.respond(core::TdFunctionKind::EditForumTopic, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["topic_id"] == 9);
+        CHECK((*outcome.result)["name"] == "Other");
+        CHECK(fake.count(core::TdFunctionKind::GetForumTopic) == 1);
+    }
+
+    SECTION("reopen validates a closed topic and returns the planned open state") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::TopicReopen, topic_mutation_request("reopen"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+        fake.respond(core::TdFunctionKind::GetForumTopic,
+                     core::TdM6Response{core::TdM6MaybeForumTopic{
+                         core::TdM6ForumTopic{.info = topic_info(true)}}});
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = topic_admin_status()}});
+        fake.respond(core::TdFunctionKind::ToggleForumTopicIsClosed,
+                     core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["closed"] == false);
+        CHECK(fake.count(core::TdFunctionKind::GetForumTopic) == 1);
+    }
+}
+
+TEST_CASE("M6 administration and storage use typed plans without post-mutation rereads",
+          "[m6][write-command][admin][storage][fake-boundary]") {
+    SECTION("set-title checks the current member right") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::ChatSetTitle, chat_admin_request("set-title"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status()}});
+        fake.respond(core::TdFunctionKind::SetChatTitle, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["chat"]["id"] == -1001);
+        CHECK((*outcome.result)["title"] == "Renamed");
+    }
+
+    SECTION("set-description emits the frozen text without a chat reread") {
+        FakeWrites fake;
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatSetDescription,
+                                        chat_admin_request("set-description"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status()}});
+        fake.respond(core::TdFunctionKind::SetChatDescription, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["description"] == "Description");
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 1);
+    }
+
+    SECTION("promote binds caller and target snapshots") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::ChatPromote, chat_admin_request("promote"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status(true)}});
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        core::TdM6MemberStatus target_status;
+        target_status.kind = core::TdM6MemberStatusKind::Member;
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 77,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = target_status}});
+        fake.respond(core::TdFunctionKind::SetChatMemberStatus, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["status"] == "administrator");
+        CHECK((*outcome.result)["can_manage_chat"] == true);
+        CHECK((*outcome.result)["rights"] == json::array({"change-info"}));
+    }
+
+    SECTION("set-photo publishes only a validated private static-JPEG spool") {
+        FakeWrites fake;
+        const std::string jpeg{static_cast<char>(0xff), static_cast<char>(0xd8), 'x',
+                               static_cast<char>(0xff), static_cast<char>(0xd9)};
+        fake.tree().write_source(jpeg, "avatar.JPEG");
+        auto request = chat_admin_request("set-photo");
+        request.args = {{"chat", "-1001"}, {"path", fake.tree().source_path("avatar.JPEG")}};
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatSetPhoto, request);
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status()}});
+        const auto function =
+            fake.respond(core::TdFunctionKind::SetChatPhoto, core::TdM6Response{core::TdM6Ok{}});
+        CHECK(function_field<bool>(function, "delete") == false);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["chat"]["id"] == -1001);
+        CHECK((*outcome.result)["chat"]["type"] == "basic_group");
+        CHECK((*outcome.result)["photo"] == "set");
+        const auto spool_root = fake.tree().account_state() + "/spool";
+        CHECK((!std::filesystem::exists(spool_root) || std::filesystem::is_empty(spool_root)));
+    }
+
+    SECTION("set-photo delete uses no source spool and returns the exact state") {
+        FakeWrites fake;
+        auto request = chat_admin_request("set-photo");
+        request.args = {{"chat", "-1001"}, {"delete", true}};
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatSetPhoto, request);
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status()}});
+        const auto function =
+            fake.respond(core::TdFunctionKind::SetChatPhoto, core::TdM6Response{core::TdM6Ok{}});
+        CHECK(function_field<bool>(function, "delete") == true);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["photo"] == "deleted");
+        CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+    }
+
+    SECTION("invite create returns the link while revoke keeps raw bytes out of audit") {
+        {
+            FakeWrites fake;
+            auto pending =
+                fake.m6_mutation(proto::M6Operation::ChatInviteLink, invite_link_request());
+            bind_principal(fake);
+            fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+            fake.respond(core::TdFunctionKind::GetChatMember,
+                         core::TdM6Response{core::TdM6ChatMember{
+                             .member = {.kind = core::TdM6SenderKind::User,
+                                        .id = 42,
+                                        .unsupported_tdlib_type_id = std::nullopt},
+                             .status = chat_admin_status()}});
+            core::TdM6ChatInviteLink link;
+            link.invite_link = "https://t.me/+created";
+            link.creator_user_id = 42;
+            link.date = 1;
+            fake.respond(core::TdFunctionKind::CreateChatInviteLink, core::TdM6Response{link});
+            const auto outcome = pending.get();
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["action"] == "create");
+            CHECK((*outcome.result)["invite_link"] == "https://t.me/+created");
+        }
+        {
+            constexpr std::string_view secret = "https://t.me/+revoked";
+            FakeWrites fake;
+            auto pending = fake.m6_mutation(proto::M6Operation::ChatInviteLink,
+                                            invite_link_request(std::string(secret)));
+            bind_principal(fake);
+            fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+            fake.respond(core::TdFunctionKind::GetChatMember,
+                         core::TdM6Response{core::TdM6ChatMember{
+                             .member = {.kind = core::TdM6SenderKind::User,
+                                        .id = 42,
+                                        .unsupported_tdlib_type_id = std::nullopt},
+                             .status = chat_admin_status()}});
+            core::TdM6ChatInviteLink revoked;
+            revoked.invite_link = secret;
+            revoked.creator_user_id = 42;
+            revoked.date = 1;
+            revoked.is_revoked = true;
+            fake.respond(core::TdFunctionKind::RevokeChatInviteLink,
+                         core::TdM6Response{core::TdM6ChatInviteLinks{
+                             .total_count = 1, .invite_links = {std::move(revoked)}}});
+            const auto outcome = pending.get();
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["action"] == "revoke");
+            CHECK((*outcome.result)["invite_link"].is_null());
+            CHECK(read_bytes(fake.tree().audit_path()).find(secret) == std::string::npos);
+        }
+    }
+
+    SECTION("invite revoke rejects a structurally inconsistent total before result projection") {
+        constexpr std::string_view secret = "https://t.me/+invalid-total";
+        FakeWrites fake;
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatInviteLink,
+                                        invite_link_request(std::string(secret)));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status()}});
+        core::TdM6ChatInviteLink revoked;
+        revoked.invite_link = secret;
+        revoked.creator_user_id = 42;
+        revoked.date = 1;
+        revoked.is_revoked = true;
+        fake.respond(core::TdFunctionKind::RevokeChatInviteLink,
+                     core::TdM6Response{core::TdM6ChatInviteLinks{
+                         .total_count = 2, .invite_links = {std::move(revoked)}}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK(outcome.terminal_count == 1);
+    }
+
+    SECTION("member mutations and permissions cover every closed administration branch") {
+        const std::array member_cases{
+            std::pair{proto::M6Operation::ChatDemote, core::TdM6MemberStatusKind::Administrator},
+            std::pair{proto::M6Operation::ChatBan, core::TdM6MemberStatusKind::Member},
+            std::pair{proto::M6Operation::ChatUnban, core::TdM6MemberStatusKind::Banned},
+            std::pair{proto::M6Operation::ChatKick, core::TdM6MemberStatusKind::Member},
+        };
+        for (const auto& [operation, before_kind] : member_cases) {
+            CAPTURE(proto::m6_operation_identity(operation)->canonical_name);
+            FakeWrites fake;
+            auto request = chat_admin_request(
+                std::string(proto::m6_operation_identity(operation)->command_path).substr(5));
+            request.context.yes = operation == proto::M6Operation::ChatBan ||
+                                  operation == proto::M6Operation::ChatKick;
+            auto pending = fake.m6_mutation(operation, request);
+            bind_principal(fake);
+            fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+            fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+            fake.respond(core::TdFunctionKind::GetChatMember,
+                         core::TdM6Response{core::TdM6ChatMember{
+                             .member = {.kind = core::TdM6SenderKind::User,
+                                        .id = 42,
+                                        .unsupported_tdlib_type_id = std::nullopt},
+                             .status = chat_admin_status(true)}});
+            fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+            core::TdM6MemberStatus before;
+            before.kind = before_kind;
+            before.can_be_edited = true;
+            before.rights.can_manage_chat =
+                before_kind == core::TdM6MemberStatusKind::Administrator;
+            fake.respond(core::TdFunctionKind::GetChatMember,
+                         core::TdM6Response{core::TdM6ChatMember{
+                             .member = {.kind = core::TdM6SenderKind::User,
+                                        .id = 77,
+                                        .unsupported_tdlib_type_id = std::nullopt},
+                             .status = before}});
+            fake.respond(core::TdFunctionKind::SetChatMemberStatus,
+                         core::TdM6Response{core::TdM6Ok{}});
+            const auto outcome = pending.get();
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["user"]["id"] == 77);
+            CHECK(fake.count(core::TdFunctionKind::SetChatMemberStatus) == 1);
+        }
+
+        FakeWrites fake;
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatSetPermissions,
+                                        chat_admin_request("set-permissions"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+        fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status(true)}});
+        fake.respond(core::TdFunctionKind::SetChatPermissions, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["permissions"] == json::array({"send-basic-messages"}));
+    }
+
+    SECTION("storage optimize uses frozen TD defaults and validates returned sums") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::StorageOptimize, storage_optimize_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::OptimizeStorage,
+                     core::TdM6Response{core::TdM6StorageStatistics{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["optimized"] == true);
+        CHECK((*outcome.result)["statistics"] ==
+              json{{"size", 0}, {"count", 0}, {"by_chat", json::array()}});
+    }
+
+    SECTION("storage optimize rejects a top-level sum mismatch") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::StorageOptimize, storage_optimize_request());
+        bind_principal(fake);
+        core::TdM6StorageStatistics malformed;
+        malformed.size = 1;
+        fake.respond(core::TdFunctionKind::OptimizeStorage, core::TdM6Response{malformed});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+        CHECK(outcome.terminal_count == 1);
+    }
+}
+
+TEST_CASE("session terminate uses the audited direct path without idempotency or reread",
+          "[m6][write-command][session][fake-boundary]") {
+    const auto target = daemon::m6_session_terminate_target_json(active_sessions().items.front());
+    REQUIRE(target);
+    std::string contract_error;
+    const daemon::WriteOperation session_operation{daemon::AccountAuditOperation::SessionTerminate};
+    auto arguments = daemon::write_contract::make_arguments(session_operation,
+                                                            {{"session_id", "7"}}, contract_error);
+    INFO(contract_error);
+    REQUIRE(arguments);
+    auto plan = daemon::write_contract::make_plan(session_operation, "main",
+                                                  {{"operation", "session_terminate"},
+                                                   {"account", "main"},
+                                                   {"tdlib_request", "terminateSession"},
+                                                   {"session", *target}},
+                                                  contract_error);
+    INFO(contract_error);
+    REQUIRE(plan);
+    SECTION("real termination resolves one immutable non-current target") {
+        FakeWrites fake;
+        {
+            std::ofstream store(fake.tree().store_path(), std::ios::binary | std::ios::trunc);
+            REQUIRE(store.good());
+            store << "not an idempotency store";
+        }
+        const auto store_before = read_bytes(fake.tree().store_path());
+        auto pending = fake.terminate_session(session_terminate_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        fake.respond(core::TdFunctionKind::TerminateSession, core::TdOk{});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK(*outcome.result == json{{"session_id", "7"}, {"terminated", true}});
+        CHECK(fake.count(core::TdFunctionKind::GetActiveSessions) == 1);
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 1);
+        CHECK(read_bytes(fake.tree().store_path()) == store_before);
+    }
+
+    SECTION("dry-run returns the strict plan without a mutation") {
+        FakeWrites fake(false);
+        auto pending = fake.terminate_session(session_terminate_request(true));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["dry_run"] == true);
+        CHECK((*outcome.result)["plan"]["session"]["id"] == "7");
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+    }
+
+    SECTION("dry-run reconciliation fails before Ready and target reads") {
+        FakeWrites fake;
+        const auto spool = fake.tree().account_state() + "/spool";
+        REQUIRE(std::filesystem::create_directory(spool));
+        REQUIRE(::chmod(spool.c_str(), 0755) == 0);
+        const auto outcome = fake.terminate_session(session_terminate_request(true)).get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "SPOOL_UNAVAILABLE");
+        CHECK((*outcome.error)["error"]["details"] == json{{"operation", "session_terminate"},
+                                                           {"path", "spool/"},
+                                                           {"reason", "wrong_mode"}});
+        CHECK(fake.count(core::TdFunctionKind::GetMe) == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetActiveSessions) == 0);
+    }
+
+    SECTION("real reconciliation follows principal and authority but precedes target reads") {
+        FakeWrites fake;
+        const auto spool = fake.tree().account_state() + "/spool";
+        REQUIRE(std::filesystem::create_directory(spool));
+        REQUIRE(::chmod(spool.c_str(), 0755) == 0);
+        auto pending = fake.terminate_session(session_terminate_request());
+        bind_principal(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "SPOOL_UNAVAILABLE");
+        CHECK(fake.count(core::TdFunctionKind::GetMe) == 1);
+        CHECK(fake.count(core::TdFunctionKind::GetActiveSessions) == 0);
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+    }
+
+    SECTION("direct preparation deadline preserves the exact preflight timeout") {
+        FakeWrites fake;
+        fake.expire_direct_before_request();
+        auto pending = fake.terminate_session(session_terminate_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK((*outcome.error)["error"]["details"] == json{{"operation", "session_terminate"},
+                                                           {"phase", "preflight"},
+                                                           {"state", "ready"},
+                                                           {"outcome", "not_started"},
+                                                           {"idempotency", "not_requested"}});
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+    }
+
+    SECTION("authorization loss during direct preparation preserves the first cause") {
+        FakeWrites fake;
+        fake.lose_authorization_before_direct_request();
+        auto pending = fake.terminate_session(session_terminate_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK((*outcome.error)["error"]["details"]["reason"] == "authorization_lost");
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+    }
+
+    SECTION("disconnect during direct preparation emits no terminal or mutation") {
+        FakeWrites fake;
+        std::shared_ptr<daemon::RequestSession> session;
+        fake.cancel_before_request(core::TdFunctionKind::TerminateSession, &session);
+        auto pending = fake.terminate_session(session_terminate_request(), &session);
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        const auto outcome = pending.get();
+        CHECK(outcome.terminal_count == 0);
+        CHECK_FALSE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+    }
 }

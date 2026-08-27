@@ -2,6 +2,7 @@
 #include "daemon/m6_audit_contract.hpp"
 #include "daemon/m6_write_policy.hpp"
 #include "daemon/write_contract.hpp"
+#include "schema_matcher.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -139,14 +140,19 @@ json plan(O operation) {
     case O::ChatDemote:
     case O::ChatBan:
     case O::ChatUnban:
-    case O::ChatKick:
+    case O::ChatKick: {
+        std::string_view after = "left";
+        if (operation == O::ChatDemote) {
+            after = "member";
+        } else if (operation == O::ChatBan) {
+            after = "banned";
+        }
         value.update({{"chat", chat()},
                       {"user", user()},
                       {"before", {{"kind", "member"}, {"member_until_date", 0}}},
-                      {"after", operation == O::ChatDemote ? "member"
-                                : operation == O::ChatBan  ? "banned"
-                                                           : "left"}});
+                      {"after", after}});
         break;
+    }
     case O::ChatSetPermissions:
         value.update({{"chat", chat()}, {"permissions", {"send-basic-messages"}}});
         break;
@@ -317,9 +323,19 @@ TEST_CASE("M6 account audit accepts the exact direct stage lifecycle for all 24 
             error);
         INFO(error);
         REQUIRE(intent);
+        CHECK(
+            tgcli::test::matches_json_schema("audit-intent.schema.json").match(intent->document()));
 
         std::vector<daemon::AccountAuditCheckpointInput> history;
         std::uint32_t sequence = 0;
+        const auto require_schema_checkpoint =
+            [&error](const daemon::AccountAuditCheckpointInput& input) {
+                auto checkpoint = daemon::make_account_audit_checkpoint(input, error);
+                INFO(error);
+                REQUIRE(checkpoint);
+                CHECK(tgcli::test::matches_json_schema("audit-checkpoint.schema.json")
+                          .match(checkpoint->document()));
+            };
         if (policy.idempotent) {
             history.push_back({{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:01Z"},
                                "main",
@@ -331,6 +347,7 @@ TEST_CASE("M6 account audit accepts the exact direct stage lifecycle for all 24 
                                 {"expires_at", std::uint64_t{1}},
                                 {"reserved_terminal_bytes",
                                  daemon::account_audit_terminal_reservation(*operation.audit())}}});
+            require_schema_checkpoint(history.back());
         }
         history.push_back({{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:02Z"},
                            "main",
@@ -340,6 +357,7 @@ TEST_CASE("M6 account audit accepts the exact direct stage lifecycle for all 24 
                            {{"tdlib_function", planned["tdlib_request"]},
                             {"dispatch_token", "0123456789abcdef0123456789abcdef"},
                             {"client_generation", std::uint64_t{1}}}});
+        require_schema_checkpoint(history.back());
         const json terminal{{"kind", "result"}, {"data", result(policy.operation, planned)}};
         history.push_back({{"0123456789abcdef0123456789abcdef", "2026-08-19T12:00:03Z"},
                            "main",
@@ -347,6 +365,7 @@ TEST_CASE("M6 account audit accepts the exact direct stage lifecycle for all 24 
                            ++sequence,
                            daemon::AccountAuditStage::MutationConfirmed,
                            {{"terminal", terminal}}});
+        require_schema_checkpoint(history.back());
         INFO(error);
         CHECK(daemon::validate_account_audit_stage_history(*operation.audit(), history, error));
         auto outcome = daemon::make_account_audit_outcome(
@@ -364,6 +383,8 @@ TEST_CASE("M6 account audit accepts the exact direct stage lifecycle for all 24 
             error);
         INFO(error);
         REQUIRE(outcome);
+        CHECK(tgcli::test::matches_json_schema("audit-outcome.schema.json")
+                  .match(outcome->document()));
     }
 }
 

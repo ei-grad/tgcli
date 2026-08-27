@@ -10,6 +10,7 @@
 #include "daemon/fetch_domain.hpp"
 #include "daemon/file_spool.hpp"
 #include "daemon/local_selector.hpp"
+#include "daemon/m6_domain.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_fingerprint.hpp"
 #include "daemon/resolver.hpp"
@@ -367,7 +368,10 @@ std::optional<int> validate_idempotency_option(const CLI::Option& option,
         return report_usage("--idempotency-key cannot be combined with --dry-run",
                             "--idempotency-key", "mutually_exclusive");
     }
-    if (!tgcli::proto::m3_operation_for_command(command)) {
+    const auto m6 = tgcli::proto::m6_operation_for_command(command);
+    const auto* m6_identity = m6 ? tgcli::proto::m6_operation_identity(*m6) : nullptr;
+    if (!tgcli::proto::m3_operation_for_command(command) &&
+        (m6_identity == nullptr || !m6_identity->idempotent)) {
         return report_usage("--idempotency-key is not supported for this command",
                             "--idempotency-key", "unsupported_mode");
     }
@@ -626,6 +630,80 @@ struct StreamCliArguments {
     CLI::Option* wait_after_option = nullptr;
 };
 
+struct M6CliArguments {
+    std::string contact_query;
+    std::string contact_user;
+    std::string folder_id_raw;
+    std::int32_t folder_id = 0;
+    std::string folder_name;
+    std::vector<std::string> folder_chats;
+    std::string folder_chat;
+    std::string folder_icon;
+    std::int64_t folder_color = -1;
+    CLI::Option* folder_name_option = nullptr;
+    CLI::Option* folder_create_icon_option = nullptr;
+    CLI::Option* folder_create_color_option = nullptr;
+    CLI::Option* folder_edit_icon_option = nullptr;
+    CLI::Option* folder_edit_color_option = nullptr;
+    std::string topic_chat;
+    std::string topic_id_raw;
+    std::int32_t topic_id = 0;
+    std::string topic_name;
+    std::string topic_icon = "blue";
+    std::string admin_chat;
+    std::string admin_title;
+    std::string photo_path;
+    bool photo_delete = false;
+    CLI::Option* photo_path_option = nullptr;
+    CLI::Option* photo_delete_option = nullptr;
+    std::string admin_description;
+    std::string invite_revoke;
+    CLI::Option* invite_revoke_option = nullptr;
+    std::string admin_user;
+    std::string admin_rights;
+    std::vector<std::string> normalized_admin_rights;
+    std::string admin_permissions;
+    std::vector<std::string> normalized_permissions;
+    std::string session_id;
+};
+
+std::optional<std::vector<std::string>>
+parse_m6_closed_list(std::string_view raw, std::span<const std::string_view> allowed,
+                     bool allow_none) {
+    if (allow_none && raw == "none") {
+        return std::vector<std::string>{};
+    }
+    if (raw.empty()) {
+        return std::nullopt;
+    }
+    std::vector<std::string> values;
+    for (std::size_t begin = 0;;) {
+        const auto end = raw.find(',', begin);
+        const auto value = raw.substr(begin, end - begin);
+        if (value.empty() || value == "none" ||
+            std::find(allowed.begin(), allowed.end(), value) == allowed.end() ||
+            std::ranges::find(values, value) != values.end()) {
+            return std::nullopt;
+        }
+        values.emplace_back(value);
+        if (end == std::string_view::npos) {
+            return values;
+        }
+        begin = end + 1;
+    }
+}
+
+bool parse_canonical_int64(std::string_view value, std::int64_t& parsed) noexcept {
+    if (value.empty() || value == "-0" || value.front() == '+' ||
+        (value.size() > 1 && value.front() == '0') ||
+        (value.size() > 2 && value.starts_with("-0"))) {
+        return false;
+    }
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    return error == std::errc{} && end == value.data() + value.size() &&
+           std::to_string(parsed) == value;
+}
+
 bool parse_canonical_positive_decimal(std::string_view raw, std::uint64_t maximum,
                                       std::uint64_t& value) noexcept {
     if (raw.empty() || raw.front() == '0' || !std::ranges::all_of(raw, [](char character) {
@@ -798,6 +876,190 @@ std::optional<int> validate_chats_arguments(const std::vector<std::string>& comm
                                             const ChatsCliArguments& chats,
                                             const SavedCliArguments& pagination);
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed 30-command grammar table.
+std::optional<int> validate_m6_arguments(const std::vector<std::string>& command,
+                                         M6CliArguments& m6, std::string_view frozen_cwd) {
+    const auto operation = tgcli::proto::m6_operation_for_command(command);
+    if (!operation) {
+        if (command == std::vector<std::string>{"session", "terminate"}) {
+            std::int64_t ignored = 0;
+            if (!parse_canonical_int64(m6.session_id, ignored)) {
+                return report_usage("session id must use canonical signed int64 spelling",
+                                    "session-id");
+            }
+        }
+        return std::nullopt;
+    }
+    using O = tgcli::proto::M6Operation;
+    const auto exact_selector = [](std::string_view value) {
+        return tgcli::daemon::valid_m6_exact_selector(value);
+    };
+    switch (*operation) {
+    case O::ContactList:
+        return std::nullopt;
+    case O::ContactSearch:
+        return tgcli::daemon::valid_m6_contact_query(m6.contact_query)
+                   ? std::nullopt
+                   : std::optional<int>{
+                         report_usage("contact query must contain 1..256 UTF-8 bytes", "query")};
+    case O::ContactAdd:
+    case O::ContactRemove:
+    case O::ContactBlock:
+    case O::ContactUnblock:
+        return exact_selector(m6.contact_user)
+                   ? std::nullopt
+                   : std::optional<int>{
+                         report_usage("contact mutation requires an exact user selector", "user")};
+    case O::FolderList:
+        return std::nullopt;
+    case O::FolderShow:
+    case O::FolderDelete:
+    case O::FolderAddChat:
+    case O::FolderRemoveChat: {
+        const auto folder_id = tgcli::daemon::parse_m6_positive_int32(m6.folder_id_raw);
+        if (!folder_id) {
+            return report_usage("folder id must be a canonical positive int32", "folder-id");
+        }
+        m6.folder_id = *folder_id;
+        if ((*operation == O::FolderAddChat || *operation == O::FolderRemoveChat) &&
+            !exact_selector(m6.folder_chat)) {
+            return report_usage("folder membership requires an exact chat selector", "chat");
+        }
+        return std::nullopt;
+    }
+    case O::FolderCreate:
+        if (!tgcli::daemon::valid_m6_canonical_text(tgcli::daemon::M6TextKind::FolderName,
+                                                    m6.folder_name)) {
+            return report_usage("folder name is not canonical", "name");
+        }
+        if (m6.folder_chats.empty() || m6.folder_chats.size() > 100 ||
+            !std::ranges::all_of(m6.folder_chats, exact_selector)) {
+            return report_usage("folder create requires 1..100 exact chat selectors", "--chat");
+        }
+        if (m6.folder_create_icon_option->count() != 0 &&
+            !tgcli::daemon::parse_m6_folder_icon(m6.folder_icon)) {
+            return report_usage("folder icon is invalid", "--icon");
+        }
+        if (m6.folder_color < -1 || m6.folder_color > 6) {
+            return report_usage("folder color must be between -1 and 6", "--color");
+        }
+        return std::nullopt;
+    case O::FolderEdit: {
+        const auto folder_id = tgcli::daemon::parse_m6_positive_int32(m6.folder_id_raw);
+        if (!folder_id) {
+            return report_usage("folder id must be a canonical positive int32", "folder-id");
+        }
+        m6.folder_id = *folder_id;
+        if (m6.folder_name_option->count() == 0 && m6.folder_edit_icon_option->count() == 0 &&
+            m6.folder_edit_color_option->count() == 0) {
+            return report_usage("folder edit requires a changed field", "folder");
+        }
+        if (m6.folder_name_option->count() != 0 &&
+            !tgcli::daemon::valid_m6_canonical_text(tgcli::daemon::M6TextKind::FolderName,
+                                                    m6.folder_name)) {
+            return report_usage("folder name is not canonical", "--name");
+        }
+        if (m6.folder_edit_icon_option->count() != 0 && m6.folder_icon != "default" &&
+            !tgcli::daemon::parse_m6_folder_icon(m6.folder_icon)) {
+            return report_usage("folder icon is invalid", "--icon");
+        }
+        if (m6.folder_edit_color_option->count() != 0 &&
+            (m6.folder_color < -1 || m6.folder_color > 6)) {
+            return report_usage("folder color must be between -1 and 6", "--color");
+        }
+        return std::nullopt;
+    }
+    case O::TopicList:
+        return exact_selector(m6.topic_chat)
+                   ? std::nullopt
+                   : std::optional<int>{
+                         report_usage("topic list requires an exact chat selector", "chat")};
+    case O::TopicCreate:
+        if (!exact_selector(m6.topic_chat) ||
+            !tgcli::daemon::valid_m6_canonical_text(tgcli::daemon::M6TextKind::TopicName,
+                                                    m6.topic_name) ||
+            !tgcli::daemon::parse_m6_topic_color(m6.topic_icon)) {
+            return report_usage("topic create arguments are invalid", "topic");
+        }
+        return std::nullopt;
+    case O::TopicEdit:
+    case O::TopicClose:
+    case O::TopicReopen: {
+        const auto topic_id = tgcli::daemon::parse_m6_positive_int32(m6.topic_id_raw);
+        if (!exact_selector(m6.topic_chat) || !topic_id) {
+            return report_usage("topic target is invalid", "topic-id");
+        }
+        m6.topic_id = *topic_id;
+        if (*operation == O::TopicEdit &&
+            !tgcli::daemon::valid_m6_canonical_text(tgcli::daemon::M6TextKind::TopicName,
+                                                    m6.topic_name)) {
+            return report_usage("topic name is not canonical", "name");
+        }
+        return std::nullopt;
+    }
+    case O::ChatSetTitle:
+        return exact_selector(m6.admin_chat) &&
+                       tgcli::daemon::valid_m6_canonical_text(tgcli::daemon::M6TextKind::ChatTitle,
+                                                              m6.admin_title)
+                   ? std::nullopt
+                   : std::optional<int>{report_usage("chat title arguments are invalid", "title")};
+    case O::ChatSetPhoto:
+        if (!exact_selector(m6.admin_chat) ||
+            (m6.photo_path_option->count() == 0) == !m6.photo_delete) {
+            return report_usage("set-photo requires exactly one PATH or --delete", "photo",
+                                "mutually_exclusive");
+        }
+        if (!m6.photo_delete &&
+            !tgcli::daemon::canonical_source_display_path(m6.photo_path, frozen_cwd)) {
+            return report_usage("set-photo path is invalid", "PATH");
+        }
+        return std::nullopt;
+    case O::ChatSetDescription:
+        return exact_selector(m6.admin_chat) &&
+                       tgcli::daemon::valid_m6_canonical_text(
+                           tgcli::daemon::M6TextKind::ChatDescription, m6.admin_description)
+                   ? std::nullopt
+                   : std::optional<int>{
+                         report_usage("chat description arguments are invalid", "description")};
+    case O::ChatInviteLink:
+        if (!exact_selector(m6.admin_chat) ||
+            (m6.invite_revoke_option->count() != 0 &&
+             !tgcli::daemon::valid_m6_invite_link(m6.invite_revoke))) {
+            return report_usage("chat invite-link arguments are invalid", "invite-link");
+        }
+        return std::nullopt;
+    case O::ChatPromote: {
+        const auto rights =
+            parse_m6_closed_list(m6.admin_rights, tgcli::daemon::m6_admin_right_names(), false);
+        if (!exact_selector(m6.admin_chat) || !exact_selector(m6.admin_user) || !rights) {
+            return report_usage("chat promote arguments are invalid", "--rights");
+        }
+        m6.normalized_admin_rights = *rights;
+        return std::nullopt;
+    }
+    case O::ChatDemote:
+    case O::ChatBan:
+    case O::ChatUnban:
+    case O::ChatKick:
+        return exact_selector(m6.admin_chat) && exact_selector(m6.admin_user)
+                   ? std::nullopt
+                   : std::optional<int>{report_usage("chat member target is invalid", "user")};
+    case O::ChatSetPermissions: {
+        const auto permissions = parse_m6_closed_list(
+            m6.admin_permissions, tgcli::daemon::m6_chat_permission_names(), true);
+        if (!exact_selector(m6.admin_chat) || !permissions) {
+            return report_usage("chat permissions are invalid", "--permissions");
+        }
+        m6.normalized_permissions = *permissions;
+        return std::nullopt;
+    }
+    case O::StorageStats:
+    case O::StorageOptimize:
+        return std::nullopt;
+    }
+    return report_usage("M6 command is invalid", "command");
+}
+
 // Each command's closed CLI contract is validated before common request construction.
 // NOLINTBEGIN(readability-function-cognitive-complexity)
 std::optional<int>
@@ -805,7 +1067,11 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
                            const ChatsCliArguments& chats, const MessageCliArguments& messages,
                            const SendCliArguments& send, const ChatCliArguments& chat,
                            const ReadCliArguments& read, const FetchCliArguments& fetch,
-                           std::string_view resolve_selector, std::string_view frozen_cwd) {
+                           std::string_view resolve_selector, M6CliArguments& m6,
+                           std::string_view frozen_cwd) {
+    if (const auto m6_exit = validate_m6_arguments(command, m6, frozen_cwd); m6_exit) {
+        return m6_exit;
+    }
     if (const auto saved_exit = validate_saved_arguments(command, saved, frozen_cwd); saved_exit) {
         return saved_exit;
     }
@@ -1150,6 +1416,86 @@ nlohmann::json read_request_args(const ReadCliArguments& read,
     };
 }
 
+nlohmann::json m6_request_args(const std::vector<std::string>& command, const M6CliArguments& m6) {
+    const auto operation = tgcli::proto::m6_operation_for_command(command);
+    if (!operation) {
+        return command == std::vector<std::string>{"session", "terminate"}
+                   ? nlohmann::json{{"session_id", m6.session_id}}
+                   : nlohmann::json::object();
+    }
+    using O = tgcli::proto::M6Operation;
+    switch (*operation) {
+    case O::ContactList:
+    case O::FolderList:
+    case O::StorageStats:
+    case O::StorageOptimize:
+        return nlohmann::json::object();
+    case O::ContactSearch:
+        return {{"query", m6.contact_query}};
+    case O::ContactAdd:
+    case O::ContactRemove:
+    case O::ContactBlock:
+    case O::ContactUnblock:
+        return {{"user", m6.contact_user}};
+    case O::FolderShow:
+    case O::FolderDelete:
+        return {{"folder_id", m6.folder_id}};
+    case O::FolderCreate:
+        return {{"name", m6.folder_name},
+                {"chats", m6.folder_chats},
+                {"icon", m6.folder_create_icon_option->count() != 0 ? nlohmann::json(m6.folder_icon)
+                                                                    : nlohmann::json(nullptr)},
+                {"color_id", static_cast<std::int32_t>(m6.folder_color)}};
+    case O::FolderEdit:
+        return {{"folder_id", m6.folder_id},
+                {"name", m6.folder_name_option->count() != 0 ? nlohmann::json(m6.folder_name)
+                                                             : nlohmann::json(nullptr)},
+                {"icon", m6.folder_edit_icon_option->count() != 0 && m6.folder_icon != "default"
+                             ? nlohmann::json(m6.folder_icon)
+                             : nlohmann::json(nullptr)},
+                {"use_default_icon",
+                 m6.folder_edit_icon_option->count() != 0 && m6.folder_icon == "default"},
+                {"color_id", m6.folder_edit_color_option->count() != 0
+                                 ? nlohmann::json(static_cast<std::int32_t>(m6.folder_color))
+                                 : nlohmann::json(nullptr)}};
+    case O::FolderAddChat:
+    case O::FolderRemoveChat:
+        return {{"folder_id", m6.folder_id}, {"chat", m6.folder_chat}};
+    case O::TopicList:
+        return {{"chat", m6.topic_chat}};
+    case O::TopicCreate:
+        return {{"chat", m6.topic_chat}, {"name", m6.topic_name}, {"icon", m6.topic_icon}};
+    case O::TopicEdit:
+        return {{"chat", m6.topic_chat}, {"topic_id", m6.topic_id}, {"name", m6.topic_name}};
+    case O::TopicClose:
+    case O::TopicReopen:
+        return {{"chat", m6.topic_chat}, {"topic_id", m6.topic_id}};
+    case O::ChatSetTitle:
+        return {{"chat", m6.admin_chat}, {"title", m6.admin_title}};
+    case O::ChatSetPhoto:
+        return m6.photo_delete ? nlohmann::json{{"chat", m6.admin_chat}, {"delete", true}}
+                               : nlohmann::json{{"chat", m6.admin_chat}, {"path", m6.photo_path}};
+    case O::ChatSetDescription:
+        return {{"chat", m6.admin_chat}, {"description", m6.admin_description}};
+    case O::ChatInviteLink:
+        return {{"chat", m6.admin_chat},
+                {"revoke", m6.invite_revoke_option->count() != 0 ? nlohmann::json(m6.invite_revoke)
+                                                                 : nlohmann::json(nullptr)}};
+    case O::ChatPromote:
+        return {{"chat", m6.admin_chat},
+                {"user", m6.admin_user},
+                {"rights", m6.normalized_admin_rights}};
+    case O::ChatDemote:
+    case O::ChatBan:
+    case O::ChatUnban:
+    case O::ChatKick:
+        return {{"chat", m6.admin_chat}, {"user", m6.admin_user}};
+    case O::ChatSetPermissions:
+        return {{"chat", m6.admin_chat}, {"permissions", m6.normalized_permissions}};
+    }
+    return nlohmann::json::object();
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed CLI request shape table.
 nlohmann::json command_request_args(const std::vector<std::string>& command, bool login_qr,
                                     bool login_bot, std::string_view resolve_selector,
@@ -1157,7 +1503,12 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                                     const MessageCliArguments& messages,
                                     const SendCliArguments& send, const ChatCliArguments& chat,
                                     const ReadCliArguments& read, const FetchCliArguments& fetch,
-                                    const StreamCliArguments& stream) {
+                                    const StreamCliArguments& stream, const M6CliArguments& m6) {
+    if (tgcli::proto::m6_operation_for_command(command) ||
+        command == std::vector<std::string>{"session", "list"} ||
+        command == std::vector<std::string>{"session", "terminate"}) {
+        return m6_request_args(command, m6);
+    }
     if (command == std::vector<std::string>{"login"}) {
         return {{"qr", login_qr}, {"bot", login_bot}};
     }
@@ -1380,6 +1731,7 @@ int run(int argc, char** argv) {
     ReadCliArguments history;
     FetchCliArguments fetch;
     StreamCliArguments stream;
+    M6CliArguments m6;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
@@ -1490,6 +1842,71 @@ int run(int argc, char** argv) {
         wait_for_cmd->add_option("--regex", stream.wait_regex, "message text RE2 pattern");
     stream.wait_after_option =
         wait_for_cmd->add_option("--after", stream.wait_after_raw, "local history anchor");
+    CLI::App* contact_cmd = app.add_subcommand("contact", "curated contacts");
+    contact_cmd->require_subcommand(1);
+    contact_cmd->add_subcommand("list", "list contacts");
+    contact_cmd->add_subcommand("search", "search contacts")
+        ->add_option("query", m6.contact_query)
+        ->required();
+    for (const auto* action : {"add", "remove", "block", "unblock"}) {
+        contact_cmd->add_subcommand(action, std::string(action) + " a contact")
+            ->add_option("user", m6.contact_user)
+            ->required();
+    }
+    CLI::App* folder_cmd = app.add_subcommand("folder", "chat folders");
+    folder_cmd->require_subcommand(1);
+    folder_cmd->add_subcommand("list", "list chat folders");
+    folder_cmd->add_subcommand("show", "show a chat folder")
+        ->add_option("folder-id", m6.folder_id_raw)
+        ->required();
+    CLI::App* folder_create_cmd = folder_cmd->add_subcommand("create", "create a chat folder");
+    folder_create_cmd->add_option("name", m6.folder_name)->required();
+    folder_create_cmd->add_option("--chat", m6.folder_chats)->required()->expected(1, 100);
+    m6.folder_create_icon_option =
+        folder_create_cmd->add_option("--icon", m6.folder_icon, "folder icon");
+    m6.folder_create_color_option =
+        folder_create_cmd->add_option("--color", m6.folder_color, "folder color -1..6");
+    CLI::App* folder_edit_cmd = folder_cmd->add_subcommand("edit", "edit folder metadata");
+    folder_edit_cmd->add_option("folder-id", m6.folder_id_raw)->required();
+    m6.folder_name_option = folder_edit_cmd->add_option("--name", m6.folder_name, "folder name");
+    m6.folder_edit_icon_option =
+        folder_edit_cmd->add_option("--icon", m6.folder_icon, "folder icon or default");
+    m6.folder_edit_color_option =
+        folder_edit_cmd->add_option("--color", m6.folder_color, "folder color -1..6");
+    folder_cmd->add_subcommand("delete", "delete a chat folder")
+        ->add_option("folder-id", m6.folder_id_raw)
+        ->required();
+    for (const auto* action : {"add-chat", "remove-chat"}) {
+        auto* membership = folder_cmd->add_subcommand(action, "change folder membership");
+        membership->add_option("folder-id", m6.folder_id_raw)->required();
+        membership->add_option("chat", m6.folder_chat)->required();
+    }
+    CLI::App* topic_cmd = app.add_subcommand("topic", "forum topics");
+    topic_cmd->require_subcommand(1);
+    topic_cmd->add_subcommand("list", "list topics")->add_option("chat", m6.topic_chat)->required();
+    CLI::App* topic_create_cmd = topic_cmd->add_subcommand("create", "create a topic");
+    topic_create_cmd->add_option("chat", m6.topic_chat)->required();
+    topic_create_cmd->add_option("name", m6.topic_name)->required();
+    topic_create_cmd->add_option("--icon", m6.topic_icon, "blue|yellow|purple|green|pink|red");
+    CLI::App* topic_edit_cmd = topic_cmd->add_subcommand("edit", "edit a topic");
+    topic_edit_cmd->add_option("chat", m6.topic_chat)->required();
+    topic_edit_cmd->add_option("topic-id", m6.topic_id_raw)->required();
+    topic_edit_cmd->add_option("name", m6.topic_name)->required();
+    for (const auto* action : {"close", "reopen"}) {
+        auto* state = topic_cmd->add_subcommand(action, "change topic state");
+        state->add_option("chat", m6.topic_chat)->required();
+        state->add_option("topic-id", m6.topic_id_raw)->required();
+    }
+    CLI::App* storage_cmd = app.add_subcommand("storage", "TDLib storage");
+    storage_cmd->require_subcommand(1);
+    storage_cmd->add_subcommand("stats", "show storage statistics");
+    storage_cmd->add_subcommand("optimize", "optimize storage");
+    CLI::App* session_cmd = app.add_subcommand("session", "active sessions");
+    session_cmd->require_subcommand(1);
+    session_cmd->add_subcommand("list", "list active sessions");
+    session_cmd->add_subcommand("terminate", "terminate a session")
+        ->add_option("session-id", m6.session_id)
+        ->required();
     CLI::App* msg_cmd = app.add_subcommand("msg", "message reads and mutations");
     msg_cmd->require_subcommand(1);
     CLI::App* msg_get_cmd = msg_cmd->add_subcommand("get", "get messages by id");
@@ -1554,6 +1971,35 @@ int run(int argc, char** argv) {
         ->add_option("invite-link|@username", chat.join)
         ->required();
     chat_cmd->add_subcommand("leave", "leave a chat")->add_option("chat", chat.leave)->required();
+    CLI::App* set_title_cmd = chat_cmd->add_subcommand("set-title", "set chat title");
+    set_title_cmd->add_option("chat", m6.admin_chat)->required();
+    set_title_cmd->add_option("title", m6.admin_title)->required();
+    CLI::App* set_photo_cmd = chat_cmd->add_subcommand("set-photo", "set or delete chat photo");
+    set_photo_cmd->add_option("chat", m6.admin_chat)->required();
+    m6.photo_path_option = set_photo_cmd->add_option("PATH", m6.photo_path);
+    m6.photo_path_option->expected(0, 1);
+    m6.photo_delete_option = set_photo_cmd->add_flag("--delete", m6.photo_delete);
+    CLI::App* set_description_cmd =
+        chat_cmd->add_subcommand("set-description", "set chat description");
+    set_description_cmd->add_option("chat", m6.admin_chat)->required();
+    set_description_cmd->add_option("description", m6.admin_description)->required();
+    CLI::App* invite_cmd = chat_cmd->add_subcommand("invite-link", "create or revoke invite link");
+    invite_cmd->add_option("chat", m6.admin_chat)->required();
+    m6.invite_revoke_option =
+        invite_cmd->add_option("--revoke", m6.invite_revoke, "invite link to revoke");
+    CLI::App* promote_cmd = chat_cmd->add_subcommand("promote", "promote a chat member");
+    promote_cmd->add_option("chat", m6.admin_chat)->required();
+    promote_cmd->add_option("user", m6.admin_user)->required();
+    promote_cmd->add_option("--rights", m6.admin_rights)->required();
+    for (const auto* action : {"demote", "ban", "unban", "kick"}) {
+        auto* member = chat_cmd->add_subcommand(action, "change a chat member");
+        member->add_option("chat", m6.admin_chat)->required();
+        member->add_option("user", m6.admin_user)->required();
+    }
+    CLI::App* permissions_cmd =
+        chat_cmd->add_subcommand("set-permissions", "set default chat permissions");
+    permissions_cmd->add_option("chat", m6.admin_chat)->required();
+    permissions_cmd->add_option("--permissions", m6.admin_permissions)->required();
     CLI::App* daemon_cmd = app.add_subcommand("daemon", "daemon management");
     daemon_cmd->require_subcommand(1);
     daemon_cmd->add_subcommand("run", "run the account daemon in the foreground");
@@ -1617,12 +2063,23 @@ int run(int argc, char** argv) {
 
     auto command = selected_command(app);
     std::unique_ptr<tgcli::secure::StringWiper> join_invite_wiper;
+    std::unique_ptr<tgcli::secure::StringWiper> revoke_invite_wiper;
     if (command == std::vector<std::string>{"chat", "join"} &&
         tgcli::common::is_exact_telegram_invite_link(chat.join)) {
         join_invite_wiper = std::make_unique<tgcli::secure::StringWiper>(
             chat.join, tgcli::secure::WipeObserver{}, "cli_join_argument");
         for (int index = 1; index < argc; ++index) {
             if (argv[index] != nullptr && std::string_view(argv[index]) == chat.join) {
+                wipe_argument(argv[index]);
+            }
+        }
+    }
+    if (command == std::vector<std::string>{"chat", "invite-link"} &&
+        m6.invite_revoke_option->count() != 0) {
+        revoke_invite_wiper = std::make_unique<tgcli::secure::StringWiper>(
+            m6.invite_revoke, tgcli::secure::WipeObserver{}, "cli_m6_invite_argument");
+        for (int index = 1; index < argc; ++index) {
+            if (argv[index] != nullptr && std::string_view(argv[index]) == m6.invite_revoke) {
                 wipe_argument(argv[index]);
             }
         }
@@ -1690,6 +2147,41 @@ int run(int argc, char** argv) {
             return *stream_exit;
         }
     }
+    if (const auto operation = tgcli::proto::m6_operation_for_command(command)) {
+        const auto* identity = tgcli::proto::m6_operation_identity(*operation);
+        if (saved.cursor_option->count() != 0) {
+            return report_usage("--cursor is not supported for M6 commands", "--cursor",
+                                "unsupported_mode");
+        }
+        if (!identity->mutation) {
+            for (const auto& [option, argument] :
+                 {std::pair{allow_write_option, std::string_view{"--allow-write"}},
+                  std::pair{yes_option, std::string_view{"--yes"}},
+                  std::pair{dry_run_option, std::string_view{"--dry-run"}},
+                  std::pair{idempotency_key_option, std::string_view{"--idempotency-key"}}}) {
+                if (option->count() != 0) {
+                    return report_usage(std::string(argument) + " is unsupported for M6 reads",
+                                        argument, "unsupported_mode");
+                }
+            }
+        } else if (yes_option->count() != 0 &&
+                   identity->tier != tgcli::proto::M6Tier::Destructive) {
+            return report_usage("--yes is supported only for destructive M6 commands", "--yes",
+                                "unsupported_mode");
+        }
+    } else if (command == std::vector<std::string>{"session", "list"}) {
+        if (saved.cursor_option->count() != 0 || allow_write_option->count() != 0 ||
+            yes_option->count() != 0 || dry_run_option->count() != 0 ||
+            idempotency_key_option->count() != 0) {
+            return report_usage("session list does not accept write or pagination options",
+                                "session", "unsupported_mode");
+        }
+    } else if (command == std::vector<std::string>{"session", "terminate"}) {
+        if (saved.cursor_option->count() != 0 || idempotency_key_option->count() != 0) {
+            return report_usage("session terminate does not accept cursor or idempotency",
+                                "session", "unsupported_mode");
+        }
+    }
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
             command, *account_option, *full_option, *allow_write_option, *yes_option,
             *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
@@ -1705,7 +2197,7 @@ int run(int argc, char** argv) {
     std::string frozen_cwd = captured_cwd ? std::move(*captured_cwd) : std::string{};
     if (const auto argument_exit =
             validate_command_arguments(command, saved, chats, messages, send, chat, *selected_read,
-                                       fetch, resolve_selector, frozen_cwd);
+                                       fetch, resolve_selector, m6, frozen_cwd);
         argument_exit) {
         return *argument_exit;
     }
@@ -1737,9 +2229,14 @@ int run(int argc, char** argv) {
         return *idempotency_exit;
     }
 
+    const auto m6_operation = tgcli::proto::m6_operation_for_command(command);
+    const auto* m6_identity =
+        m6_operation ? tgcli::proto::m6_operation_identity(*m6_operation) : nullptr;
     const bool supports_dry_run = command == std::vector<std::string>{"logout"} ||
                                   command == std::vector<std::string>{"account", "remove"} ||
-                                  tgcli::proto::m3_operation_for_command(command).has_value();
+                                  command == std::vector<std::string>{"session", "terminate"} ||
+                                  tgcli::proto::m3_operation_for_command(command).has_value() ||
+                                  (m6_identity != nullptr && m6_identity->mutation);
     if (dry_run && !supports_dry_run) {
         const nlohmann::json rendered{
             {"error",
@@ -1752,7 +2249,7 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
-                             send, chat, *selected_read, fetch, stream);
+                             send, chat, *selected_read, fetch, stream, m6);
     auto request_context =
         make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd));
     if (idempotency_key_option->count() != 0) {
@@ -1792,6 +2289,9 @@ int run(int argc, char** argv) {
     request.context = std::move(request_context);
     if (join_invite_wiper) {
         tgcli::secure::wipe(chat.join, {}, "cli_join_argument");
+    }
+    if (revoke_invite_wiper) {
+        tgcli::secure::wipe(m6.invite_revoke, {}, "cli_m6_invite_argument");
     }
 
     tgcli::cli::RunOptions options;

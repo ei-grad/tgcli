@@ -203,14 +203,11 @@ bool valid_folder_snapshot(const json& value) {
         !valid_ids("excluded_chat_ids", 100)) {
         return false;
     }
-    for (const auto field :
-         {"exclude_muted", "exclude_read", "exclude_archived", "include_contacts",
-          "include_non_contacts", "include_bots", "include_groups", "include_channels"}) {
-        if (!value[field].is_boolean()) {
-            return false;
-        }
-    }
-    return true;
+    constexpr std::array boolean_fields{
+        "exclude_muted",        "exclude_read", "exclude_archived", "include_contacts",
+        "include_non_contacts", "include_bots", "include_groups",   "include_channels"};
+    return std::ranges::all_of(boolean_fields,
+                               [&](std::string_view field) { return value[field].is_boolean(); });
 }
 
 bool valid_topic_info(const json& value) {
@@ -272,6 +269,20 @@ bool valid_member_status(const json& value) {
            value["banned_until_date"].get<std::int64_t>() >= 0 &&
            value["banned_until_date"].get<std::int64_t>() <=
                std::numeric_limits<std::int32_t>::max();
+}
+
+std::string_view terminal_member_status(O operation) {
+    switch (operation) {
+    case O::ChatDemote:
+        return "member";
+    case O::ChatBan:
+        return "banned";
+    case O::ChatUnban:
+    case O::ChatKick:
+        return "left";
+    default:
+        return {};
+    }
 }
 
 bool valid_file_snapshot(const json& value) {
@@ -511,9 +522,7 @@ bool valid_m6_audit_plan(proto::M6Operation operation, const json& value,
     case O::ChatBan:
     case O::ChatUnban:
     case O::ChatKick: {
-        const auto expected = operation == O::ChatDemote ? "member"
-                              : operation == O::ChatBan  ? "banned"
-                                                         : "left";
+        const auto expected = terminal_member_status(operation);
         return exact_fields(value, {"operation", "account", "tdlib_request", "chat", "user",
                                     "before", "after"}) &&
                valid_chat_identity(value["chat"]) && valid_user_identity(value["user"]) &&
@@ -545,6 +554,7 @@ bool valid_m6_audit_plan(proto::M6Operation operation, const json& value,
     return false;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed 24-mutation result union.
 bool valid_m6_audit_result(proto::M6Operation operation, const json& value) {
     switch (operation) {
     case O::ContactAdd:
@@ -605,9 +615,7 @@ bool valid_m6_audit_result(proto::M6Operation operation, const json& value) {
     case O::ChatKick:
         return exact_fields(value, {"chat", "user", "status"}) &&
                valid_chat_identity(value["chat"]) && valid_user_identity(value["user"]) &&
-               value["status"] == (operation == O::ChatDemote ? "member"
-                                   : operation == O::ChatBan  ? "banned"
-                                                              : "left");
+               value["status"] == terminal_member_status(operation);
     case O::ChatSetPermissions:
         return exact_fields(value, {"chat", "permissions"}) && valid_chat_identity(value["chat"]) &&
                valid_closed_array(value["permissions"], m6_chat_permission_names(), 0);
