@@ -157,6 +157,18 @@ enum class M6Operation {
 
 enum class M6Tier { Read, Write, Destructive };
 
+enum class SessionOperation { List, Terminate };
+
+constexpr std::string_view session_operation_name(SessionOperation operation) noexcept {
+    switch (operation) {
+    case SessionOperation::List:
+        return "session_list";
+    case SessionOperation::Terminate:
+        return "session_terminate";
+    }
+    return {};
+}
+
 struct M6OperationIdentity {
     M6Operation operation;
     std::string_view canonical_name;

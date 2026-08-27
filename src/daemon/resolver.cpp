@@ -1442,8 +1442,11 @@ std::string_view resolver_caller_name(const ResolverCaller& caller) {
         const auto* identity = proto::m3_operation_identity(*operation);
         return identity == nullptr ? std::string_view{} : identity->canonical_name;
     }
-    const auto* identity = proto::m6_operation_identity(std::get<proto::M6Operation>(caller));
-    return identity == nullptr ? std::string_view{} : identity->canonical_name;
+    if (const auto* operation = std::get_if<proto::M6Operation>(&caller)) {
+        const auto* identity = proto::m6_operation_identity(*operation);
+        return identity == nullptr ? std::string_view{} : identity->canonical_name;
+    }
+    return proto::session_operation_name(std::get<proto::SessionOperation>(caller));
 }
 
 ResolverConsumer::ResolverConsumer(core::TdClient& client, std::string_view account,
@@ -1529,7 +1532,7 @@ struct ResolverErrorMapper {
                                             ? "authorization_lost"
                                             : "not_ready";
         return terminal("NOT_AUTHED",
-                        std::string(m2_operation_name(owning_operation)) +
+                        std::string(resolver_caller_name(owning_operation)) +
                             " requires an authenticated account",
                         {{"account", error.account},
                          {"state", core::auth_state_name(error.state)},
@@ -1621,19 +1624,28 @@ struct ResolverErrorMapper {
                         kGeneric);
     }
 
-    M2Operation owning_operation;
+    ResolverCaller owning_operation;
 };
 
 } // namespace
 
 void emit_resolver_error(const ResolverError& error, RequestSession& session,
                          M2Operation owning_operation) {
+    emit_resolver_error(error, session, ResolverCaller{owning_operation});
+}
+
+void emit_resolver_error(const ResolverError& error, RequestSession& session,
+                         ResolverCaller owning_operation) {
     auto mapped = resolver_error_terminal(error, owning_operation);
     session.error(mapped["code"].get<std::string>(), mapped["message"].get<std::string>(),
                   std::move(mapped["details"]), mapped["exit_code"].get<int>());
 }
 
 json resolver_error_terminal(const ResolverError& error, M2Operation owning_operation) {
+    return resolver_error_terminal(error, ResolverCaller{owning_operation});
+}
+
+json resolver_error_terminal(const ResolverError& error, ResolverCaller owning_operation) {
     return std::visit(ResolverErrorMapper{owning_operation}, error);
 }
 

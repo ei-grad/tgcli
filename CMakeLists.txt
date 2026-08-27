@@ -258,6 +258,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/chat_summary.cpp
     src/daemon/local_selector.cpp
     src/daemon/m6_domain.cpp
+    src/daemon/m6_commands.cpp
+    src/daemon/m6_capability.cpp
     src/daemon/m6_model.cpp
     src/daemon/m6_audit_contract.cpp
     src/daemon/m6_topic_scan.cpp

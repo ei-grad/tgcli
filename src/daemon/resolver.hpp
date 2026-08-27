@@ -37,7 +37,8 @@ enum class M2Operation {
 
 std::string_view m2_operation_name(M2Operation operation);
 
-using ResolverCaller = std::variant<M2Operation, proto::M3Operation, proto::M6Operation>;
+using ResolverCaller =
+    std::variant<M2Operation, proto::M3Operation, proto::M6Operation, proto::SessionOperation>;
 
 std::string_view resolver_caller_name(const ResolverCaller& caller);
 
@@ -181,9 +182,13 @@ class ResolverConsumer {
 
 void emit_resolver_error(const ResolverError& error, RequestSession& session,
                          M2Operation owning_operation = M2Operation::Resolve);
+void emit_resolver_error(const ResolverError& error, RequestSession& session,
+                         ResolverCaller owning_operation);
 [[nodiscard]] nlohmann::json
 resolver_error_terminal(const ResolverError& error,
                         M2Operation owning_operation = M2Operation::Resolve);
+[[nodiscard]] nlohmann::json resolver_error_terminal(const ResolverError& error,
+                                                     ResolverCaller owning_operation);
 
 bool valid_resolve_selector(std::string_view selector);
 

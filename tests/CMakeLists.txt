@@ -17,6 +17,8 @@ add_executable(tgcli_unit_tests
     m6_foundation_test.cpp
     m6_model_test.cpp
     m6_audit_contract_test.cpp
+    m6_commands_test.cpp
+    m6_capability_test.cpp
     m6_topic_scan_test.cpp
     m6_write_policy_test.cpp
     m6_td_boundary_test.cpp
