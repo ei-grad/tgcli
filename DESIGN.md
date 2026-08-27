@@ -5860,15 +5860,26 @@ distinct topic ids for the same chat, valid descending TD order, and a cursor
 different from the request cursor unless the returned cursor is the all-zero
 terminal sentinel. Before that comparison, all three returned cursor members
 must be typed integers in their pinned wire ranges:
-`next_offset_date` is `0..2147483647`, `next_offset_message_id` is
-`0..9007199254740991`, and `next_offset_forum_topic_id` is
-`0..2147483647`. These are the exact nonnegative JSON projections of the
-`forumTopics` `int32`/message-id `int53`/`int32` fields in the pinned generated
-`td_api.tl` declaration. The all-zero tuple is the terminal sentinel; any
-other tuple is a continuation cursor. A negative, noninteger or out-of-range
-component is structural `INTERNAL/malformed_tdlib_response`, even if another
-component or topic id would also make the page nonadvancing. Order is the
-pinned signed int64 field and is nonincreasing
+`next_offset_date` is `0..2147483647` and
+`next_offset_forum_topic_id` is `0..2147483647`.
+`next_offset_message_id=m` is structurally valid exactly when `m==0` or
+`1048576<=m<=2251799812636672` and `(m & 1048575)==0`. This is the pinned
+`MessageId::is_server()` representation: a positive `ServerMessageId` in
+`1..2147483647`, shifted left by `SERVER_ID_SHIFT=20`. Merely fitting the
+generated `int53` field is insufficient. A YetUnsent/local/scheduled/sponsored
+or other internal `MessageId` representation is invalid even when
+`MessageId::is_valid()`, `is_valid_scheduled()`, `is_valid_sponsored()` or the
+outer int53 bound would accept it. These types and bounds come from the pinned
+generated `forumTopics` declaration, `MessageId.h` and
+`ForumTopicManager::get_forum_topics` zero-or-`is_server()` check.
+
+The all-zero tuple is the terminal sentinel; any other tuple is a continuation
+cursor. A negative, noninteger, out-of-range or non-server message-id component
+is structural `INTERNAL/malformed_tdlib_response`, even if another component
+or topic id would also make the page nonadvancing. This failure terminates the
+request immediately: tgcli does not submit a next `getForumTopics`, relabel it
+as `PAGINATION_INVALID`, or map it to `TDLIB_ERROR`. Order is the pinned signed
+int64 field and is nonincreasing
 across page boundaries. An empty page is valid only with the all-zero cursor
 and then terminates; a nonempty page with the all-zero cursor also terminates.
 Approximate `total_count` and a short page never do. A repeated topic or
@@ -5876,9 +5887,9 @@ nonterminal cursor that is equal, previously seen or otherwise nonadvancing is
 `PAGINATION_INVALID/non_advancing_upstream`; this includes an empty page that
 returns a structurally valid nonzero continuation cursor, a structurally valid
 equal/seen/cyclic cursor, and duplicate-topic progression. A null top-level
-page, negative or undersized `total_count`, oversized vector,
-null/malformed topic/info/icon/
-sender, chat mismatch, or invalid topic scalar/date/count/order is structural
+page, negative or undersized `total_count`, oversized vector, null/malformed
+topic/info/icon/sender, chat mismatch, or invalid topic scalar/date/count/order
+is structural
 `INTERNAL/{"operation":"topic_list","reason":"malformed_tdlib_response"}`.
 Lifecycle/auth/deadline and an actual TD error arbitrate first; complete
 page, nested-object, topic-id and returned-cursor structural validation then
@@ -6531,8 +6542,11 @@ micro-slices:
    duplicate-topic progression; negative, noninteger and one-past-maximum
    date/message/topic cursor components prove structural
    `INTERNAL/malformed_tdlib_response` precedence over every pagination
-   conflict, alongside total/null/nested/order corruption, 4096/+1 and
-   byte-capacity cases;
+   conflict without another TD request. Message-id fixtures additionally pin
+   `1048577` (low bit one), `1048578` (local), `12` (scheduled),
+   `2251799812636673` (`MessageId::max().get()+1`) and aligned
+   `2251799813685248` (`(INT32_MAX+1)<<20`) as structural failures, alongside
+   total/null/nested/order corruption, 4096/+1 and byte-capacity cases;
 6. admin tests cover static JPEG/path/spool cutpoints, delete mode, every
    one of 17 rights across Creator/Administrator/Member and all four chat-kind
    columns, basic-group promotion rejection, every target transition/member

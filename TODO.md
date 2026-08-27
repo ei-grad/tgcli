@@ -365,7 +365,8 @@ before the milestone is closed.
       canonical TD-cleaned mutation strings, disjoint folder RMW, complete
       rights/transition and structural-sum invariants, no-reread results,
       closed family-local absence schemas, structural-before-progress topic
-      cursor precedence, daemon/no-daemon parity, schemas and acceptance gates
+      cursor precedence with exact server-MessageId validation,
+      daemon/no-daemon parity, schemas and acceptance gates
 - [ ] Add the complete dormant typed TD boundary and conversion foundation for
       contacts, folder cache/snapshots, paged topics, chat admin/member/photo/
       invite-link calls and storage statistics/default optimization; pin every
