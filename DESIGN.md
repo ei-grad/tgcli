@@ -193,11 +193,15 @@ tgcli chat leave <chat>                           destructive
 tgcli chat mark-read <chat>
 tgcli chat mute|unmute <chat> [--for <duration>]
 tgcli chat pin|unpin|archive|unarchive <chat>
-tgcli chat set-title|set-photo|set-description <chat> <value>
-tgcli chat invite-link <chat> [--revoke]
-tgcli chat promote|demote <chat> <user> [--rights ...]
+tgcli chat set-title <chat> <title>
+tgcli chat set-photo <chat> <PATH>
+tgcli chat set-photo <chat> --delete
+tgcli chat set-description <chat> <description>
+tgcli chat invite-link <chat> [--revoke <invite-link>] destructive
+tgcli chat promote <chat> <user> --rights <right[,right...]>
+tgcli chat demote <chat> <user>
 tgcli chat ban|unban|kick <chat> <user>           ban/kick destructive
-tgcli chat set-permissions <chat> [--flags ...]
+tgcli chat set-permissions <chat> --permissions <permission[,permission...]|none>
 
 tgcli contact list|search <q>|add|remove|block|unblock
 tgcli folder list|show <f>|create|edit|delete|add-chat|remove-chat
@@ -215,7 +219,7 @@ tgcli saved search [<query>] [--tag <selector>] --cursor <token>
 tgcli saved attach <message-id> <PATH> [--caption TEXT]
 tgcli daemon status|stop|restart|run              lifecycle (§10); status/stop do not auto-spawn,
                                                   `run` stays in the foreground
-tgcli storage stats|optimize                      tdlib file-store usage / optimizeStorage cleanup
+tgcli storage stats|optimize                      tdlib file-store usage; optimize is destructive
 tgcli schema <command-token>... [--all]           print the primary curated success schema;
                                                    --all adds every cataloged payload kind (§4.8)
 tgcli completion <shell>
@@ -5417,6 +5421,915 @@ result DTO. It has no result/error schema and no catalog entry; `schema schema` 
 therefore uncataloged. This sole exception avoids recursive arbitrary-schema
 self-description and does not weaken strict schemas for ordinary command DTOs.
 
+### 4.9 M6 curated long-tail contract
+
+This section freezes the remaining M6 surface. Together with the two commands
+in §4.7 it makes the curated M6 set exactly 32 commands. It is specification
+only until the atomic activation described in §4.9.8: none of these 30 command
+paths is registered, admitted by the safety dispatcher, discoverable through
+`schema`, or present in the audit operation enum before its handler, typed
+TDLib boundary, schemas, safety policy and tests land together. Section 4.7 is
+unchanged.
+
+The pinned authority is TDLib commit
+`a17f87c4cff7b90b278d12b91ba0614383aaee82`. The generated declarations in
+`td/generate/scheme/td_api.tl`, the folder clamp in the authenticated source
+tree and the native generated C++ types are the boundary contract; a future
+TDLib variant or field is malformed input until reviewed. Every JSON object in
+this section is strict Draft 2020-12, has every shown field required and has
+`additionalProperties:false` at every object boundary.
+
+#### 4.9.1 Common grammar, identities and admission
+
+The exact command grammar is:
+
+```text
+tgcli contact list
+tgcli contact search <query>
+tgcli contact add|remove|block|unblock <user>
+
+tgcli folder list
+tgcli folder show <folder-id>
+tgcli folder create <name> --chat <chat> [--chat <chat> ...]
+             [--icon <folder-icon>] [--color <-1..6>]
+tgcli folder edit <folder-id> [--name <name>]
+             [--icon <folder-icon|default>] [--color <-1..6>]
+tgcli folder delete <folder-id>
+tgcli folder add-chat|remove-chat <folder-id> <chat>
+
+tgcli topic list <chat>
+tgcli topic create <chat> <name> [--icon <topic-color>]
+tgcli topic edit <chat> <topic-id> <name>
+tgcli topic close|reopen <chat> <topic-id>
+
+tgcli chat set-title <chat> <title>
+tgcli chat set-photo <chat> <PATH>
+tgcli chat set-photo <chat> --delete
+tgcli chat set-description <chat> <description>
+tgcli chat invite-link <chat> [--revoke <invite-link>]
+tgcli chat promote <chat> <user> --rights <right[,right...]>
+tgcli chat demote|ban|unban|kick <chat> <user>
+tgcli chat set-permissions <chat> --permissions <permission[,permission...]|none>
+
+tgcli storage stats
+tgcli storage optimize
+```
+
+The normalized request command and args pairs are exactly:
+
+```text
+contact list                       {}
+contact search                     {"query":string}
+contact add|remove|block|unblock   {"user":string}
+
+folder list                        {}
+folder show|delete                 {"folder_id":int32}
+folder create                      {"name":string,"chats":string[],
+                                    "icon":folder_icon|null,"color_id":int32}
+folder edit                        {"folder_id":int32,"name":string|null,
+                                    "icon":folder_icon|null,
+                                    "use_default_icon":boolean,
+                                    "color_id":int32|null}
+folder add-chat|remove-chat        {"folder_id":int32,"chat":string}
+
+topic list                         {"chat":string}
+topic create                       {"chat":string,"name":string,
+                                    "icon":topic_color}
+topic edit                         {"chat":string,"topic_id":int32,
+                                    "name":string}
+topic close|reopen                 {"chat":string,"topic_id":int32}
+
+chat set-title                     {"chat":string,"title":string}
+chat set-photo PATH                {"chat":string,"path":string}
+chat set-photo --delete            {"chat":string,"delete":true}
+chat set-description               {"chat":string,"description":string}
+chat invite-link create            {"chat":string,"revoke":null}
+chat invite-link revoke            {"chat":string,"revoke":string}
+chat promote                       {"chat":string,"user":string,
+                                    "rights":admin_right[]}
+chat demote|ban|unban|kick         {"chat":string,"user":string}
+chat set-permissions               {"chat":string,
+                                    "permissions":chat_permission[]}
+
+storage stats|optimize             {}
+```
+
+CLI order is not retained. Repeated `--chat` is the sole repeatable option;
+every other duplicate singleton option is `USAGE/invalid_argument` before
+routing. `folder edit` requires at least one of `--name`, `--icon` or
+`--color`; `--icon default` sets `use_default_icon:true` and `icon:null`, while
+an absent `--icon` sets both fields false/null. `chat set-photo` PATH and
+`--delete` are mutually exclusive and one is required. `--rights` is required
+and nonempty. `--permissions none` normalizes to an empty array; `none` cannot
+be combined with another value.
+
+All strings are valid Unicode-scalar UTF-8 without NUL. Lengths below are
+Unicode scalar counts unless explicitly called bytes. No NFC/NFKC, case fold,
+whitespace trim or confusable rewrite occurs:
+
+- contact search query is 1..256 UTF-8 bytes;
+- folder name is 1..12 scalars without CR or LF and contains plain text only;
+- topic name is 1..128 scalars;
+- title is 1..128 scalars and description is 0..255 scalars;
+- invite link is 1..4096 UTF-8 bytes without a C0/C1 control scalar;
+- PATH and its frozen cwd/file rules are exactly §4.5.12.
+
+`int53` is a JSON integer in `[-9007199254740991,9007199254740991]`.
+Chat identifiers are nonzero int53 and user identifiers are positive int53.
+`folder-id` and `topic-id` use canonical unsigned ASCII spelling and are JSON
+integers in `1..2147483647`. Every pinned TDLib `int64` identifier is a
+canonical decimal string matching §4.7's signed-int64 grammar; this includes
+zero custom-emoji ids. Conversion to a JSON number is forbidden.
+
+Mutation selectors are exact-only. A `<chat>` or `<user>` used by a mutation
+must be a numeric id, exact `@username`, or exact supported public profile
+link accepted by the shared M2 classifier. Display-name/title substring forms
+fail locally with `USAGE/invalid_argument`; the resolver is not allowed to
+expand the mutation domain. Read results may contain cached names but no M6
+read command accepts a fuzzy target. Each resolver error retains
+`operation:"resolve"` attribution. All selectors needed by one command are
+resolved under one captured Ready/principal snapshot; partial resolution is
+discarded, and the exact bound `{client_id,generation,auth_sequence,user_id}`
+must still match before planning commit.
+
+The existing globals `--account`, `--json`, `-v`, `--timeout` and
+`--no-daemon` are accepted. Absent timeout means one admission-relative
+absolute 60-second deadline. An explicit timeout retains the common finite
+timeout grammar. The `raw` command prefix remains reserved through M6;
+`--full`, `--cursor` and `--local` are unsupported for all 30 commands. A read
+rejects `--allow-write`, `--yes`, `--dry-run` and
+`--idempotency-key`. Every mutation accepts `--allow-write` and `--dry-run`.
+Only the five Destructive commands accept `--yes`. The 22 allowlisted
+mutations accept `--idempotency-key`; `chat invite-link` and
+`storage optimize` reject it. Session commands retain §4.7's
+`AbsentByPolicy` decision and are not added to this allowlist.
+
+The closed tier matrix is:
+
+| tier | commands |
+|---|---|
+| Read | `contact list`, `contact search`, `folder list`, `folder show`, `topic list`, `storage stats` |
+| Write | `contact add/remove/block/unblock`, `folder create/edit/add-chat/remove-chat`, `topic create/edit/close/reopen`, `chat set-title/set-photo/set-description/promote/demote/unban/set-permissions` |
+| Destructive | `folder delete`, `chat invite-link`, `chat ban`, `chat kick`, `storage optimize` |
+
+`chat invite-link` has one static Destructive command descriptor for both
+create and revoke. Request content never selects its tier. All 24 mutations
+use the M3 WriteKernel; no handler may submit a mutating TD function directly.
+
+Every command follows admission, the selected-account removal/logout preflight
+applicable to ordinary authenticated work, Ready, correlated `getMe`,
+principal binding, bot decision and command reads before its target call. A
+dry-run retains §4.5's zero-current-persistence/no-prior-reconciliation rule;
+a real mutation additionally enters the general v2 WriteKernel gate in
+§4.9.7. Contacts and folders are user-account-only and return
+`BOT_UNSUPPORTED` before their family-specific TD request. Topic, chat-admin
+and storage commands admit a bot only where the pinned TD call and observed
+chat/member permissions admit it; tgcli invents no bot privilege. Secret
+chats are rejected for every M6 chat/folder/topic/admin operation.
+
+Authorization loss, generation replacement, request cancellation, disconnect,
+deadline and TD response compete through the existing RequestSession first
+cause. A correlated response is usable only under its captured generation and
+principal. Deadline equality belongs to the deadline. No setup retry crosses
+an observed non-Ready state. Daemon and explicit no-daemon mode use the same
+typed calls, resolver, WriteKernel, recovery, schemas and first-cause rules;
+no-daemon never weakens write authority or durability.
+
+#### 4.9.2 Contacts
+
+The native boundary adds only `getContacts`, `searchContacts`, `addContact`,
+`removeContacts` and `setMessageSenderBlockList`. The main block list is
+`blockListMain`; null unblocks. `blockListStories`, `importContacts` and
+`changeImportedContacts` are outside M6.
+
+`contact list` performs `getContacts()`. `contact search` performs
+`searchContacts(query,100)`. A `users` response must be non-null, have a
+nonnegative `total_count`, contain no more ids than `total_count`, and contain
+positive distinct ids; search additionally permits at most 100 ids. Every id
+is converted through the accepted typed `getUser` path into exact
+`UserIdentity`, in TD order. A null/mismatched/inaccessible user, duplicate id,
+invalid username/name UTF-8, unknown user kind or partial conversion is
+`INTERNAL/malformed_tdlib_response`; no partial list is emitted. These
+unpaginated commands always return `next:null`. List admits at most 131,072
+users, 16,777,216 charged serialized bytes and 262,144 bytes for one identity;
+search admits at most 100 under the same byte/item bounds. A `+1` failure is
+`INTERNAL/capacity_exhausted`, never truncation.
+
+Contact mutations first classify the exact user selector, resolve a positive
+non-bot-or-bot `UserIdentity` and obtain the matching typed user record in the
+same generation. `contact add` uses exactly the returned `first_name`,
+`last_name` and `phone_number` in
+`importedContact(phone_number,first_name,last_name,note=null)` and always passes
+`share_phone_number=false`. First name must be 1..64 scalars, last name 0..64;
+the phone may be empty as TDLib permits. Caller-supplied replacement names,
+notes, phone numbers and phone-sharing are not in this curated surface.
+`contact remove` calls `removeContacts([user_id])`; no multi-user batch is
+exposed. Block/unblock call
+`setMessageSenderBlockList(messageSenderUser(user_id),blockListMain|null)`.
+
+The raw phone is a request-local sensitive sidecar used only to construct the
+single `addContact` call. It is never placed in a Result, error, frame,
+confirmation, log, audit record, idempotency entry or durable spool. The plan
+and audit arguments retain only
+`phone_number_sha256`, the existing canonical `sha256:<64 lowercase hex>`
+encoding of the digest of
+`"tgcli.m6.contact.phone.v1\0" || raw_phone_bytes`, plus the resolved first and
+last names. Even the empty phone is hashed; no raw-phone fallback exists.
+
+The strict contact results are:
+
+```text
+ContactListResult   = {"items":UserIdentity[],"next":null}
+ContactStateResult  = {"user":UserIdentity,"is_contact":boolean}
+ContactBlockResult  = {"user":UserIdentity,"blocked":boolean}
+```
+
+List/search use `ContactListResult`; add/remove use `ContactStateResult` with
+true/false; block/unblock use `ContactBlockResult` with true/false. Mutation
+booleans reflect the accepted TD `ok` and planned action, not a post-mutation
+reread.
+
+#### 4.9.3 Folders and generation cache
+
+The folder icon CLI/result enum is exactly:
+
+```text
+all, unread, unmuted, bots, channels, groups, private, custom, setup, cat,
+crown, favorite, flower, game, home, love, mask, party, sport, study, trade,
+travel, work, airplane, book, light, like, money, note, palette
+```
+
+The CLI/result spellings are case-sensitive. A fixed table maps them to the
+pinned `chatFolderIcon.name` values `All`, `Unread`, `Unmuted`, `Bots`,
+`Channels`, `Groups`, `Private`, `Custom`, `Setup`, `Cat`, `Crown`,
+`Favorite`, `Flower`, `Game`, `Home`, `Love`, `Mask`, `Party`, `Sport`,
+`Study`, `Trade`, `Travel`, `Work`, `Airplane`, `Book`, `Light`, `Like`,
+`Money`, `Note`, and `Palette` in the same order; this is not a general title-
+case conversion. Unknown returned names fail closed. `color_id` is -1..6.
+`FolderSummary` has exactly `id`, `name`, `icon`, `color_id`, `is_shareable`
+and `has_my_invite_links`. `FolderSnapshot` has those fields plus
+`pinned_chat_ids`, `included_chat_ids`, `excluded_chat_ids`, `exclude_muted`,
+`exclude_read`, `exclude_archived`, `include_contacts`,
+`include_non_contacts`, `include_bots`, `include_groups`, and
+`include_channels`. `FolderSummary.icon` is the non-null effective lowercase
+enum from `chatFolderInfo`; `FolderSnapshot.icon` is the configured lowercase
+enum or null from `chatFolder`. Ids are nonzero int53.
+Each id vector is duplicate-free and preserves TD order. The union of pinned
+and included ids and the excluded vector each contain at most 100 entries.
+Public `name` is the
+exact formatted-text string. The typed internal `FolderRecord` additionally
+retains validated CustomEmoji entity ranges from the pinned `chatFolderName`;
+list/show preserve them internally, an edit without `--name` sends them back
+unchanged, and caller-provided create/edit names use an empty entity vector.
+No other formatted-text entity is accepted.
+
+Every folder command first binds the latest validated `updateChatFolders` for
+the exact Ready generation; cached `chatFolderInfo` supplies the folder id and
+`has_my_invite_links` field absent from `getChatFolder`. `folder list` is
+served only from that update. The cache is cleared on generation start and on
+the first non-Ready state. It validates at most 100 distinct positive folder
+ids, one folder record per id and `main_chat_list_position` in
+`0..chat_folders.size()`; `are_tags_enabled` must be a typed boolean. If the
+current generation has not supplied the
+update, the command waits under its deadline; it never reuses the previous
+generation and does not synthesize a TD request. The result is
+`{"items":FolderSummary[],"next":null}` in update order.
+
+`folder show` calls `getChatFolder(folder_id)`, joins it to the cached info
+with that id, and returns
+`{"folder":FolderSnapshot}`. Null, id mismatch, malformed plain name/icon,
+invalid color, duplicate chat id, secret chat id or unknown field variant is a
+whole-response `INTERNAL`. TD's documented not-found response maps to
+`NOT_FOUND/{"folder_id":folder_id}`; other TD errors remain `TDLIB_ERROR`.
+
+Create resolves every repeated chat selector atomically, sorts/deduplicates
+the resulting ids and requires 1..100 unique non-secret chats. It calls
+`createChatFolder` with the plain name, selected/null icon, chosen color
+(default -1), `is_shareable=false`, empty pinned/excluded ids, all resolved
+ids as included ids, and every automatic filter boolean false. Its returned
+`chatFolderInfo` supplies the new id and server-normalized summary fields;
+the immutable request supplies membership fields. Any disagreement with the
+requested name/color/id is malformed. A configured null icon may legitimately
+produce TDLib's non-null effective default icon in the info; a configured
+non-null icon must match exactly. No `getChatFolder` follows creation.
+
+Edit is metadata-only. It first reads and validates one full snapshot, replaces
+only the explicitly supplied name/icon/color and calls `editChatFolder` with
+every other snapshot field byte-for-byte/logically unchanged. At least one
+field must change; an identical requested value is
+`PRECONDITION_FAILED/no_change`. The returned info must match the planned
+metadata and id, with the same configured-null/effective-default icon rule.
+The result snapshot is composed from that response and the
+pre-call preserved membership; no reread is allowed.
+
+`folder add-chat` and `folder remove-chat` are full-snapshot read-modify-write
+operations. They resolve the exact chat and read the folder before the commit
+epoch. Add rejects an id already in pinned or included membership, appends it
+to `included_chat_ids`, and requires the resulting union to contain at most
+100 unique ids. Remove rejects an id absent from both vectors and removes it
+from both pinned and included vectors. Excluded ids and every automatic filter
+are preserved. Both call `editChatFolder` once, require matching returned info
+and synthesize the final snapshot from the plan. They never use
+`addChatToList`, never rewrite Main/Archive placement and never reread.
+
+Delete reads the full snapshot for confirmation/audit, then calls
+`deleteChatFolder(folder_id,[])`; tgcli never leaves chats as a side effect.
+The exact results are:
+
+```text
+FolderListResult       = {"items":FolderSummary[],"next":null}
+FolderShowResult       = {"folder":FolderSnapshot}
+FolderMutationResult   = {"folder":FolderSnapshot}
+FolderMembershipResult = {"folder":FolderSnapshot,"chat":ChatIdentity,
+                          "included":boolean}
+FolderDeleteResult     = {"folder_id":int32,"deleted":true}
+```
+
+#### 4.9.4 Forum topics
+
+Topics use only `getForumTopics`, `getForumTopic`, `createForumTopic`,
+`editForumTopic` and `toggleForumTopicIsClosed`. List/create/edit accept an
+observed forum supergroup or an observed private chat whose peer has pinned
+`userTypeBot.has_topics=true`; create in the bot chat additionally requires
+`allows_users_to_create_topics=true`. Close/reopen accept only a forum
+supergroup, as required by the pinned function. A basic group, secret chat,
+ordinary private chat, channel/non-forum supergroup or malformed bot type
+fails before a topic TD call.
+
+The create icon enum and TD color mapping are exactly:
+
+```text
+blue=0x6FB9F0, yellow=0xFFD67E, purple=0xCB86DB,
+green=0x8EEE98, pink=0xFF93B2, red=0xFB6F5F
+```
+
+Omitted `--icon` normalizes to `blue`. Create passes
+`is_name_implicit=false` and `forumTopicIcon(color,custom_emoji_id=0)`.
+Custom-emoji input and implicit bot-topic names are outside M6. Edit changes
+only the nonempty name and passes
+`edit_icon_custom_emoji=false,icon_custom_emoji_id=0`; icon editing is not
+inferred from the create enum.
+
+For a forum supergroup, create requires the observed current member's
+`can_create_topics` permission or administrator `can_manage_topics`; edit and
+close/reopen require `can_manage_topics` unless the converted topic creator is
+the current user. The bot-private-chat capabilities above replace, rather than
+invent, a group-member right. A missing locally known capability is
+`PRECONDITION_FAILED/missing_right` before the mutating TD call.
+
+`TopicIcon` is exactly `{"color":topic_color,"custom_emoji_id":Int64String}`.
+`TopicInfo` is exactly `chat_id`, `id`, `name`, `icon`, `creation_date`,
+`creator`, `is_general`, `is_outgoing`, `is_closed`, `is_hidden`, and
+`is_name_implicit`. `creation_date` is UTC RFC 3339 and `creator` is the exact
+`MessageSenderRef`. `TopicRow` adds `is_pinned`, `unread_count`,
+`unread_mention_count`, `unread_reaction_count`, and
+`unread_poll_vote_count`. Counts are nonnegative int32. Null or malformed
+topic/info/sender/icon values fail the whole command.
+
+List has no public query or cursor. It issues the exact first tuple
+`getForumTopics(chat_id,"",0,0,0,100)`, then repeats with the exact returned
+`next_offset_date`, `next_offset_message_id` and
+`next_offset_forum_topic_id`. It does not trust approximate `total_count` as
+EOF. Every nonempty page must have
+`total_count>=0`, `total_count>=topics.size()`, at most 100 topics, positive
+distinct topic ids for the same chat, valid descending TD order, and a cursor
+different from the request cursor unless the returned cursor is the all-zero
+terminal sentinel. Order is the pinned signed int64 field and is nonincreasing
+across page boundaries. An empty page is valid only with the all-zero cursor
+and then terminates; a nonempty page with the all-zero cursor also terminates.
+Approximate `total_count` and a short page never do. A repeated topic or
+nonterminal cursor, an invalid count or a malformed anchor is
+`PAGINATION_INVALID` with
+`operation:"topic_list"`; null/mixed pages are `INTERNAL`. The all-pages
+accumulator admits at most 4096 topics, 16,777,216 charged serialized bytes
+and 262,144 bytes for one topic; a `+1` failure is
+`INTERNAL/capacity_exhausted`, never a partial list.
+
+Create returns the converted `forumTopicInfo` directly. Edit/close/reopen first
+call `getForumTopic` to validate the exact topic and precondition; after the
+mutation they do not reread. Close requires open, reopen requires closed, and
+edit requires a different name. The strict results are:
+
+```text
+TopicListResult   = {"items":TopicRow[],"next":null}
+TopicCreateResult = {"topic":TopicInfo}
+TopicEditResult   = {"chat":ChatIdentity,"topic_id":int32,"name":string}
+TopicStateResult  = {"chat":ChatIdentity,"topic_id":int32,"closed":boolean}
+```
+
+#### 4.9.5 Chat administration
+
+All chat-admin commands require an exact non-secret basic group, supergroup or
+channel target and a correlated `getChatMember(chat_id,messageSenderUser(me))`
+preflight. The current member must possess the exact pinned right required by
+the target TD call. A returned member/chat/sender mismatch, unknown status,
+invalid rights combination or inapplicable right is malformed; a locally
+known missing right is `PRECONDITION_FAILED/missing_right`. TD error text is
+never parsed to manufacture a privilege result.
+
+`set-title`, `set-photo` and `set-description` require `can_change_info` and
+call `setChatTitle`, `setChatPhoto` and `setChatDescription` respectively.
+Photo PATH reuses the two-pass Saved-file stability and private spool protocol
+in §4.5.12. In addition, its frozen basename ends in ASCII-case-insensitive
+`.jpg` or `.jpeg`, pass 1 verifies SOI `ff d8` and a final EOI `ff d9` with no
+trailing bytes, and TD receives only
+`inputChatPhotoStatic(inputFileLocal(private_spool_path))`. Animated, previous
+and sticker variants are forbidden. `--delete` passes null and creates no
+file/spool. The same `spool_ready`, dispatch, recovery and cleanup ordering
+applies; source bytes and private spool path never enter a terminal or audit.
+
+`chat invite-link` requires `can_invite_users`. Create calls
+`createChatInviteLink(chat_id,"",0,0,false)`. Revoke calls
+`revokeChatInviteLink(chat_id,raw_link)`. The raw caller link is a secret
+sidecar and may appear only in that TD request; it is absent from Results,
+logs, errors, confirmation, plan, audit and store. A successful Result may
+contain only a separately returned created or replacement link. Plan,
+fingerprint and audit use only the canonical `sha256:<64 lowercase hex>`
+encoding of the digest of
+`"tgcli.m6.invite-link.v1\0" || raw_link_bytes`. Create/revoke outputs validate
+every returned link record, but expose only the created link or, when a
+primary link was revoked, the replacement primary link. The revoked raw link
+is never echoed. Because Telegram creates a fresh secret or can revoke before
+a correlated response, both modes share one Destructive descriptor and the
+entire command rejects idempotency keys.
+
+A create response must be one non-null, non-revoked `chatInviteLink` whose
+name, expiration, member limit and join-request flag equal the fixed request.
+A revoke response must have nonnegative `total_count`, one or two non-null
+distinct records, exactly one revoked record whose link equals the transient
+input, and at most one additional active primary replacement. No other record
+or approximate-count EOF inference is accepted. Returned link strings are
+nonempty valid UTF-8 without controls. The result contains the created or
+replacement active link and uses null when a non-primary revoke has no
+replacement.
+
+Member commands resolve the target user exactly in the chat domain and call
+`getChatMember(chat_id,messageSenderUser(user_id))` before mutation. The
+target must not be the current principal or creator. Promote accepts this
+closed right enum in pinned field order:
+
+```text
+change-info, post-messages, edit-messages, delete-messages, invite-users,
+restrict-members, pin-messages, manage-topics, promote-members,
+manage-video-chats, post-stories, edit-stories, delete-stories,
+manage-direct-messages, manage-tags, anonymous
+```
+
+`can_manage_chat` is never a caller flag; it is true for a promoted member and
+false for demotion. Rights inapplicable to the observed basic-group,
+supergroup or channel kind are `USAGE/invalid_argument`. Requested rights must
+be a subset of the current administrator's delegable rights. Promote admits a
+Member, Restricted member, or editable Administrator and writes
+`chatMemberStatusAdministrator(can_be_edited=true,rights)`; an existing
+administrator may therefore be updated. Demote requires an editable
+Administrator and writes `chatMemberStatusMember(0)`.
+
+Ban requires a Member, Restricted member or Left user and writes
+`chatMemberStatusBanned(0)`. Unban requires Banned and writes
+`chatMemberStatusLeft`. Kick requires Member or Restricted and writes
+`chatMemberStatusLeft`. Creator, noneditable administrator, wrong starting
+state, self-target and chat-sender target are exact
+`PRECONDITION_FAILED` branches. There is no duration, revoke-messages,
+ownership transfer, bulk member or chat-sender surface.
+
+Set-permissions requires `can_restrict_members`, supports only basic groups
+and supergroups, and maps the closed enum below one-to-one to the pinned
+`chatPermissions` booleans; omitted flags are false:
+
+```text
+send-basic-messages, send-audios, send-documents, send-photos, send-videos,
+send-video-notes, send-voice-notes, send-polls, send-other-messages,
+add-link-previews, react-to-messages, edit-tag, change-info, invite-users,
+pin-messages, create-topics
+```
+
+The complete array is canonicalized in this order. Duplicate, whitespace-
+containing, empty or unknown comma members are local `USAGE`; `none` is the
+only empty spelling. No implicit permission dependency is added by tgcli; a
+combination rejected by TDLib remains a typed TD error.
+
+Successful results are composed only from the immutable plan and the returned
+`ok`/invite-link object:
+
+```text
+ChatTitleResult       = {"chat":ChatIdentity,"title":string}
+ChatPhotoResult       = {"chat":ChatIdentity,"photo":"set"|"deleted"}
+ChatDescriptionResult = {"chat":ChatIdentity,"description":string}
+ChatInviteLinkResult  = {"chat":ChatIdentity,"action":"create"|"revoke",
+                         "invite_link":string|null}
+ChatPromoteResult     = {"chat":ChatIdentity,"user":UserIdentity,
+                         "status":"administrator","rights":admin_right[]}
+ChatMemberStateResult = {"chat":ChatIdentity,"user":UserIdentity,
+                         "status":"member"|"banned"|"left"}
+ChatPermissionsResult = {"chat":ChatIdentity,
+                         "permissions":chat_permission[]}
+```
+
+Demote emits `member`; ban emits `banned`; unban and kick emit `left`. No
+post-mutation `getChat`, `getChatMember`, `getChatInviteLink` or other reread is
+allowed.
+
+#### 4.9.6 Storage
+
+Both storage commands require the selected account's exact Ready/principal
+binding even though pinned TDLib permits some storage queries before
+authorization. They add only `getStorageStatistics` and `optimizeStorage`.
+Fast/database statistics are outside M6.
+
+`storage stats` calls `getStorageStatistics(chat_limit=100)`. Optimize calls:
+
+```text
+optimizeStorage(size=-1, ttl=-1, count=-1, immunity_delay=-1,
+                file_types=[], chat_ids=[], exclude_chat_ids=[],
+                return_deleted_file_statistics=false, chat_limit=100)
+```
+
+Thus tgcli applies TDLib's deletion defaults and only fixes a bounded result
+breakdown; it does not silently choose an age, size, count, file class or chat
+filter. Optimize is Destructive, requires confirmation, and rejects
+idempotency because a response cannot prove which already-missing local files
+were deleted after a crash.
+
+`StorageStatistics` has exactly `size`, `count`, and `by_chat`.
+`StorageByChat` has `chat_id`, `size`, `count`, and `by_file_type`.
+`StorageByFileType` has `file_type`, `size`, and `count`. Sizes are nonnegative
+int53 and counts nonnegative int32. `chat_id` may be zero for the aggregate
+bucket. `file_type` is the closed lowercase mapping of the 25 pinned variants:
+
+```text
+none, animation, audio, document, live-photo-video, notification-sound,
+photo, photo-story, profile-photo, secret, secret-thumbnail, secure,
+self-destructing-live-photo-video, self-destructing-photo,
+self-destructing-video, self-destructing-video-note,
+self-destructing-voice-note, sticker, thumbnail, unknown, video, video-note,
+video-story, voice-note, wallpaper
+```
+
+Unknown variants, negative scalar fields, null entries, more than 101 chat
+rows (100 plus aggregate), more than one zero aggregate row, duplicate nonzero
+chat ids, more than 25 or duplicate file types in one row, or checked sum
+overflow are malformed TD responses. TD order is
+preserved. Stats returns `StorageStatistics` directly; optimize returns
+`{"optimized":true,"statistics":StorageStatistics}`. No filesystem path,
+TDLib database path or deleted-file name is exposed.
+
+#### 4.9.7 WriteKernel, audit, idempotency and recovery
+
+All 24 mutations use §4.5's two-epoch WriteKernel and durability rules. Their
+closed future `AccountAuditOperation` additions are:
+
+```text
+contact_add, contact_remove, contact_block, contact_unblock,
+folder_create, folder_edit, folder_delete, folder_add_chat,
+folder_remove_chat,
+topic_create, topic_edit, topic_close, topic_reopen,
+chat_set_title, chat_set_photo, chat_set_description, chat_invite_link,
+chat_promote, chat_demote, chat_ban, chat_unban, chat_kick,
+chat_set_permissions,
+storage_optimize
+```
+
+The first account epoch performs complete prior removal/audit/store/spool
+reconciliation and initial idempotency lookup when policy allows one, then
+releases before resolver, property/member/folder/topic/file planning. The
+commit epoch repeats the core
+gate and authoritative lookup, confirms the immutable plan for a Destructive
+operation, performs config/principal/generation CAS, appends and syncs intent,
+inserts the pending idempotency entry when allowed, publishes any photo spool,
+then submits the mutation. It remains held through dispatch proof, outcome,
+store transition and eligible spool cleanup. No mutating TD call occurs before
+durable intent. No handler rereads Telegram state after a mutating call; the
+result is the correlated returned object plus frozen plan. A disconnect does
+not cancel durability completion.
+
+Every non-photo M6 mutation uses §4.5's `direct` stage order
+`[idempotency_pending?],dispatch_started,mutation_confirmed?`; photo set uses
+the existing `saved-attach` order without temporary message ids:
+`[idempotency_pending?],spool_ready,dispatch_started,mutation_confirmed?`.
+Only the accepted six generic stage names exist; M6 adds no operation-specific
+checkpoint spelling. `mutation_confirmed` stores the exact strict terminal
+needed for recovery and idempotent replay.
+
+Dry-run performs the same Ready/getMe/bot, exact resolution, folder/topic/member
+reads, phone hash, invite-link hash and photo pass-1 stability/JPEG validation
+needed to construct the plan. It makes no Write/Destructive TD call, no
+confirmation and no current audit/idempotency/spool/config write. Prior-group
+reconciliation is not invoked, exactly as for the existing M3/M4 planners; an
+implementation may validate already-opened state read-only but cannot append,
+sync, repair, expire or clean it. Its result is exactly
+`{"dry_run":true,"plan":M6Plan}`. A grant or `--yes` on dry-run is ignored.
+
+The closed §6 dry-run TD-read allowlist is extended for M6 by exactly
+`getChatFolder`, `getForumTopic` and `getChatMember`, plus `getUser` only in
+the exact user resolver needed by contact/member planning. Existing exact
+chat/user public-link resolver calls retain their accepted restrictions.
+Generation-cached `updateChatFolders` is an observer update, not a planner TD
+call. `getContacts`, `searchContacts`, `getForumTopics`, storage functions and
+every mutation remain forbidden in a dry-run.
+
+At implementation activation the §4.5.12 `v2_gate_operation` set extends by
+the 24 operation names above for real mutations only. The six M6 reads remain
+persistence-free ordinary reads; they do not enter the general M3 mutation
+spool/store gate. This additive rule supersedes §4.7's session-only M6 wording
+only for §4.9 operations and does not change session `AbsentByPolicy`.
+
+The 22 idempotent operations are every operation in the list above except
+`chat_invite_link` and `storage_optimize`. Matching completed entries replay
+the stored exact terminal without TD calls; Destructive replay reconfirms the
+stored plan. A write without a key remains audited but has no automatic retry.
+The accepted 604800-second expiry, quota, pin, crash and first-cause rules are
+unchanged. Section 4.7 session operations remain `AbsentByPolicy`.
+
+Every plan is a strict object beginning with its exact `operation` and resolved
+identity. It includes only normalized mutation inputs and the minimum frozen
+precondition state needed for replay/recovery. Folder RMW plans include the
+complete before/after `FolderSnapshot`; member plans include the before status
+and exact after status/rights; photo plans include the public `FileSnapshot`
+identity and SHA-256 but no bytes or spool path; contact-add plans include the
+domain-separated phone digest but no phone; revoke plans include only the
+domain-separated link digest. Audit `arguments` use the same redacted forms.
+The request fingerprint remains the canonical normalized caller request; its
+caller-supplied revoke link is replaced by the domain-separated link digest,
+while the server-derived phone digest belongs only to the plan/audit.
+Confirmation targets are exactly these plans.
+
+Every `M6Plan` branch has exact common fields `operation`, `account` and
+`tdlib_request`. Its remaining required fields are:
+
+```text
+contact_add:
+  user:UserIdentity, first_name:string, last_name:string,
+  phone_number_sha256:sha256, share_phone_number:false
+contact_remove:
+  user:UserIdentity, is_contact:false
+contact_block/contact_unblock:
+  user:UserIdentity, blocked:boolean
+
+folder_create:
+  name:string, icon:folder_icon|null, color_id:int32,
+  chat_ids:nonzero_int53[1..100]
+folder_edit:
+  folder_id:int32, before:FolderSnapshot, after:FolderSnapshot
+folder_delete:
+  folder:FolderSnapshot, leave_chat_ids:[]
+folder_add_chat/folder_remove_chat:
+  folder_id:int32, chat:ChatIdentity,
+  before:FolderSnapshot, after:FolderSnapshot
+
+topic_create:
+  chat:ChatIdentity, name:string, icon:topic_color
+topic_edit:
+  chat:ChatIdentity, before:TopicInfo, name:string
+topic_close/topic_reopen:
+  chat:ChatIdentity, before:TopicInfo, closed:boolean
+
+chat_set_title:
+  chat:ChatIdentity, title:string
+chat_set_photo:
+  chat:ChatIdentity, delete:boolean, file:FileSnapshot|null
+chat_set_description:
+  chat:ChatIdentity, description:string
+chat_invite_link:
+  chat:ChatIdentity, action:"create"|"revoke",
+  invite_link_sha256:sha256|null
+chat_promote:
+  chat:ChatIdentity, user:UserIdentity,
+  before:MemberStatusSnapshot, rights:admin_right[1..16]
+chat_demote/chat_ban/chat_unban/chat_kick:
+  chat:ChatIdentity, user:UserIdentity,
+  before:MemberStatusSnapshot, after:"member"|"banned"|"left"
+chat_set_permissions:
+  chat:ChatIdentity, permissions:chat_permission[0..16]
+
+storage_optimize:
+  size:-1, ttl:-1, count:-1, immunity_delay:-1,
+  file_types:[], chat_ids:[], exclude_chat_ids:[],
+  return_deleted_file_statistics:false, chat_limit:100
+```
+
+`MemberStatusSnapshot` is a strict tagged union of the pinned six statuses:
+creator has `kind`, `is_anonymous`, `is_member`; administrator has `kind`,
+`can_be_edited`, `can_manage_chat`, `rights`; member has `kind`,
+`member_until_date`; restricted
+has `kind`, `is_member`, `restricted_until_date`, `permissions`; left has only
+`kind`; banned has `kind`, `banned_until_date`. Dates are int32;
+`can_manage_chat` preserves the pinned implied bit separately, while all other
+rights/permissions use the canonical arrays above. `chat_set_photo.file` is
+null iff delete is true. `chat_invite_link.invite_link_sha256` is null iff
+action is create. Member `after` is fixed by the operation and cannot select
+a different status.
+
+The exact `tdlib_request` mapping is:
+
+```text
+contact_add=addContact
+contact_remove=removeContacts
+contact_block,contact_unblock=setMessageSenderBlockList
+folder_create=createChatFolder
+folder_edit,folder_add_chat,folder_remove_chat=editChatFolder
+folder_delete=deleteChatFolder
+topic_create=createForumTopic
+topic_edit=editForumTopic
+topic_close,topic_reopen=toggleForumTopicIsClosed
+chat_set_title=setChatTitle
+chat_set_photo=setChatPhoto
+chat_set_description=setChatDescription
+chat_invite_link=createChatInviteLink|revokeChatInviteLink
+chat_promote,chat_demote,chat_ban,chat_unban,chat_kick=setChatMemberStatus
+chat_set_permissions=setChatPermissions
+storage_optimize=optimizeStorage
+```
+
+Mutation proof is the typed correlated TD response: `ok`, returned folder/topic
+info, returned invite-link set, or returned storage statistics as applicable.
+A malformed success response is not success. Dispatch without a correlated
+proof is `mutation_state:"possible"`; recovery never resends automatically.
+Invite-link and optimize recovery can close an unproven invocation only as an
+ambiguous failure and never recreate/revoke/optimize again. Photo recovery
+retains the private spool until the existing audit/store proof permits cleanup.
+
+Raw phone, local file bytes, private spool path, TD error message, argv and
+confirmation answers are prohibited from logs, diagnostics, audit,
+idempotency, result/error schemas and crash records. The caller invite link is
+necessarily present in the strict request-args schema and transient request
+frame, but is prohibited from every other listed surface. Hashes are domain-
+separated and are not presented as proof that the underlying secret is
+unknowable. Audit files, store and spool retain the existing no-symlink/
+current-uid/mode/link-count/fsync requirements. No M6 command creates new
+persistence outside those foundations.
+
+#### 4.9.8 Results, errors and schema activation
+
+Each mutation result schema is a strict `oneOf` between its real result above
+and the exact dry-run wrapper/plan. The six reads have only their real branch.
+Human success uses the existing deterministic pretty-JSON fallback:
+`data.dump(2) + "\n"`; M6 adds no ad-hoc table renderer. JSON mode emits the
+same strict compact object plus one LF. Errors use the standard error envelope,
+stderr and exit table; success stdout is empty on error.
+
+The five closed family error operation enums are:
+
+```text
+contact.error:   contact_list, contact_search, contact_add, contact_remove,
+                 contact_block, contact_unblock
+folder.error:    folder_list, folder_show, folder_create, folder_edit,
+                 folder_delete, folder_add_chat, folder_remove_chat
+topic.error:     topic_list, topic_create, topic_edit, topic_close, topic_reopen
+chat-admin.error: chat_set_title, chat_set_photo, chat_set_description,
+                  chat_invite_link, chat_promote, chat_demote, chat_ban,
+                  chat_unban, chat_kick, chat_set_permissions
+storage.error:   storage_stats, storage_optimize
+```
+
+Each family schema enumerates only reachable strict branches from the existing
+common contracts: `USAGE`, `CONFIG_INVALID`, `CONFIG_CONFLICT`,
+`ACCOUNT_NOT_FOUND`, `ACCOUNT_MISMATCH`, `HOOK_FAILED`, `NOT_AUTHED`,
+`BOT_UNSUPPORTED`, resolver `NOT_FOUND`/`AMBIGUOUS`, `TDLIB_ERROR`,
+`RATE_LIMITED`, `TIMEOUT`, `DAEMON_SHUTDOWN`, `PROTOCOL_ANSWER_INVALID`,
+`REMOVAL_INCOMPLETE`, prior-group `AUDIT_UNAVAILABLE`/`AUDIT_INCOMPLETE`/
+`SPOOL_UNAVAILABLE`, `INTERNAL`, and for mutations `WRITE_DENIED`,
+`CONFIRMATION_REQUIRED`, `AUDIT_UNAVAILABLE`, `AUDIT_INCOMPLETE`,
+`IDEMPOTENCY_CONFLICT`, `IDEMPOTENCY_PENDING`,
+`IDEMPOTENCY_UNAVAILABLE`, plus photo-only `NOT_FOUND`, `INPUT_CHANGED` and
+`SPOOL_UNAVAILABLE`. Folder/topic/admin locally proven state conflicts use
+`PRECONDITION_FAILED` with a closed family reason. Topic pagination uses
+`PAGINATION_INVALID`. Invite-link/storage schemas omit idempotency branches.
+Within each shared family schema, operation constants prevent a read operation
+from validating current-mutation authority, confirmation, idempotency,
+general-v2 recovery or outcome branches; ordinary selected-account preflight
+errors retain their existing shapes. `TDLIB_ERROR`
+exposes only operation and numeric TD code; 429 is always `RATE_LIMITED` with
+canonical saturated `retry_after`. `INTERNAL` never exposes TD message text or
+secrets.
+
+The family-local strict details are closed as follows; every unlisted common
+detail is inherited byte-for-byte from §§4.1, 4.5, 5.2 and 6 rather than
+duplicated with a new shape:
+
+| code | exact M6 details |
+|---|---|
+| `BOT_UNSUPPORTED` | `{"operation":m6_operation}` |
+| `TDLIB_ERROR` | `{"operation":m6_operation,"tdlib_code":int32}` |
+| `RATE_LIMITED` | `{"operation":m6_operation,"tdlib_code":429,"retry_after":nonnegative_int32}` |
+| `TIMEOUT` | `{"operation":m6_operation,"state":nullable_auth_state}` |
+| malformed `INTERNAL` | `{"operation":m6_operation,"reason":"malformed_tdlib_response"}` |
+| capacity `INTERNAL` | `{"operation":"contact_list"|"contact_search"|"topic_list","reason":"capacity_exhausted","resource":"users"|"topics"|"bytes"|"item_bytes","limit":nonnegative_integer}` with the operation/resource pair enforced |
+| `PAGINATION_INVALID` | `{"operation":"topic_list","reason":"non_advancing_upstream"}` |
+| missing folder | `{"folder_id":positive_int32}` |
+| missing topic | `{"chat_id":nonzero_int53,"topic_id":positive_int32}` |
+| missing member | `{"chat_id":nonzero_int53,"user_id":positive_int53}` |
+| folder precondition | `{"operation":folder_operation,"folder_id":positive_int32,"chat_id":nonzero_int53_or_null,"reason":"no_change"|"already_in_folder"|"not_in_folder"|"folder_capacity"}` |
+| topic precondition | `{"operation":topic_operation,"chat_id":nonzero_int53,"topic_id":positive_int32_or_null,"reason":"missing_right"|"no_change"|"already_closed"|"already_open"}` |
+| admin-right precondition | `{"operation":chat_admin_operation,"chat_id":nonzero_int53,"reason":"missing_right","right":admin_right}` |
+| member precondition | `{"operation":chat_admin_operation,"chat_id":nonzero_int53,"user_id":positive_int53,"reason":"self_target"|"creator"|"noneditable_administrator"|"wrong_member_state"}` |
+
+The `chat_id` in folder preconditions is null only for `folder_edit/no_change`
+and `folder_capacity` before one candidate id can be retained. The topic id is
+null only for create-time `missing_right`. Schema `oneOf` arms enforce those
+relations instead of accepting the broad nullable forms. Resolver
+NOT_FOUND/AMBIGUOUS retains its exact selector/candidates objects and
+`operation:"resolve"` attribution. `NOT_AUTHED` retains exact account/state and
+`reason:not_ready|authorization_lost|login_required`; it is never replaced by
+a second authorization-loss code.
+
+The exact future result assets and result-manifest keys are:
+
+| schema file | command key |
+|---|---|
+| `contact-list.result.schema.json` | `contact list` |
+| `contact-search.result.schema.json` | `contact search` |
+| `contact-add.result.schema.json` | `contact add` |
+| `contact-remove.result.schema.json` | `contact remove` |
+| `contact-block.result.schema.json` | `contact block` |
+| `contact-unblock.result.schema.json` | `contact unblock` |
+| `folder-list.result.schema.json` | `folder list` |
+| `folder-show.result.schema.json` | `folder show` |
+| `folder-create.result.schema.json` | `folder create` |
+| `folder-edit.result.schema.json` | `folder edit` |
+| `folder-delete.result.schema.json` | `folder delete` |
+| `folder-add-chat.result.schema.json` | `folder add-chat` |
+| `folder-remove-chat.result.schema.json` | `folder remove-chat` |
+| `topic-list.result.schema.json` | `topic list` |
+| `topic-create.result.schema.json` | `topic create` |
+| `topic-edit.result.schema.json` | `topic edit` |
+| `topic-close.result.schema.json` | `topic close` |
+| `topic-reopen.result.schema.json` | `topic reopen` |
+| `chat-set-title.result.schema.json` | `chat set-title` |
+| `chat-set-photo.result.schema.json` | `chat set-photo` |
+| `chat-set-description.result.schema.json` | `chat set-description` |
+| `chat-invite-link.result.schema.json` | `chat invite-link` |
+| `chat-promote.result.schema.json` | `chat promote` |
+| `chat-demote.result.schema.json` | `chat demote` |
+| `chat-ban.result.schema.json` | `chat ban` |
+| `chat-unban.result.schema.json` | `chat unban` |
+| `chat-kick.result.schema.json` | `chat kick` |
+| `chat-set-permissions.result.schema.json` | `chat set-permissions` |
+| `storage-stats.result.schema.json` | `storage stats` |
+| `storage-optimize.result.schema.json` | `storage optimize` |
+
+The exact future error assets are `contact.error.schema.json`,
+`folder.error.schema.json`, `topic.error.schema.json`,
+`chat-admin.error.schema.json`, and `storage.error.schema.json`; every command
+in a family maps to that family file. The audit intent/outcome/checkpoint
+schemas extend their operation/plan/result unions by the 24 names above.
+
+These 35 command-schema files, manifest mappings and audit enum/schema arms are
+one implementation activation transaction. The current source tests require
+every top-level `*.result.schema.json` to have exactly one result-manifest
+mapping and require embedded catalog/runtime tables to match. Adding dormant
+files or manifest/audit arms before handlers would deliberately violate that
+bijection and make `schema` advertise unimplemented commands. Therefore this
+specification commit creates none of those files and does not change any
+manifest, embedded asset, registry or audit enum. Implementation must add all
+35 strict files, mappings, generated embedded bytes, 24 audit arms, native
+factories, safety descriptors, handlers and public registrations atomically;
+no partial public prefix is permitted.
+
+#### 4.9.9 Verification, TestDC and platform gates
+
+Implementation acceptance is foundation-oriented rather than 30 independent
+micro-slices:
+
+1. strict CLI/frame parsing covers every command/args pair, bounds, canonical
+   numeric spelling, option matrix, repeated options and rejected global mode;
+2. typed native/fake conversion covers every pinned function and output
+   variant, null/mismatch/unknown objects, exact TD field values and forbidden
+   calls; source verification authenticates commit a17f87c4 and the inspected
+   declarations/folder clamp without network access;
+3. resolver/generation tests prove exact-only targets, atomic multi-chat
+   folder resolution, bot and secret matrices, auth loss at every response
+   gap, and daemon/no-daemon byte/trace parity;
+4. folder-cache tests cover generation replacement, update validation,
+   create 1/100/+1, full-snapshot RMW preservation and zero rereads;
+5. topic tests cover every icon, all-page cursor progress, short pages, empty
+   terminal probe, duplicate/malformed/4096/+1 and byte-capacity cases;
+6. admin tests cover static JPEG/path/spool cutpoints, delete mode, every
+   rights/permission bit and chat-kind matrix, every member precondition,
+   invite create/revoke redaction and zero post-write reads;
+7. storage tests prove the exact default tuple, bounds/conversion, destructive
+   confirmation, no idempotency and no path/file leakage;
+8. WriteKernel tests cover all 24 operations, both epochs, dry-run zero-current-
+   persistence, grant/confirmation, 22-operation idempotency allowlist,
+   crash/recovery/first-cause, audit grouping/redaction and proof/no-reread;
+9. all 30 Results and five family errors validate positives and boundary/
+   additional-property negatives; catalog/generator/package tests prove exact
+   source↔manifest↔embedded↔installed bytes and the audit schema union;
+10. Debug, ASan/UBSan, canonical wrapped non-TDLib TSan, Release, full tidy,
+    format, dependency/source/release/mechanical gates run on the integrated
+    candidate. Linux callback safety remains green; macOS compile/package and
+    runtime evidence is required in CI because local macOS execution is not a
+    substitute.
+
+The one supported live TestDC milestone flow is non-mutating
+`m6.storage.stats`: it uses the authenticated TestDC account lifecycle,
+asserts strict result/schema/human output, records the pinned
+binary/source/config evidence, and registers no cleanup because it creates no
+Telegram object. Fake/native contract tests prove the exact TD tuple and cover
+every mutation, destructive recovery and redaction. Live TestDC must never run
+a contact,
+folder, topic, admin, invite-link or optimize mutation, and the spec/generator
+checks themselves require no network.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result
@@ -6007,8 +6920,9 @@ Command handlers statically declare `Read`, `AuthBootstrap`, `Write`, or
   passes `--allow-write`. Precedence: explicit deny > any grant > default
   deny. This is the one-variable sandbox switch for a harness running an
   agent against an account whose owner keeps a standing config grant.
-- **Destructive** (msg delete, chat leave/ban/kick, session terminate, folder
-  delete, logout, account remove) — requires a write grant *and*
+- **Destructive** (msg delete, chat leave/ban/kick/invite-link, session
+  terminate, folder delete, storage optimize, logout, account remove) —
+  requires a write grant *and*
   confirmation: on a TTY an interactive prompt showing the resolved target
   (`leave chat "Dev Team" (-1001234)? [y/N]`); without a TTY an explicit
   `--yes`.

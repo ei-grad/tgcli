@@ -358,10 +358,37 @@ before the milestone is closed.
 
 ## M6 — Long tail
 
-- [ ] `tgcli contact list|search|add|remove|block|unblock`
-- [ ] `tgcli folder list|show|create|edit|delete|add-chat|remove-chat`
-- [ ] `tgcli topic list|create|edit|close|reopen`
-- [ ] `tgcli chat set-title|set-photo|set-description|invite-link|promote|demote|ban|unban|kick|set-permissions`
+- [x] Freeze the normative §4.9 curated long-tail contract for all 30 remaining
+      verbs: exact grammar/args and identifiers, TDLib a17f87c4 boundary,
+      generation binding, strict DTOs/errors, tier/bot/secret matrices,
+      22-of-24 idempotency allowlist, two-epoch audit/recovery, redaction,
+      no-reread results, daemon/no-daemon parity, schemas and acceptance gates
+- [ ] Add the complete dormant typed TD boundary and conversion foundation for
+      contacts, folder cache/snapshots, paged topics, chat admin/member/photo/
+      invite-link calls and storage statistics/default optimization; pin every
+      constructor, field, variant, bound and forbidden call to a17f87c4
+- [ ] Add strict shared M6 CLI/frame parsing, canonical numeric/string ids,
+      exact-only mutation selectors, closed folder/topic/right/permission/file-
+      type enums and the common 60-second admission/generation lifecycle
+- [ ] Extend WriteKernel/audit/recovery atomically with all 24 mutation
+      operations, the exact 22-operation idempotency allowlist, auth-bound
+      dry-run planning, redaction, photo spool proof and no-post-mutation-read
+      enforcement
+- [ ] Implement the five domain coordinators bottom-up: contact typed-user
+      hydration; generation-scoped folder update cache and full-snapshot RMW;
+      bounded all-page topics; member/right/photo/invite administration; and
+      Ready-bound storage defaults
+- [ ] Add all 30 strict result schemas and five family error schemas together
+      with result/error catalogs, generated embedded/package assets and the
+      24-operation audit schema union; keep source/catalog/runtime bijections
+      exact and expose no partially implemented command
+- [ ] Atomically activate/register the 30-command CLI/frame/safety surface only
+      after handlers, native/fake boundaries, WriteKernel, schemas, human
+      pretty-JSON fallback and focused tests are complete and green
+- [ ] Add exhaustive parser/native/fake/generation/pagination/member/spool/
+      redaction/crash/TSan/schema/package tests for the §4.9 matrix, plus the
+      non-mutating `m6.storage.stats` TestDC evidence flow; run no live
+      mutation and keep macOS runtime evidence in CI
 - [ ] Freeze the §4.7 session-only grammar/frame args, full signed-int64 string
       identity including zero, 17-value device enum, strict DTO/error/human
       output, bot/current/business-bot semantics, deadlines, TDLib acceptance
@@ -396,9 +423,9 @@ before the milestone is closed.
       provenance checks; do not terminate a live/TestDC session
 - [ ] Review gate: session-only M6 semantic diff vs DESIGN.md §4.7 and pinned
       TDLib generated API/AccountManager.cpp/Requests.cpp
-- [ ] `tgcli storage stats|optimize` (tdlib file-store usage, optimizeStorage)
-- [ ] Add a supported M6 long-tail flow to the test-DC E2E milestone gate
-- [ ] Review gate: M6 diff vs DESIGN.md
+- [ ] Review gate: complete M6 implementation diff vs DESIGN.md §§4.7 and 4.9,
+      pinned TDLib generated/source contracts and the one-shot activation
+      boundary
 
 ## M7 — Polish & release
 
