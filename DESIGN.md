@@ -5739,7 +5739,10 @@ generation and does not synthesize a TD request. The result is
 with that id, and returns
 `{"folder":FolderSnapshot}`. A successful top-level null `chatFolder` is the
 exact pinned absence result and maps to
-`NOT_FOUND/{"folder_id":folder_id}`. A null nested name/text/entity or null
+`NOT_FOUND/{"operation":folder_operation,"folder_id":folder_id}`, where
+`folder_operation` is exactly `folder_show|folder_edit|folder_delete|`
+`folder_add_chat|folder_remove_chat` for the call that returned null. A null
+nested name/text/entity or null
 effective `chatFolderInfo.icon`, malformed name/icon, invalid color, duplicate
 chat id or unknown field variant is a whole-response `INTERNAL`; the configured
 `chatFolder.icon` alone may be null. Null is not a general structural-to-
@@ -5855,21 +5858,33 @@ EOF. Every nonempty page must have
 `total_count>=0`, `total_count>=topics.size()`, at most 100 topics, positive
 distinct topic ids for the same chat, valid descending TD order, and a cursor
 different from the request cursor unless the returned cursor is the all-zero
-terminal sentinel. Order is the pinned signed int64 field and is nonincreasing
+terminal sentinel. Before that comparison, all three returned cursor members
+must be typed integers in their pinned wire ranges:
+`next_offset_date` is `0..2147483647`, `next_offset_message_id` is
+`0..9007199254740991`, and `next_offset_forum_topic_id` is
+`0..2147483647`. These are the exact nonnegative JSON projections of the
+`forumTopics` `int32`/message-id `int53`/`int32` fields in the pinned generated
+`td_api.tl` declaration. The all-zero tuple is the terminal sentinel; any
+other tuple is a continuation cursor. A negative, noninteger or out-of-range
+component is structural `INTERNAL/malformed_tdlib_response`, even if another
+component or topic id would also make the page nonadvancing. Order is the
+pinned signed int64 field and is nonincreasing
 across page boundaries. An empty page is valid only with the all-zero cursor
 and then terminates; a nonempty page with the all-zero cursor also terminates.
 Approximate `total_count` and a short page never do. A repeated topic or
 nonterminal cursor that is equal, previously seen or otherwise nonadvancing is
 `PAGINATION_INVALID/non_advancing_upstream`; this includes an empty page that
-returns a nonzero continuation cursor and any nonterminal cursor component
-outside its pinned date/message/topic-id range. A null top-level page, negative
-or undersized `total_count`, oversized vector, null/malformed topic/info/icon/
+returns a structurally valid nonzero continuation cursor, a structurally valid
+equal/seen/cyclic cursor, and duplicate-topic progression. A null top-level
+page, negative or undersized `total_count`, oversized vector,
+null/malformed topic/info/icon/
 sender, chat mismatch, or invalid topic scalar/date/count/order is structural
 `INTERNAL/{"operation":"topic_list","reason":"malformed_tdlib_response"}`.
 Lifecycle/auth/deadline and an actual TD error arbitrate first; complete
-structural validation then precedes duplicate/cursor progress validation, and
-capacity admission is last. Thus structural corruption cannot be relabeled as
-pagination merely because the same page also repeats an id. The all-pages
+page, nested-object, topic-id and returned-cursor structural validation then
+precedes duplicate/cursor progress validation, and capacity admission is last.
+Thus structural corruption cannot be relabeled as pagination merely because
+the same page also repeats an id or cursor. The all-pages
 accumulator admits at most 4096 topics, 16,777,216 charged serialized bytes
 and 262,144 bytes for one topic; a `+1` failure is
 `INTERNAL/capacity_exhausted`, never a partial list.
@@ -5877,7 +5892,9 @@ and 262,144 bytes for one topic; a `+1` failure is
 Create returns the converted `forumTopicInfo` directly. Edit/close/reopen first
 call `getForumTopic` to validate the exact topic and precondition. A successful
 top-level null `forumTopic` is the pinned absence result and maps to
-`NOT_FOUND/{"chat_id":chat_id,"topic_id":topic_id}`; a non-null topic with a
+`NOT_FOUND/{"operation":topic_operation,"chat_id":chat_id,"topic_id":topic_id}`,
+where `topic_operation` is exactly `topic_edit|topic_close|topic_reopen` for
+the call that returned null; a non-null topic with a
 null `info` or other null/malformed nested object is `INTERNAL`. After the
 mutation they do not reread. Close requires open, reopen requires closed, and
 edit requires a different name. The strict results are:
@@ -5968,7 +5985,9 @@ The member-absence classifier is call-specific and pinned to
 and `GetChannelParticipantQuery::on_error`. After lifecycle/auth/deadline wins
 and 429 normalization, only TD error code 400 with exact case-sensitive message
 `Member not found` maps to
-`NOT_FOUND/{"chat_id":chat_id,"user_id":user_id}`. Every other TD error,
+`NOT_FOUND/{"operation":chat_admin_operation,"chat_id":chat_id,`
+`"user_id":user_id}`, with the exact operation that issued this
+`getChatMember`. Every other TD error,
 including another 400 message, is `TDLIB_ERROR`. The upstream
 `USER_NOT_PARTICIPANT` error for a supergroup/channel is converted by pinned
 TDLib to a successful `chatMemberStatusLeft` and is a valid starting status,
@@ -6388,9 +6407,10 @@ duplicated with a new shape:
 | malformed `INTERNAL` | `{"operation":m6_operation,"reason":"malformed_tdlib_response"}` |
 | capacity `INTERNAL` | `{"operation":"contact_list"|"contact_search"|"topic_list","reason":"capacity_exhausted","resource":"users"|"topics"|"bytes"|"item_bytes","limit":nonnegative_integer}` with the operation/resource pair enforced |
 | `PAGINATION_INVALID` | `{"operation":"topic_list","reason":"non_advancing_upstream"}` |
-| missing folder | `{"folder_id":positive_int32}` |
-| missing topic | `{"chat_id":nonzero_int53,"topic_id":positive_int32}` |
-| missing member | `{"chat_id":nonzero_int53,"user_id":positive_int53}` |
+| missing folder | `{"operation":"folder_show"|"folder_edit"|"folder_delete"|"folder_add_chat"|"folder_remove_chat","folder_id":positive_int32}` |
+| missing topic | `{"operation":"topic_edit"|"topic_close"|"topic_reopen","chat_id":nonzero_int53,"topic_id":positive_int32}` |
+| missing member | `{"operation":chat_admin_operation,"chat_id":nonzero_int53,"user_id":positive_int53}` |
+| missing photo source | `{"operation":"chat_set_photo","path":string,"reason":source_file_reason}` |
 | folder precondition | `{"operation":folder_operation,"folder_id":positive_int32,"chat_id":nonzero_int53_or_null,"reason":"no_change"|"already_in_folder"|"not_in_folder"|"folder_capacity"}` |
 | topic precondition | `{"operation":topic_operation,"chat_id":nonzero_int53,"topic_id":positive_int32_or_null,"reason":"missing_right"|"no_change"|"already_closed"|"already_open"}` |
 | admin-right precondition | `{"operation":chat_admin_operation,"chat_id":nonzero_int53,"reason":"missing_right","right":admin_right}` |
@@ -6405,6 +6425,27 @@ NOT_FOUND/AMBIGUOUS retains its exact selector/candidates objects and
 `operation:"resolve"` attribution. `NOT_AUTHED` retains exact account/state and
 `reason:not_ready|authorization_lost|login_required`; it is never replaced by
 a second authorization-loss code.
+
+The five future family schemas have this exhaustive absence/ambiguity arm
+inventory. `operation` constants shown here and in the table above are schema
+constants or closed enums, never an unconstrained M6 operation string:
+
+| family schema | exact `NOT_FOUND` / `AMBIGUOUS` arms |
+|---|---|
+| `contact.error.schema.json` | existing resolver arms with `operation:"resolve"`; runtime reachability is contact add/remove/block/unblock |
+| `folder.error.schema.json` | existing resolver arms with `operation:"resolve"` for create/add-chat/remove-chat, plus the call-local missing-folder arm for show/edit/delete/add-chat/remove-chat |
+| `topic.error.schema.json` | existing resolver arms with `operation:"resolve"` for all five topic operations, plus the call-local missing-topic arm for edit/close/reopen |
+| `chat-admin.error.schema.json` | existing resolver arms with `operation:"resolve"` for all ten chat-admin operations, the call-local missing-member arm for exactly the ten-value `chat_admin_operation` enum, and the §4.5 source-file arm specialized to `operation:"chat_set_photo"` |
+| `storage.error.schema.json` | no `NOT_FOUND` or `AMBIGUOUS` arm |
+
+The specialized photo-source arm has stable message `input file is
+unavailable`, the same closed `source_file_reason` and canonical display-path
+rules as §4.5.3/§4.5.12, and is reachable only for non-delete
+`chat set-photo`. No family accepts another family's operation value or a
+folder/topic/member/photo absence arm not listed above. Resolver reachability
+is additionally enforced by command tests because the inherited resolver
+payload intentionally identifies its own operation as `resolve`; it does not
+invent a parent-operation field.
 
 The exact future result assets and result-manifest keys are:
 
@@ -6477,15 +6518,21 @@ micro-slices:
    folder resolution, bot and secret matrices, auth loss at every response
    gap, daemon/no-daemon byte/trace parity, top-level null folder/topic
    NOT_FOUND, nested-null INTERNAL, and exact `400/Member not found` versus
-   Left/429/other-error precedence;
+   Left/429/other-error precedence; schema tests cover every permitted
+   folder/topic/member/photo absence operation and reject cross-family,
+   unlisted-operation and storage-family NOT_FOUND/AMBIGUOUS arms;
 4. folder-cache tests cover generation replacement, update validation,
    create 1/100/+1, every within/cross-vector duplicate, excluded-to-included
    add, pinned/included-to-excluded remove, `animate_custom_emoji` true/false,
    formatted-entity/plan-hash preservation, full-snapshot RMW and zero rereads;
 5. topic tests cover every icon, all-page cursor progress, short pages, empty
    terminal and nonempty zero-cursor completion, duplicate/nonadvancing
-   pagination, structural total/null/nested/order corruption precedence,
-   4096/+1 and byte-capacity cases;
+   pagination, structurally valid equal/seen/cyclic cursor tuples, and
+   duplicate-topic progression; negative, noninteger and one-past-maximum
+   date/message/topic cursor components prove structural
+   `INTERNAL/malformed_tdlib_response` precedence over every pagination
+   conflict, alongside total/null/nested/order corruption, 4096/+1 and
+   byte-capacity cases;
 6. admin tests cover static JPEG/path/spool cutpoints, delete mode, every
    one of 17 rights across Creator/Administrator/Member and all four chat-kind
    columns, basic-group promotion rejection, every target transition/member

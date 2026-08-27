@@ -364,7 +364,8 @@ before the milestone is closed.
       22-of-24 idempotency allowlist, two-epoch audit/recovery, redaction,
       canonical TD-cleaned mutation strings, disjoint folder RMW, complete
       rights/transition and structural-sum invariants, no-reread results,
-      daemon/no-daemon parity, schemas and acceptance gates
+      closed family-local absence schemas, structural-before-progress topic
+      cursor precedence, daemon/no-daemon parity, schemas and acceptance gates
 - [ ] Add the complete dormant typed TD boundary and conversion foundation for
       contacts, folder cache/snapshots, paged topics, chat admin/member/photo/
       invite-link calls and storage statistics/default optimization; pin every
