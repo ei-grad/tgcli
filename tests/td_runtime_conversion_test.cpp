@@ -32,7 +32,7 @@ using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
 
 constexpr std::size_t kMaxSessionCount = 4'096;
 constexpr std::size_t kMaxSessionStringBytes = 1'048'576;
-constexpr std::size_t kMaxSessionListResultBytes = 16'842'751;
+constexpr std::size_t kMaxSessionListResultBytes = 16'842'700;
 
 using SessionStringMember = std::string td_api::session::*;
 

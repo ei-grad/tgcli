@@ -131,14 +131,19 @@ class ScriptedTdRuntime final : public core::TdRuntime {
     parsed_formatted_text(ScriptedClient client, std::string text,
                           std::vector<core::TdTextEntity> entities = {});
 
+    // Ordinary command traces exclude the core-owned getCurrentState bootstrap.
     bool wait_for_sent(std::size_t count,
                        std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
+    // Bootstrap/lifecycle contracts use the complete trace to assert query ordering.
+    bool wait_for_sent_including_current_state(
+        std::size_t count, std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
     bool wait_for_received(std::size_t count,
                            std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
     [[nodiscard]] std::size_t received_count() const;
     bool wait_for_clients(std::size_t count,
                           std::chrono::milliseconds timeout = std::chrono::seconds(2)) const;
     [[nodiscard]] std::vector<SentTdFunction> sent_functions() const;
+    [[nodiscard]] std::vector<SentTdFunction> sent_functions_including_current_state() const;
     [[nodiscard]] std::vector<ScriptedClient> clients() const;
     [[nodiscard]] bool initialized_before_first_client() const;
     [[nodiscard]] core::TdLogConfiguration logging_configuration() const;

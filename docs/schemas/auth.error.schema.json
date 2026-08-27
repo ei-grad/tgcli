@@ -52,6 +52,7 @@
     "auth_function": {
       "enum": [
         "getAuthorizationState",
+        "getCurrentState",
         "setTdlibParameters",
         "setAuthenticationPhoneNumber",
         "requestQrCodeAuthentication",

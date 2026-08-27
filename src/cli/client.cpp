@@ -188,6 +188,20 @@ class FrameRenderer {
         done_ = true;
     }
 
+    void on_transport_failure() noexcept {
+        if (done_) {
+            return;
+        }
+        exit_code_ = kGeneric;
+        done_ = true;
+        try {
+            print_error("GENERIC", "daemon closed the connection", json::object());
+        } catch (...) {
+            // Transport teardown must remain noexcept even if diagnostic formatting fails.
+            return;
+        }
+    }
+
     [[nodiscard]] bool done() const {
         return done_;
     }
@@ -218,25 +232,41 @@ class FrameRenderer {
 
 class InProcessSink final : public daemon::ResponseSink {
   public:
-    InProcessSink(FrameRenderer& renderer, ChallengePrompt& prompt, bool tty)
-        : renderer_(renderer), prompt_(prompt), tty_(tty) {}
+    InProcessSink(FrameRenderer& renderer, ChallengePrompt& prompt, bool tty,
+                  std::uint64_t request_id)
+        : renderer_(renderer), prompt_(prompt), tty_(tty), request_id_(request_id) {}
 
   private:
     daemon::DeliveryOutcome emit_item(json data) override {
+        if (!admit(proto::Item{request_id_, data})) {
+            return daemon::DeliveryOutcome::Disconnected;
+        }
         return renderer_.on_item(data);
     }
     void emit_progress(json data) override {
+        if (!admit(proto::Progress{request_id_, data})) {
+            return;
+        }
         renderer_.on_progress(data);
     }
     daemon::DeliveryOutcome emit_result(json data) override {
+        if (!admit(proto::Result{request_id_, data})) {
+            return daemon::DeliveryOutcome::Disconnected;
+        }
         return renderer_.on_result(data);
     }
     daemon::DeliveryOutcome emit_error(std::string code, std::string message, json details,
                                        int exit_code) override {
+        if (!admit(proto::Error{request_id_, code, message, details, exit_code})) {
+            return daemon::DeliveryOutcome::Disconnected;
+        }
         renderer_.on_error(code, message, details, exit_code);
         return daemon::DeliveryOutcome::Complete;
     }
     daemon::ChallengeReply emit_challenge(json challenge) override {
+        if (!admit(proto::Challenge{request_id_, challenge})) {
+            return {};
+        }
         if (!tty_) {
             return {{},
                     daemon::ChallengeFailure{"INTERNAL", "daemon challenged a non-TTY client",
@@ -258,9 +288,29 @@ class InProcessSink final : public daemon::ResponseSink {
                                          json::object(), kGeneric}};
     }
 
+    void emit_abort() noexcept override {
+        transport_failed_ = true;
+        renderer_.on_transport_failure();
+    }
+
+    bool admit(const proto::Frame& frame) {
+        if (transport_failed_) {
+            return false;
+        }
+        std::string error;
+        if (proto::serialize_bounded(frame, error)) {
+            return true;
+        }
+        transport_failed_ = true;
+        renderer_.on_transport_failure();
+        return false;
+    }
+
     FrameRenderer& renderer_;
     ChallengePrompt& prompt_;
     bool tty_;
+    std::uint64_t request_id_;
+    bool transport_failed_ = false;
 };
 
 using Deadline = proto::IoDeadline;
@@ -1168,7 +1218,7 @@ int run_in_process(const proto::Request& request, const RunOptions& options,
                    ChallengePrompt& prompt) {
     FrameRenderer renderer(command_key(request.command), options.json,
                            options.stream_output_writer);
-    InProcessSink sink(renderer, prompt, request.context.tty);
+    InProcessSink sink(renderer, prompt, request.context.tty, request.id);
     std::string error;
     if (!daemon::run_no_daemon(request, sink, options.account, error, options.in_process_dispatcher,
                                options.in_process_td_client, options.in_process_request_wall_clock,
@@ -1331,7 +1381,7 @@ int run_config_global(const proto::Request& request, const RunOptions& options,
     daemon::register_account_commands(dispatcher, context);
 
     FrameRenderer renderer(command_key(request.command), options.json);
-    InProcessSink sink(renderer, prompt, request.context.tty);
+    InProcessSink sink(renderer, prompt, request.context.tty, request.id);
     try {
         daemon::RequestSession session(request, sink);
         if (request.command == std::vector<std::string>{"account", "show"}) {
@@ -1392,7 +1442,7 @@ int run_logout_dry_run(const proto::Request& request, const RunOptions& options)
 int run_local_account_removal(const proto::Request& request, const RunOptions& options,
                               ChallengePrompt& prompt) {
     FrameRenderer renderer(command_key(request.command), options.json);
-    InProcessSink sink(renderer, prompt, request.context.tty);
+    InProcessSink sink(renderer, prompt, request.context.tty, request.id);
     std::string error;
     if (!daemon::run_account_removal_local(request, sink, options.account, error)) {
         print_error("GENERIC", error, json::object());

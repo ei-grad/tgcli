@@ -40,6 +40,7 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <poll.h>
@@ -2399,7 +2400,7 @@ TEST_CASE("stream no-daemon injection requires and uses a paired observer servic
     auto* scripted = runtime.get();
     core::TdClient client(std::move(runtime), core::TdLogConfiguration{},
                           core::TdClientEventHooks{}, service.observer_factory());
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     REQUIRE(scripted->clients().size() == 1);
     const auto td_client = scripted->clients().front();
 
@@ -2431,7 +2432,7 @@ TEST_CASE("stream no-daemon injection requires and uses a paired observer servic
     state.updates.push_back(core::TdValue::from(core::TdUpdateNewChat{.chat = private_chat}));
     std::optional<std::uint64_t> current_state_query;
     std::optional<std::uint64_t> authorization_query;
-    for (const auto& call : scripted->sent_functions()) {
+    for (const auto& call : scripted->sent_functions_including_current_state()) {
         if (call.function.kind() == core::TdFunctionKind::GetCurrentState) {
             current_state_query = call.query_id;
         } else {
@@ -2475,8 +2476,8 @@ TEST_CASE("stream no-daemon injection requires and uses a paired observer servic
     });
 
     const auto respond = [&](std::size_t count, core::TdFunctionKind kind, core::TdValue value) {
-        REQUIRE(scripted->wait_for_sent(count));
-        const auto sent = scripted->sent_functions();
+        REQUIRE(scripted->wait_for_sent_including_current_state(count));
+        const auto sent = scripted->sent_functions_including_current_state();
         REQUIRE(sent.size() == count);
         REQUIRE(sent.back().function.kind() == kind);
         scripted->push_response(td_client, sent.back().query_id, std::move(value));
@@ -3524,6 +3525,70 @@ TEST_CASE("msg forward socket and no-daemon dispatch preserve the same normalize
     const auto normalized = json::parse(direct.out);
     CHECK(normalized["command"] == request.command);
     CHECK(normalized["args"] == request.args);
+}
+
+TEST_CASE("socket and no-daemon apply the same whole response frame budget",
+          "[cli][frame-budget][parity][no-daemon][socket]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    constexpr auto request_id = std::numeric_limits<std::uint64_t>::max();
+
+    for (const bool oversized : {false, true}) {
+        DYNAMIC_SECTION("response frame " << (oversized ? "one over" : "exact fit")) {
+            const auto payload_bytes = proto::maximum_result_payload_bytes(request_id);
+            const json payload = std::string(payload_bytes - (oversized ? 1U : 2U), 'x');
+            daemon::Dispatcher dispatcher;
+            dispatcher.register_command(
+                "version", {daemon::Tier::Read,
+                            [payload](const proto::Request&, daemon::RequestSession& session) {
+                                session.result(payload);
+                            }});
+
+            proto::Request request("main");
+            request.id = request_id;
+            request.command = {"version"};
+            request.context.json = true;
+            request.context.cwd = "/";
+
+            cli::RunOptions direct_options;
+            direct_options.account = "main";
+            direct_options.json = true;
+            direct_options.no_daemon = true;
+            direct_options.in_process_dispatcher = &dispatcher;
+            const auto direct = run_request_captured(request, direct_options, env);
+
+            const auto real_env = paths::real_environment();
+            std::string error;
+            REQUIRE(paths::ensure_private_dir(paths::runtime_dir(real_env), real_env.uid, error));
+            const auto socket_path = paths::socket_path("main", real_env, error);
+            REQUIRE(socket_path);
+            daemon::Server server({"main", *socket_path, kVersion, proto::kProtocolVersion, {}, {}},
+                                  dispatcher);
+            REQUIRE(server.start(error));
+            cli::RunOptions socket_options;
+            socket_options.account = "main";
+            socket_options.json = true;
+            socket_options.auto_spawn = false;
+            const auto socket = run_request_captured(request, socket_options, env);
+            server.stop();
+
+            CHECK(socket.exit_code == direct.exit_code);
+            CHECK(socket.out == direct.out);
+            CHECK(socket.err == direct.err);
+            if (oversized) {
+                CHECK(direct.exit_code == kGeneric);
+                CHECK(direct.out.empty());
+                CHECK(json::parse(direct.err) == json{{"error",
+                                                       {{"code", "GENERIC"},
+                                                        {"message", "daemon closed the connection"},
+                                                        {"details", json::object()}}}});
+            } else {
+                CHECK(direct.exit_code == kOk);
+                CHECK(direct.err.empty());
+                CHECK(direct.out == payload.dump() + '\n');
+            }
+        }
+    }
 }
 
 TEST_CASE("saved attach socket and no-daemon dispatch preserve the same normalized frame",

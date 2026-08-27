@@ -889,6 +889,17 @@ std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_obser
     return document.dump();
 }
 
+std::optional<std::string> serialize_bounded(const Frame& frame, std::string& error,
+                                             const secure::WipeObserver& wipe_observer) {
+    auto serialized = serialize(frame, wipe_observer);
+    if (serialized.empty() || serialized.size() > kMaximumSerializedFrameBytes) {
+        error = "frame exceeds " + std::to_string(kMaximumSerializedFrameBytes) + " bytes";
+        return std::nullopt;
+    }
+    error.clear();
+    return serialized;
+}
+
 std::optional<Request> admit_request_source(const Request& request, std::string& error) {
     auto admitted = RequestSourceAccess::frozen(request);
     if (admitted.source_bytes_ != 0) {

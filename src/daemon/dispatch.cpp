@@ -39,6 +39,62 @@ constexpr std::array<M3OperationPolicy, 17> kM3OperationPolicies{{
 
 static_assert(kM3OperationPolicies.size() == proto::kM3OperationIdentities.size());
 
+struct DispatcherOperationIdentity {
+    std::string_view command_path;
+    std::string_view operation;
+};
+
+constexpr std::array<DispatcherOperationIdentity, 26> kDispatcherOperationIdentities{{
+    {"version", "version"},
+    {"doctor", "doctor"},
+    {"daemon status", "status"},
+    {"daemon stop", "stop"},
+    {"daemon restart", "restart"},
+    {"account add", "account_add"},
+    {"account list", "account_list"},
+    {"account show", "account_show"},
+    {"account use", "account_use"},
+    {"account remove", "account_remove"},
+    {"login", "login"},
+    {"me", "me"},
+    {"logout", "logout"},
+    {"saved tags", "saved_tags"},
+    {"saved search", "saved_search"},
+    {"chats", "chats"},
+    {"unread", "unread"},
+    {"fetch", "fetch"},
+    {"msg get", "msg_get"},
+    {"msg link", "msg_link"},
+    {"read", "read"},
+    {"resolve", "resolve"},
+    {"session list", "session_list"},
+    {"session terminate", "session_terminate"},
+    {"listen", "listen"},
+    {"wait-for", "wait_for"},
+}};
+
+std::string_view dispatcher_operation(std::string_view command_path) noexcept {
+    const auto* const found = std::ranges::find(kDispatcherOperationIdentities, command_path,
+                                                &DispatcherOperationIdentity::command_path);
+    if (found != kDispatcherOperationIdentities.end()) {
+        return found->operation;
+    }
+    if (const auto operation = proto::m3_operation_for_command(command_path)) {
+        return proto::m3_operation_identity(*operation)->canonical_name;
+    }
+    if (const auto operation = proto::m6_operation_for_command(command_path)) {
+        return proto::m6_operation_identity(*operation)->canonical_name;
+    }
+    return "dispatcher";
+}
+
+void emit_dispatch_failure(RequestSession& session, std::string_view command_path,
+                           std::string_view message) {
+    session.error("INTERNAL", std::string(message),
+                  {{"operation", dispatcher_operation(command_path)}, {"reason", "internal_error"}},
+                  kGeneric);
+}
+
 constexpr bool is_m1_destructive_command(std::string_view path) noexcept {
     return path == "logout" || path == "account remove";
 }
@@ -306,18 +362,17 @@ void Dispatcher::dispatch(RequestSession& session) const {
     try {
         it->second.handler(request, session);
     } catch (const std::exception&) {
-        session.error("GENERIC", "command handler failed", nlohmann::json::object(), kGeneric);
+        emit_dispatch_failure(session, key, "command handler failed");
         return;
     } catch (...) {
-        session.error("GENERIC", "command handler failed", nlohmann::json::object(), kGeneric);
+        emit_dispatch_failure(session, key, "command handler failed");
         return;
     }
     if (session.cancellation_requested()) {
         return;
     }
     if (!session.has_terminal()) {
-        session.error("GENERIC", "command handler returned without a terminal response",
-                      nlohmann::json::object(), kGeneric);
+        emit_dispatch_failure(session, key, "command handler returned without a terminal response");
     }
 }
 

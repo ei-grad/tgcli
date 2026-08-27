@@ -52,8 +52,14 @@
     "daemon stop": {
       "error": "daemon.error.schema.json"
     },
+    "doctor": {
+      "error": "meta.error.schema.json"
+    },
     "login": {
       "error": "auth.error.schema.json"
+    },
+    "listen": {
+      "error": "stream.error.schema.json"
     },
     "logout": {
       "error": "logout.error.schema.json"
@@ -99,6 +105,12 @@
     },
     "session terminate": {
       "error": "session.error.schema.json"
+    },
+    "version": {
+      "error": "meta.error.schema.json"
+    },
+    "wait-for": {
+      "error": "stream.error.schema.json"
     }
   }
 }

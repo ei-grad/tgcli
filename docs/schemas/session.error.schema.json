@@ -837,6 +837,24 @@
         }
       }
     },
+    "dispatcherInternalError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "details"],
+      "properties": {
+        "code": { "const": "INTERNAL" },
+        "message": { "type": "string" },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "reason"],
+          "properties": {
+            "operation": { "enum": ["session_list", "session_terminate"] },
+            "reason": { "const": "internal_error" }
+          }
+        }
+      }
+    },
     "timeoutError": {
       "type": "object",
       "additionalProperties": false,
@@ -913,6 +931,7 @@
         { "$ref": "#/$defs/tdlibError" },
         { "$ref": "#/$defs/rateLimitedError" },
         { "$ref": "#/$defs/internalError" },
+        { "$ref": "#/$defs/dispatcherInternalError" },
         { "$ref": "#/$defs/timeoutError" }
       ]
     }

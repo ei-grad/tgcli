@@ -134,7 +134,9 @@ TEST_CASE("non-stream error manifest is the exact accepted command authority",
                           {"daemon restart", {{"error", "daemon.error.schema.json"}}},
                           {"daemon status", {{"error", "daemon.error.schema.json"}}},
                           {"daemon stop", {{"error", "daemon.error.schema.json"}}},
+                          {"doctor", {{"error", "meta.error.schema.json"}}},
                           {"login", {{"error", "auth.error.schema.json"}}},
+                          {"listen", {{"error", "stream.error.schema.json"}}},
                           {"logout", {{"error", "logout.error.schema.json"}}},
                           {"me", {{"error", "auth.error.schema.json"}}},
                           {"msg delete", {{"error", "m3-write.error.schema.json"}}},
@@ -149,14 +151,14 @@ TEST_CASE("non-stream error manifest is the exact accepted command authority",
                           {"saved tags", {{"error", "saved.error.schema.json"}}},
                           {"send", {{"error", "m3-write.error.schema.json"}}},
                           {"session list", {{"error", "session.error.schema.json"}}},
-                          {"session terminate", {{"error", "session.error.schema.json"}}}}}};
+                          {"session terminate", {{"error", "session.error.schema.json"}}},
+                          {"version", {{"error", "meta.error.schema.json"}}},
+                          {"wait-for", {{"error", "stream.error.schema.json"}}}}}};
     CHECK(tgcli::test::load_schema_document("error-manifest.json") == expected);
     CHECK_FALSE(expected.at("commands").contains("chats"));
     CHECK_FALSE(expected.at("commands").contains("fetch"));
-    CHECK_FALSE(expected.at("commands").contains("listen"));
     CHECK_FALSE(expected.at("commands").contains("read"));
     CHECK_FALSE(expected.at("commands").contains("unread"));
-    CHECK_FALSE(expected.at("commands").contains("wait-for"));
 }
 
 TEST_CASE("schema target normalization is ASCII-only and history is the sole alias",
@@ -181,10 +183,11 @@ TEST_CASE("schema lookup selects result then item and renders fixed all-kind ord
     REQUIRE(version);
     REQUIRE(version->result != nullptr);
     CHECK(version->item == nullptr);
-    CHECK(version->error == nullptr);
+    REQUIRE(version->error != nullptr);
     CHECK(tgcli::cli::primary_schema(*version) == version->result);
     CHECK(tgcli::cli::render_all_schemas(*version) ==
-          expected_all({{"result", "version.result.schema.json"}}));
+          expected_all(
+              {{"result", "version.result.schema.json"}, {"error", "meta.error.schema.json"}}));
 
     const auto listen = tgcli::cli::find_schema_set("listen");
     REQUIRE(listen);

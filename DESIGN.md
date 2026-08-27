@@ -2199,23 +2199,32 @@ resume it. Only the next separately authorized real invocation creates active
 and appends its own fresh intent without rotation or numbered-slot deletion.
 
 These are newly reviewed behavioral limits, not non-narrowing claims and not
-Telegram/TDLib producer guarantees. The admitted compact request source
+Telegram/TDLib producer guarantees. The shared compact serialized-frame budget
 excluding LF is `P=16,842,751` bytes, derived from the current 16,777,216-byte
-pre-read threshold plus the 65,536-byte chunk minus one. Every otherwise-
-unbounded caller UTF-8 string is at most `P` decoded bytes and all caller
-fields together fit one compact request of at most `P`; daemon and no-daemon
-apply the same admission predicate before handler entry. Existing tighter
-command limits still apply. Above `P`, no Request or command terminal exists:
-the daemon reader closes the connection with its existing oversized-frame
-behavior, and the no-daemon/in-process admission seam reports the same
-transport rejection to its caller without config/audit/store/spool access.
+pre-read threshold plus the 65,536-byte chunk minus one. It is the maximum
+whole Request, Result, Error, Item, Progress, Challenge or Answer frame in both
+daemon and no-daemon mode; LF is appended only after the complete frame passes
+the bound. Every otherwise-unbounded caller UTF-8 string is at most `P` decoded
+bytes and all caller fields together fit one compact Request of at most `P`.
+Existing tighter command limits still apply. Above `P`, a Request has no
+command terminal and an outbound frame has no partial observable bytes: the
+socket path closes the connection and the in-process path performs the same
+transport-failure delivery before exposing the oversized value.
+
+For compact `Result`, the exact whole-frame equation is
+`bytes(data.dump()) + 31 + decimal_digits(request_id) <= P`; `31` is every
+fixed byte of `{"type":"result","id":<id>,"data":<data>}`. Thus the exact
+data ceiling is `P - 31 - decimal_digits(request_id)`: 16,842,719 bytes for
+request id 0 and 16,842,700 bytes for the largest uint64 id. Producers that
+cannot retain the request id use the conservative 16,842,700-byte ceiling.
+Schema validity never overrides this serialization admission.
 
 Before confirmation, intent, or mutation, TD conversion is all-or-nothing
 under these exact limits: ChatIdentity title at most 1,048,576 valid UTF-8
 bytes; at most 100 usernames, each 1..32 ASCII bytes; at most 4,096 sessions;
 each session `application_name`, `application_version`, `device_model`,
 `platform`, `system_version`, `ip_address`, and `location` at most 1,048,576
-valid UTF-8 bytes; complete compact SessionListResult at most 16,842,751
+valid UTF-8 bytes; complete compact SessionListResult data at most 16,842,700
 bytes; MessageSummary text/caption at most 4,096 Unicode scalars and 16,384
 UTF-8 bytes; at most 100 forward items; canonical ForwardItem vector at most
 4,194,304 bytes. SessionId remains the full canonical signed-int64 ASCII
@@ -3567,7 +3576,12 @@ Each TdClient generation owns a new empty `StreamGenerationState`. Before that
 generation accepts a subscription:
 
 1. Install the metadata fold and raw-event buffer before public update publication.
-2. Issue one core-owned `getCurrentState`; never issue it from an update callback.
+2. Immediately after core-owned query id 1 `getAuthorizationState`, issue
+   exactly one core-owned query id 2 `getCurrentState` for every generation,
+   even when no stream observer is installed; never issue it from an update
+   callback or expose it through a request-owner API. Its response is consumed
+   only by that generation. A stale response from a replaced generation can
+   settle only that generation's query and cannot publish into the current one.
 3. While it is outstanding, normalize identity/chat deltas into a preallocated
    bootstrap buffer.
 4. At the response receive-sequence barrier, fold the returned current-state updates
@@ -5534,6 +5548,13 @@ or confusable rewrite occurs:
 - invite link is 1..4096 UTF-8 bytes without a C0/C1 control scalar;
 - PATH and its frozen cwd/file rules are exactly §4.5.12.
 
+Every M6 Result remains subject to the shared whole-frame equation in §4.5:
+its compact data must fit `P - 31 - decimal_digits(request_id)`, with the
+16,842,700-byte conservative ceiling used by request-id-independent
+accumulators. Family-local 16,777,216-byte accumulator bounds are tighter and
+remain unchanged. The future atomic schema/registry activation cannot admit a
+payload merely because it satisfies its result schema.
+
 Folder names, topic names, chat titles and chat descriptions use strict
 canonical caller input. Before normalized args or a request frame exists, the
 client applies the exact pinned cleaner below to a copy and requires byte
@@ -6795,7 +6816,7 @@ For M1, the auxiliary enums are closed: `usage_reason` is `missing_argument`,
 `replacement_failed`. `destructive_action` is `logout` or `account_remove`;
 `daemon_control_operation` is `status`, `stop`, or `restart`;
 `challenge_kind` is one of the exact kinds in §10; `auth_function` is one of
-the ten AuthBootstrap functions listed in §6, `getMe`, `logOut`, `close`, or
+the eleven AuthBootstrap functions listed in §6, `getMe`, `logOut`, `close`, or
 `other`; `destructive_plan` is the exact logout or removal plan from §5.1 and
 must match `action`; `mutation_state` is `none`, `possible`, or `confirmed`;
 and `audit_stage` is `planned`, `intent_synced`, `logout_send_started`,
@@ -7143,14 +7164,19 @@ Command handlers statically declare `Read`, `AuthBootstrap`, `Write`, or
 
 - **Reads** — always allowed, no grant needed.
 - **AuthBootstrap** — grant-exempt but not unrestricted. It admits only
-  `getAuthorizationState`, `setTdlibParameters`,
+  `getAuthorizationState`, the generation-owned `getCurrentState`,
+  `setTdlibParameters`,
   `setAuthenticationPhoneNumber`, `requestQrCodeAuthentication`,
   `checkAuthenticationBotToken`, `setAuthenticationEmailAddress`,
   `checkAuthenticationEmailCode`, `checkAuthenticationCode`, `registerUser`,
   and `checkAuthenticationPassword`. Each function must match the current
   pinned auth state, client generation, auth owner and secret-source rules in
-  §8; anything else is `AUTH_FUNCTION_DENIED`. The initial state query and
-  configured-credential bootstrap use an internal auth owner, while
+  §8; anything else is `AUTH_FUNCTION_DENIED`. Each generation reserves query
+  id 1 for `getAuthorizationState` and query id 2 for its sole
+  `getCurrentState`; both use that generation's internal auth owner and
+  Unknown snapshot. The current-state query has no public request-owner entry
+  point. The initial state queries and configured-credential bootstrap use an
+  internal auth owner, while
   interactive functions require the login lease. `getMe` remains Read;
   `logOut` remains Destructive; process-global log initialization and
   intentional `close` are lifecycle primitives, not an auth bypass.
@@ -7446,7 +7472,16 @@ Layer responsibilities:
   confirmations) are prompted client-side and answered back over the socket.
 - **dispatch** — the daemon-side protocol endpoint: frames in/out, concurrent
   requests, subscription multiplexing (up to 32 `listen`/`wait-for` clients
-  over one update bus; §4.6.6).
+  over one update bus; §4.6.6). Every registered descriptor has a closed
+  operation identity. A handler exception or a return without a terminal is
+  contained as `INTERNAL/1` with exact
+  `{"operation":<descriptor operation>,"reason":"internal_error"}`; raw
+  exception text is never exposed. Current cataloged families use their exact
+  strict error-schema operation. The local meta commands use exact `version`
+  and `doctor` operations in their strict meta error schema. M3/M6 use their
+  canonical operation tables, registered noncatalog descriptors use
+  `dispatcher`, and an unregistered command remains `USAGE` without entering
+  a handler.
 - **core (`TdClient`)** — owns the tdlib `ClientManager` receive loop on a
   dedicated thread. Its public boundary is
   `send(TdValue) → future<TdValue>`: `TdValue` is move-only type erasure, so
@@ -8087,9 +8122,11 @@ DB open per command), safe concurrent ordinary invocations, up to 32 simultaneou
   `--allow-write` and `TGCLI_ALLOW_WRITE` into the write-authority field,
   because the daemon cannot see the invoking shell's environment, and the
   daemon combines it with the account config per §6 (explicit deny > any grant
-  > default deny). Response
-  frames: `result`,
-  `error`, `item` (streams), `progress`, and `challenge`. Interactive flows
+  > default deny). Response frames are `result`, `error`, `item` (streams),
+  `progress`, and `challenge`. Every request and response frame is
+  compact-serialized and admitted under the shared `P=16,842,751` whole-frame
+  bound from §4.5 before LF or any observable delivery; socket and in-process
+  paths use the same predicate. Interactive flows
   are challenge/response: the daemon asks (login values or destructive
   confirmation), the client prompts on *its* TTY and answers. A challenge
   payload always contains `kind`, a random 128-bit lowercase-hex `nonce`, a

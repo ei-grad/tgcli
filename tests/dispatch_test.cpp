@@ -617,9 +617,100 @@ TEST_CASE("handler return and exception both receive a terminal error", "[dispat
                                 std::vector<std::string>{"throwing", "handler"}}) {
         const auto outcome = dispatch(dispatcher, command);
         CHECK_FALSE(outcome.result.has_value());
-        CHECK(outcome.error_code == "GENERIC");
+        CHECK(outcome.error_code == "INTERNAL");
+        CHECK(outcome.error_details ==
+              json{{"operation", "dispatcher"}, {"reason", "internal_error"}});
         CHECK(outcome.exit_code == kGeneric);
     }
+}
+
+TEST_CASE("dispatcher fallback is operation-specific for every descriptor family",
+          "[dispatch][fallback]") {
+    struct Entry {
+        std::string_view command;
+        std::string_view operation;
+    };
+    constexpr std::array entries{
+        Entry{"version", "version"},
+        Entry{"doctor", "doctor"},
+        Entry{"daemon stop", "stop"},
+        Entry{"account list", "account_list"},
+        Entry{"login", "login"},
+        Entry{"logout", "logout"},
+        Entry{"saved tags", "saved_tags"},
+        Entry{"chats", "chats"},
+        Entry{"fetch", "fetch"},
+        Entry{"msg get", "msg_get"},
+        Entry{"read", "read"},
+        Entry{"resolve", "resolve"},
+        Entry{"session list", "session_list"},
+        Entry{"listen", "listen"},
+        Entry{"contact list", "contact_list"},
+    };
+    for (const auto& entry : entries) {
+        CAPTURE(entry.command);
+        daemon::Dispatcher dispatcher;
+        daemon::CommandDescriptor descriptor{daemon::Tier::Read,
+                                             [](const proto::Request&, daemon::RequestSession&) {
+                                                 throw std::runtime_error("must not escape");
+                                             }};
+        if (entry.command == "fetch" || entry.command == "listen") {
+            descriptor.deadline_default = DeadlineDefault::Unlimited;
+        }
+        dispatcher.register_command(std::string(entry.command), std::move(descriptor));
+        const auto outcome = dispatch(dispatcher, command_parts(entry.command));
+        CHECK(outcome.error_code == "INTERNAL");
+        CHECK(outcome.exit_code == kGeneric);
+        CHECK(outcome.error_details ==
+              json{{"operation", entry.operation}, {"reason", "internal_error"}});
+    }
+
+    daemon::Dispatcher m3;
+    m3.register_command("send", {daemon::Tier::Write,
+                                 [](const proto::Request&, daemon::RequestSession&) {
+                                     throw std::runtime_error("must not escape");
+                                 },
+                                 false, daemon::M3Operation::Send});
+    proto::Request send("testacct");
+    send.command = {"send"};
+    const auto m3_outcome = dispatch_frozen_request(m3, send);
+    CHECK(m3_outcome.error_code == "INTERNAL");
+    CHECK(m3_outcome.error_details == json{{"operation", "send"}, {"reason", "internal_error"}});
+
+    struct SchemaCase {
+        std::string_view schema;
+        std::string_view operation;
+    };
+    constexpr std::array schema_cases{
+        SchemaCase{"meta.error.schema.json", "version"},
+        SchemaCase{"meta.error.schema.json", "doctor"},
+        SchemaCase{"daemon.error.schema.json", "stop"},
+        SchemaCase{"account.error.schema.json", "account_list"},
+        SchemaCase{"auth.error.schema.json", "login"},
+        SchemaCase{"logout.error.schema.json", "logout"},
+        SchemaCase{"saved.error.schema.json", "saved_tags"},
+        SchemaCase{"resolve.error.schema.json", "resolve"},
+        SchemaCase{"session.error.schema.json", "session_list"},
+        SchemaCase{"stream.error.schema.json", "listen"},
+        SchemaCase{"m3-write.error.schema.json", "send"},
+    };
+    for (const auto& schema_case : schema_cases) {
+        const json error{
+            {"error",
+             {{"code", "INTERNAL"},
+              {"message", "command handler failed"},
+              {"details", {{"operation", schema_case.operation}, {"reason", "internal_error"}}}}}};
+        CAPTURE(schema_case.schema, schema_case.operation);
+        CHECK_THAT(error, test::matches_json_schema(std::string(schema_case.schema)));
+    }
+
+    daemon::Dispatcher noncatalog;
+    noncatalog.register_command(
+        "private test hook",
+        {daemon::Tier::Read, [](const proto::Request&, daemon::RequestSession&) {}});
+    const auto outcome = dispatch(noncatalog, {"private", "test", "hook"});
+    CHECK(outcome.error_code == "INTERNAL");
+    CHECK(outcome.error_details == json{{"operation", "dispatcher"}, {"reason", "internal_error"}});
 }
 
 TEST_CASE("concurrent result and error race to one terminal response", "[dispatch]") {

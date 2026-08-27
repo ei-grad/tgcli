@@ -868,3 +868,57 @@ TEST_CASE("sensitive string transfer wipes a short-string move source",
                item.size == std::string_view{"t.me/+x"}.size() && item.all_zero;
     }));
 }
+
+TEST_CASE("whole frame budget derives exact result payload ceilings", "[proto][frame-budget]") {
+    constexpr auto maximum_id = std::numeric_limits<std::uint64_t>::max();
+    STATIC_CHECK(kMaximumSerializedFrameBytes == 16'842'751);
+    STATIC_CHECK(kMaximumRequestSourceBytes == kMaximumSerializedFrameBytes);
+    STATIC_CHECK(maximum_result_payload_bytes(maximum_id) == 16'842'700);
+    STATIC_CHECK(maximum_result_payload_bytes(0) == 16'842'719);
+
+    for (const auto request_id : {std::uint64_t{0}, maximum_id}) {
+        const auto ceiling = maximum_result_payload_bytes(request_id);
+        const json exact_payload = std::string(ceiling - 2, 'x');
+        const json oversized_payload = std::string(ceiling - 1, 'x');
+        std::string error;
+        const Frame exact{Result{request_id, exact_payload}};
+        const Frame oversized{Result{request_id, oversized_payload}};
+        const auto exact_serialized = serialize_bounded(exact, error);
+        INFO(error);
+        REQUIRE(exact_serialized);
+        CHECK(exact_serialized->size() == kMaximumSerializedFrameBytes);
+        CHECK_FALSE(serialize_bounded(oversized, error));
+        CHECK(error == "frame exceeds 16842751 bytes");
+    }
+}
+
+TEST_CASE("oversized outbound frame writes no partial bytes", "[proto][frame-budget][io]") {
+    std::array<int, 2> descriptors{};
+    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors.data()) == 0);
+    constexpr auto maximum_id = std::numeric_limits<std::uint64_t>::max();
+    const auto ceiling = maximum_result_payload_bytes(maximum_id);
+    const Frame oversized{Result{maximum_id, std::string(ceiling - 1, 'x')}};
+    std::string error;
+    CHECK_FALSE(write_frame(descriptors[0], oversized, error));
+    CHECK(error == "frame exceeds 16842751 bytes");
+
+    char byte = 0;
+    CHECK(::recv(descriptors[1], &byte, 1, MSG_DONTWAIT) == -1);
+    REQUIRE(::close(descriptors[0]) == 0);
+    REQUIRE(::close(descriptors[1]) == 0);
+}
+
+TEST_CASE("every outbound frame kind shares the whole-frame budget", "[proto][frame-budget]") {
+    const std::string oversized(kMaximumSerializedFrameBytes, 'x');
+    const auto rejects = [](Frame frame) {
+        std::string error;
+        CHECK_FALSE(serialize_bounded(frame, error));
+        CHECK(error == "frame exceeds 16842751 bytes");
+    };
+
+    rejects(Item{1, oversized});
+    rejects(Progress{1, oversized});
+    rejects(Error{1, "INTERNAL", oversized, json::object(), 1});
+    rejects(Challenge{1, oversized});
+    rejects(Answer{1, json(oversized)});
+}

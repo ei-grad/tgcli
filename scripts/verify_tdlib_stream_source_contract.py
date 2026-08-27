@@ -26,6 +26,12 @@ EXPECTED_COMPONENT = {
 }
 EXPECTED_GIT_TREE = "27af7989c2c65dec54eb7860fb6932d5e422c7b5"
 EXPECTED_ASSERTIONS = {
+    "current_state_is_a_closed_updates_query": {
+        "file_sha256": "a8166ef37efb1a1440357b81e8e26c68ea45a35901c0bcc8d69964487c98476f",
+        "fragment_sha256": "ba04d55e01ffbf6f1ea9bb47f798d5888b385bee254e490f5053c6d4cc077f67",
+        "path": "td/generate/scheme/td_api.tl",
+        "source_lines": ("getCurrentState = Updates;",),
+    },
     "chat_folder_count_is_clamped_to_one_hundred": {
         "file_sha256": "4d002f748f78110fd16e0091df5f52e9f101f578d3c9ea414c8668d77012c590",
         "fragment_sha256": "3c3a196bbce9786d5cfe7b14bd48a0db9bccb53d4b188a7bd7dab8fca32c793b",

@@ -204,7 +204,14 @@ class ConnectionSink final : public ResponseSink {
         return complete ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
     void emit_progress(nlohmann::json data) override {
-        connection_->send(proto::Progress{request_id_, std::move(data)});
+        try {
+            if (!connection_->send(proto::Progress{request_id_, std::move(data)})) {
+                abort();
+            }
+        } catch (...) {
+            // Progress serialization failure is a connection abort; no later frame is retried.
+            abort();
+        }
     }
     DeliveryOutcome emit_result(nlohmann::json data) override {
         bool visible = false;
@@ -239,7 +246,14 @@ class ConnectionSink final : public ResponseSink {
         return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
     ChallengeReply emit_challenge(nlohmann::json data) override {
-        connection_->send(proto::Challenge{request_id_, std::move(data)});
+        try {
+            if (!connection_->send(proto::Challenge{request_id_, std::move(data)})) {
+                abort();
+            }
+        } catch (...) {
+            // Challenge serialization failure follows the same transport-abort path.
+            abort();
+        }
         return {};
     }
     void emit_abort() noexcept override {

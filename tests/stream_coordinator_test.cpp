@@ -104,9 +104,9 @@ class CoordinatorFixture {
         client_ = std::make_unique<tgcli::core::TdClient>(
             std::move(runtime), tgcli::core::TdLogConfiguration{},
             tgcli::core::TdClientEventHooks{}, service_.observer_factory());
-        REQUIRE(runtime_->wait_for_sent(2));
+        REQUIRE(runtime_->wait_for_sent_including_current_state(2));
         client_id_ = runtime_->clients().front();
-        const auto sent = runtime_->sent_functions();
+        const auto sent = runtime_->sent_functions_including_current_state();
         for (const auto& call : sent) {
             if (call.function.kind() == tgcli::core::TdFunctionKind::GetCurrentState) {
                 runtime_->push_response(client_id_, call.query_id,
@@ -141,8 +141,8 @@ class CoordinatorFixture {
 
     tgcli::core::TdFunctionData respond(tgcli::core::TdFunctionKind kind,
                                         tgcli::core::TdValue value) {
-        REQUIRE(runtime_->wait_for_sent(sent_count_ + 1));
-        const auto sent = runtime_->sent_functions();
+        REQUIRE(runtime_->wait_for_sent_including_current_state(sent_count_ + 1));
+        const auto sent = runtime_->sent_functions_including_current_state();
         REQUIRE(sent.size() == sent_count_ + 1);
         REQUIRE(sent.back().function.kind() == kind);
         const auto descriptor = sent.back().function;
@@ -162,14 +162,14 @@ class CoordinatorFixture {
     }
 
     void replace_generation() {
-        const auto previous_sent = runtime_->sent_functions().size();
+        const auto previous_sent = runtime_->sent_functions_including_current_state().size();
         const auto previous = client_id_;
         runtime_->push_update(previous, {},
                               tgcli::core::AuthStateData{tgcli::core::AuthState::Closed});
         REQUIRE(runtime_->wait_for_clients(2));
-        REQUIRE(runtime_->wait_for_sent(previous_sent + 2));
+        REQUIRE(runtime_->wait_for_sent_including_current_state(previous_sent + 2));
         client_id_ = runtime_->clients().back();
-        const auto sent = runtime_->sent_functions();
+        const auto sent = runtime_->sent_functions_including_current_state();
         for (std::size_t index = previous_sent; index < sent.size(); ++index) {
             if (sent[index].function.kind() == tgcli::core::TdFunctionKind::GetCurrentState) {
                 runtime_->push_response(client_id_, sent[index].query_id,
@@ -338,7 +338,7 @@ TEST_CASE("wait-for bot after rejects before chat user or history resolution",
     REQUIRE(outcome.error);
     CHECK(outcome.error->at("code") == "BOT_UNSUPPORTED");
     CHECK(outcome.error->at("details") == json{{"operation", "wait_for"}});
-    CHECK(fixture.runtime().sent_functions().size() == 3);
+    CHECK(fixture.runtime().sent_functions_including_current_state().size() == 3);
 }
 
 TEST_CASE("listen resolves every chat before activation and fails atomically",

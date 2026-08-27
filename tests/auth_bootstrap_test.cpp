@@ -202,6 +202,8 @@ TEST_CASE("AuthBootstrap is a closed function state and owner allowlist",
     const std::vector<Allowed> allowed{
         {core::TdFunctionKind::GetAuthorizationState, core::AuthState::Unknown,
          core::TdOwnerKind::InternalAuth, 0},
+        {core::TdFunctionKind::GetCurrentState, core::AuthState::Unknown,
+         core::TdOwnerKind::InternalAuth, 0},
         {core::TdFunctionKind::SetTdlibParameters, core::AuthState::WaitTdlibParameters,
          core::TdOwnerKind::InternalAuth},
         {core::TdFunctionKind::SetAuthenticationPhoneNumber, core::AuthState::WaitPhoneNumber,
@@ -237,7 +239,7 @@ TEST_CASE("AuthBootstrap is a closed function state and owner allowlist",
                                             &function, snapshot, false));
     }
 
-    CHECK(allowed.size() == 10);
+    CHECK(allowed.size() == 11);
 }
 
 TEST_CASE("TD send descriptor mismatches fail before the fake boundary",
@@ -1091,7 +1093,7 @@ TEST_CASE("parameter bootstrap preserves response-first and update-first query o
         REQUIRE(sent.size() == 2);
         CHECK(sent.at(0).query_id == 1);
         CHECK(sent.at(0).function.has_type("getAuthorizationState"));
-        CHECK(sent.at(1).query_id == 2);
+        CHECK(sent.at(1).query_id == 3);
         CHECK(sent.at(1).function.has_type("setTdlibParameters"));
 
         if (update_first) {

@@ -154,7 +154,7 @@ TEST_CASE("stream service factory begins each generation before current-state di
         }
     });
     core::TdClient client(std::move(runtime), {}, {}, service.observer_factory());
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     CHECK(bootstrap_visible.load(std::memory_order_acquire));
     CHECK_FALSE(submission_during_callback.load(std::memory_order_acquire));
 
@@ -393,7 +393,7 @@ TEST_CASE("real receive idle boundary closes the activation gap before the next 
     auto runtime = std::make_unique<test::ScriptedTdRuntime>();
     auto* scripted = runtime.get();
     core::TdClient client(std::move(runtime), {}, {}, service.observer_factory());
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
     scripted->push_response(first, 2, current_stream_state());
     scripted->push_response(first, 1, {}, core::AuthStateData{core::AuthState::Ready});
@@ -421,7 +421,7 @@ TEST_CASE("unexpected Closed claims authorization before generation replacement"
     auto runtime = std::make_unique<test::ScriptedTdRuntime>();
     auto* scripted = runtime.get();
     core::TdClient client(std::move(runtime), {}, {}, service.observer_factory());
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
     scripted->push_response(first, 2, current_stream_state());
     scripted->push_response(first, 1, {}, core::AuthStateData{core::AuthState::Ready});
@@ -496,7 +496,7 @@ TEST_CASE("real generation replacement resets stream service and rejects old tra
     auto runtime = std::make_unique<test::ScriptedTdRuntime>();
     auto* scripted = runtime.get();
     core::TdClient client(std::move(runtime), {}, {}, service.observer_factory());
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
     scripted->push_response(first, 2, current_state());
     scripted->push_response(first, 1, {}, core::AuthStateData{core::AuthState::Ready});
@@ -505,7 +505,7 @@ TEST_CASE("real generation replacement resets stream service and rejects old tra
 
     scripted->push_update(first, {}, core::AuthStateData{core::AuthState::Closed});
     REQUIRE(scripted->wait_for_clients(2));
-    REQUIRE(scripted->wait_for_sent(4));
+    REQUIRE(scripted->wait_for_sent_including_current_state(4));
     const auto second = scripted->clients().back();
     REQUIRE(eventually([&] {
         const auto status = service.status();

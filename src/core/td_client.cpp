@@ -1243,28 +1243,28 @@ class TdClient::Impl {
         if (submission.query_id != 1) {
             throw std::logic_error("authorization bootstrap must reserve query id 1");
         }
-        if (generation->observer != nullptr) {
-            const TdSendDescriptor current_state_descriptor{
-                .function = TdFunctionKind::GetCurrentState,
-                .tier = DescriptorKind::AuthBootstrap,
-                .owner = {TdOwnerKind::InternalAuth, generation->internal_auth_owner_id,
-                          generation->internal_auth_owner_capability},
-                .client_generation = generation_number,
-                .auth_sequence = 0,
-                .auth_state = AuthState::Unknown,
-            };
-            auto current_state = runtime_->make_get_current_state();
-            auto current_state_submission =
-                submit_locked(generation, current_state_descriptor, current_state);
-            if (current_state_submission.query_id != 2) {
-                throw std::logic_error("current-state bootstrap must reserve query id 2");
-            }
-            if (current_state_submission.synchronous_failure) {
+        const TdSendDescriptor current_state_descriptor{
+            .function = TdFunctionKind::GetCurrentState,
+            .tier = DescriptorKind::AuthBootstrap,
+            .owner = {TdOwnerKind::InternalAuth, generation->internal_auth_owner_id,
+                      generation->internal_auth_owner_capability},
+            .client_generation = generation_number,
+            .auth_sequence = 0,
+            .auth_state = AuthState::Unknown,
+        };
+        auto current_state = runtime_->make_get_current_state();
+        auto current_state_submission =
+            submit_locked(generation, current_state_descriptor, current_state);
+        if (current_state_submission.query_id != 2) {
+            throw std::logic_error("current-state bootstrap must reserve query id 2");
+        }
+        if (current_state_submission.synchronous_failure) {
+            if (generation->observer != nullptr) {
                 generation->observer->on_current_state_failure(
                     current_state_submission.synchronous_failure);
-            } else {
-                generation->current_state_query_id = current_state_submission.query_id;
             }
+        } else {
+            generation->current_state_query_id = current_state_submission.query_id;
         }
         return generation;
     }
@@ -1532,8 +1532,7 @@ class TdClient::Impl {
 
         auto response = generation->queries.take(event.query_id);
         const bool current_state_response =
-            response && generation->observer != nullptr &&
-            event.query_id == generation->current_state_query_id &&
+            response && event.query_id == generation->current_state_query_id &&
             std::exchange(generation->current_state_query_id, 0) == event.query_id;
         std::optional<LeaseLocks> auth_locks;
         bool install_response = false;
@@ -1556,7 +1555,7 @@ class TdClient::Impl {
             auto publication = begin_event_publication(observed_at);
             event.object.set_receive_event_metadata(receive_event_sequence,
                                                     publication.observed_at);
-            if (current_state_response) {
+            if (current_state_response && generation->observer != nullptr) {
                 generation->observer->on_current_state(event.object);
             }
             if (install_response) {

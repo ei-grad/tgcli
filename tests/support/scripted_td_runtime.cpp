@@ -2,6 +2,8 @@
 
 #include "common/secure_wipe.hpp"
 
+#include <algorithm>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
@@ -687,6 +689,16 @@ ScriptedTdRuntime::parsed_formatted_text(ScriptedClient client, std::string text
 
 bool ScriptedTdRuntime::wait_for_sent(std::size_t count, std::chrono::milliseconds timeout) const {
     std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, count] {
+        return static_cast<std::size_t>(std::ranges::count_if(sent_, [](const auto& sent) {
+                   return sent.function.kind() != core::TdFunctionKind::GetCurrentState;
+               })) >= count;
+    });
+}
+
+bool ScriptedTdRuntime::wait_for_sent_including_current_state(
+    std::size_t count, std::chrono::milliseconds timeout) const {
+    std::unique_lock<std::mutex> lock(mutex_);
     return cv_.wait_for(lock, timeout, [this, count] { return sent_.size() >= count; });
 }
 
@@ -708,6 +720,15 @@ bool ScriptedTdRuntime::wait_for_clients(std::size_t count,
 }
 
 std::vector<SentTdFunction> ScriptedTdRuntime::sent_functions() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<SentTdFunction> result;
+    std::ranges::copy_if(sent_, std::back_inserter(result), [](const auto& sent) {
+        return sent.function.kind() != core::TdFunctionKind::GetCurrentState;
+    });
+    return result;
+}
+
+std::vector<SentTdFunction> ScriptedTdRuntime::sent_functions_including_current_state() const {
     const std::lock_guard<std::mutex> lock(mutex_);
     return sent_;
 }

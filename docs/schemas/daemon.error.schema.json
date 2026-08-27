@@ -75,6 +75,24 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": { "const": "INTERNAL" },
+            "message": { "type": "string" },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "reason"],
+              "properties": {
+                "operation": { "enum": ["status", "stop", "restart"] },
+                "reason": { "const": "internal_error" }
+              }
+            }
+          }
         }
       ]
     }

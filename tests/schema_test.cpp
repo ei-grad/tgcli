@@ -1290,6 +1290,7 @@ TEST_CASE("removal tombstone schema binds policy stage prefix and next stage",
 TEST_CASE("auth function denial has a closed exact detail schema", "[schema][auth]") {
     const std::vector<std::string_view> functions{
         "getAuthorizationState",
+        "getCurrentState",
         "setTdlibParameters",
         "setAuthenticationPhoneNumber",
         "requestQrCodeAuthentication",
@@ -1351,7 +1352,11 @@ TEST_CASE("daemon control errors match their closed schema", "[schema][daemon-co
           {{"code", "DAEMON_CONTROL_FAILED"},
            {"message", "cannot stop daemon"},
            {"details",
-            {{"account", "main"}, {"operation", "stop"}, {"reason", "surface_invalid"}}}}}}};
+            {{"account", "main"}, {"operation", "stop"}, {"reason", "surface_invalid"}}}}}},
+        {{"error",
+          {{"code", "INTERNAL"},
+           {"message", "command handler failed"},
+           {"details", {{"operation", "stop"}, {"reason", "internal_error"}}}}}}};
     for (const auto& error : errors) {
         CHECK_THAT(error, tgcli::test::matches_json_schema("daemon.error.schema.json"));
     }

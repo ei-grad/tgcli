@@ -187,6 +187,10 @@ TEST_CASE("M5 resolver reads are Ready request-owner calls and current state is 
     wrong_tier.tier = DescriptorKind::Read;
     CHECK(authorize_td_send(wrong_tier, &function, unknown, false) ==
           TdAuthorizationFailure::TierMismatch);
+    auto public_owner = current_state;
+    public_owner.owner = {TdOwnerKind::Request, 9, request_capability};
+    CHECK(authorize_td_send(public_owner, &function, unknown, false) ==
+          TdAuthorizationFailure::OwnerMismatch);
 }
 
 TEST_CASE("TdClient submits typed M5 resolver calls with one scripted trace",
@@ -248,8 +252,8 @@ TEST_CASE("generation observer is installed before current-state send and preced
     };
     TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
 
-    REQUIRE(scripted->wait_for_sent(2));
-    const auto sent = scripted->sent_functions();
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
+    const auto sent = scripted->sent_functions_including_current_state();
     REQUIRE(sent.size() == 2);
     CHECK(sent[0].query_id == 1);
     CHECK(sent[0].function.kind() == TdFunctionKind::GetAuthorizationState);
@@ -283,6 +287,32 @@ TEST_CASE("generation observer is installed before current-state send and preced
     client.unsubscribe_updates(subscription);
 }
 
+TEST_CASE("every generation reserves auth query one and current-state query two without observer",
+          "[core][td-runtime][bootstrap][fake-boundary]") {
+    auto runtime = std::make_unique<ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    const TdClient client(std::move(runtime));
+
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
+    auto sent = scripted->sent_functions_including_current_state();
+    REQUIRE(sent.size() == 2);
+    CHECK(sent[0].query_id == 1);
+    CHECK(sent[0].function.kind() == TdFunctionKind::GetAuthorizationState);
+    CHECK(sent[1].query_id == 2);
+    CHECK(sent[1].function.kind() == TdFunctionKind::GetCurrentState);
+
+    const auto first = scripted->clients().front();
+    scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
+    scripted->push_update(first, {}, AuthStateData{AuthState::Closed});
+    REQUIRE(scripted->wait_for_clients(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(4));
+    sent = scripted->sent_functions_including_current_state();
+    CHECK(sent[2].query_id == 1);
+    CHECK(sent[2].function.kind() == TdFunctionKind::GetAuthorizationState);
+    CHECK(sent[3].query_id == 2);
+    CHECK(sent[3].function.kind() == TdFunctionKind::GetCurrentState);
+}
+
 TEST_CASE("generation observer receives auth then one boundary for events and empty polls",
           "[stream][core][boundary][authorization][fake-boundary]") {
     auto runtime = std::make_unique<ScriptedTdRuntime>();
@@ -292,7 +322,7 @@ TEST_CASE("generation observer receives auth then one boundary for events and em
         return std::make_unique<RecordingGenerationObserver>(state);
     };
     const TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
     REQUIRE(eventually([&] { return state->boundary_count.load(std::memory_order_acquire) > 0; }));
     const auto empty_boundaries = state->boundary_count.load(std::memory_order_acquire);
@@ -332,7 +362,7 @@ TEST_CASE("generation observers reject stale callbacks and reset on replacement"
                                                                              : second_state);
     };
     TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
     scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
     scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
@@ -340,10 +370,12 @@ TEST_CASE("generation observers reject stale callbacks and reset on replacement"
 
     scripted->push_update(first, {}, AuthStateData{AuthState::Closed});
     REQUIRE(scripted->wait_for_clients(2));
-    REQUIRE(scripted->wait_for_sent(4));
+    REQUIRE(scripted->wait_for_sent_including_current_state(4));
     const auto second = scripted->clients().back();
-    CHECK(scripted->sent_functions()[2].function.kind() == TdFunctionKind::GetAuthorizationState);
-    CHECK(scripted->sent_functions()[3].function.kind() == TdFunctionKind::GetCurrentState);
+    CHECK(scripted->sent_functions_including_current_state()[2].function.kind() ==
+          TdFunctionKind::GetAuthorizationState);
+    CHECK(scripted->sent_functions_including_current_state()[3].function.kind() ==
+          TdFunctionKind::GetCurrentState);
 
     const auto received_before_stale = scripted->received_count();
     const auto boundaries_before_stale =
@@ -414,7 +446,7 @@ TEST_CASE("replacement generation reports synchronous current-state dispatch fai
                                                                              : second_state);
     };
     TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
     scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));
     scripted->push_response(first, 1, {}, AuthStateData{AuthState::Ready});
@@ -427,7 +459,7 @@ TEST_CASE("replacement generation reports synchronous current-state dispatch fai
     });
     scripted->push_update(first, {}, AuthStateData{AuthState::Closed});
     REQUIRE(scripted->wait_for_clients(2));
-    REQUIRE(scripted->wait_for_sent(3));
+    REQUIRE(scripted->wait_for_sent_including_current_state(3));
     REQUIRE(eventually([&] {
         return second_state->current_state_failure_count.load(std::memory_order_acquire) == 1;
     }));
@@ -458,7 +490,7 @@ TEST_CASE("current-state observer consumes the response barrier exactly once",
         return std::make_unique<RecordingGenerationObserver>(state);
     };
     TdClient client(std::move(runtime), {}, {}, std::move(observer_factory));
-    REQUIRE(scripted->wait_for_sent(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(2));
     const auto first = scripted->clients().front();
 
     scripted->push_response(first, 2, TdValue::from(TdCurrentState{}));

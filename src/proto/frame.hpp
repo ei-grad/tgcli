@@ -1,9 +1,11 @@
 #pragma once
 
 #include "common/deadline.hpp"
+#include "common/frame_budget.hpp"
 #include "common/secure_wipe.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -25,7 +27,12 @@ struct RequestSourceAccess;
 struct RequestFacts;
 
 inline constexpr int kProtocolVersion = 3;
-inline constexpr std::uint64_t kMaximumRequestSourceBytes = 16'842'751;
+inline constexpr std::uint64_t kMaximumSerializedFrameBytes =
+    frame_budget::kMaximumSerializedFrameBytes;
+inline constexpr std::uint64_t kMaximumRequestSourceBytes = kMaximumSerializedFrameBytes;
+constexpr std::size_t maximum_result_payload_bytes(std::uint64_t request_id) noexcept {
+    return frame_budget::maximum_result_payload_bytes(request_id);
+}
 
 // The client folds --allow-write and TGCLI_ALLOW_WRITE into this field; the
 // daemon cannot see the invoking shell's environment (DESIGN.md §6/§10).
@@ -175,6 +182,11 @@ std::optional<Request> admit_request_source(const Request& request, std::string&
 
 // Single-line JSON without a trailing newline; the transport appends '\n'.
 std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_observer = {});
+
+// Serializes one complete compact frame and rejects it before transport when
+// its bytes excluding LF exceed the shared protocol ceiling.
+std::optional<std::string> serialize_bounded(const Frame& frame, std::string& error,
+                                             const secure::WipeObserver& wipe_observer = {});
 
 // Parses one line. Returns std::nullopt and sets `error` on malformed input:
 // invalid JSON, unknown/missing type, missing or mistyped required fields.

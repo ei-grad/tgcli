@@ -499,7 +499,7 @@ TEST_CASE("reused query ids cannot be satisfied by late old-generation traffic",
 
     auto old_future = send_test_read(*fake.client);
     REQUIRE(fake.runtime->wait_for_sent(2));
-    CHECK(fake.runtime->sent_functions()[1].query_id == 2);
+    CHECK(fake.runtime->sent_functions()[1].query_id == 3);
 
     fake.runtime->push_update(fake.first, {}, AuthStateData{AuthState::LoggingOut});
     fake.runtime->push_update(fake.first, {}, AuthStateData{AuthState::Closing});
@@ -530,9 +530,9 @@ TEST_CASE("reused query ids cannot be satisfied by late old-generation traffic",
     CHECK(fake.runtime->sent_functions().size() == sent_before_stale);
     auto new_future = send_test_read(*fake.client);
     REQUIRE(fake.runtime->wait_for_sent(4));
-    CHECK(fake.runtime->sent_functions()[3].query_id == 2);
+    CHECK(fake.runtime->sent_functions()[3].query_id == 3);
 
-    fake.runtime->push_response(fake.first, 2, TdValue::from(std::string("old")));
+    fake.runtime->push_response(fake.first, 3, TdValue::from(std::string("old")));
     fake.runtime->push_update(fake.first, {},
                               AuthStateData{AuthState::WaitOtherDeviceConfirmation,
                                             AuthWaitOtherDeviceConfirmation{.link = "stale"}});
@@ -540,7 +540,7 @@ TEST_CASE("reused query ids cannot be satisfied by late old-generation traffic",
     CHECK(fake.client->auth_state()->client_generation == 2);
     CHECK(fake.client->auth_state()->data.state == AuthState::Ready);
 
-    fake.runtime->push_response(second, 2, TdValue::from(std::string("new")));
+    fake.runtime->push_response(second, 3, TdValue::from(std::string("new")));
     auto response = new_future.get();
     REQUIRE(response.get_if<std::string>() != nullptr);
     CHECK(*response.get_if<std::string>() == "new");
@@ -596,11 +596,11 @@ TEST_CASE("authorization publication cannot cross an admitted runtime send",
     REQUIRE(fake.runtime->wait_for_sent(2));
     REQUIRE(eventually([&] { return fake.client->auth_state()->auth_sequence == 2; }));
     fake.runtime->set_before_send({});
-    fake.runtime->push_response(fake.first, 2, TdValue::from(std::string("ok")));
+    fake.runtime->push_response(fake.first, 3, TdValue::from(std::string("ok")));
     CHECK(*response.get().get_if<std::string>() == "ok");
 }
 
-TEST_CASE("unsupported initial state cannot repeat query 1 and still admits close query 2",
+TEST_CASE("unsupported initial state cannot repeat query 1 and still admits close query 3",
           "[core][td-runtime][lifecycle][safety]") {
     auto fake = make_fake_client(false);
     fake.runtime->push_response(fake.first, 1, {},
@@ -624,7 +624,7 @@ TEST_CASE("unsupported initial state cannot repeat query 1 and still admits clos
     REQUIRE(fake.runtime->wait_for_sent(2));
     const auto sent = fake.runtime->sent_functions();
     REQUIRE(sent.size() == 2);
-    CHECK(sent[1].query_id == 2);
+    CHECK(sent[1].query_id == 3);
     CHECK(sent[1].function.kind() == TdFunctionKind::Close);
     fake.runtime->push_update(fake.first, {}, AuthStateData{AuthState::Closed});
     CHECK(closing.wait_for(2s) == std::future_status::ready);
@@ -725,7 +725,7 @@ TEST_CASE("Closed closes request admission before auth-state callbacks run",
 
 TEST_CASE("intentional close waits for the initial auth snapshot before sending close",
           "[core][td-runtime][lifecycle]") {
-    SECTION("a non-Closed initial state admits close as query 2") {
+    SECTION("a non-Closed initial state admits close as query 3") {
         auto fake = make_fake_client(false);
         std::promise<void> close_started;
         auto close_started_future = close_started.get_future();
@@ -747,7 +747,7 @@ TEST_CASE("intentional close waits for the initial auth snapshot before sending 
         REQUIRE(sent.size() == 2);
         CHECK(sent[0].query_id == 1);
         CHECK(sent[0].function.has_type("getAuthorizationState"));
-        CHECK(sent[1].query_id == 2);
+        CHECK(sent[1].query_id == 3);
         CHECK(sent[1].function.has_type("close"));
         CHECK(close_completed);
     }

@@ -17,7 +17,7 @@ namespace {
 
 // A frame is one command's worth of JSON; anything beyond this is a protocol
 // violation, not data.
-constexpr std::size_t kMaxLineBytes = kMaximumRequestSourceBytes;
+constexpr std::size_t kMaxLineBytes = kMaximumSerializedFrameBytes;
 
 bool wait_for_io(int fd, short events, const IoDeadline& deadline, std::string_view operation,
                  std::string& error) {
@@ -182,12 +182,14 @@ std::optional<std::string> FrameReader::read_line_impl(const IoDeadline* deadlin
 
 bool write_frame(int fd, const Frame& frame, std::string& error,
                  const secure::WipeObserver& wipe_observer) {
-    return write_line(fd, serialize(frame, wipe_observer), nullptr, error, wipe_observer);
+    auto serialized = serialize_bounded(frame, error, wipe_observer);
+    return serialized && write_line(fd, std::move(*serialized), nullptr, error, wipe_observer);
 }
 
 bool write_frame_until(int fd, const Frame& frame, IoDeadline deadline, std::string& error,
                        const secure::WipeObserver& wipe_observer) {
-    return write_line(fd, serialize(frame, wipe_observer), &deadline, error, wipe_observer);
+    auto serialized = serialize_bounded(frame, error, wipe_observer);
+    return serialized && write_line(fd, std::move(*serialized), &deadline, error, wipe_observer);
 }
 
 } // namespace tgcli::proto

@@ -1,5 +1,6 @@
 #include "core/td_runtime.hpp"
 
+#include "common/frame_budget.hpp"
 #include "common/utf8.hpp"
 #include "core/td_runtime_test_adapter.hpp"
 
@@ -337,7 +338,7 @@ bool valid_persistable_message_text(std::string_view value) {
 
 constexpr std::size_t kMaxSessionCount = 4'096;
 constexpr std::size_t kMaxSessionStringBytes = 1'048'576;
-constexpr std::size_t kMaxSessionListResultBytes = 16'842'751;
+constexpr std::size_t kMaxSessionListResultBytes = frame_budget::kMinimumResultPayloadBytes;
 
 bool add_session_result_bytes(std::size_t& size, std::size_t amount) {
     if (amount > kMaxSessionListResultBytes - size) {
