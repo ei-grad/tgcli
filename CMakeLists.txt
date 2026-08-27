@@ -257,6 +257,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/chat_identity.cpp
     src/daemon/chat_summary.cpp
     src/daemon/local_selector.cpp
+    src/daemon/m6_domain.cpp
     src/daemon/message_summary.cpp
     src/daemon/read_domain.cpp
     src/daemon/read_commands.cpp

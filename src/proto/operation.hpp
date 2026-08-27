@@ -122,6 +122,130 @@ m3_operation_for_command(std::span<const std::string> command) noexcept {
     return std::nullopt;
 }
 
+enum class M6Operation {
+    ContactList,
+    ContactSearch,
+    ContactAdd,
+    ContactRemove,
+    ContactBlock,
+    ContactUnblock,
+    FolderList,
+    FolderShow,
+    FolderCreate,
+    FolderEdit,
+    FolderDelete,
+    FolderAddChat,
+    FolderRemoveChat,
+    TopicList,
+    TopicCreate,
+    TopicEdit,
+    TopicClose,
+    TopicReopen,
+    ChatSetTitle,
+    ChatSetPhoto,
+    ChatSetDescription,
+    ChatInviteLink,
+    ChatPromote,
+    ChatDemote,
+    ChatBan,
+    ChatUnban,
+    ChatKick,
+    ChatSetPermissions,
+    StorageStats,
+    StorageOptimize,
+};
+
+enum class M6Tier { Read, Write, Destructive };
+
+struct M6OperationIdentity {
+    M6Operation operation;
+    std::string_view canonical_name;
+    std::string_view command_path;
+    M6Tier tier;
+    bool mutation;
+    bool idempotent;
+};
+
+inline constexpr std::array<M6OperationIdentity, 30> kM6OperationIdentities{{
+    {M6Operation::ContactList, "contact_list", "contact list", M6Tier::Read, false, false},
+    {M6Operation::ContactSearch, "contact_search", "contact search", M6Tier::Read, false, false},
+    {M6Operation::ContactAdd, "contact_add", "contact add", M6Tier::Write, true, true},
+    {M6Operation::ContactRemove, "contact_remove", "contact remove", M6Tier::Write, true, true},
+    {M6Operation::ContactBlock, "contact_block", "contact block", M6Tier::Write, true, true},
+    {M6Operation::ContactUnblock, "contact_unblock", "contact unblock", M6Tier::Write, true, true},
+    {M6Operation::FolderList, "folder_list", "folder list", M6Tier::Read, false, false},
+    {M6Operation::FolderShow, "folder_show", "folder show", M6Tier::Read, false, false},
+    {M6Operation::FolderCreate, "folder_create", "folder create", M6Tier::Write, true, true},
+    {M6Operation::FolderEdit, "folder_edit", "folder edit", M6Tier::Write, true, true},
+    {M6Operation::FolderDelete, "folder_delete", "folder delete", M6Tier::Destructive, true, true},
+    {M6Operation::FolderAddChat, "folder_add_chat", "folder add-chat", M6Tier::Write, true, true},
+    {M6Operation::FolderRemoveChat, "folder_remove_chat", "folder remove-chat", M6Tier::Write, true,
+     true},
+    {M6Operation::TopicList, "topic_list", "topic list", M6Tier::Read, false, false},
+    {M6Operation::TopicCreate, "topic_create", "topic create", M6Tier::Write, true, true},
+    {M6Operation::TopicEdit, "topic_edit", "topic edit", M6Tier::Write, true, true},
+    {M6Operation::TopicClose, "topic_close", "topic close", M6Tier::Write, true, true},
+    {M6Operation::TopicReopen, "topic_reopen", "topic reopen", M6Tier::Write, true, true},
+    {M6Operation::ChatSetTitle, "chat_set_title", "chat set-title", M6Tier::Write, true, true},
+    {M6Operation::ChatSetPhoto, "chat_set_photo", "chat set-photo", M6Tier::Write, true, true},
+    {M6Operation::ChatSetDescription, "chat_set_description", "chat set-description", M6Tier::Write,
+     true, true},
+    {M6Operation::ChatInviteLink, "chat_invite_link", "chat invite-link", M6Tier::Destructive, true,
+     false},
+    {M6Operation::ChatPromote, "chat_promote", "chat promote", M6Tier::Write, true, true},
+    {M6Operation::ChatDemote, "chat_demote", "chat demote", M6Tier::Write, true, true},
+    {M6Operation::ChatBan, "chat_ban", "chat ban", M6Tier::Destructive, true, true},
+    {M6Operation::ChatUnban, "chat_unban", "chat unban", M6Tier::Write, true, true},
+    {M6Operation::ChatKick, "chat_kick", "chat kick", M6Tier::Destructive, true, true},
+    {M6Operation::ChatSetPermissions, "chat_set_permissions", "chat set-permissions", M6Tier::Write,
+     true, true},
+    {M6Operation::StorageStats, "storage_stats", "storage stats", M6Tier::Read, false, false},
+    {M6Operation::StorageOptimize, "storage_optimize", "storage optimize", M6Tier::Destructive,
+     true, false},
+}};
+
+constexpr std::span<const M6OperationIdentity> m6_operation_identities() noexcept {
+    return kM6OperationIdentities;
+}
+
+constexpr const M6OperationIdentity* m6_operation_identity(M6Operation operation) noexcept {
+    for (const auto& identity : kM6OperationIdentities) {
+        if (identity.operation == operation) {
+            return &identity;
+        }
+    }
+    return nullptr;
+}
+
+constexpr std::optional<M6Operation> parse_m6_operation(std::string_view canonical_name) noexcept {
+    for (const auto& identity : kM6OperationIdentities) {
+        if (identity.canonical_name == canonical_name) {
+            return identity.operation;
+        }
+    }
+    return std::nullopt;
+}
+
+constexpr std::optional<M6Operation>
+m6_operation_for_command(std::string_view command_path) noexcept {
+    for (const auto& identity : kM6OperationIdentities) {
+        if (identity.command_path == command_path) {
+            return identity.operation;
+        }
+    }
+    return std::nullopt;
+}
+
+inline std::optional<M6Operation>
+m6_operation_for_command(std::span<const std::string> command) noexcept {
+    for (const auto& identity : kM6OperationIdentities) {
+        if (command_matches(command, identity.command_path)) {
+            return identity.operation;
+        }
+    }
+    return std::nullopt;
+}
+
 constexpr bool valid_idempotency_key(std::string_view key) noexcept {
     if (key.empty() || key.size() > 128) {
         return false;
