@@ -129,6 +129,9 @@ using ResolverError =
 struct ResolverPrincipal {
     std::int64_t id = 0;
     bool is_bot = false;
+    std::int32_t client_id = 0;
+    std::uint64_t client_generation = 0;
+    std::uint64_t auth_sequence = 0;
 
     bool operator==(const ResolverPrincipal&) const = default;
 };

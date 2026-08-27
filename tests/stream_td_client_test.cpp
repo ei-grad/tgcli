@@ -559,4 +559,30 @@ TEST_CASE("M6 folder cache is generation bound validated and cleared on non-Read
     REQUIRE(eventually([&] { return client.auth_state()->data.state == AuthState::Ready; }));
     CHECK_FALSE(client.m6_chat_folders(client.auth_state()));
     CHECK_FALSE(client.m6_chat_folders(authorization));
+
+    scripted->push_update(first, {}, AuthStateData{AuthState::Closed});
+    REQUIRE(scripted->wait_for_clients(2));
+    REQUIRE(scripted->wait_for_sent_including_current_state(4));
+    const auto second = scripted->clients().back();
+    TdCurrentState replacement;
+    replacement.updates.push_back(TdValue::from(TdM6ChatFoldersUpdate{
+        .folders = {
+            {.id = 9,
+             .name = {.text = "New", .animate_custom_emoji = false, .custom_emoji_entities = {}},
+             .icon = TdM6FolderIcon::Custom,
+             .color_id = 1,
+             .is_shareable = false,
+             .has_my_invite_links = false}}}));
+    scripted->push_response(second, 2, TdValue::from(std::move(replacement)));
+    scripted->push_response(second, 1, {}, AuthStateData{AuthState::Ready});
+    REQUIRE(eventually([&] {
+        const auto current = client.auth_state();
+        return current->client_generation == 2 && current->data.state == AuthState::Ready;
+    }));
+    const auto replacement_authorization = client.auth_state();
+    auto replacement_cache = client.m6_chat_folders(replacement_authorization);
+    REQUIRE(replacement_cache);
+    REQUIRE(replacement_cache->folders.size() == 1);
+    CHECK(replacement_cache->folders.front().id == 9);
+    CHECK_FALSE(client.m6_chat_folders(authorization));
 }

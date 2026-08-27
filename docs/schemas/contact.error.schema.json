@@ -1316,71 +1316,30 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "contact_list",
-                        "contact_search",
-                        "contact_add",
-                        "contact_remove",
-                        "contact_block",
-                        "contact_unblock"
-                      ]
-                    },
-                    "reason": {
-                      "enum": [
-                        "internal_error",
-                        "malformed_tdlib_response"
-                      ]
-                    }
-                  }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "contact_list",
+                    "contact_search",
+                    "contact_add",
+                    "contact_remove",
+                    "contact_block",
+                    "contact_unblock"
+                  ]
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason",
-                    "resource",
-                    "limit"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "contact_list",
-                        "contact_search",
-                        "contact_add",
-                        "contact_remove",
-                        "contact_block",
-                        "contact_unblock"
-                      ]
-                    },
-                    "reason": {
-                      "const": "capacity_exhausted"
-                    },
-                    "resource": {
-                      "enum": [
-                        "users",
-                        "topics",
-                        "bytes",
-                        "item_bytes"
-                      ]
-                    },
-                    "limit": {
-                      "type": "integer",
-                      "minimum": 0
-                    }
-                  }
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
                 }
-              ]
+              }
             }
           }
         },
@@ -1932,6 +1891,129 @@
           ],
           "properties": {
             "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "contact_list"
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "users"
+                    },
+                    "limit": {
+                      "const": 131072
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "contact_search"
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "users"
+                    },
+                    "limit": {
+                      "const": 100
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "contact_list",
+                        "contact_search"
+                      ]
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "bytes"
+                    },
+                    "limit": {
+                      "const": 16777216
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "contact_list",
+                        "contact_search"
+                      ]
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "item_bytes"
+                    },
+                    "limit": {
+                      "const": 262144
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
               "const": "NOT_FOUND"
             },
             "message": {
@@ -1987,65 +2069,29 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "selector",
-                    "scope",
-                    "candidates",
-                    "truncated"
-                  ],
-                  "properties": {
-                    "selector": {
-                      "type": "string"
-                    },
-                    "scope": {
-                      "enum": [
-                        "active_dialogs",
-                        "local_materialized"
-                      ]
-                    },
-                    "candidates": {
-                      "type": "array",
-                      "minItems": 0,
-                      "maxItems": 20,
-                      "items": {
-                        "$ref": "#/$defs/chat"
-                      }
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "selector",
+                "candidates",
+                "truncated"
+              ],
+              "properties": {
+                "selector": {
+                  "type": "string"
+                },
+                "candidates": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 20,
+                  "items": {
+                    "$ref": "#/$defs/user"
                   }
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "selector",
-                    "candidates",
-                    "truncated"
-                  ],
-                  "properties": {
-                    "selector": {
-                      "type": "string"
-                    },
-                    "candidates": {
-                      "type": "array",
-                      "minItems": 0,
-                      "maxItems": 20,
-                      "items": {
-                        "$ref": "#/$defs/user"
-                      }
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    }
-                  }
+                "truncated": {
+                  "type": "boolean"
                 }
-              ]
+              }
             }
           }
         }

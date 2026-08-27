@@ -194,6 +194,7 @@ tgcli::core::TdChat domain_chat(tgcli::core::TdChatKind kind, std::int64_t relat
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 
@@ -211,6 +212,7 @@ tgcli::core::TdChat private_chat(std::int64_t user_id, std::string title = "User
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 

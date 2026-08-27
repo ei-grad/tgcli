@@ -214,6 +214,7 @@ tgcli::core::TdChat basic_chat(std::int64_t id, std::string title) {
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 
@@ -231,6 +232,7 @@ tgcli::core::TdChat private_chat(std::int64_t id, std::int64_t user_id, std::str
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 
@@ -248,6 +250,7 @@ tgcli::core::TdChat channel_chat(std::int64_t id, std::int64_t supergroup_id, st
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 
@@ -804,6 +807,7 @@ TEST_CASE("resolver rejects closed link and chat classes exactly",
                                          .unread_reaction_count = 0,
                                          .unread_poll_vote_count = 0,
                                          .last_message = std::nullopt,
+                                         .permissions = std::nullopt,
                                          .notification_settings = std::nullopt});
         const auto outcome = pending.get();
         REQUIRE(outcome.error);

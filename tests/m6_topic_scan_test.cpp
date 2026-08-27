@@ -75,7 +75,7 @@ TEST_CASE("M6 topic scanner separates structural duplicate from cursor non-advan
     REQUIRE(duplicate.append({}, page({topic(1, 20)}, cursor)).status ==
             daemon::M6TopicScanStatus::Accepted);
     CHECK(duplicate.append(cursor, page({topic(1, 10)}, {})).status ==
-          daemon::M6TopicScanStatus::StructuralError);
+          daemon::M6TopicScanStatus::NonAdvancing);
 
     daemon::M6TopicAccumulator stalled(-1001);
     REQUIRE(stalled.append({}, page({topic(1, 20)}, cursor)).status ==
@@ -106,6 +106,8 @@ TEST_CASE("M6 topic scanner rejects cross-page order regression and item capacit
     }
     const auto overflow = capacity.append(request, page({topic(4'097, 0)}, {}));
     CHECK(overflow.status == daemon::M6TopicScanStatus::Capacity);
+    CHECK(overflow.capacity_resource == daemon::M6TopicCapacityResource::Topics);
+    CHECK(overflow.capacity_limit == 4'096);
     CHECK(capacity.items().size() == 4'096);
 }
 

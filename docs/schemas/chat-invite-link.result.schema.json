@@ -911,49 +911,72 @@
           "const": true
         },
         "plan": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "operation",
-            "account",
-            "tdlib_request",
-            "chat",
-            "action",
-            "invite_link_sha256"
-          ],
-          "properties": {
-            "operation": {
-              "const": "chat_invite_link"
-            },
-            "account": {
-              "$ref": "#/$defs/account"
-            },
-            "tdlib_request": {
-              "enum": [
-                "createChatInviteLink",
-                "revokeChatInviteLink"
-              ]
-            },
-            "chat": {
-              "$ref": "#/$defs/chat"
-            },
-            "action": {
-              "enum": [
-                "create",
-                "revoke"
-              ]
-            },
-            "invite_link_sha256": {
-              "oneOf": [
-                {
-                  "type": "null"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "account",
+                "tdlib_request",
+                "chat",
+                "action",
+                "invite_link_sha256"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chat_invite_link"
                 },
-                {
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "tdlib_request": {
+                  "const": "createChatInviteLink"
+                },
+                "chat": {
+                  "$ref": "#/$defs/chat"
+                },
+                "action": {
+                  "const": "create"
+                },
+                "invite_link_sha256": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "account",
+                "tdlib_request",
+                "chat",
+                "action",
+                "invite_link_sha256"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chat_invite_link"
+                },
+                "account": {
+                  "$ref": "#/$defs/account"
+                },
+                "tdlib_request": {
+                  "const": "revokeChatInviteLink"
+                },
+                "chat": {
+                  "$ref": "#/$defs/chat"
+                },
+                "action": {
+                  "const": "revoke"
+                },
+                "invite_link_sha256": {
                   "$ref": "#/$defs/hash"
                 }
-              ]
+              }
             }
-          }
+          ]
         }
       }
     }

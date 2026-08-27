@@ -172,6 +172,7 @@ core::TdChat basic_chat() {
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 
@@ -389,7 +390,10 @@ class FakeWrites final {
         });
     }
 
-    std::future<Outcome> m6_mutation(proto::M6Operation operation, const proto::Request& request) {
+    std::future<Outcome>
+    m6_mutation(proto::M6Operation operation, const proto::Request& request,
+                std::shared_ptr<daemon::RequestSession>* exposed_session = nullptr,
+                daemon::CallbackSink::ChallengeFn on_challenge = {}) {
         std::string error;
         auto frozen = proto::admit_request_source(request, error);
         INFO(error);
@@ -409,11 +413,15 @@ class FakeWrites final {
                                         {"details", std::move(details)}}}};
                 outcome->exit_code = exit_code;
                 ++outcome->terminal_count;
-            });
+            },
+            std::move(on_challenge));
         auto session = std::make_shared<daemon::RequestSession>(
             std::move(*frozen), sink, 0, daemon::RequestSession::NonceGenerator{},
             daemon::ActivityTracker::Token{}, admitted_, std::nullopt,
             daemon::ConfigAdmissionMode::FrozenRuntime);
+        if (exposed_session != nullptr) {
+            *exposed_session = session;
+        }
         return std::async(std::launch::async, [this, operation, outcome, session] {
             coordinator_->m6_mutation(operation, session->request(), *session);
             return *outcome;
@@ -613,6 +621,92 @@ class FakeWrites final {
                 std::this_thread::sleep_for(1ms);
             }
         };
+    }
+
+    void advance_authorization_before_principal_cas(bool before_dispatch = false) {
+        auto advance = [this] {
+            const auto initial = client_->auth_state();
+            REQUIRE(initial);
+            const auto sequence = initial->auth_sequence;
+            std::promise<void> observed;
+            auto future = observed.get_future();
+            auto delivered = std::make_shared<std::atomic<bool>>(false);
+            const auto subscription = client_->subscribe_auth_states(
+                [sequence, delivered, &observed](const auto& current) {
+                    if (current && current->auth_sequence > sequence &&
+                        !delivered->exchange(true)) {
+                        observed.set_value();
+                    }
+                });
+            runtime_->push_update(client_id_, {}, core::AuthStateData{core::AuthState::Ready});
+            REQUIRE(future.wait_for(2s) == std::future_status::ready);
+            client_->unsubscribe_auth_states(subscription);
+        };
+        if (before_dispatch) {
+            coordinator_hooks_->before_dispatch_principal_cas = std::move(advance);
+        } else {
+            coordinator_hooks_->before_principal_cas = std::move(advance);
+        }
+    }
+
+    void replace_generation_before_principal_cas() {
+        coordinator_hooks_->before_principal_cas = [this] {
+            const auto initial = client_->auth_state();
+            REQUIRE(initial);
+            const auto sent_before = runtime_->sent_functions_including_current_state().size();
+            runtime_->push_update(client_id_, {}, core::AuthStateData{core::AuthState::Closed});
+            REQUIRE(runtime_->wait_for_sent_including_current_state(sent_before + 2));
+            const auto clients = runtime_->clients();
+            REQUIRE(clients.size() >= 2);
+            const auto replacement = clients.back();
+            runtime_->push_response(replacement, 2, core::TdValue::from(core::TdCurrentState{}));
+            runtime_->push_response(replacement, 1, {},
+                                    core::AuthStateData{core::AuthState::Ready});
+            std::promise<void> observed;
+            auto future = observed.get_future();
+            auto delivered = std::make_shared<std::atomic<bool>>(false);
+            const auto subscription =
+                client_->subscribe_auth_states([generation = replacement.client_generation,
+                                                delivered, &observed](const auto& current) {
+                    if (current && current->client_generation == generation &&
+                        current->data.state == core::AuthState::Ready &&
+                        !delivered->exchange(true)) {
+                        observed.set_value();
+                    }
+                });
+            if (const auto current = client_->auth_state();
+                current && current->client_generation == replacement.client_generation &&
+                current->data.state == core::AuthState::Ready && !delivered->exchange(true)) {
+                observed.set_value();
+            }
+            REQUIRE(future.wait_for(2s) == std::future_status::ready);
+            client_->unsubscribe_auth_states(subscription);
+        };
+    }
+
+    void replace_generation_with_folders(core::TdM6ChatFoldersUpdate update) {
+        const auto sent_before = runtime_->sent_functions_including_current_state().size();
+        runtime_->push_update(client_id_, {}, core::AuthStateData{core::AuthState::Closed});
+        REQUIRE(runtime_->wait_for_sent_including_current_state(sent_before + 2));
+        const auto clients = runtime_->clients();
+        REQUIRE(clients.size() >= 2);
+        const auto replacement = clients.back();
+        core::TdCurrentState state;
+        state.updates.push_back(core::TdValue::from(std::move(update)));
+        runtime_->push_response(replacement, 2, core::TdValue::from(std::move(state)));
+        runtime_->push_response(replacement, 1, {}, core::AuthStateData{core::AuthState::Ready});
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto current = client_->auth_state();
+            if (current && current->client_generation == replacement.client_generation &&
+                current->data.state == core::AuthState::Ready) {
+                client_id_ = replacement;
+                ++sent_count_;
+                return;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        FAIL("replacement M6 generation did not become Ready");
     }
 
     void expire_direct_before_request() {
@@ -3941,6 +4035,91 @@ TEST_CASE("M6 contact mutations use the shared audited direct-write kernel",
         CHECK(fake.count(core::TdFunctionKind::AddContact) == 0);
         CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
     }
+
+    SECTION("dry-run rejects a principal sequence replaced during planning") {
+        FakeWrites fake(false);
+        fake.advance_authorization_before_principal_cas();
+        auto pending = fake.m6_mutation(proto::M6Operation::ContactAdd,
+                                        contact_mutation_request("add", std::nullopt, true));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::AddContact) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+
+    SECTION("same-user auth-sequence replacement before intent leaves no durable write") {
+        FakeWrites fake;
+        fake.advance_authorization_before_principal_cas();
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::ContactAdd, contact_mutation_request("add"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::AddContact) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+
+    SECTION("same-user auth replacement after intent still precedes contact submission") {
+        FakeWrites fake;
+        fake.advance_authorization_before_principal_cas(true);
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::ContactAdd, contact_mutation_request("add"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::AddContact) == 0);
+        const auto audit = read_bytes(fake.tree().audit_path());
+        CHECK(audit.find(R"("phase":"intent")") != std::string::npos);
+        CHECK(audit.find(R"("phase":"outcome")") != std::string::npos);
+        CHECK(audit.find(R"("stage":"dispatch_started")") == std::string::npos);
+    }
+
+    SECTION("replacement generation before intent leaves no durable write") {
+        FakeWrites fake;
+        fake.replace_generation_before_principal_cas();
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::ContactAdd, contact_mutation_request("add"));
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::AddContact) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+
+    SECTION("completed replay returns before target resolution and hydration") {
+        FakeWrites fake;
+        auto request = contact_mutation_request("add");
+        request.context.idempotency_key = "contact-replay";
+        auto first = fake.m6_mutation(proto::M6Operation::ContactAdd, request);
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+        CHECK(first.wait_for(100ms) == std::future_status::timeout);
+        fake.respond(core::TdFunctionKind::AddContact, core::TdM6Response{core::TdM6Ok{}});
+        REQUIRE(first.get().result);
+        const auto target_reads = fake.count(core::TdFunctionKind::GetUser);
+        const auto mutations = fake.count(core::TdFunctionKind::AddContact);
+
+        auto replay = fake.m6_mutation(proto::M6Operation::ContactAdd, request);
+        bind_principal(fake);
+        const auto outcome = replay.get();
+        REQUIRE(outcome.result);
+        CHECK(fake.count(core::TdFunctionKind::GetUser) == target_reads);
+        CHECK(fake.count(core::TdFunctionKind::AddContact) == mutations);
+    }
 }
 
 TEST_CASE("M6 folder mutations preserve full snapshots through the shared kernel",
@@ -3962,6 +4141,26 @@ TEST_CASE("M6 folder mutations preserve full snapshots through the shared kernel
         CHECK((*outcome.result)["folder"]["included_chat_ids"] == json::array({-1002, -1001}));
         CHECK((*outcome.result)["folder"]["name"]["animate_custom_emoji"] == false);
         CHECK((*outcome.result)["folder"]["icon"] == "work");
+    }
+
+    SECTION("write rejects a replacement-generation folder cache before snapshot read") {
+        FakeWrites fake;
+        auto pending = fake.m6_mutation(proto::M6Operation::FolderEdit, folder_edit_request());
+        bind_principal(fake);
+        fake.replace_generation_with_folders({.folders = {{.id = 7,
+                                                           .name = {.text = "New",
+                                                                    .animate_custom_emoji = false,
+                                                                    .custom_emoji_entities = {}},
+                                                           .icon = core::TdM6FolderIcon::Work,
+                                                           .color_id = 1,
+                                                           .is_shareable = false,
+                                                           .has_my_invite_links = false}}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::GetChatFolder) == 0);
+        CHECK(fake.count(core::TdFunctionKind::EditChatFolder) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
     }
 
     SECTION("add-chat removes excluded membership and preserves animated folder name") {
@@ -4021,6 +4220,56 @@ TEST_CASE("M6 folder mutations preserve full snapshots through the shared kernel
         CHECK((*outcome.result)["folder"]["included_chat_ids"] == json::array({-1001}));
     }
 
+    SECTION("edit rejects every returned folder-info field mismatch") {
+        enum class Field { Id, Text, Animation, Entities, Icon, Color, Shareable, InviteLinks };
+        for (const auto field : {Field::Id, Field::Text, Field::Animation, Field::Entities,
+                                 Field::Icon, Field::Color, Field::Shareable, Field::InviteLinks}) {
+            CAPTURE(static_cast<int>(field));
+            FakeWrites fake;
+            fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
+            auto pending = fake.m6_mutation(proto::M6Operation::FolderEdit, folder_edit_request());
+            bind_principal(fake);
+            fake.respond(core::TdFunctionKind::GetChatFolder,
+                         core::TdM6Response{core::TdM6MaybeChatFolder{folder_snapshot()}});
+            auto returned = folder_info();
+            returned.name.text = "Other";
+            switch (field) {
+            case Field::Id:
+                returned.id = 8;
+                break;
+            case Field::Text:
+                returned.name.text = "Different";
+                break;
+            case Field::Animation:
+                returned.name.animate_custom_emoji = false;
+                break;
+            case Field::Entities:
+                returned.name.custom_emoji_entities.push_back(
+                    {.offset = 0, .length = 1, .custom_emoji_id = "1"});
+                break;
+            case Field::Icon:
+                returned.icon = core::TdM6FolderIcon::Custom;
+                break;
+            case Field::Color:
+                returned.color_id = 3;
+                break;
+            case Field::Shareable:
+                returned.is_shareable = true;
+                break;
+            case Field::InviteLinks:
+                returned.has_my_invite_links = true;
+                break;
+            }
+            fake.respond(core::TdFunctionKind::EditChatFolder,
+                         core::TdM6Response{std::move(returned)});
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+            CHECK((*outcome.error)["error"]["details"]["reason"] == "malformed_tdlib_response");
+            CHECK(outcome.terminal_count == 1);
+        }
+    }
+
     SECTION("delete confirms the frozen folder and performs one mutation") {
         FakeWrites fake;
         fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
@@ -4033,6 +4282,70 @@ TEST_CASE("M6 folder mutations preserve full snapshots through the shared kernel
         REQUIRE(outcome.result);
         CHECK(*outcome.result == json{{"folder_id", 7}, {"deleted", true}});
         CHECK(fake.count(core::TdFunctionKind::DeleteChatFolder) == 1);
+    }
+
+    SECTION("delete confirmation has one terminal for every rejection and cancellation path") {
+        enum class Mode { NoTty, TtyNo, TtyYes, Deadline, Disconnect };
+        for (const auto mode :
+             {Mode::NoTty, Mode::TtyNo, Mode::TtyYes, Mode::Deadline, Mode::Disconnect}) {
+            CAPTURE(static_cast<int>(mode));
+            FakeWrites fake;
+            fake.push_update(core::TdM6ChatFoldersUpdate{.folders = {folder_info()}});
+            auto request = folder_delete_request();
+            request.context.yes = false;
+            request.context.tty = mode != Mode::NoTty;
+            if (mode == Mode::Deadline) {
+                request.context.timeout_seconds = 1.0;
+            }
+            std::shared_ptr<daemon::RequestSession> session;
+            auto challenge_seen = std::make_shared<std::atomic<bool>>(false);
+            daemon::CallbackSink::ChallengeFn challenge;
+            if (mode != Mode::NoTty) {
+                challenge = [mode, &session, challenge_seen](json value) -> std::optional<json> {
+                    challenge_seen->store(value["details"]["action"] == "folder_delete",
+                                          std::memory_order_release);
+                    if (mode == Mode::Disconnect) {
+                        session->disconnect();
+                        return std::nullopt;
+                    }
+                    if (mode == Mode::Deadline) {
+                        return std::nullopt;
+                    }
+                    return json{{"nonce", value["nonce"]},
+                                {"sequence", value["sequence"]},
+                                {"client_generation", value["client_generation"]},
+                                {"auth_sequence", value["auth_sequence"]},
+                                {"value", mode == Mode::TtyYes}};
+                };
+            }
+            auto pending = fake.m6_mutation(proto::M6Operation::FolderDelete, request, &session,
+                                            std::move(challenge));
+            bind_principal(fake);
+            fake.respond(core::TdFunctionKind::GetChatFolder,
+                         core::TdM6Response{core::TdM6MaybeChatFolder{folder_snapshot()}});
+            if (mode == Mode::TtyYes) {
+                fake.respond(core::TdFunctionKind::DeleteChatFolder,
+                             core::TdM6Response{core::TdM6Ok{}});
+            }
+            const auto outcome = pending.get();
+            if (mode == Mode::TtyYes) {
+                REQUIRE(outcome.result);
+                CHECK((*outcome.result)["deleted"] == true);
+            } else if (mode == Mode::Disconnect) {
+                CHECK(outcome.terminal_count == 0);
+            } else {
+                REQUIRE(outcome.error);
+                std::string_view expected = "CONFIRMATION_REQUIRED";
+                if (mode == Mode::Deadline) {
+                    expected = "TIMEOUT";
+                }
+                CHECK((*outcome.error)["error"]["code"] == expected);
+                CHECK(outcome.terminal_count == 1);
+            }
+            CHECK(fake.count(core::TdFunctionKind::DeleteChatFolder) ==
+                  (mode == Mode::TtyYes ? 1 : 0));
+            CHECK(challenge_seen->load(std::memory_order_acquire) == (mode != Mode::NoTty));
+        }
     }
 }
 
@@ -4154,6 +4467,30 @@ TEST_CASE("M6 administration and storage use typed plans without post-mutation r
         CHECK((*outcome.result)["title"] == "Renamed");
     }
 
+    SECTION("set-title uses native chat permissions for a regular member") {
+        FakeWrites fake;
+        auto pending =
+            fake.m6_mutation(proto::M6Operation::ChatSetTitle, chat_admin_request("set-title"));
+        bind_principal(fake);
+        auto chat = basic_chat();
+        core::TdM6ChatPermissions permissions;
+        permissions.can_change_info = true;
+        chat.permissions = permissions;
+        fake.respond(core::TdFunctionKind::GetChat, chat);
+        core::TdM6MemberStatus member;
+        member.kind = core::TdM6MemberStatusKind::Member;
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = member}});
+        fake.respond(core::TdFunctionKind::SetChatTitle, core::TdM6Response{core::TdM6Ok{}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.result);
+        CHECK((*outcome.result)["title"] == "Renamed");
+    }
+
     SECTION("set-description emits the frozen text without a chat reread") {
         FakeWrites fake;
         auto pending = fake.m6_mutation(proto::M6Operation::ChatSetDescription,
@@ -4203,6 +4540,63 @@ TEST_CASE("M6 administration and storage use typed plans without post-mutation r
         CHECK((*outcome.result)["rights"] == json::array({"change-info"}));
     }
 
+    SECTION("member lookup taxonomy is exact and malformed statuses are structural errors") {
+        enum class Reply { Missing, Other400, WrongVariant, UnknownStatus };
+        for (const auto reply :
+             {Reply::Missing, Reply::Other400, Reply::WrongVariant, Reply::UnknownStatus}) {
+            CAPTURE(static_cast<int>(reply));
+            FakeWrites fake;
+            auto pending = fake.m6_mutation(proto::M6Operation::ChatBan, chat_admin_request("ban"));
+            bind_principal(fake);
+            fake.respond(core::TdFunctionKind::GetChat, supergroup_chat());
+            fake.respond(core::TdFunctionKind::GetSupergroup, forum_supergroup());
+            fake.respond(core::TdFunctionKind::GetChatMember,
+                         core::TdM6Response{core::TdM6ChatMember{
+                             .member = {.kind = core::TdM6SenderKind::User,
+                                        .id = 42,
+                                        .unsupported_tdlib_type_id = std::nullopt},
+                             .status = chat_admin_status(true)}});
+            fake.respond(core::TdFunctionKind::GetUser, peer(core::TdUserPresence::Online));
+            if (reply == Reply::Missing) {
+                fake.respond(core::TdFunctionKind::GetChatMember,
+                             core::TdError{.code = 400, .message = "Member not found"});
+            } else if (reply == Reply::Other400) {
+                fake.respond(core::TdFunctionKind::GetChatMember,
+                             core::TdError{.code = 400, .message = "member not found"});
+            } else if (reply == Reply::WrongVariant) {
+                fake.respond(core::TdFunctionKind::GetChatMember,
+                             core::TdM6Response{core::TdM6Ok{}});
+            } else {
+                core::TdM6MemberStatus unknown;
+                unknown.kind = core::TdM6MemberStatusKind::Unknown;
+                fake.respond(core::TdFunctionKind::GetChatMember,
+                             core::TdM6Response{core::TdM6ChatMember{
+                                 .member = {.kind = core::TdM6SenderKind::User,
+                                            .id = 77,
+                                            .unsupported_tdlib_type_id = std::nullopt},
+                                 .status = unknown}});
+            }
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            if (reply == Reply::Missing) {
+                CHECK((*outcome.error)["error"]["code"] == "NOT_FOUND");
+                CHECK((*outcome.error)["error"]["details"] ==
+                      json{{"operation", "chat_ban"}, {"chat_id", -1001}, {"user_id", 77}});
+            } else if (reply == Reply::Other400) {
+                CHECK((*outcome.error)["error"]["code"] == "TDLIB_ERROR");
+                CHECK((*outcome.error)["error"]["details"]["tdlib_code"] == 400);
+            } else {
+                CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+                CHECK((*outcome.error)["error"]["details"]["reason"] == "malformed_tdlib_response");
+            }
+            CHECK(fake.count(core::TdFunctionKind::SetChatMemberStatus) == 0);
+            CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        }
+    }
+}
+
+TEST_CASE("M6 photo administration and destructive operations preserve durable truth",
+          "[m6][write-command][admin][storage][fake-boundary]") {
     SECTION("set-photo publishes only a validated private static-JPEG spool") {
         FakeWrites fake;
         const std::string jpeg{static_cast<char>(0xff), static_cast<char>(0xd8), 'x',
@@ -4231,6 +4625,57 @@ TEST_CASE("M6 administration and storage use typed plans without post-mutation r
         CHECK((!std::filesystem::exists(spool_root) || std::filesystem::is_empty(spool_root)));
     }
 
+    SECTION("set-photo principal replacement after pass one creates no intent or spool") {
+        FakeWrites fake;
+        const std::string jpeg{static_cast<char>(0xff), static_cast<char>(0xd8), 'x',
+                               static_cast<char>(0xff), static_cast<char>(0xd9)};
+        fake.tree().write_source(jpeg, "principal.JPEG");
+        auto request = chat_admin_request("set-photo");
+        request.args = {{"chat", "-1001"}, {"path", fake.tree().source_path("principal.JPEG")}};
+        fake.advance_authorization_before_principal_cas();
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatSetPhoto, request);
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetChat, basic_chat());
+        fake.respond(core::TdFunctionKind::GetChatMember,
+                     core::TdM6Response{
+                         core::TdM6ChatMember{.member = {.kind = core::TdM6SenderKind::User,
+                                                         .id = 42,
+                                                         .unsupported_tdlib_type_id = std::nullopt},
+                                              .status = chat_admin_status()}});
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::SetChatPhoto) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+    }
+
+    SECTION("photo audit contradiction precedes missing-source validation and target planning") {
+        FakeWrites fake;
+        const auto spool = fake.tree().account_state() + "/spool";
+        const auto contradiction = spool + "/not-an-invocation";
+        REQUIRE(std::filesystem::create_directory(spool));
+        REQUIRE(::chmod(spool.c_str(), 0700) == 0);
+        REQUIRE(std::filesystem::create_directory(contradiction));
+        REQUIRE(::chmod(contradiction.c_str(), 0700) == 0);
+        auto source_stages = std::make_shared<std::atomic<std::size_t>>(0);
+        auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+        hooks->at_stage = [source_stages](daemon::FileSpoolStage) { ++*source_stages; };
+        fake.file_spool_hooks(hooks);
+        auto request = chat_admin_request("set-photo");
+        request.args = {{"chat", "-1001"}, {"path", fake.tree().source_path("missing.JPEG")}};
+        auto pending = fake.m6_mutation(proto::M6Operation::ChatSetPhoto, request);
+        bind_principal(fake);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "AUDIT_INCOMPLETE");
+        CHECK(*source_stages == 0);
+        CHECK(fake.count(core::TdFunctionKind::GetChat) == 0);
+        CHECK(fake.count(core::TdFunctionKind::SetChatPhoto) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        CHECK_FALSE(std::filesystem::exists(fake.tree().store_path()));
+    }
+
     SECTION("set-photo delete uses no source spool and returns the exact state") {
         FakeWrites fake;
         auto request = chat_admin_request("set-photo");
@@ -4251,6 +4696,55 @@ TEST_CASE("M6 administration and storage use typed plans without post-mutation r
         REQUIRE(outcome.result);
         CHECK((*outcome.result)["photo"] == "deleted");
         CHECK_FALSE(std::filesystem::exists(fake.tree().account_state() + "/spool"));
+    }
+
+    SECTION("set-photo pass-two cancellation closes durable state without dispatch") {
+        for (const bool keyed : {false, true}) {
+            CAPTURE(keyed);
+            FakeWrites fake;
+            const std::string jpeg{static_cast<char>(0xff), static_cast<char>(0xd8), 'x',
+                                   static_cast<char>(0xff), static_cast<char>(0xd9)};
+            fake.tree().write_source(jpeg, "cancel.JPEG");
+            auto request = chat_admin_request("set-photo");
+            request.args = {{"chat", "-1001"}, {"path", fake.tree().source_path("cancel.JPEG")}};
+            if (keyed) {
+                request.context.idempotency_key = "photo-cancel";
+            }
+            std::shared_ptr<daemon::RequestSession> session;
+            auto hooks = std::make_shared<daemon::testing::FileSpoolHooks>();
+            auto fired = std::make_shared<std::atomic<bool>>(false);
+            hooks->at_stage = [fired, &session, keyed](daemon::FileSpoolStage stage) {
+                if (stage == daemon::FileSpoolStage::DuringPass2Read && !fired->exchange(true)) {
+                    if (keyed) {
+                        session->disconnect();
+                    } else {
+                        session->shutdown();
+                    }
+                }
+            };
+            fake.file_spool_hooks(hooks);
+            auto pending = fake.m6_mutation(proto::M6Operation::ChatSetPhoto, request, &session);
+            bind_principal(fake);
+            auto chat = basic_chat();
+            core::TdM6ChatPermissions permissions;
+            permissions.can_change_info = true;
+            chat.permissions = permissions;
+            fake.respond(core::TdFunctionKind::GetChat, chat);
+            fake.respond(core::TdFunctionKind::GetChatMember,
+                         core::TdM6Response{core::TdM6ChatMember{
+                             .member = {.kind = core::TdM6SenderKind::User,
+                                        .id = 42,
+                                        .unsupported_tdlib_type_id = std::nullopt},
+                             .status = chat_admin_status()}});
+            const auto outcome = pending.get();
+            CHECK(outcome.terminal_count == 0);
+            CHECK(fake.count(core::TdFunctionKind::SetChatPhoto) == 0);
+            const auto audit = read_bytes(fake.tree().audit_path());
+            CHECK(audit.find(R"("phase":"outcome")") != std::string::npos);
+            CHECK(audit.find(R"("mutation_state":"none")") != std::string::npos);
+            const auto spool_root = fake.tree().account_state() + "/spool";
+            CHECK((!std::filesystem::exists(spool_root) || std::filesystem::is_empty(spool_root)));
+        }
     }
 
     SECTION("invite create returns the link while revoke keeps raw bytes out of audit") {
@@ -4531,6 +5025,35 @@ TEST_CASE("session terminate uses the audited direct path without idempotency or
         CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
         CHECK((*outcome.error)["error"]["details"]["reason"] == "authorization_lost");
         CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+    }
+
+    SECTION("same-user auth-sequence replacement before intent leaves no durable write") {
+        FakeWrites fake;
+        fake.advance_authorization_before_principal_cas();
+        auto pending = fake.terminate_session(session_terminate_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+        CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+    }
+
+    SECTION("same-user auth replacement after intent still precedes session submission") {
+        FakeWrites fake;
+        fake.advance_authorization_before_principal_cas(true);
+        auto pending = fake.terminate_session(session_terminate_request());
+        bind_principal(fake);
+        fake.respond(core::TdFunctionKind::GetActiveSessions, active_sessions());
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK(fake.count(core::TdFunctionKind::TerminateSession) == 0);
+        const auto audit = read_bytes(fake.tree().audit_path());
+        CHECK(audit.find(R"("phase":"intent")") != std::string::npos);
+        CHECK(audit.find(R"("phase":"outcome")") != std::string::npos);
+        CHECK(audit.find(R"("stage":"dispatch_started")") == std::string::npos);
     }
 
     SECTION("disconnect during direct preparation emits no terminal or mutation") {

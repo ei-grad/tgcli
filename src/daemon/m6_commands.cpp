@@ -19,6 +19,7 @@
 #include <optional>
 #include <regex>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -157,6 +158,10 @@ bool stopped(const ReadyReadResult& result, core::TdClient& client, std::string_
                             caller);
         return true;
     case ReadyReadStatus::Cancelled:
+        if (session.shutdown_requested()) {
+            session.error("DAEMON_SHUTDOWN", "daemon is shutting down",
+                          {{"reason", "daemon_shutdown"}}, kGeneric);
+        }
         return true;
     }
     return true;
@@ -268,7 +273,38 @@ bool run_session_recovery_preflight(
 std::optional<core::TdM6ChatFoldersUpdate>
 m6_wait_for_folders(core::TdClient& client,
                     const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
-                    RequestSession& session) {
+                    const ResolverCaller& caller, RequestSession& session) {
+    const auto ready = [&]() {
+        if (deadline_expired(session.deadline())) {
+            emit_resolver_error(ResolverError{ResolverTimeoutError{
+                                    .operation = caller, .state = core::AuthState::Ready}},
+                                session, caller);
+            return false;
+        }
+        if (session.shutdown_requested()) {
+            session.error("DAEMON_SHUTDOWN", "daemon is shutting down",
+                          {{"reason", "daemon_shutdown"}}, kGeneric);
+            return false;
+        }
+        if (session.cancellation_requested()) {
+            return false;
+        }
+        const auto current = client.auth_state();
+        if (!authorization || !current || current != authorization ||
+            current->data.state != core::AuthState::Ready) {
+            emit_resolver_error(
+                ResolverError{ResolverNotAuthenticatedError{
+                    .account = session.request().account,
+                    .state = current ? current->data.state : core::AuthState::Unknown,
+                    .reason = ResolverNotAuthedReason::AuthorizationLost}},
+                session, caller);
+            return false;
+        }
+        return true;
+    };
+    if (!ready()) {
+        return std::nullopt;
+    }
     if (auto cached = client.m6_chat_folders(authorization)) {
         return cached;
     }
@@ -281,22 +317,17 @@ m6_wait_for_folders(core::TdClient& client,
             condition.notify_one();
         }
     });
-    while (!session.cancellation_requested() && !session.shutdown_requested()) {
+    for (;;) {
+        if (!ready()) {
+            return std::nullopt;
+        }
         if (auto cached = client.m6_chat_folders(authorization)) {
             return cached;
-        }
-        const auto current = client.auth_state();
-        if (!current || current->client_id != authorization->client_id ||
-            current->client_generation != authorization->client_generation ||
-            current->auth_sequence != authorization->auth_sequence ||
-            current->data.state != core::AuthState::Ready || deadline_expired(session.deadline())) {
-            return std::nullopt;
         }
         std::unique_lock lock(mutex);
         condition.wait_for(lock, 2ms,
                            [&] { return notified.exchange(false, std::memory_order_acq_rel); });
     }
-    return std::nullopt;
 }
 
 namespace {
@@ -315,15 +346,127 @@ std::optional<ResolvedChatTarget> resolve_exact(ResolverConsumer& resolver, std:
     return std::get<ResolvedChatTarget>(outcome);
 }
 
+bool valid_contact_request(proto::M6Operation operation, const json& arguments) {
+    if (operation == proto::M6Operation::ContactList) {
+        return exact_fields(arguments, {});
+    }
+    return operation == proto::M6Operation::ContactSearch && exact_fields(arguments, {"query"}) &&
+           arguments["query"].is_string() &&
+           valid_m6_contact_query(arguments["query"].get_ref<const std::string&>());
+}
+
+std::optional<std::vector<core::TdUserSummary>>
+hydrate_contacts(core::TdClient& client, std::string_view account, const ResolverCaller& caller,
+                 ResolverConsumer& resolver, const core::TdM6Users& users,
+                 RequestSession& session) {
+    std::vector<core::TdUserSummary> hydrated;
+    hydrated.reserve(users.user_ids.size());
+    std::size_t charged_bytes = 0;
+    for (const auto user_id : users.user_ids) {
+        auto user = resolver.read_target(
+            [&](const auto& current) { return client.get_user(current, user_id); });
+        if (stopped(user, client, account, caller, session)) {
+            return std::nullopt;
+        }
+        if (const auto* error = user.value.get_if<core::TdError>()) {
+            td_error(session, caller, *error);
+            return std::nullopt;
+        }
+        const auto* value = user.value.get_if<core::TdUserSummary>();
+        const auto identity = value != nullptr ? m6_user_identity(*value) : std::nullopt;
+        if (!identity || identity->id != user_id) {
+            internal(session, resolver_caller_name(caller));
+            return std::nullopt;
+        }
+        const auto bytes = m6_user_identity_json(*identity).dump().size();
+        if (bytes > 262'144) {
+            capacity(session, resolver_caller_name(caller), "item_bytes", 262'144);
+            return std::nullopt;
+        }
+        if (charged_bytes > 16'777'216 - bytes) {
+            capacity(session, resolver_caller_name(caller), "bytes", 16'777'216);
+            return std::nullopt;
+        }
+        charged_bytes += bytes;
+        hydrated.push_back(*value);
+    }
+    return hydrated;
+}
+
+std::optional<core::TdM6ForumTopics>
+read_topic_page(core::TdClient& client, std::string_view account, const ResolverCaller& caller,
+                ResolverConsumer& resolver, std::int64_t chat_id, const M6TopicCursor& cursor,
+                RequestSession& session) {
+    auto response = resolver.read_target([&](const auto& current) {
+        return client.m6_read(
+            current, core::TdM6GetForumTopicsRequest{.chat_id = chat_id,
+                                                     .query = {},
+                                                     .offset_date = cursor.date,
+                                                     .offset_message_id = cursor.message_id,
+                                                     .offset_forum_topic_id = cursor.topic_id,
+                                                     .limit = 100});
+    });
+    if (stopped(response, client, account, caller, session)) {
+        return std::nullopt;
+    }
+    if (const auto* error = response.value.get_if<core::TdError>()) {
+        td_error(session, caller, *error);
+        return std::nullopt;
+    }
+    const auto* envelope = response.value.get_if<core::TdM6Response>();
+    const auto* page = envelope != nullptr ? std::get_if<core::TdM6ForumTopics>(envelope) : nullptr;
+    if (page == nullptr) {
+        internal(session, resolver_caller_name(caller));
+        return std::nullopt;
+    }
+    return *page;
+}
+
+std::string_view topic_capacity_resource(M6TopicCapacityResource resource) {
+    switch (resource) {
+    case M6TopicCapacityResource::Topics:
+        return "topics";
+    case M6TopicCapacityResource::Bytes:
+        return "bytes";
+    case M6TopicCapacityResource::ItemBytes:
+        return "item_bytes";
+    }
+    return "topics";
+}
+
+bool finish_topic_append(const M6TopicScanResult& appended, const M6TopicAccumulator& accumulator,
+                         const ResolverCaller& caller, RequestSession& session) {
+    switch (appended.status) {
+    case M6TopicScanStatus::Accepted:
+        return false;
+    case M6TopicScanStatus::Complete:
+        session.result({{"items", accumulator.items()}, {"next", nullptr}});
+        return true;
+    case M6TopicScanStatus::StructuralError:
+        internal(session, resolver_caller_name(caller));
+        return true;
+    case M6TopicScanStatus::NonAdvancing:
+        session.error(
+            "PAGINATION_INVALID", "topic pagination did not advance",
+            {{"operation", resolver_caller_name(caller)}, {"reason", "non_advancing_upstream"}},
+            kGeneric);
+        return true;
+    case M6TopicScanStatus::Capacity:
+        capacity(session, resolver_caller_name(caller),
+                 topic_capacity_resource(
+                     appended.capacity_resource.value_or(M6TopicCapacityResource::Topics)),
+                 appended.capacity_limit);
+        return true;
+    }
+    return true;
+}
+
 } // namespace
 
 void M6Coordinator::contact(proto::M6Operation operation, const proto::Request& request,
                             RequestSession& session) {
     const bool search = operation == proto::M6Operation::ContactSearch;
-    if ((operation != proto::M6Operation::ContactList && !search) ||
-        (search ? (!exact_fields(request.args, {"query"}) || !request.args["query"].is_string() ||
-                   !valid_m6_contact_query(request.args["query"].get_ref<const std::string&>()))
-                : !exact_fields(request.args, {}))) {
+    if (!valid_contact_request(operation, request.args)) {
         usage(session, "contact command received malformed arguments", search ? "query" : nullptr);
         return;
     }
@@ -347,32 +490,28 @@ void M6Coordinator::contact(proto::M6Operation operation, const proto::Request& 
     }
     const auto* envelope = response.value.get_if<core::TdM6Response>();
     const auto* users = envelope != nullptr ? std::get_if<core::TdM6Users>(envelope) : nullptr;
+    const auto maximum_users = search ? std::size_t{100} : std::size_t{131'072};
     if (users == nullptr || users->total_count < 0 ||
-        static_cast<std::size_t>(users->total_count) < users->user_ids.size() ||
-        users->user_ids.size() > (search ? 100 : 131'072)) {
+        static_cast<std::size_t>(users->total_count) < users->user_ids.size()) {
         internal(session, operation_name(operation));
         return;
     }
-    std::vector<core::TdUserSummary> hydrated;
-    hydrated.reserve(users->user_ids.size());
-    for (const auto user_id : users->user_ids) {
-        auto user = resolver.read_target(
-            [&](const auto& current) { return client_.get().get_user(current, user_id); });
-        if (stopped(user, client_.get(), account_, caller, session)) {
-            return;
-        }
-        if (const auto* error = user.value.get_if<core::TdError>()) {
-            td_error(session, caller, *error);
-            return;
-        }
-        const auto* value = user.value.get_if<core::TdUserSummary>();
-        if (value == nullptr) {
-            internal(session, operation_name(operation));
-            return;
-        }
-        hydrated.push_back(*value);
+    if (users->user_ids.size() > maximum_users) {
+        capacity(session, operation_name(operation), "users", maximum_users);
+        return;
     }
-    auto result = m6_contact_list_json(*users, hydrated, search);
+    std::unordered_set<std::int64_t> user_ids;
+    if (!std::ranges::all_of(users->user_ids, [&](std::int64_t id) {
+            return id > 0 && user_ids.insert(id).second;
+        })) {
+        internal(session, operation_name(operation));
+        return;
+    }
+    auto hydrated = hydrate_contacts(client_.get(), account_, caller, resolver, *users, session);
+    if (!hydrated) {
+        return;
+    }
+    auto result = m6_contact_list_json(*users, *hydrated, search);
     if (!result) {
         internal(session, operation_name(operation));
         return;
@@ -392,25 +531,8 @@ void M6Coordinator::folder_list(const proto::Request& request, RequestSession& s
         return;
     }
     const auto folders =
-        m6_wait_for_folders(client_.get(), resolver.bound_authorization(), session);
+        m6_wait_for_folders(client_.get(), resolver.bound_authorization(), caller, session);
     if (!folders) {
-        const auto current = client_.get().auth_state();
-        if (!session.cancellation_requested() && !session.shutdown_requested()) {
-            if (deadline_expired(session.deadline())) {
-                emit_resolver_error(
-                    ResolverError{ResolverTimeoutError{
-                        .operation = caller,
-                        .state = current ? std::optional{current->data.state} : std::nullopt}},
-                    session, caller);
-            } else {
-                emit_resolver_error(
-                    ResolverError{ResolverNotAuthenticatedError{
-                        .account = account_,
-                        .state = current ? current->data.state : core::AuthState::Unknown,
-                        .reason = ResolverNotAuthedReason::AuthorizationLost}},
-                    session, caller);
-            }
-        }
         return;
     }
     auto result = m6_folder_list_json(*folders);
@@ -437,9 +559,8 @@ void M6Coordinator::folder_show(const proto::Request& request, RequestSession& s
         return;
     }
     const auto folders =
-        m6_wait_for_folders(client_.get(), resolver.bound_authorization(), session);
+        m6_wait_for_folders(client_.get(), resolver.bound_authorization(), caller, session);
     if (!folders) {
-        internal(session, operation_name(operation));
         return;
     }
     const auto info = std::ranges::find(folders->folders, folder_id, &core::TdM6FolderInfo::id);
@@ -497,50 +618,34 @@ void M6Coordinator::topic_list(const proto::Request& request, RequestSession& se
     if (!target) {
         return;
     }
+    const bool private_bot =
+        target->observed_chat && target->observed_chat->kind == core::TdChatKind::Private &&
+        target->observed_user && target->observed_user->id == target->observed_chat->related_id &&
+        target->observed_user->is_bot && target->observed_user->bot_has_topics;
+    const bool forum_supergroup =
+        target->observed_chat && target->observed_chat->kind == core::TdChatKind::Supergroup &&
+        target->observed_supergroup &&
+        target->observed_supergroup->id == target->observed_chat->related_id &&
+        !target->observed_supergroup->is_channel && target->observed_supergroup->is_forum;
+    if (!private_bot && !forum_supergroup) {
+        session.error("USAGE", "chat does not support topic listing",
+                      {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
+        return;
+    }
     M6TopicAccumulator accumulator(target->chat.id);
     M6TopicCursor cursor;
     while (true) {
-        auto response = resolver.read_target([&](const auto& current) {
-            return client_.get().m6_read(
-                current, core::TdM6GetForumTopicsRequest{.chat_id = target->chat.id,
-                                                         .query = {},
-                                                         .offset_date = cursor.date,
-                                                         .offset_message_id = cursor.message_id,
-                                                         .offset_forum_topic_id = cursor.topic_id,
-                                                         .limit = 100});
-        });
-        if (stopped(response, client_.get(), account_, caller, session)) {
-            return;
-        }
-        if (const auto* error = response.value.get_if<core::TdError>()) {
-            td_error(session, caller, *error);
-            return;
-        }
-        const auto* envelope = response.value.get_if<core::TdM6Response>();
-        const auto* page =
-            envelope != nullptr ? std::get_if<core::TdM6ForumTopics>(envelope) : nullptr;
-        if (page == nullptr) {
-            internal(session, operation_name(operation));
+        auto page = read_topic_page(client_.get(), account_, caller, resolver, target->chat.id,
+                                    cursor, session);
+        if (!page) {
             return;
         }
         const auto appended = accumulator.append(cursor, *page);
-        if (appended.status == M6TopicScanStatus::StructuralError) {
+        if (finish_topic_append(appended, accumulator, caller, session)) {
+            return;
+        }
+        if (!appended.next) {
             internal(session, operation_name(operation));
-            return;
-        }
-        if (appended.status == M6TopicScanStatus::NonAdvancing) {
-            session.error(
-                "PAGINATION_INVALID", "topic pagination did not advance",
-                {{"operation", operation_name(operation)}, {"reason", "non_advancing_upstream"}},
-                kGeneric);
-            return;
-        }
-        if (appended.status == M6TopicScanStatus::Capacity) {
-            capacity(session, operation_name(operation), "topics", 4'096);
-            return;
-        }
-        if (appended.status == M6TopicScanStatus::Complete) {
-            session.result({{"items", accumulator.items()}, {"next", nullptr}});
             return;
         }
         cursor = *appended.next;

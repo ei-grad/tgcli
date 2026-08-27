@@ -1319,73 +1319,31 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "folder_list",
-                        "folder_show",
-                        "folder_create",
-                        "folder_edit",
-                        "folder_delete",
-                        "folder_add_chat",
-                        "folder_remove_chat"
-                      ]
-                    },
-                    "reason": {
-                      "enum": [
-                        "internal_error",
-                        "malformed_tdlib_response"
-                      ]
-                    }
-                  }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "folder_list",
+                    "folder_show",
+                    "folder_create",
+                    "folder_edit",
+                    "folder_delete",
+                    "folder_add_chat",
+                    "folder_remove_chat"
+                  ]
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason",
-                    "resource",
-                    "limit"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "folder_list",
-                        "folder_show",
-                        "folder_create",
-                        "folder_edit",
-                        "folder_delete",
-                        "folder_add_chat",
-                        "folder_remove_chat"
-                      ]
-                    },
-                    "reason": {
-                      "const": "capacity_exhausted"
-                    },
-                    "resource": {
-                      "enum": [
-                        "users",
-                        "topics",
-                        "bytes",
-                        "item_bytes"
-                      ]
-                    },
-                    "limit": {
-                      "type": "integer",
-                      "minimum": 0
-                    }
-                  }
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
                 }
-              ]
+              }
             }
           }
         },
@@ -1812,25 +1770,23 @@
               "type": "string"
             },
             "details": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "account",
-                "action",
-                "target"
-              ],
-              "properties": {
-                "account": {
-                  "$ref": "#/$defs/account"
-                },
-                "action": {
-                  "enum": [
-                    "folder_delete"
-                  ]
-                },
-                "target": {
-                  "oneOf": [
-                    {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "account",
+                    "action",
+                    "target"
+                  ],
+                  "properties": {
+                    "account": {
+                      "$ref": "#/$defs/account"
+                    },
+                    "action": {
+                      "const": "folder_delete"
+                    },
+                    "target": {
                       "type": "object",
                       "additionalProperties": false,
                       "required": [
@@ -1858,9 +1814,9 @@
                         }
                       }
                     }
-                  ]
+                  }
                 }
-              }
+              ]
             }
           }
         },
@@ -2087,65 +2043,36 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "selector",
-                    "scope",
-                    "candidates",
-                    "truncated"
-                  ],
-                  "properties": {
-                    "selector": {
-                      "type": "string"
-                    },
-                    "scope": {
-                      "enum": [
-                        "active_dialogs",
-                        "local_materialized"
-                      ]
-                    },
-                    "candidates": {
-                      "type": "array",
-                      "minItems": 0,
-                      "maxItems": 20,
-                      "items": {
-                        "$ref": "#/$defs/chat"
-                      }
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "selector",
+                "scope",
+                "candidates",
+                "truncated"
+              ],
+              "properties": {
+                "selector": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "active_dialogs",
+                    "local_materialized"
+                  ]
+                },
+                "candidates": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 20,
+                  "items": {
+                    "$ref": "#/$defs/chat"
                   }
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "selector",
-                    "candidates",
-                    "truncated"
-                  ],
-                  "properties": {
-                    "selector": {
-                      "type": "string"
-                    },
-                    "candidates": {
-                      "type": "array",
-                      "minItems": 0,
-                      "maxItems": 20,
-                      "items": {
-                        "$ref": "#/$defs/user"
-                      }
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    }
-                  }
+                "truncated": {
+                  "type": "boolean"
                 }
-              ]
+              }
             }
           }
         },
@@ -2165,44 +2092,86 @@
               "type": "string"
             },
             "details": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "operation",
-                "folder_id",
-                "chat_id",
-                "reason"
-              ],
-              "properties": {
-                "operation": {
-                  "enum": [
-                    "folder_edit",
-                    "folder_add_chat",
-                    "folder_remove_chat"
-                  ]
-                },
-                "folder_id": {
-                  "$ref": "#/$defs/positiveInt32"
-                },
-                "chat_id": {
-                  "oneOf": [
-                    {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "folder_id",
+                    "chat_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "folder_edit"
+                    },
+                    "folder_id": {
+                      "$ref": "#/$defs/positiveInt32"
+                    },
+                    "chat_id": {
                       "type": "null"
                     },
-                    {
-                      "$ref": "#/$defs/int53"
+                    "reason": {
+                      "const": "no_change"
                     }
-                  ]
+                  }
                 },
-                "reason": {
-                  "enum": [
-                    "no_change",
-                    "already_in_folder",
-                    "not_in_folder",
-                    "folder_capacity"
-                  ]
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "folder_id",
+                    "chat_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "folder_add_chat"
+                    },
+                    "folder_id": {
+                      "$ref": "#/$defs/positiveInt32"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "reason": {
+                      "enum": [
+                        "already_in_folder",
+                        "folder_capacity"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "folder_id",
+                    "chat_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "folder_remove_chat"
+                    },
+                    "folder_id": {
+                      "$ref": "#/$defs/positiveInt32"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "reason": {
+                      "enum": [
+                        "not_in_folder",
+                        "folder_capacity"
+                      ]
+                    }
+                  }
                 }
-              }
+              ]
             }
           }
         }

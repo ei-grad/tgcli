@@ -62,8 +62,20 @@ struct WriteAdmission {
     std::vector<redaction::CorrelatedInviteLink> invite_redactions;
 };
 
+struct WriteLookupAdmission {
+    IdempotencyRequestFingerprint request_fingerprint;
+    std::shared_ptr<PreparedSource> pass1_source;
+};
+
+struct WriteMaterialization {
+    WriteAdmission admission;
+    write_contract::Plan plan;
+};
+
 using WriteAdmissionOutcome = std::variant<WriteAdmission, nlohmann::json>;
 using WritePlanningOutcome = std::variant<write_contract::Plan, nlohmann::json>;
+using WriteLookupAdmissionOutcome = std::variant<WriteLookupAdmission, nlohmann::json>;
+using WriteMaterializationOutcome = std::variant<WriteMaterialization, nlohmann::json>;
 
 enum class WriteConfirmationStatus { ConfirmedYes, ConfirmedTty, Rejected, TimedOut, Cancelled };
 
@@ -122,11 +134,14 @@ class WriteDurableObservationSink final {
 struct WriteKernelHooks {
     std::function<WriteAdmissionOutcome()> admit;
     std::function<WritePlanningOutcome(const WriteAdmission&)> plan;
+    std::function<WriteLookupAdmissionOutcome()> lookup_admit;
+    std::function<WriteMaterializationOutcome(const WriteLookupAdmission&)> materialize;
     std::function<WriteConfirmationOutcome(const write_contract::Plan&, bool replay)> confirm;
     std::function<config::GrantVerificationResult(std::string_view expected_identity,
                                                   std::string_view account,
                                                   const config::MutationControl&)>
         verify_config_grant;
+    std::function<std::optional<nlohmann::json>()> revalidate_principal;
     std::function<WritePostIntentPreparation(const write_contract::Plan&, const WriteAdmission&)>
         post_intent;
     std::function<void(const AccountAuditAppendReceipt&, const AccountAuditCoordinator::Guard&)>

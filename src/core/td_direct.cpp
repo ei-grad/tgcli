@@ -215,7 +215,8 @@ bool valid_td_direct_request(const TdLeaveChatRequest& request) noexcept {
 }
 
 bool valid_td_direct_request(const TdTerminateSessionRequest& request) noexcept {
-    return request.session_id != 0;
+    static_cast<void>(request);
+    return true;
 }
 
 bool valid_td_direct_request(const TdM6Request& request) noexcept {

@@ -52,6 +52,7 @@ tgcli::core::TdChat project_chat() {
                                               .tdlib_type_id = 6},
                 .content_kind = tgcli::core::TdMessageContentKind::Text,
                 .text = "experiment result"},
+        .permissions = std::nullopt,
         .notification_settings = std::nullopt};
 }
 

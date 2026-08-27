@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -89,6 +90,10 @@ json topic(bool row) {
 
 json storage() {
     return {{"size", 0}, {"count", 0}, {"by_chat", json::array()}};
+}
+
+json member() {
+    return {{"kind", "member"}, {"member_until_date", 0}};
 }
 
 json result_for(tgcli::proto::M6Operation operation) {
@@ -210,4 +215,368 @@ TEST_CASE("M6 family error assets close operation and detail ownership", "[m6][s
                !matches_json_schema("folder.error.schema.json"));
     CHECK_THAT(error("NOT_FOUND", {{"operation", "storage_stats"}}),
                !matches_json_schema("storage.error.schema.json"));
+}
+
+TEST_CASE("M6 family errors reject operation-detail cross products", "[m6][schema][error]") {
+    CHECK_THAT(error("INTERNAL", {{"operation", "contact_list"},
+                                  {"reason", "capacity_exhausted"},
+                                  {"resource", "users"},
+                                  {"limit", 131'072}}),
+               matches_json_schema("contact.error.schema.json"));
+    CHECK_THAT(error("INTERNAL", {{"operation", "contact_search"},
+                                  {"reason", "capacity_exhausted"},
+                                  {"resource", "users"},
+                                  {"limit", 131'072}}),
+               !matches_json_schema("contact.error.schema.json"));
+    CHECK_THAT(error("INTERNAL", {{"operation", "topic_list"},
+                                  {"reason", "capacity_exhausted"},
+                                  {"resource", "users"},
+                                  {"limit", 4'096}}),
+               !matches_json_schema("topic.error.schema.json"));
+
+    CHECK_THAT(error("PRECONDITION_FAILED", {{"operation", "folder_edit"},
+                                             {"folder_id", 7},
+                                             {"chat_id", nullptr},
+                                             {"reason", "no_change"}}),
+               matches_json_schema("folder.error.schema.json"));
+    CHECK_THAT(error("PRECONDITION_FAILED", {{"operation", "folder_add_chat"},
+                                             {"folder_id", 7},
+                                             {"chat_id", nullptr},
+                                             {"reason", "folder_capacity"}}),
+               !matches_json_schema("folder.error.schema.json"));
+    CHECK_THAT(error("PRECONDITION_FAILED", {{"operation", "topic_close"},
+                                             {"chat_id", -1001},
+                                             {"topic_id", 9},
+                                             {"reason", "already_open"}}),
+               !matches_json_schema("topic.error.schema.json"));
+    CHECK_THAT(error("PRECONDITION_FAILED", {{"operation", "chat_invite_link"},
+                                             {"chat_id", -1001},
+                                             {"reason", "missing_right"},
+                                             {"right", "change-info"}}),
+               !matches_json_schema("chat-admin.error.schema.json"));
+
+    const json folder_delete_plan{{"operation", "folder_delete"},
+                                  {"account", "main"},
+                                  {"tdlib_request", "deleteChatFolder"},
+                                  {"folder", folder(true)},
+                                  {"leave_chat_ids", json::array()}};
+    const json storage_plan{{"operation", "storage_optimize"},
+                            {"account", "main"},
+                            {"tdlib_request", "optimizeStorage"},
+                            {"size", -1},
+                            {"ttl", -1},
+                            {"count", -1},
+                            {"immunity_delay", -1},
+                            {"file_types", json::array()},
+                            {"chat_ids", json::array()},
+                            {"exclude_chat_ids", json::array()},
+                            {"return_deleted_file_statistics", false},
+                            {"chat_limit", 100}};
+    CHECK_THAT(
+        error("CONFIRMATION_REQUIRED",
+              {{"account", "main"}, {"action", "folder_delete"}, {"target", folder_delete_plan}}),
+        matches_json_schema("folder.error.schema.json"));
+    CHECK_THAT(error("CONFIRMATION_REQUIRED",
+                     {{"account", "main"}, {"action", "folder_delete"}, {"target", storage_plan}}),
+               !matches_json_schema("folder.error.schema.json"));
+}
+
+TEST_CASE("M6 operation-correlated error arms reject every family cross product",
+          "[m6][schema][error][cross-product]") {
+    struct Donor {
+        std::string filename;
+        std::string code;
+        json details;
+        std::vector<std::string_view> allowed;
+    };
+    const std::vector<Donor> donors{
+        {"contact.error.schema.json",
+         "INTERNAL",
+         {{"operation", "contact_list"},
+          {"reason", "capacity_exhausted"},
+          {"resource", "users"},
+          {"limit", 131'072}},
+         {"contact_list"}},
+        {"contact.error.schema.json",
+         "INTERNAL",
+         {{"operation", "contact_search"},
+          {"reason", "capacity_exhausted"},
+          {"resource", "users"},
+          {"limit", 100}},
+         {"contact_search"}},
+        {"contact.error.schema.json",
+         "INTERNAL",
+         {{"operation", "contact_list"},
+          {"reason", "capacity_exhausted"},
+          {"resource", "bytes"},
+          {"limit", 16'777'216}},
+         {"contact_list", "contact_search"}},
+        {"folder.error.schema.json",
+         "NOT_FOUND",
+         {{"operation", "folder_show"}, {"folder_id", 7}},
+         {"folder_show", "folder_edit", "folder_delete", "folder_add_chat", "folder_remove_chat"}},
+        {"folder.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "folder_edit"},
+          {"folder_id", 7},
+          {"chat_id", nullptr},
+          {"reason", "no_change"}},
+         {"folder_edit"}},
+        {"folder.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "folder_add_chat"},
+          {"folder_id", 7},
+          {"chat_id", -1001},
+          {"reason", "already_in_folder"}},
+         {"folder_add_chat"}},
+        {"folder.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "folder_remove_chat"},
+          {"folder_id", 7},
+          {"chat_id", -1001},
+          {"reason", "not_in_folder"}},
+         {"folder_remove_chat"}},
+        {"folder.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "folder_add_chat"},
+          {"folder_id", 7},
+          {"chat_id", -1001},
+          {"reason", "folder_capacity"}},
+         {"folder_add_chat", "folder_remove_chat"}},
+        {"topic.error.schema.json",
+         "NOT_FOUND",
+         {{"operation", "topic_edit"}, {"chat_id", -1001}, {"topic_id", 9}},
+         {"topic_edit", "topic_close", "topic_reopen"}},
+        {"topic.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "topic_create"},
+          {"chat_id", -1001},
+          {"topic_id", nullptr},
+          {"reason", "missing_right"}},
+         {"topic_create"}},
+        {"topic.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "topic_edit"},
+          {"chat_id", -1001},
+          {"topic_id", 9},
+          {"reason", "no_change"}},
+         {"topic_edit"}},
+        {"topic.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "topic_close"},
+          {"chat_id", -1001},
+          {"topic_id", 9},
+          {"reason", "already_closed"}},
+         {"topic_close"}},
+        {"topic.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "topic_reopen"},
+          {"chat_id", -1001},
+          {"topic_id", 9},
+          {"reason", "already_open"}},
+         {"topic_reopen"}},
+        {"topic.error.schema.json",
+         "PAGINATION_INVALID",
+         {{"operation", "topic_list"}, {"reason", "non_advancing_upstream"}},
+         {"topic_list"}},
+        {"chat-admin.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "chat_set_title"},
+          {"chat_id", -1001},
+          {"reason", "missing_right"},
+          {"right", "change-info"}},
+         {"chat_set_title", "chat_set_photo", "chat_set_description"}},
+        {"chat-admin.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "chat_invite_link"},
+          {"chat_id", -1001},
+          {"reason", "missing_right"},
+          {"right", "invite-users"}},
+         {"chat_invite_link"}},
+        {"chat-admin.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "chat_promote"},
+          {"chat_id", -1001},
+          {"reason", "missing_right"},
+          {"right", "promote-members"}},
+         {"chat_promote", "chat_demote"}},
+        {"chat-admin.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "chat_ban"},
+          {"chat_id", -1001},
+          {"reason", "missing_right"},
+          {"right", "restrict-members"}},
+         {"chat_ban", "chat_unban", "chat_kick", "chat_set_permissions"}},
+        {"chat-admin.error.schema.json",
+         "PRECONDITION_FAILED",
+         {{"operation", "chat_ban"},
+          {"chat_id", -1001},
+          {"user_id", 77},
+          {"reason", "wrong_member_state"}},
+         {"chat_promote", "chat_demote", "chat_ban", "chat_unban", "chat_kick"}},
+        {"chat-admin.error.schema.json",
+         "INPUT_CHANGED",
+         {{"operation", "chat_set_photo"}, {"path", "/tmp/photo.jpg"}},
+         {"chat_set_photo"}},
+    };
+    const std::array<std::vector<std::string_view>, 4> operations{{
+        {"contact_list", "contact_search", "contact_add", "contact_remove", "contact_block",
+         "contact_unblock"},
+        {"folder_list", "folder_show", "folder_create", "folder_edit", "folder_delete",
+         "folder_add_chat", "folder_remove_chat"},
+        {"topic_list", "topic_create", "topic_edit", "topic_close", "topic_reopen"},
+        {"chat_set_title", "chat_set_photo", "chat_set_description", "chat_invite_link",
+         "chat_promote", "chat_demote", "chat_ban", "chat_unban", "chat_kick",
+         "chat_set_permissions"},
+    }};
+    const auto family_index = [](std::string_view filename) {
+        if (filename.starts_with("contact")) {
+            return std::size_t{0};
+        }
+        if (filename.starts_with("folder")) {
+            return std::size_t{1};
+        }
+        if (filename.starts_with("topic")) {
+            return std::size_t{2};
+        }
+        return std::size_t{3};
+    };
+    for (const auto& donor : donors) {
+        CAPTURE(donor.filename, donor.code, donor.details);
+        CHECK_THAT(error(donor.code, donor.details), matches_json_schema(donor.filename));
+        for (const auto operation : operations.at(family_index(donor.filename))) {
+            auto crossed = donor.details;
+            crossed["operation"] = operation;
+            const bool allowed = std::ranges::find(donor.allowed, operation) != donor.allowed.end();
+            CAPTURE(operation, allowed);
+            if (allowed) {
+                CHECK_THAT(error(donor.code, crossed), matches_json_schema(donor.filename));
+            } else {
+                CHECK_THAT(error(donor.code, crossed), !matches_json_schema(donor.filename));
+            }
+        }
+    }
+
+    auto edit_nullability = donors[4].details;
+    edit_nullability["chat_id"] = -1001;
+    CHECK_THAT(error("PRECONDITION_FAILED", edit_nullability),
+               !matches_json_schema("folder.error.schema.json"));
+    auto add_nullability = donors[5].details;
+    add_nullability["chat_id"] = nullptr;
+    CHECK_THAT(error("PRECONDITION_FAILED", add_nullability),
+               !matches_json_schema("folder.error.schema.json"));
+    auto topic_nullability = donors[9].details;
+    topic_nullability["topic_id"] = 9;
+    CHECK_THAT(error("PRECONDITION_FAILED", topic_nullability),
+               !matches_json_schema("topic.error.schema.json"));
+}
+
+TEST_CASE("M6 destructive confirmation arms correlate every action and target",
+          "[m6][schema][error][cross-product]") {
+    const json folder_delete{{"operation", "folder_delete"},
+                             {"account", "main"},
+                             {"tdlib_request", "deleteChatFolder"},
+                             {"folder", folder(true)},
+                             {"leave_chat_ids", json::array()}};
+    const json invite_create{{"operation", "chat_invite_link"},
+                             {"account", "main"},
+                             {"tdlib_request", "createChatInviteLink"},
+                             {"chat", chat()},
+                             {"action", "create"},
+                             {"invite_link_sha256", nullptr}};
+    const json invite_revoke{{"operation", "chat_invite_link"},
+                             {"account", "main"},
+                             {"tdlib_request", "revokeChatInviteLink"},
+                             {"chat", chat()},
+                             {"action", "revoke"},
+                             {"invite_link_sha256", "sha256:" + std::string(64, 'a')}};
+    const json ban{
+        {"operation", "chat_ban"}, {"account", "main"}, {"tdlib_request", "setChatMemberStatus"},
+        {"chat", chat()},          {"user", user()},    {"before", member()},
+        {"after", "banned"}};
+    const json kick{
+        {"operation", "chat_kick"}, {"account", "main"}, {"tdlib_request", "setChatMemberStatus"},
+        {"chat", chat()},           {"user", user()},    {"before", member()},
+        {"after", "left"}};
+    const json optimize{{"operation", "storage_optimize"},
+                        {"account", "main"},
+                        {"tdlib_request", "optimizeStorage"},
+                        {"size", -1},
+                        {"ttl", -1},
+                        {"count", -1},
+                        {"immunity_delay", -1},
+                        {"file_types", json::array()},
+                        {"chat_ids", json::array()},
+                        {"exclude_chat_ids", json::array()},
+                        {"return_deleted_file_statistics", false},
+                        {"chat_limit", 100}};
+    struct Arm {
+        std::string_view filename;
+        std::string_view action;
+        const json* target;
+    };
+    const std::array arms{Arm{"folder.error.schema.json", "folder_delete", &folder_delete},
+                          Arm{"chat-admin.error.schema.json", "chat_invite_link", &invite_create},
+                          Arm{"chat-admin.error.schema.json", "chat_ban", &ban},
+                          Arm{"chat-admin.error.schema.json", "chat_kick", &kick},
+                          Arm{"storage.error.schema.json", "storage_optimize", &optimize}};
+    for (const auto& arm : arms) {
+        const auto valid =
+            error("CONFIRMATION_REQUIRED",
+                  {{"account", "main"}, {"action", arm.action}, {"target", *arm.target}});
+        CAPTURE(arm.filename, arm.action, *arm.target);
+        CHECK_THAT(valid, matches_json_schema(std::string(arm.filename)));
+        for (const auto& crossed : arms) {
+            if (crossed.action == arm.action) {
+                continue;
+            }
+            auto wrong_action = valid;
+            wrong_action["error"]["details"]["action"] = crossed.action;
+            CHECK_THAT(wrong_action, !matches_json_schema(std::string(arm.filename)));
+
+            auto wrong_target = valid;
+            wrong_target["error"]["details"]["target"] = *crossed.target;
+            CHECK_THAT(wrong_target, !matches_json_schema(std::string(arm.filename)));
+        }
+    }
+
+    CHECK_THAT(
+        error("CONFIRMATION_REQUIRED",
+              {{"account", "main"}, {"action", "chat_invite_link"}, {"target", invite_revoke}}),
+        matches_json_schema("chat-admin.error.schema.json"));
+    for (const auto& [field, value] : std::array<std::pair<std::string_view, json>, 3>{{
+             {"tdlib_request", "revokeChatInviteLink"},
+             {"action", "revoke"},
+             {"invite_link_sha256", "sha256:" + std::string(64, 'a')},
+         }}) {
+        auto crossed = invite_create;
+        crossed[field] = value;
+        CHECK_THAT(
+            error("CONFIRMATION_REQUIRED",
+                  {{"account", "main"}, {"action", "chat_invite_link"}, {"target", crossed}}),
+            !matches_json_schema("chat-admin.error.schema.json"));
+    }
+}
+
+TEST_CASE("M6 ambiguity arms expose only reachable family candidate kinds",
+          "[m6][schema][error][cross-product]") {
+    const auto chat_ambiguity = error("AMBIGUOUS", {{"selector", "project"},
+                                                    {"scope", "active_dialogs"},
+                                                    {"candidates", json::array({chat()})},
+                                                    {"truncated", false}});
+    const auto user_ambiguity =
+        error("AMBIGUOUS",
+              {{"selector", "ada"}, {"candidates", json::array({user()})}, {"truncated", false}});
+
+    CHECK_THAT(user_ambiguity, matches_json_schema("contact.error.schema.json"));
+    CHECK_THAT(chat_ambiguity, !matches_json_schema("contact.error.schema.json"));
+    for (const auto* filename : {"folder.error.schema.json", "topic.error.schema.json"}) {
+        CAPTURE(filename);
+        CHECK_THAT(chat_ambiguity, matches_json_schema(filename));
+        CHECK_THAT(user_ambiguity, !matches_json_schema(filename));
+    }
+    CHECK_THAT(chat_ambiguity, matches_json_schema("chat-admin.error.schema.json"));
+    CHECK_THAT(user_ambiguity, matches_json_schema("chat-admin.error.schema.json"));
+    CHECK_THAT(chat_ambiguity, !matches_json_schema("storage.error.schema.json"));
+    CHECK_THAT(user_ambiguity, !matches_json_schema("storage.error.schema.json"));
 }

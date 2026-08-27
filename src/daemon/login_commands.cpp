@@ -320,6 +320,7 @@ std::string_view auth_function_name(TdFunctionKind function) {
         return core::td_function_name(function);
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetContacts:
+    case TdFunctionKind::GetM6Contacts:
     case TdFunctionKind::SearchContacts:
     case TdFunctionKind::AddContact:
     case TdFunctionKind::RemoveContacts:

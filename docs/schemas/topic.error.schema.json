@@ -1313,69 +1313,29 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "topic_list",
-                        "topic_create",
-                        "topic_edit",
-                        "topic_close",
-                        "topic_reopen"
-                      ]
-                    },
-                    "reason": {
-                      "enum": [
-                        "internal_error",
-                        "malformed_tdlib_response"
-                      ]
-                    }
-                  }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "topic_list",
+                    "topic_create",
+                    "topic_edit",
+                    "topic_close",
+                    "topic_reopen"
+                  ]
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason",
-                    "resource",
-                    "limit"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "topic_list",
-                        "topic_create",
-                        "topic_edit",
-                        "topic_close",
-                        "topic_reopen"
-                      ]
-                    },
-                    "reason": {
-                      "const": "capacity_exhausted"
-                    },
-                    "resource": {
-                      "enum": [
-                        "users",
-                        "topics",
-                        "bytes",
-                        "item_bytes"
-                      ]
-                    },
-                    "limit": {
-                      "type": "integer",
-                      "minimum": 0
-                    }
-                  }
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
                 }
-              ]
+              }
             }
           }
         },
@@ -1924,6 +1884,99 @@
           ],
           "properties": {
             "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_list"
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "topics"
+                    },
+                    "limit": {
+                      "const": 4096
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_list"
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "bytes"
+                    },
+                    "limit": {
+                      "const": 16777216
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "reason",
+                    "resource",
+                    "limit"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_list"
+                    },
+                    "reason": {
+                      "const": "capacity_exhausted"
+                    },
+                    "resource": {
+                      "const": "item_bytes"
+                    },
+                    "limit": {
+                      "const": 262144
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
               "const": "NOT_FOUND"
             },
             "message": {
@@ -2003,65 +2056,36 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "selector",
-                    "scope",
-                    "candidates",
-                    "truncated"
-                  ],
-                  "properties": {
-                    "selector": {
-                      "type": "string"
-                    },
-                    "scope": {
-                      "enum": [
-                        "active_dialogs",
-                        "local_materialized"
-                      ]
-                    },
-                    "candidates": {
-                      "type": "array",
-                      "minItems": 0,
-                      "maxItems": 20,
-                      "items": {
-                        "$ref": "#/$defs/chat"
-                      }
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "selector",
+                "scope",
+                "candidates",
+                "truncated"
+              ],
+              "properties": {
+                "selector": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "active_dialogs",
+                    "local_materialized"
+                  ]
+                },
+                "candidates": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 20,
+                  "items": {
+                    "$ref": "#/$defs/chat"
                   }
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "selector",
-                    "candidates",
-                    "truncated"
-                  ],
-                  "properties": {
-                    "selector": {
-                      "type": "string"
-                    },
-                    "candidates": {
-                      "type": "array",
-                      "minItems": 0,
-                      "maxItems": 20,
-                      "items": {
-                        "$ref": "#/$defs/user"
-                      }
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    }
-                  }
+                "truncated": {
+                  "type": "boolean"
                 }
-              ]
+              }
             }
           }
         },
@@ -2081,45 +2105,113 @@
               "type": "string"
             },
             "details": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "operation",
-                "chat_id",
-                "topic_id",
-                "reason"
-              ],
-              "properties": {
-                "operation": {
-                  "enum": [
-                    "topic_create",
-                    "topic_edit",
-                    "topic_close",
-                    "topic_reopen"
-                  ]
-                },
-                "chat_id": {
-                  "$ref": "#/$defs/int53"
-                },
-                "topic_id": {
-                  "oneOf": [
-                    {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "topic_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_create"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "topic_id": {
                       "type": "null"
                     },
-                    {
-                      "$ref": "#/$defs/positiveInt32"
+                    "reason": {
+                      "const": "missing_right"
                     }
-                  ]
+                  }
                 },
-                "reason": {
-                  "enum": [
-                    "missing_right",
-                    "no_change",
-                    "already_closed",
-                    "already_open"
-                  ]
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "topic_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_edit"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "topic_id": {
+                      "$ref": "#/$defs/positiveInt32"
+                    },
+                    "reason": {
+                      "enum": [
+                        "missing_right",
+                        "no_change"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "topic_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_close"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "topic_id": {
+                      "$ref": "#/$defs/positiveInt32"
+                    },
+                    "reason": {
+                      "enum": [
+                        "missing_right",
+                        "already_closed"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "topic_id",
+                    "reason"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "topic_reopen"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "topic_id": {
+                      "$ref": "#/$defs/positiveInt32"
+                    },
+                    "reason": {
+                      "enum": [
+                        "missing_right",
+                        "already_open"
+                      ]
+                    }
+                  }
                 }
-              }
+              ]
             }
           }
         },

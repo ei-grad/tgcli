@@ -20,10 +20,13 @@ struct M6TopicCursor {
 };
 
 enum class M6TopicScanStatus { Accepted, Complete, StructuralError, NonAdvancing, Capacity };
+enum class M6TopicCapacityResource { Topics, Bytes, ItemBytes };
 
 struct M6TopicScanResult {
     M6TopicScanStatus status = M6TopicScanStatus::StructuralError;
     std::optional<M6TopicCursor> next;
+    std::optional<M6TopicCapacityResource> capacity_resource;
+    std::size_t capacity_limit = 0;
 };
 
 bool valid_m6_topic_cursor(const M6TopicCursor& cursor) noexcept;

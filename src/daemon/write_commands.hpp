@@ -20,6 +20,8 @@ struct WriteCoordinatorHooks {
     ForwardHooks forward;
     DirectRpcHooks direct_rpc;
     std::shared_ptr<const FileSpoolHooks> file_spool;
+    std::function<void()> before_principal_cas;
+    std::function<void()> before_dispatch_principal_cas;
 };
 } // namespace testing
 

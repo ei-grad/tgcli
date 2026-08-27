@@ -389,6 +389,7 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetCurrentState:
     case core::TdFunctionKind::GetOption:
     case core::TdFunctionKind::GetContacts:
+    case core::TdFunctionKind::GetM6Contacts:
     case core::TdFunctionKind::SearchContacts:
     case core::TdFunctionKind::AddContact:
     case core::TdFunctionKind::RemoveContacts:

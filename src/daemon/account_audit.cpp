@@ -1394,7 +1394,7 @@ bool valid_stored_error_message(std::string_view code, const json& message) {
         {"RATE_LIMITED", {"Telegram rate limit exceeded"}},
         {"INTERNAL",
          {"internal error", "TDLib returned data outside the supported persistence bounds",
-          "TDLib returned malformed session data"}},
+          "TDLib returned malformed session data", "TDLib returned a malformed response"}},
         {"SEND_FAILED", {"message was deleted before confirmation"}},
         {"FORWARD_FAILED", {"messages could not be forwarded"}},
         {"FORWARD_PARTIAL", {"some messages could not be forwarded"}},
@@ -1467,6 +1467,13 @@ bool valid_stored_error( // NOLINT(readability-function-cognitive-complexity)
             return exact_fields(details, {"operation", "reason", "tdlib_type_id"}) &&
                    details["reason"] == "malformed_tdlib_response" &&
                    (details["tdlib_type_id"].is_null() || valid_int32(details["tdlib_type_id"]));
+        }
+        if (m6_operation_for_audit(operation)) {
+            return exact_fields(details, {"operation", "reason"}) &&
+                   ((details["reason"] == "internal_error" &&
+                     value["message"] == "internal error") ||
+                    (details["reason"] == "malformed_tdlib_response" &&
+                     value["message"] == "TDLib returned a malformed response"));
         }
         return exact_fields(details, {"operation", "reason"}) &&
                details["reason"] == "internal_error";
@@ -3648,6 +3655,9 @@ bool validate_account_audit_persisted_spool(const SpoolRef& spool, std::string_v
 }
 
 std::uint32_t account_audit_terminal_reservation(AccountAuditOperation operation) {
+    if (m6_operation_for_audit(operation)) {
+        return static_cast<std::uint32_t>(kOtherTerminalBytes);
+    }
     return static_cast<std::uint32_t>(terminal_byte_ceiling(operation));
 }
 

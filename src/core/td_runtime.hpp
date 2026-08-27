@@ -36,6 +36,7 @@ enum class TdFunctionKind {
     GetMe,
     GetCurrentState,
     GetContacts,
+    GetM6Contacts,
     SearchContacts,
     AddContact,
     RemoveContacts,
@@ -141,6 +142,7 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetCurrentState:
         return "getCurrentState";
     case TdFunctionKind::GetContacts:
+    case TdFunctionKind::GetM6Contacts:
         return "getContacts";
     case TdFunctionKind::SearchContacts:
         return "searchContacts";
@@ -1536,6 +1538,7 @@ struct TdChat {
     std::int32_t unread_reaction_count = 0;
     std::int32_t unread_poll_vote_count = 0;
     std::optional<TdMessageSummary> last_message;
+    std::optional<TdM6ChatPermissions> permissions;
     std::optional<TdChatNotificationSettings> notification_settings;
 
     bool operator==(const TdChat&) const = default;

@@ -2524,6 +2524,7 @@ TEST_CASE("stream no-daemon injection requires and uses a paired observer servic
         .unread_reaction_count = 0,
         .unread_poll_vote_count = 0,
         .last_message = std::nullopt,
+        .permissions = std::nullopt,
         .notification_settings = std::nullopt};
     core::TdCurrentState state;
     state.updates.push_back(core::TdValue::from(core::TdUpdateUser{.user = account_user}));
@@ -4073,6 +4074,7 @@ TEST_CASE("chat mark-read no-daemon consumes the same normalized request without
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
                                              .last_message = std::nullopt,
+                                             .permissions = std::nullopt,
                                              .notification_settings = std::nullopt}));
     const auto outcome = pending.get();
     REQUIRE(outcome.exit_code == kOk);
@@ -4207,6 +4209,7 @@ TEST_CASE("read no-daemon fake boundary preserves canonical JSON discipline",
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
                                              .last_message = std::nullopt,
+                                             .permissions = std::nullopt,
                                              .notification_settings = std::nullopt}));
     respond(
         4, core::TdFunctionKind::GetChatHistory,
@@ -4324,6 +4327,7 @@ TEST_CASE("fetch no-daemon progress stays on stderr while stdout holds only the 
                                              .unread_reaction_count = 0,
                                              .unread_poll_vote_count = 0,
                                              .last_message = std::nullopt,
+                                             .permissions = std::nullopt,
                                              .notification_settings = std::nullopt}));
     const auto cutoff = core::TdMessageSummary{
         .id = 99,
@@ -4419,6 +4423,7 @@ TEST_CASE("msg get and link no-daemon fake boundary preserve strict JSON discipl
                                           .unread_reaction_count = 0,
                                           .unread_poll_vote_count = 0,
                                           .last_message = std::nullopt,
+                                          .permissions = std::nullopt,
                                           .notification_settings = std::nullopt};
     const auto target_message = core::TdMessageSummary{
         .id = 123,
@@ -4528,6 +4533,7 @@ TEST_CASE("resolve no-daemon fake boundary preserves JSON stream discipline",
                                          .unread_reaction_count = 0,
                                          .unread_poll_vote_count = 0,
                                          .last_message = std::nullopt,
+                                         .permissions = std::nullopt,
                                          .notification_settings = std::nullopt}));
     const auto outcome = pending.get();
     CHECK(outcome.exit_code == kOk);

@@ -458,6 +458,106 @@ daemon::WriteKernelHooks archive_hooks(const daemon::write_contract::Plan& propo
     return hooks;
 }
 
+json contact_user() {
+    return {{"id", 77},
+            {"display_name", "Peer"},
+            {"is_bot", false},
+            {"usernames", json::array({"peer"})}};
+}
+
+daemon::write_contract::Arguments contact_arguments() {
+    std::string error;
+    auto value = daemon::write_contract::make_arguments(proto::M6Operation::ContactAdd,
+                                                        {{"user", contact_user()},
+                                                         {"first_name", "Peer"},
+                                                         {"last_name", ""},
+                                                         {"phone_number_sha256", digest('e')},
+                                                         {"share_phone_number", false}},
+                                                        error);
+    INFO(error);
+    REQUIRE(value);
+    return std::move(*value);
+}
+
+daemon::write_contract::Plan contact_plan() {
+    std::string error;
+    auto value = daemon::write_contract::make_plan(proto::M6Operation::ContactAdd, "main",
+                                                   {{"operation", "contact_add"},
+                                                    {"account", "main"},
+                                                    {"tdlib_request", "addContact"},
+                                                    {"user", contact_user()},
+                                                    {"first_name", "Peer"},
+                                                    {"last_name", ""},
+                                                    {"phone_number_sha256", digest('e')},
+                                                    {"share_phone_number", false}},
+                                                   error);
+    INFO(error);
+    REQUIRE(value);
+    return std::move(*value);
+}
+
+daemon::write_contract::StoredTerminal contact_unknown_terminal() {
+    std::string error;
+    auto value = daemon::write_contract::make_error_terminal(
+        proto::M6Operation::ContactAdd, "INTERNAL", "TDLib returned a malformed response",
+        {{"operation", "contact_add"}, {"reason", "malformed_tdlib_response"}}, kGeneric, error);
+    INFO(error);
+    REQUIRE(value);
+    return std::move(*value);
+}
+
+daemon::WriteKernelRequest contact_request(std::string invocation, std::uint64_t sampled_now) {
+    return {proto::M6Operation::ContactAdd,
+            "main",
+            key_hash('6'),
+            std::move(invocation),
+            std::string(kTimestamp),
+            "/tmp/config.toml",
+            std::string(kSnapshot),
+            daemon::AuthoritySource::Request,
+            128,
+            sample_at(sampled_now),
+            false,
+            {},
+            {},
+            {}};
+}
+
+daemon::WriteKernelHooks contact_deferred_hooks(std::atomic<int>& materializations,
+                                                std::atomic<int>& dispatches,
+                                                char fingerprint_digit = '6') {
+    daemon::WriteKernelHooks hooks;
+    hooks.audit_fatal_shutdown = [] {};
+    hooks.lookup_admit = [fingerprint_digit] {
+        return daemon::WriteLookupAdmissionOutcome{
+            daemon::WriteLookupAdmission{fingerprint(fingerprint_digit), {}}};
+    };
+    hooks.materialize = [&materializations](const daemon::WriteLookupAdmission& lookup) {
+        ++materializations;
+        return daemon::WriteMaterializationOutcome{daemon::WriteMaterialization{
+            daemon::WriteAdmission{
+                contact_arguments(), lookup.request_fingerprint, lookup.pass1_source, {}},
+            contact_plan()}};
+    };
+    hooks.post_intent = [](const daemon::write_contract::Plan&, const daemon::WriteAdmission&) {
+        return daemon::WritePostIntentPreparation{};
+    };
+    hooks.revalidate_auth_and_schedule = [](const daemon::write_contract::Plan&) {
+        return daemon::WriteDispatchPreparation{
+            {{"tdlib_function", "addContact"},
+             {"dispatch_token", "0123456789abcdef0123456789abcdef"},
+             {"client_generation", std::uint64_t{7}}}};
+    };
+    hooks.dispatch = [&dispatches](const daemon::write_contract::Plan&,
+                                   const daemon::WriteDispatchPreparation&,
+                                   daemon::WriteDurableObservationSink&) {
+        ++dispatches;
+        return daemon::WriteDispatchOutcome{contact_unknown_terminal(),
+                                            daemon::AccountAuditMutationState::Possible, false};
+    };
+    return hooks;
+}
+
 } // namespace
 
 TEST_CASE("write kernel admits two initial misses but one commit winner",
@@ -750,6 +850,38 @@ TEST_CASE("completed lookup adopts stored plan and pending conflict never confir
         CHECK(confirmations == 0);
         CHECK(dispatches == 1);
     }
+}
+
+TEST_CASE("M6 pending and conflict lookup precede deferred target materialization",
+          "[write-kernel][m6][idempotency][ordering]") {
+    const KernelTree tree;
+    const daemon::WriteKernel kernel(tree.foundation());
+    std::atomic<int> materializations{0};
+    std::atomic<int> dispatches{0};
+    auto first_hooks = contact_deferred_hooks(materializations, dispatches);
+    CHECK(
+        kernel.run(contact_request("00000000000000000000000000000061", 1'700'000'000), first_hooks)
+            .status == daemon::WriteKernelStatus::Completed);
+    CHECK(materializations == 1);
+    CHECK(dispatches == 1);
+
+    auto pending_hooks = contact_deferred_hooks(materializations, dispatches);
+    const auto pending = kernel.run(
+        contact_request("00000000000000000000000000000062", 1'700'000'001), pending_hooks);
+    CHECK(pending.status == daemon::WriteKernelStatus::Pending);
+    REQUIRE(pending.terminal);
+    CHECK((*pending.terminal)["code"] == "IDEMPOTENCY_PENDING");
+    CHECK(materializations == 1);
+    CHECK(dispatches == 1);
+
+    auto conflict_hooks = contact_deferred_hooks(materializations, dispatches, '7');
+    const auto conflict = kernel.run(
+        contact_request("00000000000000000000000000000063", 1'700'000'001), conflict_hooks);
+    CHECK(conflict.status == daemon::WriteKernelStatus::Conflict);
+    REQUIRE(conflict.terminal);
+    CHECK((*conflict.terminal)["code"] == "IDEMPOTENCY_CONFLICT");
+    CHECK(materializations == 1);
+    CHECK(dispatches == 1);
 }
 
 TEST_CASE("write kernel expiry equality and post-intent cancellation preserve ordering",

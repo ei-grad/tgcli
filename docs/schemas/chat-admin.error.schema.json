@@ -1328,79 +1328,34 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "chat_set_title",
-                        "chat_set_photo",
-                        "chat_set_description",
-                        "chat_invite_link",
-                        "chat_promote",
-                        "chat_demote",
-                        "chat_ban",
-                        "chat_unban",
-                        "chat_kick",
-                        "chat_set_permissions"
-                      ]
-                    },
-                    "reason": {
-                      "enum": [
-                        "internal_error",
-                        "malformed_tdlib_response"
-                      ]
-                    }
-                  }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "chat_set_title",
+                    "chat_set_photo",
+                    "chat_set_description",
+                    "chat_invite_link",
+                    "chat_promote",
+                    "chat_demote",
+                    "chat_ban",
+                    "chat_unban",
+                    "chat_kick",
+                    "chat_set_permissions"
+                  ]
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason",
-                    "resource",
-                    "limit"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "chat_set_title",
-                        "chat_set_photo",
-                        "chat_set_description",
-                        "chat_invite_link",
-                        "chat_promote",
-                        "chat_demote",
-                        "chat_ban",
-                        "chat_unban",
-                        "chat_kick",
-                        "chat_set_permissions"
-                      ]
-                    },
-                    "reason": {
-                      "const": "capacity_exhausted"
-                    },
-                    "resource": {
-                      "enum": [
-                        "users",
-                        "topics",
-                        "bytes",
-                        "item_bytes"
-                      ]
-                    },
-                    "limit": {
-                      "type": "integer",
-                      "minimum": 0
-                    }
-                  }
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
                 }
-              ]
+              }
             }
           }
         },
@@ -1836,72 +1791,108 @@
               "type": "string"
             },
             "details": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "account",
-                "action",
-                "target"
-              ],
-              "properties": {
-                "account": {
-                  "$ref": "#/$defs/account"
-                },
-                "action": {
-                  "enum": [
-                    "chat_invite_link",
-                    "chat_ban",
-                    "chat_kick"
-                  ]
-                },
-                "target": {
-                  "oneOf": [
-                    {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "required": [
-                        "operation",
-                        "account",
-                        "tdlib_request",
-                        "chat",
-                        "action",
-                        "invite_link_sha256"
-                      ],
-                      "properties": {
-                        "operation": {
-                          "const": "chat_invite_link"
-                        },
-                        "account": {
-                          "$ref": "#/$defs/account"
-                        },
-                        "tdlib_request": {
-                          "enum": [
-                            "createChatInviteLink",
-                            "revokeChatInviteLink"
-                          ]
-                        },
-                        "chat": {
-                          "$ref": "#/$defs/chat"
-                        },
-                        "action": {
-                          "enum": [
-                            "create",
-                            "revoke"
-                          ]
-                        },
-                        "invite_link_sha256": {
-                          "oneOf": [
-                            {
-                              "type": "null"
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "account",
+                    "action",
+                    "target"
+                  ],
+                  "properties": {
+                    "account": {
+                      "$ref": "#/$defs/account"
+                    },
+                    "action": {
+                      "const": "chat_invite_link"
+                    },
+                    "target": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "operation",
+                            "account",
+                            "tdlib_request",
+                            "chat",
+                            "action",
+                            "invite_link_sha256"
+                          ],
+                          "properties": {
+                            "operation": {
+                              "const": "chat_invite_link"
                             },
-                            {
+                            "account": {
+                              "$ref": "#/$defs/account"
+                            },
+                            "tdlib_request": {
+                              "const": "createChatInviteLink"
+                            },
+                            "chat": {
+                              "$ref": "#/$defs/chat"
+                            },
+                            "action": {
+                              "const": "create"
+                            },
+                            "invite_link_sha256": {
+                              "type": "null"
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "operation",
+                            "account",
+                            "tdlib_request",
+                            "chat",
+                            "action",
+                            "invite_link_sha256"
+                          ],
+                          "properties": {
+                            "operation": {
+                              "const": "chat_invite_link"
+                            },
+                            "account": {
+                              "$ref": "#/$defs/account"
+                            },
+                            "tdlib_request": {
+                              "const": "revokeChatInviteLink"
+                            },
+                            "chat": {
+                              "$ref": "#/$defs/chat"
+                            },
+                            "action": {
+                              "const": "revoke"
+                            },
+                            "invite_link_sha256": {
                               "$ref": "#/$defs/hash"
                             }
-                          ]
+                          }
                         }
-                      }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "account",
+                    "action",
+                    "target"
+                  ],
+                  "properties": {
+                    "account": {
+                      "$ref": "#/$defs/account"
                     },
-                    {
+                    "action": {
+                      "const": "chat_ban"
+                    },
+                    "target": {
                       "type": "object",
                       "additionalProperties": false,
                       "required": [
@@ -1936,8 +1927,25 @@
                           "const": "banned"
                         }
                       }
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "account",
+                    "action",
+                    "target"
+                  ],
+                  "properties": {
+                    "account": {
+                      "$ref": "#/$defs/account"
                     },
-                    {
+                    "action": {
+                      "const": "chat_kick"
+                    },
+                    "target": {
                       "type": "object",
                       "additionalProperties": false,
                       "required": [
@@ -1973,9 +1981,9 @@
                         }
                       }
                     }
-                  ]
+                  }
                 }
-              }
+              ]
             }
           }
         },
@@ -2338,10 +2346,83 @@
                       "enum": [
                         "chat_set_title",
                         "chat_set_photo",
-                        "chat_set_description",
-                        "chat_invite_link",
+                        "chat_set_description"
+                      ]
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "reason": {
+                      "const": "missing_right"
+                    },
+                    "right": {
+                      "const": "change-info"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "reason",
+                    "right"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "const": "chat_invite_link"
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "reason": {
+                      "const": "missing_right"
+                    },
+                    "right": {
+                      "const": "invite-users"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "reason",
+                    "right"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "enum": [
                         "chat_promote",
-                        "chat_demote",
+                        "chat_demote"
+                      ]
+                    },
+                    "chat_id": {
+                      "$ref": "#/$defs/int53"
+                    },
+                    "reason": {
+                      "const": "missing_right"
+                    },
+                    "right": {
+                      "const": "promote-members"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "operation",
+                    "chat_id",
+                    "reason",
+                    "right"
+                  ],
+                  "properties": {
+                    "operation": {
+                      "enum": [
                         "chat_ban",
                         "chat_unban",
                         "chat_kick",
@@ -2355,24 +2436,7 @@
                       "const": "missing_right"
                     },
                     "right": {
-                      "enum": [
-                        "change-info",
-                        "post-messages",
-                        "edit-messages",
-                        "delete-messages",
-                        "invite-users",
-                        "restrict-members",
-                        "pin-messages",
-                        "manage-topics",
-                        "promote-members",
-                        "manage-video-chats",
-                        "post-stories",
-                        "edit-stories",
-                        "delete-stories",
-                        "manage-direct-messages",
-                        "manage-tags",
-                        "anonymous"
-                      ]
+                      "const": "restrict-members"
                     }
                   }
                 },
@@ -2388,16 +2452,11 @@
                   "properties": {
                     "operation": {
                       "enum": [
-                        "chat_set_title",
-                        "chat_set_photo",
-                        "chat_set_description",
-                        "chat_invite_link",
                         "chat_promote",
                         "chat_demote",
                         "chat_ban",
                         "chat_unban",
-                        "chat_kick",
-                        "chat_set_permissions"
+                        "chat_kick"
                       ]
                     },
                     "chat_id": {

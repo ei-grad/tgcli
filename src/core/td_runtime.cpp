@@ -33,7 +33,7 @@ TdFunctionKind td_m6_request_kind(const TdM6Request& request) noexcept {
         [](const auto& value) {
             using Request = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<Request, TdM6GetContactsRequest>) {
-                return TdFunctionKind::GetContacts;
+                return TdFunctionKind::GetM6Contacts;
             } else if constexpr (std::is_same_v<Request, TdM6SearchContactsRequest>) {
                 return TdFunctionKind::SearchContacts;
             } else if constexpr (std::is_same_v<Request, TdM6AddContactRequest>) {
@@ -103,7 +103,7 @@ bool valid_td_m6_chat_folders_update(const TdM6ChatFoldersUpdate& update) noexce
 
 bool td_m6_request_is_read(const TdM6Request& request) noexcept {
     switch (td_m6_request_kind(request)) {
-    case TdFunctionKind::GetContacts:
+    case TdFunctionKind::GetM6Contacts:
     case TdFunctionKind::SearchContacts:
     case TdFunctionKind::GetChatFolder:
     case TdFunctionKind::GetForumTopics:
@@ -1477,6 +1477,9 @@ convert_chat_notification_settings(const td_api::chatNotificationSettings& value
             .disable_mention_notifications = value.disable_mention_notifications_};
 }
 
+std::optional<TdM6ChatPermissions>
+convert_m6_permissions(const td_api::chatPermissions* permissions);
+
 TdChat convert_chat(td_api::chat& chat) {
     TdChat converted{.id = chat.id_,
                      .title = std::move(chat.title_),
@@ -1491,6 +1494,7 @@ TdChat convert_chat(td_api::chat& chat) {
                      .unread_reaction_count = chat.unread_reaction_count_,
                      .unread_poll_vote_count = chat.unread_poll_vote_count_,
                      .last_message = std::nullopt,
+                     .permissions = convert_m6_permissions(chat.permissions_.get()),
                      .notification_settings = std::nullopt};
     converted.positions.reserve(chat.positions_.size());
     for (const auto& position : chat.positions_) {
@@ -3167,6 +3171,7 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
         return convert_current_state_response(object, client_generation);
     case TdFunctionKind::GetContacts:
         return convert_contacts_response(object);
+    case TdFunctionKind::GetM6Contacts:
     case TdFunctionKind::SearchContacts:
         return convert_m6_contacts_response(object);
     case TdFunctionKind::GetChatFolder:
@@ -3288,6 +3293,7 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
     case TdFunctionKind::GetMe:
         return function.get_id() == td_api::getMe::ID;
     case TdFunctionKind::GetContacts:
+    case TdFunctionKind::GetM6Contacts:
         return function.get_id() == td_api::getContacts::ID;
     case TdFunctionKind::SearchContacts:
         return function.get_id() == td_api::searchContacts::ID;

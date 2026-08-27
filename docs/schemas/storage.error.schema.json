@@ -1304,63 +1304,26 @@
               "type": "string"
             },
             "details": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "storage_stats",
-                        "storage_optimize"
-                      ]
-                    },
-                    "reason": {
-                      "enum": [
-                        "internal_error",
-                        "malformed_tdlib_response"
-                      ]
-                    }
-                  }
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "storage_stats",
+                    "storage_optimize"
+                  ]
                 },
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "operation",
-                    "reason",
-                    "resource",
-                    "limit"
-                  ],
-                  "properties": {
-                    "operation": {
-                      "enum": [
-                        "storage_stats",
-                        "storage_optimize"
-                      ]
-                    },
-                    "reason": {
-                      "const": "capacity_exhausted"
-                    },
-                    "resource": {
-                      "enum": [
-                        "users",
-                        "topics",
-                        "bytes",
-                        "item_bytes"
-                      ]
-                    },
-                    "limit": {
-                      "type": "integer",
-                      "minimum": 0
-                    }
-                  }
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
                 }
-              ]
+              }
             }
           }
         },
@@ -1772,25 +1735,23 @@
               "type": "string"
             },
             "details": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "account",
-                "action",
-                "target"
-              ],
-              "properties": {
-                "account": {
-                  "$ref": "#/$defs/account"
-                },
-                "action": {
-                  "enum": [
-                    "storage_optimize"
-                  ]
-                },
-                "target": {
-                  "oneOf": [
-                    {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "account",
+                    "action",
+                    "target"
+                  ],
+                  "properties": {
+                    "account": {
+                      "$ref": "#/$defs/account"
+                    },
+                    "action": {
+                      "const": "storage_optimize"
+                    },
+                    "target": {
                       "type": "object",
                       "additionalProperties": false,
                       "required": [
@@ -1846,9 +1807,9 @@
                         }
                       }
                     }
-                  ]
+                  }
                 }
-              }
+              ]
             }
           }
         }

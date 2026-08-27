@@ -218,7 +218,12 @@ const planFor = (operation) => {
   if (operation === "chat_set_title") return request({ const: "setChatTitle" }, { chat: ref("chat"), title: boundedString(1, 128) });
   if (operation === "chat_set_photo") return request({ const: "setChatPhoto" }, { chat: ref("chat"), delete: { type: "boolean" }, file: nullable(ref("fileSnapshot")) });
   if (operation === "chat_set_description") return request({ const: "setChatDescription" }, { chat: ref("chat"), description: boundedString(0, 255) });
-  if (operation === "chat_invite_link") return request({ enum: ["createChatInviteLink", "revokeChatInviteLink"] }, { chat: ref("chat"), action: { enum: ["create", "revoke"] }, invite_link_sha256: nullable(ref("hash")) });
+  if (operation === "chat_invite_link") return {
+    oneOf: [
+      request({ const: "createChatInviteLink" }, { chat: ref("chat"), action: { const: "create" }, invite_link_sha256: { type: "null" } }),
+      request({ const: "revokeChatInviteLink" }, { chat: ref("chat"), action: { const: "revoke" }, invite_link_sha256: ref("hash") }),
+    ],
+  };
   if (operation === "chat_promote") return request({ const: "setChatMemberStatus" }, { chat: ref("chat"), user: ref("user"), before: ref("memberStatus"), can_manage_chat: { const: true }, rights: array({ enum: adminRights }, 16, 1, true) });
   if (["chat_demote", "chat_ban", "chat_unban", "chat_kick"].includes(operation)) return request({ const: "setChatMemberStatus" }, { chat: ref("chat"), user: ref("user"), before: ref("memberStatus"), after: { const: operation === "chat_demote" ? "member" : operation === "chat_ban" ? "banned" : "left" } });
   if (operation === "chat_set_permissions") return request({ const: "setChatPermissions" }, { chat: ref("chat"), permissions: array({ enum: permissions }, 16, 0, true) });
@@ -266,12 +271,7 @@ for (const [filename, family] of Object.entries(familyOperations)) {
     errorEnvelope("TDLIB_ERROR", detailsOperation({ tdlib_code: ref("int32") })),
     errorEnvelope("RATE_LIMITED", detailsOperation({ tdlib_code: { const: 429 }, retry_after: ref("nonnegativeInt32") })),
     errorEnvelope("NOT_AUTHED", object({ account: ref("account"), state, reason: { enum: ["not_ready", "authorization_lost", "login_required"] } })),
-    errorEnvelope("INTERNAL", {
-      oneOf: [
-        detailsOperation({ reason: { enum: ["internal_error", "malformed_tdlib_response"] } }),
-        detailsOperation({ reason: { const: "capacity_exhausted" }, resource: { enum: ["users", "topics", "bytes", "item_bytes"] }, limit: { type: "integer", minimum: 0 } }),
-      ],
-    }),
+    errorEnvelope("INTERNAL", detailsOperation({ reason: { enum: ["internal_error", "malformed_tdlib_response"] } })),
     errorEnvelope("TIMEOUT", {
       oneOf: [
         detailsOperation({ state: nullable(state) }),
@@ -288,8 +288,13 @@ for (const [filename, family] of Object.entries(familyOperations)) {
   if (mutations.length) {
     branches.push(errorEnvelope("WRITE_DENIED", object({ account: ref("account"), reason: { enum: ["missing_authority", "config_denied", "explicit_denial"] } })));
     if (destructive.length) {
-      const confirmationPlans = destructive.map((name) => planFor(name));
-      branches.push(errorEnvelope("CONFIRMATION_REQUIRED", object({ account: ref("account"), action: { enum: destructive }, target: { oneOf: confirmationPlans } })));
+      branches.push(errorEnvelope("CONFIRMATION_REQUIRED", {
+        oneOf: destructive.map((name) => object({
+          account: ref("account"),
+          action: { const: name },
+          target: planFor(name),
+        })),
+      }));
     }
     if (idempotent.length) {
       const idempotentOperation = { enum: idempotent };
@@ -297,6 +302,20 @@ for (const [filename, family] of Object.entries(familyOperations)) {
       branches.push(errorEnvelope("IDEMPOTENCY_PENDING", object({ operation: idempotentOperation, key_hash: ref("hash"), fingerprint: ref("hash"), invocation_id: { type: "string", pattern: "^[0-9a-f]{32}$" }, temporary_message_ids: { type: "array" } })));
       branches.push(errorEnvelope("IDEMPOTENCY_UNAVAILABLE", object({ account: ref("account"), path: { type: "string" }, reason: { type: "string" } })));
     }
+  }
+  if (filename === "contact.error.schema.json") {
+    branches.push(errorEnvelope("INTERNAL", { oneOf: [
+      object({ operation: { const: "contact_list" }, reason: { const: "capacity_exhausted" }, resource: { const: "users" }, limit: { const: 131072 } }),
+      object({ operation: { const: "contact_search" }, reason: { const: "capacity_exhausted" }, resource: { const: "users" }, limit: { const: 100 } }),
+      object({ operation: { enum: ["contact_list", "contact_search"] }, reason: { const: "capacity_exhausted" }, resource: { const: "bytes" }, limit: { const: 16777216 } }),
+      object({ operation: { enum: ["contact_list", "contact_search"] }, reason: { const: "capacity_exhausted" }, resource: { const: "item_bytes" }, limit: { const: 262144 } }),
+    ] }));
+  } else if (filename === "topic.error.schema.json") {
+    branches.push(errorEnvelope("INTERNAL", { oneOf: [
+      object({ operation: { const: "topic_list" }, reason: { const: "capacity_exhausted" }, resource: { const: "topics" }, limit: { const: 4096 } }),
+      object({ operation: { const: "topic_list" }, reason: { const: "capacity_exhausted" }, resource: { const: "bytes" }, limit: { const: 16777216 } }),
+      object({ operation: { const: "topic_list" }, reason: { const: "capacity_exhausted" }, resource: { const: "item_bytes" }, limit: { const: 262144 } }),
+    ] }));
   }
   const resolverNotFound = [
     object({ selector: { type: "string" } }),
@@ -313,20 +332,36 @@ for (const [filename, family] of Object.entries(familyOperations)) {
   }
   if (notFound.length) branches.push(errorEnvelope("NOT_FOUND", { oneOf: notFound }));
   if (filename !== "storage.error.schema.json") {
-    branches.push(errorEnvelope("AMBIGUOUS", { oneOf: [
-      object({ selector: { type: "string" }, scope: { enum: ["active_dialogs", "local_materialized"] }, candidates: array(ref("chat"), 20), truncated: { type: "boolean" } }),
-      object({ selector: { type: "string" }, candidates: array(ref("user"), 20), truncated: { type: "boolean" } }),
-    ] }));
+    const chatAmbiguity = object({ selector: { type: "string" }, scope: { enum: ["active_dialogs", "local_materialized"] }, candidates: array(ref("chat"), 20), truncated: { type: "boolean" } });
+    const userAmbiguity = object({ selector: { type: "string" }, candidates: array(ref("user"), 20), truncated: { type: "boolean" } });
+    const ambiguity = filename === "contact.error.schema.json"
+      ? userAmbiguity
+      : filename === "chat-admin.error.schema.json"
+        ? { oneOf: [chatAmbiguity, userAmbiguity] }
+        : chatAmbiguity;
+    branches.push(errorEnvelope("AMBIGUOUS", ambiguity));
   }
   if (filename === "folder.error.schema.json") {
-    branches.push(errorEnvelope("PRECONDITION_FAILED", object({ operation: { enum: ["folder_edit", "folder_add_chat", "folder_remove_chat"] }, folder_id: ref("positiveInt32"), chat_id: nullable(ref("int53")), reason: { enum: ["no_change", "already_in_folder", "not_in_folder", "folder_capacity"] } })));
+    branches.push(errorEnvelope("PRECONDITION_FAILED", { oneOf: [
+      object({ operation: { const: "folder_edit" }, folder_id: ref("positiveInt32"), chat_id: { type: "null" }, reason: { const: "no_change" } }),
+      object({ operation: { const: "folder_add_chat" }, folder_id: ref("positiveInt32"), chat_id: ref("int53"), reason: { enum: ["already_in_folder", "folder_capacity"] } }),
+      object({ operation: { const: "folder_remove_chat" }, folder_id: ref("positiveInt32"), chat_id: ref("int53"), reason: { enum: ["not_in_folder", "folder_capacity"] } }),
+    ] }));
   } else if (filename === "topic.error.schema.json") {
-    branches.push(errorEnvelope("PRECONDITION_FAILED", object({ operation: { enum: ["topic_create", "topic_edit", "topic_close", "topic_reopen"] }, chat_id: ref("int53"), topic_id: nullable(ref("positiveInt32")), reason: { enum: ["missing_right", "no_change", "already_closed", "already_open"] } })));
+    branches.push(errorEnvelope("PRECONDITION_FAILED", { oneOf: [
+      object({ operation: { const: "topic_create" }, chat_id: ref("int53"), topic_id: { type: "null" }, reason: { const: "missing_right" } }),
+      object({ operation: { const: "topic_edit" }, chat_id: ref("int53"), topic_id: ref("positiveInt32"), reason: { enum: ["missing_right", "no_change"] } }),
+      object({ operation: { const: "topic_close" }, chat_id: ref("int53"), topic_id: ref("positiveInt32"), reason: { enum: ["missing_right", "already_closed"] } }),
+      object({ operation: { const: "topic_reopen" }, chat_id: ref("int53"), topic_id: ref("positiveInt32"), reason: { enum: ["missing_right", "already_open"] } }),
+    ] }));
     branches.push(errorEnvelope("PAGINATION_INVALID", object({ operation: { const: "topic_list" }, reason: { const: "non_advancing_upstream" } })));
   } else if (filename === "chat-admin.error.schema.json") {
     branches.push(errorEnvelope("PRECONDITION_FAILED", { oneOf: [
-      object({ operation, chat_id: ref("int53"), reason: { const: "missing_right" }, right: { enum: adminRights } }),
-      object({ operation, chat_id: ref("int53"), user_id: ref("positiveInt53"), reason: { enum: ["self_target", "creator", "noneditable_administrator", "wrong_member_state"] } }),
+      object({ operation: { enum: ["chat_set_title", "chat_set_photo", "chat_set_description"] }, chat_id: ref("int53"), reason: { const: "missing_right" }, right: { const: "change-info" } }),
+      object({ operation: { const: "chat_invite_link" }, chat_id: ref("int53"), reason: { const: "missing_right" }, right: { const: "invite-users" } }),
+      object({ operation: { enum: ["chat_promote", "chat_demote"] }, chat_id: ref("int53"), reason: { const: "missing_right" }, right: { const: "promote-members" } }),
+      object({ operation: { enum: ["chat_ban", "chat_unban", "chat_kick", "chat_set_permissions"] }, chat_id: ref("int53"), reason: { const: "missing_right" }, right: { const: "restrict-members" } }),
+      object({ operation: { enum: ["chat_promote", "chat_demote", "chat_ban", "chat_unban", "chat_kick"] }, chat_id: ref("int53"), user_id: ref("positiveInt53"), reason: { enum: ["self_target", "creator", "noneditable_administrator", "wrong_member_state"] } }),
     ] }));
     branches.push(errorEnvelope("INPUT_CHANGED", object({ operation: { const: "chat_set_photo" }, path: { type: "string" } })));
   }

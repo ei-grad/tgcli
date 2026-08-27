@@ -1077,6 +1077,9 @@ TEST_CASE("production converter preserves resolver chat and link metadata",
             auto chat = td_api::make_object<td_api::chat>();
             chat->id_ = -100;
             chat->title_ = "Resolver chat";
+            chat->permissions_ = td_api::make_object<td_api::chatPermissions>();
+            chat->permissions_->can_change_info_ = true;
+            chat->permissions_->can_create_topics_ = true;
             const auto type_id = test_case.type->get_id();
             chat->type_ = std::move(test_case.type);
             auto converted = convert_response(std::move(chat));
@@ -1087,6 +1090,9 @@ TEST_CASE("production converter preserves resolver chat and link metadata",
             CHECK(value->kind == test_case.expected_kind);
             CHECK(value->related_id == test_case.related_id);
             CHECK(value->tdlib_type_id == type_id);
+            REQUIRE(value->permissions.has_value());
+            CHECK(value->permissions->can_change_info);
+            CHECK(value->permissions->can_create_topics);
         }
 
         auto unknown = td_api::make_object<td_api::chat>();

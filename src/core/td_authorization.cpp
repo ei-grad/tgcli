@@ -37,6 +37,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetOption:
     case TdFunctionKind::GetMe:
     case TdFunctionKind::GetContacts:
+    case TdFunctionKind::GetM6Contacts:
     case TdFunctionKind::SearchContacts:
     case TdFunctionKind::GetSavedMessagesTags:
     case TdFunctionKind::SearchSavedMessages:

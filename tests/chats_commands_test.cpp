@@ -202,6 +202,7 @@ tgcli::core::TdChat chat(std::int64_t id, std::int64_t order, tgcli::core::TdCha
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 

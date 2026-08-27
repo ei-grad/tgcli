@@ -397,18 +397,65 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
     };
     try {
         const auto operation = audit_operation(request.operation);
+        const bool deferred_planning = hooks.lookup_admit || hooks.materialize;
         if (!operation ||
             (request.idempotency_key_hash &&
              (!request.operation.idempotent() || absent_idempotency_by_policy)) ||
             (request.recovery_preflight_complete != absent_idempotency_by_policy) ||
             request.request_source_bytes == 0 ||
             request.request_source_bytes > proto::kMaximumRequestSourceBytes ||
-            request.config_path.empty() || !hooks.admit || !hooks.plan ||
+            request.config_path.empty() ||
+            (deferred_planning ? (!hooks.lookup_admit || !hooks.materialize)
+                               : (!hooks.admit || !hooks.plan)) ||
             (!request.dry_run && (!request.sample_now || !hooks.audit_fatal_shutdown))) {
             return audit_fatal();
         }
 
         if (request.dry_run) {
+            if (deferred_planning) {
+                std::optional<WriteLookupAdmissionOutcome> looked_up;
+                try {
+                    looked_up.emplace(hooks.lookup_admit());
+                } catch (...) {
+                    return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+                }
+                if (auto interruption =
+                        post_hook_interruption(request, pre_intent_idempotency(request))) {
+                    return std::move(interruption).value();
+                }
+                if (auto* terminal = std::get_if<json>(&*looked_up)) {
+                    return rejected(std::move(*terminal));
+                }
+                auto lookup = std::get<WriteLookupAdmission>(std::move(*looked_up));
+                std::optional<WriteMaterializationOutcome> materialized;
+                try {
+                    materialized.emplace(hooks.materialize(lookup));
+                } catch (...) {
+                    return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+                }
+                if (auto interruption =
+                        post_hook_interruption(request, pre_intent_idempotency(request))) {
+                    return std::move(interruption).value();
+                }
+                if (auto* terminal = std::get_if<json>(&*materialized)) {
+                    return rejected(std::move(*terminal));
+                }
+                auto operation_state = std::get<WriteMaterialization>(std::move(*materialized));
+                if (operation_state.admission.arguments.operation() != request.operation ||
+                    operation_state.admission.request_fingerprint != lookup.request_fingerprint ||
+                    operation_state.plan.operation() != request.operation ||
+                    operation_state.plan.account() != request.account) {
+                    return audit_fatal();
+                }
+                if (hooks.revalidate_principal) {
+                    auto failure = hooks.revalidate_principal();
+                    if (failure) {
+                        return rejected(std::move(*failure));
+                    }
+                }
+                return {WriteKernelStatus::DryRunPlanned, std::nullopt,
+                        std::move(operation_state.plan)};
+            }
             std::optional<WriteAdmissionOutcome> admitted;
             try {
                 admitted.emplace(hooks.admit());
@@ -443,6 +490,12 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             if (plan.operation() != request.operation || plan.account() != request.account) {
                 return audit_fatal();
             }
+            if (hooks.revalidate_principal) {
+                auto failure = hooks.revalidate_principal();
+                if (failure) {
+                    return rejected(std::move(*failure));
+                }
+            }
             return {WriteKernelStatus::DryRunPlanned, std::nullopt, std::move(plan)};
         }
         if (!foundation_) {
@@ -460,6 +513,7 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                        : foundation_->run_core_gate(epoch, sampled_now, {}, spool_control,
                                                     hooks.spool_hooks);
         };
+        std::optional<WriteLookupAdmission> lookup_admission;
         std::optional<WriteAdmission> admission;
         const auto admit = [&]() -> std::optional<WriteKernelResult> {
             std::optional<WriteAdmissionOutcome> admitted;
@@ -481,8 +535,26 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             }
             return std::nullopt;
         };
+        const auto lookup_admit = [&]() -> std::optional<WriteKernelResult> {
+            std::optional<WriteLookupAdmissionOutcome> looked_up;
+            try {
+                looked_up.emplace(hooks.lookup_admit());
+            } catch (...) {
+                return WriteKernelResult{WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+            }
+            if (auto interruption =
+                    post_hook_interruption(request, pre_intent_idempotency(request))) {
+                return interruption;
+            }
+            if (auto* terminal = std::get_if<json>(&*looked_up)) {
+                return rejected(std::move(*terminal));
+            }
+            lookup_admission.emplace(std::get<WriteLookupAdmission>(std::move(*looked_up)));
+            return std::nullopt;
+        };
         if (request.recovery_preflight_complete) {
-            if (auto failure = admit()) {
+            auto failure = deferred_planning ? lookup_admit() : admit();
+            if (failure) {
                 return std::move(failure).value();
             }
         } else {
@@ -500,40 +572,77 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
             if (gate.status != IdempotencyCoreGateStatus::Clean) {
                 return gate_failure(request, gate, *foundation_);
             }
-            if (auto failure = admit()) {
+            auto failure = deferred_planning ? lookup_admit() : admit();
+            if (failure) {
                 return std::move(failure).value();
             }
-            if (!admission) {
+            if ((!deferred_planning && !admission) || (deferred_planning && !lookup_admission)) {
                 return audit_fatal();
             }
-            const auto& admitted_request = admission.value();
+            const auto& request_fingerprint = deferred_planning
+                                                  ? lookup_admission->request_fingerprint
+                                                  : admission->request_fingerprint;
             if (request.idempotency_key_hash) {
                 const auto& key_hash = request.idempotency_key_hash.value();
-                const auto lookup = IdempotencyStore::lookup(gate.snapshot, key_hash,
-                                                             admitted_request.request_fingerprint);
-                if (auto result = incumbent_result(request, hooks, lookup, key_hash,
-                                                   admitted_request.request_fingerprint)) {
+                const auto lookup =
+                    IdempotencyStore::lookup(gate.snapshot, key_hash, request_fingerprint);
+                if (auto result =
+                        incumbent_result(request, hooks, lookup, key_hash, request_fingerprint)) {
                     return std::move(result).value();
                 }
             }
         }
 
-        if (!admission) {
+        std::optional<write_contract::Plan> proposed_plan_value;
+        if (deferred_planning) {
+            if (!lookup_admission) {
+                return audit_fatal();
+            }
+            std::optional<WriteMaterializationOutcome> materialized;
+            try {
+                materialized.emplace(hooks.materialize(*lookup_admission));
+            } catch (...) {
+                return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+            }
+            if (auto interruption =
+                    post_hook_interruption(request, pre_intent_idempotency(request))) {
+                return std::move(*interruption);
+            }
+            if (auto* terminal = std::get_if<json>(&*materialized)) {
+                return rejected(std::move(*terminal));
+            }
+            auto operation_state = std::get<WriteMaterialization>(std::move(*materialized));
+            if (operation_state.admission.request_fingerprint !=
+                    lookup_admission->request_fingerprint ||
+                operation_state.admission.pass1_source != lookup_admission->pass1_source) {
+                return audit_fatal();
+            }
+            admission.emplace(std::move(operation_state.admission));
+            proposed_plan_value.emplace(std::move(operation_state.plan));
+        } else {
+            if (!admission) {
+                return audit_fatal();
+            }
+            std::optional<WritePlanningOutcome> planning;
+            try {
+                planning.emplace(hooks.plan(*admission));
+            } catch (...) {
+                return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+            }
+            if (auto interruption =
+                    post_hook_interruption(request, pre_intent_idempotency(request))) {
+                return std::move(*interruption);
+            }
+            if (auto* terminal = std::get_if<json>(&*planning)) {
+                return rejected(std::move(*terminal));
+            }
+            proposed_plan_value.emplace(std::get<write_contract::Plan>(std::move(*planning)));
+        }
+        if (!admission || admission->arguments.operation() != request.operation ||
+            !proposed_plan_value) {
             return audit_fatal();
         }
-        std::optional<WritePlanningOutcome> planning;
-        try {
-            planning.emplace(hooks.plan(*admission));
-        } catch (...) {
-            return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
-        }
-        if (auto interruption = post_hook_interruption(request, pre_intent_idempotency(request))) {
-            return std::move(*interruption);
-        }
-        if (auto* terminal = std::get_if<json>(&*planning)) {
-            return rejected(std::move(*terminal));
-        }
-        auto proposed_plan = std::get<write_contract::Plan>(std::move(*planning));
+        auto proposed_plan = std::move(*proposed_plan_value);
         if (proposed_plan.operation() != request.operation ||
             proposed_plan.account() != request.account) {
             return audit_fatal();
@@ -609,6 +718,21 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                     return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
                 }
                 return rejected(std::move(*terminal));
+            }
+        }
+        if (hooks.revalidate_principal) {
+            std::optional<json> failure;
+            try {
+                failure = hooks.revalidate_principal();
+            } catch (...) {
+                return {WriteKernelStatus::Rejected, std::nullopt, std::nullopt};
+            }
+            if (auto interruption =
+                    post_hook_interruption(request, pre_intent_idempotency(request))) {
+                return std::move(*interruption);
+            }
+            if (failure) {
+                return rejected(std::move(*failure));
             }
         }
 
@@ -804,7 +928,8 @@ WriteKernelResult WriteKernel::run(const WriteKernelRequest& request,
                                     proposed_plan.value()["last_message_id"].is_null() &&
                                     post_intent.terminal_without_dispatch->success();
             const bool valid_stop = post_intent.stop_without_dispatch &&
-                                    request.operation == proto::M3Operation::SavedAttach &&
+                                    (request.operation == proto::M3Operation::SavedAttach ||
+                                     request.operation.uses_photo_spool()) &&
                                     !post_intent.complete_without_mutation;
             if (post_intent.complete_without_mutation != valid_noop ||
                 post_intent.stop_without_dispatch != valid_stop) {

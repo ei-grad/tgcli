@@ -225,7 +225,7 @@ class TdClient::Impl {
                                    TdQueryLifetime lifetime = {}) {
         if (!authorization ||
             (function != TdFunctionKind::GetOption && function != TdFunctionKind::GetMe &&
-             function != TdFunctionKind::GetContacts &&
+             function != TdFunctionKind::GetContacts && function != TdFunctionKind::GetM6Contacts &&
              function != TdFunctionKind::SearchContacts &&
              function != TdFunctionKind::GetSavedMessagesTags &&
              function != TdFunctionKind::SearchSavedMessages &&
@@ -307,7 +307,8 @@ class TdClient::Impl {
             generation = current_;
         }
         if (!generation || generation->client_id != authorization->client_id ||
-            generation->number != authorization->client_generation) {
+            generation->number != authorization->client_generation ||
+            auth_state_.load(std::memory_order_acquire) != authorization) {
             return std::nullopt;
         }
         const std::lock_guard lock(generation->m6_cache_mutex);

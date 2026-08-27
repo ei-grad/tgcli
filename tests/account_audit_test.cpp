@@ -740,6 +740,8 @@ TEST_CASE("account audit limits preserve the accepted equations", "[account-audi
     CHECK(kMaximumAuditBytes == 9'348'172'155ULL);
     CHECK(daemon::account_audit_terminal_reservation(daemon::AccountAuditOperation::MsgForward) ==
           4'194'304);
+    CHECK(daemon::account_audit_terminal_reservation(daemon::AccountAuditOperation::ContactAdd) ==
+          32'768);
 }
 
 TEST_CASE("account audit intent factories cover the closed operation enum",

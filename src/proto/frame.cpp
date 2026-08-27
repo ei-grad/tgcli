@@ -171,7 +171,9 @@ bool validate_destructive_details(const json& details, std::string& error) {
         plan && ((action == "logout" && std::holds_alternative<LogoutPlan>(*plan)) ||
                  (action == "account_remove" && std::holds_alternative<AccountRemovePlan>(*plan)) ||
                  (action == "msg_delete" && std::holds_alternative<MsgDeletePlan>(*plan)) ||
-                 (action == "chat_leave" && std::holds_alternative<ChatLeavePlan>(*plan)));
+                 (action == "chat_leave" && std::holds_alternative<ChatLeavePlan>(*plan)) ||
+                 (std::holds_alternative<M6DestructivePlan>(*plan) &&
+                  action == std::get<M6DestructivePlan>(*plan).action()));
     if (!matches) {
         error = "challenge: invalid destructive_confirmation target";
     }

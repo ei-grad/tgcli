@@ -260,7 +260,11 @@ class ResolverRun {
             return take_error_or_stop();
         }
         me_ = *user;
-        principal_ = ResolverPrincipal{.id = user->id, .is_bot = user->is_bot};
+        principal_ = ResolverPrincipal{.id = user->id,
+                                       .is_bot = user->is_bot,
+                                       .client_id = snapshot_->client_id,
+                                       .client_generation = snapshot_->client_generation,
+                                       .auth_sequence = snapshot_->auth_sequence};
         return *principal_;
     }
 

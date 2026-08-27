@@ -41,14 +41,20 @@ bool valid_m6_topic_cursor(const M6TopicCursor& cursor) noexcept {
 M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
                                              const core::TdM6ForumTopics& page) {
     if (complete_ || !valid_m6_topic_cursor(request)) {
-        return {.status = M6TopicScanStatus::StructuralError, .next = std::nullopt};
+        return {.status = M6TopicScanStatus::StructuralError,
+                .next = std::nullopt,
+                .capacity_resource = std::nullopt,
+                .capacity_limit = 0};
     }
     const M6TopicCursor next{.date = page.next_offset_date,
                              .message_id = page.next_offset_message_id,
                              .topic_id = page.next_offset_forum_topic_id};
     if (!valid_m6_topic_cursor(next) || page.total_count < 0 || page.topics.size() > 100 ||
         static_cast<std::size_t>(page.total_count) < page.topics.size()) {
-        return {.status = M6TopicScanStatus::StructuralError, .next = std::nullopt};
+        return {.status = M6TopicScanStatus::StructuralError,
+                .next = std::nullopt,
+                .capacity_resource = std::nullopt,
+                .capacity_limit = 0};
     }
 
     std::vector<nlohmann::json> accepted;
@@ -59,17 +65,39 @@ M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
     std::size_t accepted_bytes = 0;
     for (const auto& topic : page.topics) {
         auto projected = m6_topic_row_json(topic);
+        if (topic_ids_.contains(topic.info.id)) {
+            return {.status = M6TopicScanStatus::NonAdvancing,
+                    .next = std::nullopt,
+                    .capacity_resource = std::nullopt,
+                    .capacity_limit = 0};
+        }
         if (!projected || topic.info.chat_id != chat_id_ || topic.info.id <= 0 ||
-            topic_ids_.contains(topic.info.id) ||
             std::ranges::find(accepted_ids, topic.info.id) != accepted_ids.end() ||
             (previous_order && topic.order > *previous_order)) {
-            return {.status = M6TopicScanStatus::StructuralError, .next = std::nullopt};
+            return {.status = M6TopicScanStatus::StructuralError,
+                    .next = std::nullopt,
+                    .capacity_resource = std::nullopt,
+                    .capacity_limit = 0};
         }
         const auto bytes = projected->dump().size();
-        if (bytes > kMaximumItemBytes || accepted_bytes > kMaximumBytes - bytes ||
-            charged_bytes_ > kMaximumBytes - accepted_bytes - bytes ||
-            items_.size() + accepted.size() >= kMaximumTopics) {
-            return {.status = M6TopicScanStatus::Capacity, .next = std::nullopt};
+        if (bytes > kMaximumItemBytes) {
+            return {.status = M6TopicScanStatus::Capacity,
+                    .next = std::nullopt,
+                    .capacity_resource = M6TopicCapacityResource::ItemBytes,
+                    .capacity_limit = kMaximumItemBytes};
+        }
+        if (accepted_bytes > kMaximumBytes - bytes ||
+            charged_bytes_ > kMaximumBytes - accepted_bytes - bytes) {
+            return {.status = M6TopicScanStatus::Capacity,
+                    .next = std::nullopt,
+                    .capacity_resource = M6TopicCapacityResource::Bytes,
+                    .capacity_limit = kMaximumBytes};
+        }
+        if (items_.size() + accepted.size() >= kMaximumTopics) {
+            return {.status = M6TopicScanStatus::Capacity,
+                    .next = std::nullopt,
+                    .capacity_resource = M6TopicCapacityResource::Topics,
+                    .capacity_limit = kMaximumTopics};
         }
         accepted_bytes += bytes;
         accepted_ids.push_back(topic.info.id);
@@ -80,7 +108,10 @@ M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
     if (!terminal(next)) {
         if (page.topics.empty() || (!terminal(request) && !strictly_after(next, request)) ||
             std::ranges::find(cursors_, next) != cursors_.end()) {
-            return {.status = M6TopicScanStatus::NonAdvancing, .next = std::nullopt};
+            return {.status = M6TopicScanStatus::NonAdvancing,
+                    .next = std::nullopt,
+                    .capacity_resource = std::nullopt,
+                    .capacity_limit = 0};
         }
     }
 
@@ -93,10 +124,16 @@ M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
     previous_order_ = previous_order;
     if (terminal(next)) {
         complete_ = true;
-        return {.status = M6TopicScanStatus::Complete, .next = std::nullopt};
+        return {.status = M6TopicScanStatus::Complete,
+                .next = std::nullopt,
+                .capacity_resource = std::nullopt,
+                .capacity_limit = 0};
     }
     cursors_.push_back(next);
-    return {.status = M6TopicScanStatus::Accepted, .next = next};
+    return {.status = M6TopicScanStatus::Accepted,
+            .next = next,
+            .capacity_resource = std::nullopt,
+            .capacity_limit = 0};
 }
 
 const std::vector<nlohmann::json>& M6TopicAccumulator::items() const noexcept {

@@ -59,6 +59,7 @@ core::TdValue current_stream_state() {
                  .unread_reaction_count = 0,
                  .unread_poll_vote_count = 0,
                  .last_message = std::nullopt,
+                 .permissions = std::nullopt,
                  .notification_settings = std::nullopt}}));
     return core::TdValue::from(std::move(state));
 }
@@ -283,6 +284,7 @@ TEST_CASE("live incomplete new chat keeps activation armed through its FIFO barr
                  .unread_reaction_count = 0,
                  .unread_poll_vote_count = 0,
                  .last_message = std::nullopt,
+                 .permissions = std::nullopt,
                  .notification_settings = std::nullopt}});
     incomplete.set_receive_event_metadata(3, core::TdEventClock::time_point{});
     observer->on_update(incomplete);
@@ -592,6 +594,7 @@ TEST_CASE("stream status readers observe coherent snapshots during live publicat
                  .unread_reaction_count = 0,
                  .unread_poll_vote_count = 0,
                  .last_message = std::nullopt,
+                 .permissions = std::nullopt,
                  .notification_settings = std::nullopt}}));
     auto state = core::TdValue::from(std::move(base));
     state.set_receive_event_metadata(1, core::TdEventClock::time_point{});

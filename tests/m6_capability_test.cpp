@@ -1,6 +1,7 @@
 #include "daemon/m6_capability.hpp"
 
 #include <array>
+#include <cstddef>
 #include <optional>
 
 #include <catch2/catch_test_macros.hpp>
@@ -37,6 +38,61 @@ core::TdM6MemberStatus member() {
     return status;
 }
 
+void enable_right(core::TdM6AdminRights& rights, std::size_t index) {
+    switch (index) {
+    case 0:
+        rights.can_change_info = true;
+        break;
+    case 1:
+        rights.can_post_messages = true;
+        break;
+    case 2:
+        rights.can_edit_messages = true;
+        break;
+    case 3:
+        rights.can_delete_messages = true;
+        break;
+    case 4:
+        rights.can_invite_users = true;
+        break;
+    case 5:
+        rights.can_restrict_members = true;
+        break;
+    case 6:
+        rights.can_pin_messages = true;
+        break;
+    case 7:
+        rights.can_manage_topics = true;
+        break;
+    case 8:
+        rights.can_promote_members = true;
+        break;
+    case 9:
+        rights.can_manage_video_chats = true;
+        break;
+    case 10:
+        rights.can_post_stories = true;
+        break;
+    case 11:
+        rights.can_edit_stories = true;
+        break;
+    case 12:
+        rights.can_delete_stories = true;
+        break;
+    case 13:
+        rights.can_manage_direct_messages = true;
+        break;
+    case 14:
+        rights.can_manage_tags = true;
+        break;
+    case 15:
+        rights.is_anonymous = true;
+        break;
+    default:
+        break;
+    }
+}
+
 TEST_CASE("M6 administrator snapshots enforce the complete chat-kind applicability matrix",
           "[m6][capability]") {
     auto status = administrator();
@@ -54,6 +110,39 @@ TEST_CASE("M6 administrator snapshots enforce the complete chat-kind applicabili
     status = administrator();
     status.rights.can_manage_chat = false;
     CHECK_FALSE(daemon::valid_m6_member_status(status, daemon::M6ChatKind::BasicGroup));
+}
+
+TEST_CASE("M6 all native administrator rights are validated against every chat kind",
+          "[m6][capability][matrix]") {
+    constexpr std::array<std::array<bool, 16>, 4> applicable{{
+        {{true, false, false, true, true, true, true, false, true, true, false, false, false, false,
+          true, false}},
+        {{true, false, false, true, true, true, true, true, true, true, true, true, true, false,
+          true, true}},
+        {{true, false, false, true, true, true, true, false, true, true, true, true, true, false,
+          true, true}},
+        {{true, true, true, true, true, true, false, false, true, true, true, true, true, true,
+          false, false}},
+    }};
+    for (std::size_t kind_index = 0; kind_index < applicable.size(); ++kind_index) {
+        const auto kind = static_cast<daemon::M6ChatKind>(kind_index);
+        const auto& applicable_rights = applicable.at(kind_index);
+        for (std::size_t right = 0; right < applicable_rights.size(); ++right) {
+            CAPTURE(kind_index, right);
+            core::TdM6MemberStatus status;
+            status.kind = core::TdM6MemberStatusKind::Administrator;
+            status.rights.can_manage_chat = true;
+            enable_right(status.rights, right);
+            CHECK(daemon::valid_m6_member_status(status, kind) == applicable_rights.at(right));
+        }
+        core::TdM6MemberStatus manager;
+        manager.kind = core::TdM6MemberStatusKind::Administrator;
+        manager.rights.can_manage_chat = true;
+        CHECK(daemon::valid_m6_member_status(manager, kind));
+        manager.rights.can_manage_chat = false;
+        manager.rights.can_change_info = true;
+        CHECK_FALSE(daemon::valid_m6_member_status(manager, kind));
+    }
 }
 
 TEST_CASE("M6 caller authority is explicit for creator administrator and member",

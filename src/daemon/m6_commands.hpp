@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/td_client.hpp"
+#include "daemon/resolver.hpp"
 #include "proto/frame.hpp"
 #include "proto/operation.hpp"
 
@@ -27,7 +28,7 @@ bool run_session_recovery_preflight(
 std::optional<core::TdM6ChatFoldersUpdate>
 m6_wait_for_folders(core::TdClient& client,
                     const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
-                    RequestSession& session);
+                    const ResolverCaller& caller, RequestSession& session);
 
 class M6Coordinator final {
   public:

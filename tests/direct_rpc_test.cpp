@@ -611,3 +611,13 @@ TEST_CASE("invite request-sent preserves correlation metadata without changing t
     CHECK(result->status == tgcli::daemon::DirectJoinStatus::RequestSent);
     CHECK(result->chat_id == -1001);
 }
+
+TEST_CASE("session termination direct boundary accepts the full signed int64 domain",
+          "[daemon][direct][session][fake-boundary]") {
+    for (const auto session_id : {std::numeric_limits<std::int64_t>::min(), std::int64_t{0},
+                                  std::numeric_limits<std::int64_t>::max()}) {
+        CAPTURE(session_id);
+        CHECK(tgcli::core::valid_td_direct_request(
+            tgcli::core::TdTerminateSessionRequest{session_id}));
+    }
+}

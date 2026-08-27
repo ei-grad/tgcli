@@ -107,7 +107,7 @@ TEST_CASE("production M6 converters retain strict folder topic member invite and
         users->total_count_ = 2;
         users->user_ids_ = {7, 8};
         auto value = detail::convert_production_m6_response_for_test(
-            TdFunctionKind::SearchContacts, TdValue::from(NativeObjectPtr{std::move(users)}));
+            TdFunctionKind::GetM6Contacts, TdValue::from(NativeObjectPtr{std::move(users)}));
         const auto* response = value.get_if<TdM6Response>();
         REQUIRE(response != nullptr);
         REQUIRE(std::get_if<TdM6Users>(response) != nullptr);

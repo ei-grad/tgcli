@@ -57,8 +57,11 @@ struct SessionDispatchState {
 
 struct M6WriteDefinition {
     proto::M6Operation operation = proto::M6Operation::ContactAdd;
+    ResolverPrincipal principal;
     std::function<WriteAdmissionOutcome()> admit;
     std::function<WritePlanningOutcome()> plan;
+    std::function<WriteLookupAdmissionOutcome()> lookup_admit;
+    std::function<WriteMaterializationOutcome(const WriteLookupAdmission&)> materialize;
     std::function<std::optional<write_contract::StoredTerminal>(const write_contract::Plan&,
                                                                 const core::TdM6Response&)>
         success;
@@ -67,30 +70,6 @@ struct M6WriteDefinition {
                                              std::string_view invocation_id)>
         post_intent;
     std::shared_ptr<M6DispatchState> dispatch;
-};
-
-struct ContactMutationState {
-    ContactMutationState(ResolverPrincipal principal_value, std::optional<UserIdentity> user_value,
-                         core::TdUserSummary record_value,
-                         std::shared_ptr<M6DispatchState> dispatch_value)
-        : principal(principal_value), user(std::move(user_value)), record(std::move(record_value)),
-          dispatch(std::move(dispatch_value)) {}
-
-    ContactMutationState(const ContactMutationState&) = delete;
-    ContactMutationState& operator=(const ContactMutationState&) = delete;
-    ContactMutationState(ContactMutationState&&) = delete;
-    ContactMutationState& operator=(ContactMutationState&&) = delete;
-
-    ResolverPrincipal principal;
-    std::optional<UserIdentity> user;
-    std::optional<core::TdUserSummary> record;
-    std::shared_ptr<M6DispatchState> dispatch;
-
-    ~ContactMutationState() {
-        if (record) {
-            secure::wipe(record->phone_number);
-        }
-    }
 };
 
 struct PreparedM6Mutation {
@@ -127,6 +106,13 @@ json internal(proto::M6Operation operation) {
     return terminal("INTERNAL", "internal error",
                     {{"operation", operation_name(operation)}, {"reason", "internal_error"}},
                     kGeneric);
+}
+
+json malformed(proto::M6Operation operation) {
+    return terminal(
+        "INTERNAL", "TDLib returned a malformed response",
+        {{"operation", operation_name(operation)}, {"reason", "malformed_tdlib_response"}},
+        kGeneric);
 }
 
 json not_authed(std::string_view account, core::AuthState state) {
@@ -473,7 +459,10 @@ void execute_m6_write(
                       kDenied);
         return;
     }
-    if (!definition.admit || !definition.plan || !definition.success || !definition.dispatch) {
+    const bool deferred_planning = definition.lookup_admit || definition.materialize;
+    if ((deferred_planning ? (!definition.lookup_admit || !definition.materialize)
+                           : (!definition.admit || !definition.plan)) ||
+        !definition.success || !definition.dispatch) {
         session.error(
             "INTERNAL", "write operation is incomplete",
             {{"operation", operation_name(definition.operation)}, {"reason", "internal_error"}},
@@ -487,7 +476,11 @@ void execute_m6_write(
                                 std::move(invocation), config_store.path());
     WriteKernelHooks hooks;
     hooks.admit = std::move(definition.admit);
-    hooks.plan = [plan = std::move(definition.plan)](const WriteAdmission&) { return plan(); };
+    hooks.plan = definition.plan
+                     ? [plan = std::move(definition.plan)](const WriteAdmission&) { return plan(); }
+                     : std::function<WritePlanningOutcome(const WriteAdmission&)>{};
+    hooks.lookup_admit = std::move(definition.lookup_admit);
+    hooks.materialize = std::move(definition.materialize);
     hooks.confirm =
         definition.confirm ? std::move(definition.confirm) : [](const write_contract::Plan&, bool) {
             return WriteConfirmationOutcome{.status = WriteConfirmationStatus::ConfirmedYes,
@@ -497,6 +490,22 @@ void execute_m6_write(
                                                 std::string_view expected_account,
                                                 const config::MutationControl& control) {
         return config_store.verify_write_grant(expected, expected_account, control);
+    };
+    const auto principal = definition.principal;
+    hooks.revalidate_principal = [&client, account_value = std::string(account), principal,
+                                  coordinator_hooks]() -> std::optional<json> {
+        if (coordinator_hooks && coordinator_hooks->before_principal_cas) {
+            coordinator_hooks->before_principal_cas();
+        }
+        const auto current = client.auth_state();
+        if (current && current->data.state == core::AuthState::Ready &&
+            current->client_id == principal.client_id &&
+            current->client_generation == principal.client_generation &&
+            current->auth_sequence == principal.auth_sequence) {
+            return std::nullopt;
+        }
+        return not_authed(account_value,
+                          current != nullptr ? current->data.state : core::AuthState::Unknown);
     };
     if (definition.post_intent) {
         hooks.post_intent =
@@ -512,7 +521,11 @@ void execute_m6_write(
     const auto dispatch = definition.dispatch;
     hooks.revalidate_auth_and_schedule =
         [&client, &session, &request, dispatch, operation, account_value = std::string(account),
-         coordinator_hooks](const write_contract::Plan& plan) -> WriteDispatchAdmissionOutcome {
+         coordinator_hooks,
+         principal](const write_contract::Plan& plan) -> WriteDispatchAdmissionOutcome {
+        if (coordinator_hooks && coordinator_hooks->before_dispatch_principal_cas) {
+            coordinator_hooks->before_dispatch_principal_cas();
+        }
         if (deadline_expired(session.deadline())) {
             return stored_from_terminal(
                 operation, timeout(operation, "preflight",
@@ -522,7 +535,10 @@ void execute_m6_write(
             return WriteDispatchStopped{};
         }
         auto current = client.auth_state();
-        if (!current || current->data.state != core::AuthState::Ready) {
+        if (!current || current->data.state != core::AuthState::Ready ||
+            current->client_id != principal.client_id ||
+            current->client_generation != principal.client_generation ||
+            current->auth_sequence != principal.auth_sequence) {
             return stored_from_terminal(operation,
                                         not_authed(account_value, current != nullptr
                                                                       ? current->data.state
@@ -581,7 +597,7 @@ void execute_m6_write(
                     auto terminal_value =
                         response != nullptr ? success(plan, *response) : std::nullopt;
                     if (!terminal_value) {
-                        return {.terminal = stored_from_terminal(operation, internal(operation)),
+                        return {.terminal = stored_from_terminal(operation, malformed(operation)),
                                 .mutation_state = AccountAuditMutationState::Possible,
                                 .mutation_confirmed = false};
                     }
@@ -614,7 +630,7 @@ void execute_m6_write(
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 } else {
-                    return {.terminal = stored_from_terminal(operation, internal(operation)),
+                    return {.terminal = stored_from_terminal(operation, malformed(operation)),
                             .mutation_state = audit_state(outcome.mutation_state),
                             .mutation_confirmed = false};
                 }
@@ -639,22 +655,27 @@ void execute_m6_write(
     }
 }
 
+using M6DeferredPlanner =
+    std::function<std::optional<PreparedM6Mutation>(std::shared_ptr<PreparedSource>)>;
+using M6SourceAdmission = std::function<std::variant<std::shared_ptr<PreparedSource>, json>()>;
+
 void execute_prepared_m6( // NOLINT(readability-function-cognitive-complexity): closed transaction.
     core::TdClient& client, std::string_view account, config::Store& config_store,
     const std::shared_ptr<IdempotencyFoundation>& foundation,
     const std::function<void()>& audit_fatal_shutdown,
     const std::shared_ptr<const testing::WriteCoordinatorHooks>& coordinator_hooks,
     const proto::Request& request, RequestSession& session, AuthoritySource authority,
-    PreparedM6Mutation prepared) {
-    const auto operation = prepared.operation;
-    auto state = std::make_shared<PreparedM6Mutation>(std::move(prepared));
+    proto::M6Operation operation, ResolverPrincipal principal, M6DeferredPlanner planner,
+    const M6SourceAdmission& source_admission = {}) {
+    auto state = std::make_shared<std::optional<PreparedM6Mutation>>();
     auto dispatch = std::make_shared<M6DispatchState>();
     M6WriteDefinition definition;
     definition.operation = operation;
+    definition.principal = principal;
     definition.dispatch = dispatch;
     const auto* identity = proto::m6_operation_identity(operation);
     if (identity != nullptr && identity->tier == proto::M6Tier::Destructive) {
-        definition.confirm = [&session](const write_contract::Plan& plan, bool) {
+        definition.confirm = [&session, operation](const write_contract::Plan& plan, bool) {
             const auto rejected = [&] {
                 return terminal("CONFIRMATION_REQUIRED", "destructive operation was not confirmed",
                                 {{"account", plan.account()},
@@ -684,7 +705,8 @@ void execute_prepared_m6( // NOLINT(readability-function-cognitive-complexity): 
             }
             if (answer.status() == ChallengeStatus::TimedOut) {
                 return WriteConfirmationOutcome{.status = WriteConfirmationStatus::TimedOut,
-                                                .terminal = std::nullopt};
+                                                .terminal =
+                                                    timeout(operation, "preflight", "not_created")};
             }
             if (answer.status() == ChallengeStatus::Cancelled ||
                 answer.status() == ChallengeStatus::Disconnected ||
@@ -696,115 +718,142 @@ void execute_prepared_m6( // NOLINT(readability-function-cognitive-complexity): 
                                             .terminal = rejected()};
         };
     }
-    definition.admit = [state, account_value = std::string(account)]() -> WriteAdmissionOutcome {
-        auto fingerprint = m6_fingerprint(account_value, state->principal, state->operation,
-                                          state->fingerprint_payload);
-        std::string error;
-        auto arguments = write_contract::make_arguments(state->operation, state->arguments, error);
-        if (!fingerprint || !arguments) {
-            return internal(state->operation);
+    definition.lookup_admit = [operation, principal, request_args = request.args, source_admission,
+                               account_value =
+                                   std::string(account)]() mutable -> WriteLookupAdmissionOutcome {
+        std::shared_ptr<PreparedSource> source;
+        json fingerprint_payload = request_args;
+        if (source_admission) {
+            auto admitted_source = source_admission();
+            if (auto* failure = std::get_if<json>(&admitted_source)) {
+                return std::move(*failure);
+            }
+            source = std::get<std::shared_ptr<PreparedSource>>(std::move(admitted_source));
+            if (!source) {
+                return internal(operation);
+            }
+            fingerprint_payload = {{"chat", request_args["chat"]},
+                                   {"file", file_snapshot_json(source->snapshot())}};
         }
-        return WriteAdmission{.arguments = std::move(*arguments),
-                              .request_fingerprint = *fingerprint,
-                              .pass1_source = state->pass1_source,
-                              .invite_redactions = {}};
+        auto fingerprint =
+            m6_fingerprint(account_value, principal, operation, std::move(fingerprint_payload));
+        if (!fingerprint) {
+            return internal(operation);
+        }
+        return WriteLookupAdmission{.request_fingerprint = *fingerprint,
+                                    .pass1_source = std::move(source)};
     };
-    definition.plan = [state, dispatch,
-                       account_value = std::string(account)]() mutable -> WritePlanningOutcome {
-        std::string error;
-        auto plan = write_contract::make_plan(state->operation, account_value, state->plan, error);
-        if (!plan) {
-            return internal(state->operation);
+    definition.materialize =
+        [state, dispatch, planner = std::move(planner), principal, operation,
+         account_value = std::string(account)](
+            const WriteLookupAdmission& lookup) mutable -> WriteMaterializationOutcome {
+        auto prepared = planner(lookup.pass1_source);
+        if (!prepared) {
+            return json();
         }
-        dispatch->request = std::move(state->request);
-        return std::move(*plan);
+        if (prepared->operation != operation || prepared->principal != principal ||
+            prepared->pass1_source != lookup.pass1_source) {
+            return internal(operation);
+        }
+        std::string error;
+        auto arguments = write_contract::make_arguments(operation, prepared->arguments, error);
+        auto plan = write_contract::make_plan(operation, account_value, prepared->plan, error);
+        if (!arguments || !plan) {
+            return internal(operation);
+        }
+        dispatch->request = std::move(prepared->request);
+        state->emplace(std::move(*prepared));
+        return WriteMaterialization{.admission = {.arguments = std::move(*arguments),
+                                                  .request_fingerprint = lookup.request_fingerprint,
+                                                  .pass1_source = lookup.pass1_source,
+                                                  .invite_redactions = {}},
+                                    .plan = std::move(*plan)};
     };
     definition.success =
         [state](
             const write_contract::Plan& plan,
             const core::TdM6Response& response) -> std::optional<write_contract::StoredTerminal> {
-        if (!state->result) {
+        if (!*state || !state->value().result) {
             return std::nullopt;
         }
-        auto materialized = state->result(response, plan.value());
-        return materialized ? stored_result(state->operation, std::move(*materialized))
+        auto materialized = state->value().result(response, plan.value());
+        return materialized ? stored_result(state->value().operation, std::move(*materialized))
                             : std::nullopt;
     };
-    if (state->pass1_source) {
-        definition.post_intent = [state, dispatch, foundation, coordinator_hooks, &session](
-                                     const write_contract::Plan& plan,
-                                     const WriteAdmission& admission,
-                                     std::string_view invocation_id) -> WritePostIntentPreparation {
-            if (!foundation || !admission.pass1_source ||
-                state->operation != proto::M6Operation::ChatSetPhoto || !dispatch->request) {
-                throw std::logic_error("M6 photo spool state is incomplete");
-            }
-            const FileSpoolControl control{session.deadline().expires_at,
-                                           session.cancellation_token(),
-                                           [&session] { return session.cancellation_requested(); }};
-            const auto spool_hooks = coordinator_hooks
-                                         ? coordinator_hooks->file_spool
-                                         : std::shared_ptr<const testing::FileSpoolHooks>{};
-            auto created =
-                create_spool_file(*admission.pass1_source, foundation->state_directory(),
-                                  invocation_id, foundation->expected_uid(), control, spool_hooks);
-            if (auto* failure = std::get_if<FileSpoolError>(&created)) {
-                if (failure->cleanup_reference) {
-                    auto cleanup = cleanup_spool_file(foundation->state_directory(),
-                                                      *failure->cleanup_reference,
-                                                      foundation->expected_uid(), {}, spool_hooks);
-                    if (std::holds_alternative<FileSpoolError>(cleanup)) {
-                        throw std::runtime_error("M6 photo spool cleanup failed");
-                    }
+    definition.post_intent = [state, dispatch, foundation, coordinator_hooks, &session](
+                                 const write_contract::Plan& plan, const WriteAdmission& admission,
+                                 std::string_view invocation_id) -> WritePostIntentPreparation {
+        if (!*state || !state->value().pass1_source) {
+            return {};
+        }
+        if (!foundation || !admission.pass1_source ||
+            state->value().operation != proto::M6Operation::ChatSetPhoto || !dispatch->request) {
+            throw std::logic_error("M6 photo spool state is incomplete");
+        }
+        const FileSpoolControl control{session.deadline().expires_at, session.cancellation_token(),
+                                       [&session] { return session.cancellation_requested(); }};
+        const auto spool_hooks = coordinator_hooks
+                                     ? coordinator_hooks->file_spool
+                                     : std::shared_ptr<const testing::FileSpoolHooks>{};
+        auto created =
+            create_spool_file(*admission.pass1_source, foundation->state_directory(), invocation_id,
+                              foundation->expected_uid(), control, spool_hooks);
+        if (auto* failure = std::get_if<FileSpoolError>(&created)) {
+            if (failure->cleanup_reference) {
+                auto cleanup =
+                    cleanup_spool_file(foundation->state_directory(), *failure->cleanup_reference,
+                                       foundation->expected_uid(), {}, spool_hooks);
+                if (std::holds_alternative<FileSpoolError>(cleanup)) {
+                    throw std::runtime_error("M6 photo spool cleanup failed");
                 }
-                json value = internal(state->operation);
-                bool stopped = false;
-                const auto source_path = plan.value()["file"].value("path", std::string{});
-                switch (failure->kind) {
-                case FileSpoolErrorKind::TimedOut:
-                    value = timeout(state->operation, "preflight", "removed");
-                    break;
-                case FileSpoolErrorKind::Cancelled:
-                    value = shutdown_terminal();
-                    stopped = true;
-                    break;
-                case FileSpoolErrorKind::InputChanged:
-                case FileSpoolErrorKind::SourceUnavailable:
-                    value = terminal(
-                        "INPUT_CHANGED", "input file changed while being read",
-                        {{"operation", operation_name(state->operation)}, {"path", source_path}},
-                        kGeneric);
-                    break;
-                case FileSpoolErrorKind::DurabilityFailure:
-                case FileSpoolErrorKind::Contradiction:
-                    value =
-                        terminal("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
-                                 {{"operation", operation_name(state->operation)},
+            }
+            json value = internal(state->value().operation);
+            bool stopped = false;
+            const auto source_path = plan.value()["file"].value("path", std::string{});
+            switch (failure->kind) {
+            case FileSpoolErrorKind::TimedOut:
+                value = timeout(state->value().operation, "preflight", "removed");
+                break;
+            case FileSpoolErrorKind::Cancelled:
+                value = shutdown_terminal();
+                stopped = true;
+                break;
+            case FileSpoolErrorKind::InputChanged:
+            case FileSpoolErrorKind::SourceUnavailable:
+                value = terminal("INPUT_CHANGED", "input file changed while being read",
+                                 {{"operation", operation_name(state->value().operation)},
+                                  {"path", source_path}},
+                                 kGeneric);
+                break;
+            case FileSpoolErrorKind::DurabilityFailure:
+            case FileSpoolErrorKind::Contradiction:
+                value = terminal("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
+                                 {{"operation", operation_name(state->value().operation)},
                                   {"path", source_path},
                                   {"reason", spool_reason_name(failure->durability_reason.value_or(
                                                  DurabilityReason::Contradiction))}},
                                  kGeneric);
-                    break;
-                case FileSpoolErrorKind::InvalidInput:
-                    break;
-                }
-                return {.spool = std::nullopt,
-                        .terminal_without_dispatch = stored_from_terminal(state->operation, value),
-                        .complete_without_mutation = false,
-                        .stop_without_dispatch = stopped};
+                break;
+            case FileSpoolErrorKind::InvalidInput:
+                break;
             }
-            auto& spool = std::get<CreatedSpool>(created);
-            auto* photo = std::get_if<core::TdM6SetChatPhotoRequest>(&*dispatch->request);
-            if (photo == nullptr || photo->local_path) {
-                throw std::logic_error("M6 photo request state is invalid");
-            }
-            photo->local_path = spool.local_path;
-            return {.spool = std::move(spool.reference),
-                    .terminal_without_dispatch = std::nullopt,
+            return {.spool = std::nullopt,
+                    .terminal_without_dispatch =
+                        stored_from_terminal(state->value().operation, value),
                     .complete_without_mutation = false,
-                    .stop_without_dispatch = false};
-        };
-    }
+                    .stop_without_dispatch = stopped};
+        }
+        auto& spool = std::get<CreatedSpool>(created);
+        auto* photo = std::get_if<core::TdM6SetChatPhotoRequest>(&*dispatch->request);
+        if (photo == nullptr || photo->local_path) {
+            throw std::logic_error("M6 photo request state is invalid");
+        }
+        photo->local_path = spool.local_path;
+        return {.spool = std::move(spool.reference),
+                .terminal_without_dispatch = std::nullopt,
+                .complete_without_mutation = false,
+                .stop_without_dispatch = false};
+    };
     execute_m6_write(client, account, config_store, foundation, audit_fatal_shutdown,
                      coordinator_hooks, request, session, authority, std::move(definition));
 }
@@ -851,46 +900,74 @@ std::optional<ResolvedChatTarget> resolve_chat(ResolverConsumer& resolver, std::
     return std::get<ResolvedChatTarget>(outcome);
 }
 
+bool m6_read_stopped(const ReadyReadResult& outcome, core::TdClient& client,
+                     std::string_view account, const ResolverCaller& caller,
+                     RequestSession& session) {
+    switch (outcome.status) {
+    case ReadyReadStatus::Response:
+        return false;
+    case ReadyReadStatus::AuthorizationLost:
+        emit_resolver_error(
+            ResolverError{ResolverNotAuthenticatedError{
+                .account = std::string(account),
+                .state = outcome.snapshot ? outcome.snapshot->data.state : core::AuthState::Unknown,
+                .reason = ResolverNotAuthedReason::AuthorizationLost}},
+            session, caller);
+        return true;
+    case ReadyReadStatus::TimedOut: {
+        const auto current = client.auth_state();
+        emit_resolver_error(
+            ResolverError{ResolverTimeoutError{.operation = caller,
+                                               .state = current ? std::optional{current->data.state}
+                                                                : std::nullopt}},
+            session, caller);
+        return true;
+    }
+    case ReadyReadStatus::Cancelled:
+        if (session.shutdown_requested()) {
+            emit_terminal(session, shutdown_terminal());
+        }
+        return true;
+    case ReadyReadStatus::Failed:
+        emit_resolver_error(ResolverError{ResolverInternalError{.operation = caller}}, session,
+                            caller);
+        return true;
+    }
+    return true;
+}
+
 std::optional<core::TdM6Response>
 planning_read(ResolverConsumer& resolver, core::TdClient& client, std::string_view account,
               proto::M6Operation operation, core::TdM6Request request, RequestSession& session) {
     const ResolverCaller caller{operation};
+    const auto* member_request = std::get_if<core::TdM6GetChatMemberRequest>(&request);
+    const bool member_call = member_request != nullptr;
+    const auto member_chat_id = member_request != nullptr ? member_request->chat_id : 0;
+    const auto member_user_id = member_request != nullptr ? member_request->user_id : 0;
     auto outcome = resolver.read_target(
         [&](const auto& current) { return client.m6_read(current, std::move(request)); });
-    switch (outcome.status) {
-    case ReadyReadStatus::Response:
-        break;
-    case ReadyReadStatus::AuthorizationLost:
-        emit_resolver_error(ResolverError{ResolverNotAuthenticatedError{
-                                .account = std::string(account),
-                                .state = outcome.snapshot != nullptr ? outcome.snapshot->data.state
-                                                                     : core::AuthState::Unknown,
-                                .reason = ResolverNotAuthedReason::AuthorizationLost}},
-                            session, caller);
-        return std::nullopt;
-    case ReadyReadStatus::TimedOut: {
-        const auto current = client.auth_state();
-        emit_resolver_error(
-            ResolverError{ResolverTimeoutError{
-                .operation = caller,
-                .state = current != nullptr ? std::optional{current->data.state} : std::nullopt}},
-            session, caller);
-        return std::nullopt;
-    }
-    case ReadyReadStatus::Failed:
-        emit_resolver_error(ResolverError{ResolverInternalError{.operation = caller}}, session,
-                            caller);
-        return std::nullopt;
-    case ReadyReadStatus::Cancelled:
+    if (m6_read_stopped(outcome, client, account, caller, session)) {
         return std::nullopt;
     }
     if (const auto* error = outcome.value.get_if<core::TdError>()) {
+        if (member_call && error->code == 400 && error->message == "Member not found") {
+            session.error("NOT_FOUND", "member was not found",
+                          {{"operation", operation_name(operation)},
+                           {"chat_id", member_chat_id},
+                           {"user_id", member_user_id}},
+                          kNotFound);
+            return std::nullopt;
+        }
         emit_terminal(session, td_error_terminal(operation, *error));
         return std::nullopt;
     }
     const auto* response = outcome.value.get_if<core::TdM6Response>();
     if (response == nullptr) {
-        emit_terminal(session, internal(operation));
+        emit_terminal(session, malformed(operation));
+        return std::nullopt;
+    }
+    if (std::get_if<core::TdM6ConversionError>(response) != nullptr) {
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
     return *response;
@@ -961,6 +1038,12 @@ std::optional<PreparedM6Mutation> prepare_folder_create(const proto::Request& re
         if (!target) {
             return std::nullopt;
         }
+        if (!target->observed_chat || target->observed_chat->kind == core::TdChatKind::Secret ||
+            target->observed_chat->kind == core::TdChatKind::Unknown) {
+            session.error("USAGE", "chat does not support folders",
+                          {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
+            return std::nullopt;
+        }
         chat_ids.push_back(target->chat.id);
     }
     std::ranges::sort(chat_ids);
@@ -1000,6 +1083,7 @@ std::optional<PreparedM6Mutation> prepare_folder_create(const proto::Request& re
                                                const json&) -> std::optional<json> {
             const auto* info = std::get_if<core::TdM6FolderInfo>(&response);
             if (info == nullptr || info->name != folder.name || info->color_id != folder.color_id ||
+                info->is_shareable != folder.is_shareable || info->has_my_invite_links ||
                 (folder.icon && info->icon != *folder.icon)) {
                 return std::nullopt;
             }
@@ -1040,6 +1124,12 @@ prepare_existing_folder( // NOLINT(readability-function-cognitive-complexity): e
         if (!chat) {
             return std::nullopt;
         }
+        if (!chat->observed_chat || chat->observed_chat->kind == core::TdChatKind::Secret ||
+            chat->observed_chat->kind == core::TdChatKind::Unknown) {
+            session.error("USAGE", "chat does not support folders",
+                          {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
+            return std::nullopt;
+        }
     } else if (erase && !exact_fields(request.args, {"folder_id"})) {
         session.error("USAGE", "folder delete received malformed arguments",
                       {{"argument", "folder_id"}, {"reason", "invalid_argument"}}, kUsage);
@@ -1051,7 +1141,8 @@ prepare_existing_folder( // NOLINT(readability-function-cognitive-complexity): e
         return std::nullopt;
     }
 
-    const auto folders = m6_wait_for_folders(client, resolver.bound_authorization(), session);
+    const auto folders =
+        m6_wait_for_folders(client, resolver.bound_authorization(), caller, session);
     if (!folders) {
         return std::nullopt;
     }
@@ -1067,7 +1158,7 @@ prepare_existing_folder( // NOLINT(readability-function-cognitive-complexity): e
     }
     const auto* maybe = std::get_if<core::TdM6MaybeChatFolder>(&*response);
     if (maybe == nullptr) {
-        emit_terminal(session, internal(operation));
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
     if (!maybe->folder) {
@@ -1150,7 +1241,7 @@ prepare_existing_folder( // NOLINT(readability-function-cognitive-complexity): e
     if (!erase) {
         auto snapshot = m6_folder_snapshot_json(folder_id, after, *info);
         if (!snapshot) {
-            emit_terminal(session, internal(operation));
+            emit_terminal(session, malformed(operation));
             return std::nullopt;
         }
         after_json = std::move(*snapshot);
@@ -1198,6 +1289,7 @@ prepare_existing_folder( // NOLINT(readability-function-cognitive-complexity): e
             const auto* returned = std::get_if<core::TdM6FolderInfo>(&response);
             if (returned == nullptr || returned->id != folder_id || returned->name != after.name ||
                 returned->color_id != after.color_id ||
+                returned->is_shareable != after.is_shareable ||
                 (after.icon && returned->icon != *after.icon)) {
                 return std::nullopt;
             }
@@ -1228,7 +1320,7 @@ std::optional<M6ChatKind> supergroup_kind(const ResolvedChatTarget& target) {
 std::optional<core::TdM6MemberStatus>
 current_member_status(ResolverConsumer& resolver, core::TdClient& client, std::string_view account,
                       proto::M6Operation operation, std::int64_t chat_id, std::int64_t principal_id,
-                      RequestSession& session) {
+                      const core::TdChat* chat, RequestSession& session) {
     auto response = planning_read(resolver, client, account, operation,
                                   core::TdM6GetChatMemberRequest{chat_id, principal_id}, session);
     if (!response) {
@@ -1237,10 +1329,18 @@ current_member_status(ResolverConsumer& resolver, core::TdClient& client, std::s
     const auto* member = std::get_if<core::TdM6ChatMember>(&*response);
     if (member == nullptr || member->member.kind != core::TdM6SenderKind::User ||
         member->member.id != principal_id) {
-        emit_terminal(session, internal(operation));
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
-    return member->status;
+    auto status = member->status;
+    if (status.kind == core::TdM6MemberStatusKind::Member) {
+        if (chat == nullptr || !chat->permissions) {
+            emit_terminal(session, internal(operation));
+            return std::nullopt;
+        }
+        status.permissions = *chat->permissions;
+    }
+    return status;
 }
 
 std::optional<core::TdUserSummary> private_peer(const ResolvedChatTarget& target) {
@@ -1352,8 +1452,9 @@ prepare_topic_mutation( // NOLINT(readability-function-cognitive-complexity): cl
         before = maybe->topic->info;
     }
     if (!private_bot) {
-        auto caller_status = current_member_status(resolver, client, account, operation,
-                                                   target->chat.id, principal.id, session);
+        auto caller_status =
+            current_member_status(resolver, client, account, operation, target->chat.id,
+                                  principal.id, &*target->observed_chat, session);
         const auto creator = before && before->creator.kind == core::TdM6SenderKind::User
                                  ? std::optional{before->creator.id}
                                  : std::nullopt;
@@ -1706,6 +1807,11 @@ prepare_chat_admin( // NOLINT(readability-function-cognitive-complexity): closed
     if (!target) {
         return std::nullopt;
     }
+    if (!target->observed_chat) {
+        emit_terminal(session, malformed(operation));
+        return std::nullopt;
+    }
+    const auto* observed_chat = &*target->observed_chat;
     const auto kind = admin_chat_kind(*target);
     if (!kind || (permissions && *kind == M6ChatKind::Channel) ||
         (operation == proto::M6Operation::ChatPromote && *kind == M6ChatKind::BasicGroup)) {
@@ -1713,10 +1819,11 @@ prepare_chat_admin( // NOLINT(readability-function-cognitive-complexity): closed
                       {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
         return std::nullopt;
     }
-    auto caller_status = current_member_status(resolver, client, account, operation,
-                                               target->chat.id, principal.id, session);
+    auto caller_status =
+        current_member_status(resolver, client, account, operation, target->chat.id, principal.id,
+                              observed_chat, session);
     if (!caller_status || !valid_m6_member_status(*caller_status, *kind)) {
-        emit_terminal(session, internal(operation));
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
 
@@ -1796,7 +1903,7 @@ prepare_chat_admin( // NOLINT(readability-function-cognitive-complexity): closed
         const auto* member = std::get_if<core::TdM6ChatMember>(&*member_response);
         if (member == nullptr || member->member.kind != core::TdM6SenderKind::User ||
             member->member.id != user.id || !valid_m6_member_status(member->status, *kind)) {
-            emit_terminal(session, internal(operation));
+            emit_terminal(session, malformed(operation));
             return std::nullopt;
         }
         const auto target_decision =
@@ -1910,16 +2017,22 @@ prepare_invite_link( // NOLINT(readability-function-cognitive-complexity): secre
     if (!target) {
         return std::nullopt;
     }
+    if (!target->observed_chat) {
+        emit_terminal(session, malformed(operation));
+        return std::nullopt;
+    }
+    const auto* observed_chat = &*target->observed_chat;
     const auto kind = admin_chat_kind(*target);
     if (!kind) {
         session.error("USAGE", "chat type does not support invite links",
                       {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
         return std::nullopt;
     }
-    auto caller_status = current_member_status(resolver, client, account, operation,
-                                               target->chat.id, principal.id, session);
+    auto caller_status =
+        current_member_status(resolver, client, account, operation, target->chat.id, principal.id,
+                              observed_chat, session);
     if (!caller_status || !valid_m6_member_status(*caller_status, *kind)) {
-        emit_terminal(session, internal(operation));
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
     if (m6_authorize_caller(operation, *kind, *caller_status) != M6CapabilityStatus::Allowed) {
@@ -2002,11 +2115,63 @@ prepare_invite_link( // NOLINT(readability-function-cognitive-complexity): secre
         }};
 }
 
+std::variant<std::shared_ptr<PreparedSource>, json>
+admit_static_photo_source(const proto::Request& request, RequestSession& session,
+                          const std::shared_ptr<const testing::WriteCoordinatorHooks>& hooks) {
+    constexpr auto operation = proto::M6Operation::ChatSetPhoto;
+    if (!exact_fields(request.args, {"chat", "path"}) || !request.args["chat"].is_string() ||
+        !request.args["path"].is_string() ||
+        request.args["path"].get_ref<const std::string&>().empty()) {
+        return terminal("USAGE", "set-photo path received malformed arguments",
+                        {{"argument", "photo"}, {"reason", "invalid_argument"}}, kUsage);
+    }
+    const FileSpoolControl control{session.deadline().expires_at, session.cancellation_token(),
+                                   [&session] { return session.cancellation_requested(); }};
+    auto prepared = prepare_spool_source(
+        request.args["path"].get_ref<const std::string&>(), request.context.cwd, control,
+        hooks ? hooks->file_spool : std::shared_ptr<const testing::FileSpoolHooks>{},
+        SourceContentPolicy::StaticJpeg);
+    if (auto* failure = std::get_if<FileSpoolError>(&prepared)) {
+        const auto display_path = canonical_source_display_path(
+            request.args["path"].get_ref<const std::string&>(), request.context.cwd);
+        switch (failure->kind) {
+        case FileSpoolErrorKind::TimedOut:
+            return timeout(operation, "preflight", "not_created");
+        case FileSpoolErrorKind::Cancelled:
+            return json();
+        case FileSpoolErrorKind::SourceUnavailable:
+            return terminal("NOT_FOUND", "input file is unavailable",
+                            {{"operation", operation_name(operation)},
+                             {"path", display_path.value_or(std::string{})},
+                             {"reason", source_reason_name(failure->source_reason.value_or(
+                                            SourceFileReason::Unreadable))}},
+                            kNotFound);
+        case FileSpoolErrorKind::InputChanged:
+            return terminal("INPUT_CHANGED", "input file changed while being read",
+                            {{"operation", operation_name(operation)},
+                             {"path", display_path.value_or(std::string{})}},
+                            kGeneric);
+        case FileSpoolErrorKind::DurabilityFailure:
+        case FileSpoolErrorKind::Contradiction:
+            return terminal("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
+                            {{"operation", operation_name(operation)},
+                             {"path", display_path.value_or(std::string{})},
+                             {"reason", spool_reason_name(failure->durability_reason.value_or(
+                                            DurabilityReason::Contradiction))}},
+                            kGeneric);
+        case FileSpoolErrorKind::InvalidInput:
+            return terminal("USAGE", "set-photo requires a static JPEG source",
+                            {{"argument", "photo"}, {"reason", "invalid_argument"}}, kUsage);
+        }
+    }
+    return std::make_shared<PreparedSource>(std::get<PreparedSource>(std::move(prepared)));
+}
+
 std::optional<PreparedM6Mutation>
 prepare_static_photo(const proto::Request& request, ResolverConsumer& resolver,
                      const ResolverPrincipal& principal, core::TdClient& client,
                      std::string_view account, RequestSession& session,
-                     const std::shared_ptr<const testing::WriteCoordinatorHooks>& hooks) {
+                     std::shared_ptr<PreparedSource> source) {
     constexpr auto operation = proto::M6Operation::ChatSetPhoto;
     if (!exact_fields(request.args, {"chat", "path"}) || !request.args["chat"].is_string() ||
         !request.args["path"].is_string() ||
@@ -2020,64 +2185,32 @@ prepare_static_photo(const proto::Request& request, ResolverConsumer& resolver,
     if (!target) {
         return std::nullopt;
     }
+    if (!target->observed_chat) {
+        emit_terminal(session, malformed(operation));
+        return std::nullopt;
+    }
+    const auto* observed_chat = &*target->observed_chat;
     const auto kind = admin_chat_kind(*target);
-    auto caller_status = kind ? current_member_status(resolver, client, account, operation,
-                                                      target->chat.id, principal.id, session)
-                              : std::nullopt;
-    if (!kind || !caller_status || !valid_m6_member_status(*caller_status, *kind)) {
-        emit_terminal(session, internal(operation));
+    if (!kind) {
+        session.error("USAGE", "chat does not support this administration operation",
+                      {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
+        return std::nullopt;
+    }
+    auto caller_status =
+        current_member_status(resolver, client, account, operation, target->chat.id, principal.id,
+                              observed_chat, session);
+    if (!caller_status || !valid_m6_member_status(*caller_status, *kind)) {
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
     if (m6_authorize_caller(operation, *kind, *caller_status) != M6CapabilityStatus::Allowed) {
         admin_precondition(session, operation, target->chat.id, "change-info");
         return std::nullopt;
     }
-    const FileSpoolControl control{session.deadline().expires_at, session.cancellation_token(),
-                                   [&session] { return session.cancellation_requested(); }};
-    auto prepared = prepare_spool_source(
-        request.args["path"].get_ref<const std::string&>(), request.context.cwd, control,
-        hooks ? hooks->file_spool : std::shared_ptr<const testing::FileSpoolHooks>{},
-        SourceContentPolicy::StaticJpeg);
-    if (auto* failure = std::get_if<FileSpoolError>(&prepared)) {
-        const auto display_path = canonical_source_display_path(
-            request.args["path"].get_ref<const std::string&>(), request.context.cwd);
-        switch (failure->kind) {
-        case FileSpoolErrorKind::TimedOut:
-            emit_terminal(session, timeout(operation, "preflight", "not_created"));
-            break;
-        case FileSpoolErrorKind::Cancelled:
-            break;
-        case FileSpoolErrorKind::SourceUnavailable:
-            session.error("NOT_FOUND", "input file is unavailable",
-                          {{"operation", operation_name(operation)},
-                           {"path", display_path.value_or(std::string{})},
-                           {"reason", source_reason_name(failure->source_reason.value_or(
-                                          SourceFileReason::Unreadable))}},
-                          kNotFound);
-            break;
-        case FileSpoolErrorKind::InputChanged:
-            session.error("INPUT_CHANGED", "input file changed while being read",
-                          {{"operation", operation_name(operation)},
-                           {"path", display_path.value_or(std::string{})}},
-                          kGeneric);
-            break;
-        case FileSpoolErrorKind::DurabilityFailure:
-        case FileSpoolErrorKind::Contradiction:
-            session.error("SPOOL_UNAVAILABLE", "attachment spool is unavailable",
-                          {{"operation", operation_name(operation)},
-                           {"path", display_path.value_or(std::string{})},
-                           {"reason", spool_reason_name(failure->durability_reason.value_or(
-                                          DurabilityReason::Contradiction))}},
-                          kGeneric);
-            break;
-        case FileSpoolErrorKind::InvalidInput:
-            session.error("USAGE", "set-photo requires a static JPEG source",
-                          {{"argument", "photo"}, {"reason", "invalid_argument"}}, kUsage);
-            break;
-        }
+    if (!source) {
+        emit_terminal(session, internal(operation));
         return std::nullopt;
     }
-    auto source = std::make_shared<PreparedSource>(std::get<PreparedSource>(std::move(prepared)));
     json plan{{"operation", operation_name(operation)},
               {"account", account},
               {"tdlib_request", "setChatPhoto"},
@@ -2117,12 +2250,22 @@ prepare_delete_photo(const proto::Request& request, ResolverConsumer& resolver,
     if (!target) {
         return std::nullopt;
     }
+    if (!target->observed_chat) {
+        emit_terminal(session, malformed(operation));
+        return std::nullopt;
+    }
+    const auto* observed_chat = &*target->observed_chat;
     const auto kind = admin_chat_kind(*target);
-    auto caller_status = kind ? current_member_status(resolver, client, account, operation,
-                                                      target->chat.id, principal.id, session)
-                              : std::nullopt;
-    if (!kind || !caller_status || !valid_m6_member_status(*caller_status, *kind)) {
-        emit_terminal(session, internal(operation));
+    if (!kind) {
+        session.error("USAGE", "chat does not support this administration operation",
+                      {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
+        return std::nullopt;
+    }
+    auto caller_status =
+        current_member_status(resolver, client, account, operation, target->chat.id, principal.id,
+                              observed_chat, session);
+    if (!caller_status || !valid_m6_member_status(*caller_status, *kind)) {
+        emit_terminal(session, malformed(operation));
         return std::nullopt;
     }
     if (m6_authorize_caller(operation, *kind, *caller_status) != M6CapabilityStatus::Allowed) {
@@ -2149,6 +2292,83 @@ prepare_delete_photo(const proto::Request& request, ResolverConsumer& resolver,
                        ? std::optional<json>{{{"chat", plan_value["chat"]}, {"photo", "deleted"}}}
                        : std::nullopt;
         }};
+}
+
+std::optional<PreparedM6Mutation>
+prepare_contact_mutation(proto::M6Operation operation, const proto::Request& request,
+                         ResolverConsumer& resolver, const ResolverPrincipal& principal,
+                         core::TdClient& client, std::string_view account,
+                         RequestSession& session) {
+    const ResolverCaller caller{operation};
+    auto resolved_user =
+        resolve_user(resolver, request.args["user"].get<std::string>(), caller, session);
+    if (!resolved_user) {
+        return std::nullopt;
+    }
+    auto record = resolver.read_target(
+        [&](const auto& current) { return client.get_user(current, resolved_user->id); });
+    if (m6_read_stopped(record, client, account, caller, session)) {
+        return std::nullopt;
+    }
+    if (const auto* error = record.value.get_if<core::TdError>()) {
+        emit_terminal(session, td_error_terminal(operation, *error));
+        return std::nullopt;
+    }
+    const auto* user = record.value.get_if<core::TdUserSummary>();
+    const auto converted = user != nullptr ? m6_user_identity(*user) : std::nullopt;
+    if (user == nullptr || !converted || *converted != *resolved_user) {
+        emit_terminal(session, internal(operation));
+        return std::nullopt;
+    }
+    json plan{{"operation", operation_name(operation)},
+              {"account", account},
+              {"user", user_json(*resolved_user)}};
+    core::TdM6Request mutation = core::TdM6SetBlockRequest{};
+    if (operation == proto::M6Operation::ContactAdd) {
+        plan["tdlib_request"] = "addContact";
+        plan["first_name"] = user->first_name;
+        plan["last_name"] = user->last_name;
+        plan["phone_number_sha256"] =
+            common::domain_separated_sha256("tgcli.m6.contact.phone.v1", user->phone_number);
+        plan["share_phone_number"] = false;
+        mutation = core::TdM6AddContactRequest{.user_id = user->id,
+                                               .phone_number = user->phone_number,
+                                               .first_name = user->first_name,
+                                               .last_name = user->last_name,
+                                               .share_phone_number = false};
+    } else if (operation == proto::M6Operation::ContactRemove) {
+        plan["tdlib_request"] = "removeContacts";
+        plan["is_contact"] = false;
+        mutation = core::TdM6RemoveContactsRequest{{user->id}};
+    } else {
+        const bool blocked = operation == proto::M6Operation::ContactBlock;
+        plan["tdlib_request"] = "setMessageSenderBlockList";
+        plan["blocked"] = blocked;
+        mutation = core::TdM6SetBlockRequest{.user_id = user->id, .blocked = blocked};
+    }
+    return PreparedM6Mutation{.operation = operation,
+                              .principal = principal,
+                              .fingerprint_payload = request.args,
+                              .arguments = arguments_from_plan(plan),
+                              .plan = std::move(plan),
+                              .request = std::move(mutation),
+                              .pass1_source = nullptr,
+                              .result = [operation](const core::TdM6Response& response,
+                                                    const json& plan_value) -> std::optional<json> {
+                                  if (std::get_if<core::TdM6Ok>(&response) == nullptr) {
+                                      return std::nullopt;
+                                  }
+                                  json result{{"user", plan_value["user"]}};
+                                  if (operation == proto::M6Operation::ContactAdd ||
+                                      operation == proto::M6Operation::ContactRemove) {
+                                      result["is_contact"] =
+                                          operation == proto::M6Operation::ContactAdd;
+                                  } else {
+                                      result["blocked"] =
+                                          operation == proto::M6Operation::ContactBlock;
+                                  }
+                                  return result;
+                              }};
 }
 
 } // namespace
@@ -2212,166 +2432,69 @@ void WriteCoordinator::m6_mutation(proto::M6Operation operation, const proto::Re
         return;
     }
     if (folder) {
-        auto prepared = operation == proto::M6Operation::FolderCreate
-                            ? prepare_folder_create(request, resolver, principal, account_, session)
-                            : prepare_existing_folder(operation, request, resolver, principal,
-                                                      client_.get(), account_, session);
-        if (prepared) {
-            execute_prepared_m6(client_.get(), account_, config_store_, foundation_,
-                                audit_fatal_shutdown_, hooks_, request, session, *authority,
-                                std::move(*prepared));
-        }
+        execute_prepared_m6(
+            client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_, hooks_,
+            request, session, *authority, operation, principal,
+            [&](const std::shared_ptr<PreparedSource>&) {
+                return operation == proto::M6Operation::FolderCreate
+                           ? prepare_folder_create(request, resolver, principal, account_, session)
+                           : prepare_existing_folder(operation, request, resolver, principal,
+                                                     client_.get(), account_, session);
+            });
         return;
     }
     if (topic) {
-        auto prepared = prepare_topic_mutation(operation, request, resolver, principal,
-                                               client_.get(), account_, session);
-        if (prepared) {
-            execute_prepared_m6(client_.get(), account_, config_store_, foundation_,
-                                audit_fatal_shutdown_, hooks_, request, session, *authority,
-                                std::move(*prepared));
-        }
+        execute_prepared_m6(client_.get(), account_, config_store_, foundation_,
+                            audit_fatal_shutdown_, hooks_, request, session, *authority, operation,
+                            principal, [&](const std::shared_ptr<PreparedSource>&) {
+                                return prepare_topic_mutation(operation, request, resolver,
+                                                              principal, client_.get(), account_,
+                                                              session);
+                            });
         return;
     }
     if (storage) {
-        auto prepared = prepare_storage_optimize(request, principal, account_, session);
-        if (prepared) {
-            execute_prepared_m6(client_.get(), account_, config_store_, foundation_,
-                                audit_fatal_shutdown_, hooks_, request, session, *authority,
-                                std::move(*prepared));
-        }
+        execute_prepared_m6(client_.get(), account_, config_store_, foundation_,
+                            audit_fatal_shutdown_, hooks_, request, session, *authority, operation,
+                            principal, [&](const std::shared_ptr<PreparedSource>&) {
+                                return prepare_storage_optimize(request, principal, account_,
+                                                                session);
+                            });
         return;
     }
     if (admin) {
-        std::optional<PreparedM6Mutation> prepared;
-        if (operation == proto::M6Operation::ChatInviteLink) {
-            prepared =
-                prepare_invite_link(request, resolver, principal, client_.get(), account_, session);
-        } else if (operation == proto::M6Operation::ChatSetPhoto) {
-            prepared = request.args.contains("delete")
-                           ? prepare_delete_photo(request, resolver, principal, client_.get(),
-                                                  account_, session)
-                           : prepare_static_photo(request, resolver, principal, client_.get(),
-                                                  account_, session, hooks_);
-        } else {
-            prepared = prepare_chat_admin(operation, request, resolver, principal, client_.get(),
+        const bool static_photo =
+            operation == proto::M6Operation::ChatSetPhoto && request.args.contains("path");
+        execute_prepared_m6(
+            client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_, hooks_,
+            request, session, *authority, operation, principal,
+            [&](std::shared_ptr<PreparedSource> source) {
+                if (operation == proto::M6Operation::ChatInviteLink) {
+                    return prepare_invite_link(request, resolver, principal, client_.get(),
+                                               account_, session);
+                }
+                if (operation == proto::M6Operation::ChatSetPhoto) {
+                    return request.args.contains("delete")
+                               ? prepare_delete_photo(request, resolver, principal, client_.get(),
+                                                      account_, session)
+                               : prepare_static_photo(request, resolver, principal, client_.get(),
+                                                      account_, session, std::move(source));
+                }
+                return prepare_chat_admin(operation, request, resolver, principal, client_.get(),
                                           account_, session);
-        }
-        if (prepared) {
-            execute_prepared_m6(client_.get(), account_, config_store_, foundation_,
-                                audit_fatal_shutdown_, hooks_, request, session, *authority,
-                                std::move(*prepared));
-        }
+            },
+            static_photo ? M6SourceAdmission{[&] {
+                return admit_static_photo_source(request, session, hooks_);
+            }}
+                         : M6SourceAdmission{});
         return;
     }
-    const auto selector = request.args["user"].get<std::string>();
-    auto resolved_user = resolve_user(resolver, selector, caller, session);
-    if (!resolved_user) {
-        return;
-    }
-    auto record = resolver.read_target(
-        [&](const auto& current) { return client_.get().get_user(current, resolved_user->id); });
-    if (record.status != ReadyReadStatus::Response) {
-        return;
-    }
-    if (const auto* error = record.value.get_if<core::TdError>()) {
-        emit_terminal(session, td_error_terminal(operation, *error));
-        return;
-    }
-    const auto* user = record.value.get_if<core::TdUserSummary>();
-    const auto converted = user != nullptr ? m6_user_identity(*user) : std::nullopt;
-    if (user == nullptr || !converted || *converted != *resolved_user) {
-        emit_terminal(session, internal(operation));
-        return;
-    }
-    auto state = std::make_shared<ContactMutationState>(principal, std::move(resolved_user), *user,
-                                                        std::make_shared<M6DispatchState>());
-    M6WriteDefinition definition;
-    definition.operation = operation;
-    definition.dispatch = state->dispatch;
-    definition.admit = [state, operation, request_args = request.args,
-                        account = account_]() -> WriteAdmissionOutcome {
-        auto fingerprint = m6_fingerprint(account, state->principal, operation, request_args);
-        if (!fingerprint || !state->user || !state->record) {
-            return internal(operation);
-        }
-        json arguments;
-        if (operation == proto::M6Operation::ContactAdd) {
-            arguments = {{"user", user_json(*state->user)},
-                         {"first_name", state->record->first_name},
-                         {"last_name", state->record->last_name},
-                         {"phone_number_sha256",
-                          common::domain_separated_sha256("tgcli.m6.contact.phone.v1",
-                                                          state->record->phone_number)},
-                         {"share_phone_number", false}};
-        } else if (operation == proto::M6Operation::ContactRemove) {
-            arguments = {{"user", user_json(*state->user)}, {"is_contact", false}};
-        } else {
-            arguments = {{"user", user_json(*state->user)},
-                         {"blocked", operation == proto::M6Operation::ContactBlock}};
-        }
-        std::string error;
-        auto converted = write_contract::make_arguments(operation, std::move(arguments), error);
-        if (!converted) {
-            return internal(operation);
-        }
-        return WriteAdmission{.arguments = std::move(*converted),
-                              .request_fingerprint = *fingerprint,
-                              .pass1_source = nullptr,
-                              .invite_redactions = {}};
-    };
-    definition.plan = [state, operation, account = account_]() mutable -> WritePlanningOutcome {
-        const auto& user = *state->record;
-        json plan{{"operation", operation_name(operation)},
-                  {"account", account},
-                  {"user", user_json(*state->user)}};
-        if (operation == proto::M6Operation::ContactAdd) {
-            plan["tdlib_request"] = "addContact";
-            plan["first_name"] = user.first_name;
-            plan["last_name"] = user.last_name;
-            plan["phone_number_sha256"] =
-                common::domain_separated_sha256("tgcli.m6.contact.phone.v1", user.phone_number);
-            plan["share_phone_number"] = false;
-            state->dispatch->request =
-                core::TdM6AddContactRequest{.user_id = user.id,
-                                            .phone_number = user.phone_number,
-                                            .first_name = user.first_name,
-                                            .last_name = user.last_name,
-                                            .share_phone_number = false};
-        } else if (operation == proto::M6Operation::ContactRemove) {
-            plan["tdlib_request"] = "removeContacts";
-            plan["is_contact"] = false;
-            state->dispatch->request = core::TdM6RemoveContactsRequest{{user.id}};
-        } else {
-            const bool blocked = operation == proto::M6Operation::ContactBlock;
-            plan["tdlib_request"] = "setMessageSenderBlockList";
-            plan["blocked"] = blocked;
-            state->dispatch->request =
-                core::TdM6SetBlockRequest{.user_id = user.id, .blocked = blocked};
-        }
-        std::string error;
-        auto converted_plan = write_contract::make_plan(operation, account, std::move(plan), error);
-        return converted_plan ? WritePlanningOutcome{std::move(*converted_plan)}
-                              : WritePlanningOutcome{internal(operation)};
-    };
-    definition.success =
-        [operation](
-            const write_contract::Plan& plan,
-            const core::TdM6Response& response) -> std::optional<write_contract::StoredTerminal> {
-        if (std::get_if<core::TdM6Ok>(&response) == nullptr) {
-            return std::nullopt;
-        }
-        json result{{"user", plan.value()["user"]}};
-        if (operation == proto::M6Operation::ContactAdd ||
-            operation == proto::M6Operation::ContactRemove) {
-            result["is_contact"] = operation == proto::M6Operation::ContactAdd;
-        } else {
-            result["blocked"] = operation == proto::M6Operation::ContactBlock;
-        }
-        return stored_result(operation, std::move(result));
-    };
-    execute_m6_write(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
-                     hooks_, request, session, *authority, std::move(definition));
+    execute_prepared_m6(client_.get(), account_, config_store_, foundation_, audit_fatal_shutdown_,
+                        hooks_, request, session, *authority, operation, principal,
+                        [&](const std::shared_ptr<PreparedSource>&) {
+                            return prepare_contact_mutation(operation, request, resolver, principal,
+                                                            client_.get(), account_, session);
+                        });
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed session transaction.
@@ -2448,7 +2571,7 @@ void WriteCoordinator::terminate_session(const proto::Request& request, RequestS
     }
     auto active = resolver.read_target(
         [&](const auto& current) { return client_.get().get_active_sessions(current); });
-    if (active.status != ReadyReadStatus::Response) {
+    if (m6_read_stopped(active, client_.get(), account_, caller, session)) {
         return;
     }
     if (const auto* error = active.value.get_if<core::TdError>()) {
@@ -2604,12 +2727,29 @@ void WriteCoordinator::terminate_session(const proto::Request& request, RequestS
                                        const config::MutationControl& control) {
         return config_store_.verify_write_grant(expected, account, control);
     };
+    hooks.revalidate_principal = [this, principal]() -> std::optional<json> {
+        if (hooks_ && hooks_->before_principal_cas) {
+            hooks_->before_principal_cas();
+        }
+        const auto current = client_.get().auth_state();
+        if (current && current->data.state == core::AuthState::Ready &&
+            current->client_id == principal.client_id &&
+            current->client_generation == principal.client_generation &&
+            current->auth_sequence == principal.auth_sequence) {
+            return std::nullopt;
+        }
+        return not_authed(account_,
+                          current != nullptr ? current->data.state : core::AuthState::Unknown);
+    };
     hooks.post_intent = [](const write_contract::Plan&, const WriteAdmission&) {
         return WritePostIntentPreparation{};
     };
     hooks.revalidate_auth_and_schedule =
-        [this, &session, dispatch,
-         session_id](const write_contract::Plan& immutable) -> WriteDispatchAdmissionOutcome {
+        [this, &session, dispatch, session_id,
+         principal](const write_contract::Plan& immutable) -> WriteDispatchAdmissionOutcome {
+        if (hooks_ && hooks_->before_dispatch_principal_cas) {
+            hooks_->before_dispatch_principal_cas();
+        }
         if (deadline_expired(session.deadline())) {
             return session_stored_from(terminal("TIMEOUT", "request timed out",
                                                 {{"operation", "session_terminate"},
@@ -2623,7 +2763,10 @@ void WriteCoordinator::terminate_session(const proto::Request& request, RequestS
             return WriteDispatchStopped{};
         }
         auto current = client_.get().auth_state();
-        if (!current || current->data.state != core::AuthState::Ready) {
+        if (!current || current->data.state != core::AuthState::Ready ||
+            current->client_id != principal.client_id ||
+            current->client_generation != principal.client_generation ||
+            current->auth_sequence != principal.auth_sequence) {
             return session_stored_from(
                 not_authed(immutable.account(),
                            current != nullptr ? current->data.state : core::AuthState::Unknown));

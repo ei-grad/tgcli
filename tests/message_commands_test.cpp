@@ -154,6 +154,7 @@ tgcli::core::TdChat chat(std::int64_t id,
             .unread_reaction_count = 0,
             .unread_poll_vote_count = 0,
             .last_message = std::nullopt,
+            .permissions = std::nullopt,
             .notification_settings = std::nullopt};
 }
 
