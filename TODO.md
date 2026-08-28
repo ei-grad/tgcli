@@ -425,9 +425,9 @@ before the milestone is closed.
 - [x] Add the no-skip non-mutating Saved TestDC `m6.session.list` flow with
       verified daemon stop/lock release before `--no-daemon`, plus release-
       provenance checks; do not terminate a live/TestDC session
-- [ ] Review gate: session-only M6 semantic diff vs DESIGN.md §4.7 and pinned
+- [x] Review gate: session-only M6 semantic diff vs DESIGN.md §4.7 and pinned
       TDLib generated API/AccountManager.cpp/Requests.cpp
-- [ ] Review gate: complete M6 implementation diff vs DESIGN.md §§4.7 and 4.9,
+- [x] Review gate: complete M6 implementation diff vs DESIGN.md §§4.7 and 4.9,
       pinned TDLib generated/source contracts and the one-shot activation
       boundary
 
