@@ -68,10 +68,10 @@ json error_outcome() {
         {"terminal", {{"kind", "error_summary"}, {"code", "TDLIB_ERROR"}, {"td_error_code", 400}}}};
 }
 
-json internal_outcome() {
+json unconfirmed_outcome() {
     auto value = error_outcome();
     value["terminal"] = {
-        {"kind", "error_summary"}, {"code", "INTERNAL"}, {"td_error_code", nullptr}};
+        {"kind", "error_summary"}, {"code", "RAW_OUTCOME_UNCONFIRMED"}, {"td_error_code", nullptr}};
     return value;
 }
 
@@ -92,7 +92,7 @@ TEST_CASE("raw audit v3 validates hash-only records and rejects bodies",
     CHECK(tgcli::daemon::raw::audit_v3::valid_checkpoint(response("error")));
     CHECK(tgcli::daemon::raw::audit_v3::valid_outcome(result_outcome()));
     CHECK(tgcli::daemon::raw::audit_v3::valid_outcome(error_outcome()));
-    CHECK(tgcli::daemon::raw::audit_v3::valid_outcome(internal_outcome()));
+    CHECK(tgcli::daemon::raw::audit_v3::valid_outcome(unconfirmed_outcome()));
 
     auto request_body = intent();
     request_body["request"] = {{"@type", "deleteMessages"}};
@@ -116,7 +116,7 @@ TEST_CASE("raw audit v3 maps every durable crash cut without resend", "[raw][aud
     CHECK(action({intent(), dispatch(), response(), result_outcome()}) == RecoveryAction::Complete);
     CHECK(action({intent(), dispatch(), response("error"), error_outcome()}) ==
           RecoveryAction::Complete);
-    CHECK(action({intent(), dispatch(), internal_outcome()}) == RecoveryAction::Complete);
+    CHECK(action({intent(), dispatch(), unconfirmed_outcome()}) == RecoveryAction::Complete);
 }
 
 TEST_CASE("raw audit v3 fails closed on ordering identity and terminal contradictions",
@@ -142,8 +142,11 @@ TEST_CASE("raw audit v3 fails closed on ordering identity and terminal contradic
     wrong_generation["data"]["generation"] = "8";
     CHECK(action({intent(), dispatch(), wrong_generation}) == RecoveryAction::FailClosed);
 
-    CHECK(action({intent(), dispatch(), response(), internal_outcome()}) ==
+    CHECK(action({intent(), dispatch(), response(), unconfirmed_outcome()}) ==
           RecoveryAction::FailClosed);
+
+    auto predispatch_unconfirmed = unconfirmed_outcome();
+    CHECK(action({intent(), predispatch_unconfirmed}) == RecoveryAction::FailClosed);
 
     auto wrong_digest = result_outcome();
     wrong_digest["terminal"]["response_sha256"] =

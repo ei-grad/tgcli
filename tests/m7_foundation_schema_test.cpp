@@ -1,6 +1,8 @@
 #include "schema_matcher.hpp"
 
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
@@ -59,6 +61,14 @@ TEST_CASE("future M2 and M4 result schemas are strict and remain independently v
     invalid_info["member_count"] = 1;
     CHECK_FALSE(tgcli::test::matches_json_schema("future/chat-info.result.schema.json")
                     .match(invalid_info));
+    auto basic_info = private_info;
+    basic_info["type"] = "basic_group";
+    basic_info["is_bot"] = false;
+    basic_info["member_count"] = 7;
+    CHECK_THAT(basic_info, tgcli::test::matches_json_schema("future/chat-info.result.schema.json"));
+    basic_info["member_count"] = nullptr;
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("future/chat-info.result.schema.json").match(basic_info));
 
     const json chat_member{{"sender", {{"type", "chat"}, {"id", -1002}}},
                            {"display_name", "Linked channel"},
@@ -85,6 +95,14 @@ TEST_CASE("future M2 and M4 result schemas are strict and remain independently v
     relative["path"] = "report.pdf";
     CHECK_FALSE(
         tgcli::test::matches_json_schema("future/download.result.schema.json").match(relative));
+    auto maximum_bytes = download;
+    maximum_bytes["bytes"] = std::numeric_limits<std::uint64_t>::max();
+    CHECK_THAT(maximum_bytes,
+               tgcli::test::matches_json_schema("future/download.result.schema.json"));
+    auto overflow_bytes = download;
+    overflow_bytes["bytes"] = json::parse("18446744073709551616");
+    CHECK_FALSE(tgcli::test::matches_json_schema("future/download.result.schema.json")
+                    .match(overflow_bytes));
 }
 
 TEST_CASE("future raw result schema separates live TD objects from exact dry-run plans",
@@ -169,6 +187,16 @@ TEST_CASE("dormant raw audit v3 schemas retain hashes and reject request or resp
                          {"response_bytes", 32}}}};
     CHECK_THAT(outcome,
                tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json"));
+    auto unconfirmed = outcome;
+    unconfirmed["mutation_state"] = "possible";
+    unconfirmed["terminal"] = {
+        {"kind", "error_summary"}, {"code", "RAW_OUTCOME_UNCONFIRMED"}, {"td_error_code", nullptr}};
+    CHECK_THAT(unconfirmed,
+               tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json"));
+    auto internal_surrogate = unconfirmed;
+    internal_surrogate["terminal"]["code"] = "INTERNAL";
+    CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json")
+                    .match(internal_surrogate));
     auto leaked_terminal = outcome;
     leaked_terminal["terminal"]["body"] = {{"@type", "ok"}};
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json")
@@ -185,11 +213,22 @@ TEST_CASE("future family error schemas reject cross-operation and secret-bearing
     CHECK_FALSE(
         tgcli::test::matches_json_schema("future/search.error.schema.json").match(wrong_search));
 
+    for (const auto* filename :
+         {"future/search.error.schema.json", "future/chat-read.error.schema.json",
+          "future/download.error.schema.json", "future/raw.error.schema.json"}) {
+        const auto config_timeout =
+            terminal("TIMEOUT", {{"operation", "config_admission"}, {"state", nullptr}});
+        CHECK_THAT(config_timeout, tgcli::test::matches_json_schema(filename));
+        const auto shutdown = terminal("DAEMON_SHUTDOWN", {{"reason", "daemon_shutdown"}});
+        CHECK_THAT(shutdown, tgcli::test::matches_json_schema(filename));
+    }
+
     const auto chat_read =
         terminal("PAGINATION_INVALID", {{"operation", "chat_members"}, {"reason", "page_invalid"}});
     CHECK_THAT(chat_read, tgcli::test::matches_json_schema("future/chat-read.error.schema.json"));
     const auto members_bot = terminal("BOT_UNSUPPORTED", {{"operation", "chat_members"}});
-    CHECK_THAT(members_bot, tgcli::test::matches_json_schema("future/chat-read.error.schema.json"));
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("future/chat-read.error.schema.json").match(members_bot));
     const auto info_bot = terminal("BOT_UNSUPPORTED", {{"operation", "chat_info"}});
     CHECK_FALSE(
         tgcli::test::matches_json_schema("future/chat-read.error.schema.json").match(info_bot));
@@ -199,10 +238,34 @@ TEST_CASE("future family error schemas reject cross-operation and secret-bearing
                                                            {"message_id", 123},
                                                            {"reason", "album_unsupported"}});
     CHECK_THAT(download, tgcli::test::matches_json_schema("future/download.error.schema.json"));
+    const auto missing_download = terminal("NOT_FOUND", {{"chat_id", -1001}, {"message_id", 123}});
+    CHECK_THAT(missing_download,
+               tgcli::test::matches_json_schema("future/download.error.schema.json"));
+    const auto unavailable = terminal(
+        "OUTPUT_UNAVAILABLE",
+        {{"operation", "download"}, {"path", "/tmp/report.pdf"}, {"reason", "cleanup_failed"}});
+    CHECK_THAT(unavailable, tgcli::test::matches_json_schema("future/download.error.schema.json"));
+    auto no_path = unavailable;
+    no_path["error"]["details"].erase("path");
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("future/download.error.schema.json").match(no_path));
 
     const auto raw = terminal(
         "DENIED", {{"operation", "raw"}, {"function", "getChat"}, {"reason", "function_denied"}});
     CHECK_THAT(raw, tgcli::test::matches_json_schema("future/raw.error.schema.json"));
+    auto unconfirmed_raw =
+        terminal("RAW_OUTCOME_UNCONFIRMED",
+                 {{"operation", "raw"},
+                  {"function", "deleteMessages"},
+                  {"request_sha256",
+                   "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+                  {"mutation_state", "possible"}});
+    unconfirmed_raw["error"]["message"] = "raw request outcome is unconfirmed";
+    CHECK_THAT(unconfirmed_raw, tgcli::test::matches_json_schema("future/raw.error.schema.json"));
+    auto wrong_unconfirmed = unconfirmed_raw;
+    wrong_unconfirmed["error"]["details"]["account"] = "main";
+    CHECK_FALSE(
+        tgcli::test::matches_json_schema("future/raw.error.schema.json").match(wrong_unconfirmed));
     auto leaked = raw;
     leaked["error"]["details"]["request"] = {{"@type", "getChat"}};
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw.error.schema.json").match(leaked));
@@ -249,7 +312,31 @@ TEST_CASE("active M2 error schemas are command-local and cataloged",
         CHECK_THAT(value, tgcli::test::matches_json_schema(filename));
     }
 
+    for (const auto& [command, filename] : mappings) {
+        static_cast<void>(command);
+        const auto timeout =
+            terminal("TIMEOUT", {{"operation", "config_admission"}, {"state", nullptr}});
+        CHECK_THAT(timeout, tgcli::test::matches_json_schema(filename));
+    }
+
     auto cross_operation = cases.front().second;
     cross_operation["error"]["details"]["operation"] = "unread";
     CHECK_FALSE(tgcli::test::matches_json_schema(cases.front().first).match(cross_operation));
+}
+
+TEST_CASE("generated protocol error schemas preserve the exact uint64 request-id ceiling",
+          "[schema][uint64][generator]") {
+    for (const auto* filename :
+         {"contact.error.schema.json", "folder.error.schema.json", "topic.error.schema.json",
+          "chat-admin.error.schema.json", "storage.error.schema.json",
+          "future/search.error.schema.json", "future/chat-read.error.schema.json",
+          "future/download.error.schema.json", "future/raw.error.schema.json"}) {
+        const auto endpoint = terminal(
+            "PROTOCOL_ANSWER_INVALID",
+            {{"request_id", std::numeric_limits<std::uint64_t>::max()}, {"reason", "malformed"}});
+        CHECK_THAT(endpoint, tgcli::test::matches_json_schema(filename));
+        auto overflow = endpoint;
+        overflow["error"]["details"]["request_id"] = json::parse("18446744073709551616");
+        CHECK_FALSE(tgcli::test::matches_json_schema(filename).match(overflow));
+    }
 }

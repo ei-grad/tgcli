@@ -125,7 +125,7 @@
           ],
           "properties": {
             "code": {
-              "const": "BOT_UNSUPPORTED"
+              "const": "ACCOUNT_NOT_FOUND"
             },
             "message": {
               "type": "string"
@@ -134,11 +134,93 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "operation"
+                "account"
               ],
               "properties": {
-                "operation": {
-                  "const": "chat_members"
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "ACCOUNT_MISMATCH"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "requested_account",
+                "daemon_account"
+              ],
+              "properties": {
+                "requested_account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "daemon_account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIG_INVALID"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "enum": [
+                    "path_invalid",
+                    "wrong_owner",
+                    "wrong_type",
+                    "wrong_mode",
+                    "wrong_link_count",
+                    "too_large",
+                    "parse_error",
+                    "type_error",
+                    "invalid_default",
+                    "conflicting_credentials",
+                    "io_error",
+                    "sync_error"
+                  ]
                 }
               }
             }
@@ -234,6 +316,300 @@
           ],
           "properties": {
             "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "chat_info",
+                    "chat_members"
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_SHUTDOWN"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "daemon_shutdown"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "PROTOCOL_ANSWER_INVALID"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request_id",
+                "reason"
+              ],
+              "properties": {
+                "request_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "reason": {
+                  "enum": [
+                    "future_sequence",
+                    "nonce_mismatch",
+                    "generation_mismatch",
+                    "malformed",
+                    "unknown_request"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "config_admission"
+                },
+                "state": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "REMOVAL_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "invocation_id",
+                "stage",
+                "completed_stages",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "invocation_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "stage": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_UNAVAILABLE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "mutation_state",
+                "completed_stages"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "mutation_state": {
+                  "enum": [
+                    "none",
+                    "possible",
+                    "confirmed"
+                  ]
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
               "const": "TIMEOUT"
             },
             "message": {
@@ -312,11 +688,7 @@
                   ]
                 },
                 "reason": {
-                  "enum": [
-                    "internal_error",
-                    "malformed_tdlib_response",
-                    "source_changed"
-                  ]
+                  "const": "source_changed"
                 }
               }
             }

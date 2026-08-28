@@ -59,6 +59,7 @@ add_executable(tgcli_unit_tests
     ready_read_test.cpp
     raw_audit_contract_test.cpp
     raw_contract_test.cpp
+    raw_native_contract_test.cpp
     read_domain_test.cpp
     read_commands_test.cpp
     read_td_runtime_conversion_test.cpp
@@ -193,7 +194,8 @@ set_tests_properties(
         "PYTHONDONTWRITEBYTECODE=1;TGCLI_TEST_TDLIB_SOURCE=${TGCLI_TDLIB_SOURCE}")
 add_test(
     NAME command-registry-completion-assets
-    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs")
+    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs"
+        "$<TARGET_FILE:tgcli>")
 add_test(
     NAME raw-policy-source-contract
     COMMAND "${Python3_EXECUTABLE}" -B

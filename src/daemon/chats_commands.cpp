@@ -1024,17 +1024,23 @@ void ChatsCoordinator::unread(const proto::Request& request, RequestSession& ses
 }
 
 void register_chats_command(Dispatcher& dispatcher, ChatsCoordinator& coordinator) {
-    dispatcher.register_command("chats", {Tier::Read, [&coordinator](const proto::Request& request,
-                                                                     RequestSession& session) {
-                                              coordinator.chats(request, session);
-                                          }});
+    dispatcher.register_command(
+        "chats", {.tier = Tier::Read,
+                  .handler =
+                      [&coordinator](const proto::Request& request, RequestSession& session) {
+                          coordinator.chats(request, session);
+                      },
+                  .config_admission = true});
 }
 
 void register_unread_command(Dispatcher& dispatcher, ChatsCoordinator& coordinator) {
-    dispatcher.register_command("unread", {Tier::Read, [&coordinator](const proto::Request& request,
-                                                                      RequestSession& session) {
-                                               coordinator.unread(request, session);
-                                           }});
+    dispatcher.register_command(
+        "unread", {.tier = Tier::Read,
+                   .handler =
+                       [&coordinator](const proto::Request& request, RequestSession& session) {
+                           coordinator.unread(request, session);
+                       },
+                   .config_admission = true});
 }
 
 } // namespace tgcli::daemon

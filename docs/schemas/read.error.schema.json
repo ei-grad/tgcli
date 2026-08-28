@@ -575,7 +575,7 @@
                 "request_id": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 18446744073709552000
+                  "maximum": 18446744073709551615
                 },
                 "reason": {
                   "enum": [
@@ -585,6 +585,39 @@
                     "malformed",
                     "unknown_request"
                   ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "config_admission"
+                },
+                "state": {
+                  "type": "null"
                 }
               }
             }

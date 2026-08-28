@@ -420,7 +420,7 @@
                 "request_id": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 18446744073709552000
+                  "maximum": 18446744073709551615
                 },
                 "reason": {
                   "enum": [
@@ -430,6 +430,39 @@
                     "malformed",
                     "unknown_request"
                   ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "config_admission"
+                },
+                "state": {
+                  "type": "null"
                 }
               }
             }
@@ -485,6 +518,158 @@
                       ]
                     }
                   ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "REMOVAL_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "invocation_id",
+                "stage",
+                "completed_stages",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "invocation_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "stage": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_UNAVAILABLE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "mutation_state",
+                "completed_stages"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "mutation_state": {
+                  "enum": [
+                    "none",
+                    "possible",
+                    "confirmed"
+                  ]
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
                 }
               }
             }

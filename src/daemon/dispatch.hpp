@@ -165,6 +165,7 @@ struct CommandDescriptor {
     DeadlineDefault deadline_default = DeadlineDefault::Default60;
     std::optional<proto::M6Operation> m6_operation = std::nullopt;
     std::optional<proto::SessionOperation> session_operation = std::nullopt;
+    bool config_admission = false;
 };
 
 // The daemon-side dispatch table and the single safety chokepoint (DESIGN.md

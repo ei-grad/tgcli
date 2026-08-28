@@ -103,8 +103,8 @@ file(GENERATE
 
 if(TGCLI_SYSTEM_TDLIB)
     find_package(Td REQUIRED)
-    if(NOT TARGET Td::TdStatic)
-        message(FATAL_ERROR "Td package found but Td::TdStatic is missing; "
+    if(NOT TARGET Td::TdStatic OR NOT TARGET Td::TdJsonStatic)
+        message(FATAL_ERROR "Td package found but static C++/JSON targets are missing; "
             "build the prefix with scripts/build-tdlib.sh")
     endif()
     tgcli_assert_tdlib_prefix_provenance("${Td_DIR}" ${TGCLI_TDLIB_REV})
@@ -298,7 +298,7 @@ add_library(tgcli_daemon STATIC
     src/daemon/daemon_run.cpp)
 target_link_libraries(tgcli_daemon
     PUBLIC tgcli_proto tgcli_util
-    PRIVATE tgcli_core re2::re2)
+    PRIVATE tgcli_core re2::re2 Td::TdJsonStatic)
 add_dependencies(tgcli_daemon tgcli_version_header)
 
 add_library(tgcli_cli STATIC

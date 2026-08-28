@@ -62,27 +62,35 @@ class FakeFetch {
     }
 
     std::future<Outcome> dispatch(tgcli::proto::Request request) {
-        return std::async(std::launch::async, [this, request = std::move(request)]() mutable {
-            Outcome outcome;
-            tgcli::daemon::CallbackSink sink(
-                [](const json&) {},
-                [&](json value) { outcome.progress.push_back(std::move(value)); },
-                [&](json value) {
-                    ++outcome.terminal_count;
-                    outcome.result = std::move(value);
-                    outcome.exit_code = tgcli::kOk;
-                },
-                [&](std::string code, std::string message, json details, int exit_code) {
-                    ++outcome.terminal_count;
-                    outcome.error = json{{"error",
-                                          {{"code", std::move(code)},
-                                           {"message", std::move(message)},
-                                           {"details", std::move(details)}}}};
-                    outcome.exit_code = exit_code;
-                });
-            dispatcher_.dispatch(request, sink);
-            return outcome;
-        });
+        const auto deadline = tgcli::request_deadline(request.context.timeout_seconds,
+                                                      tgcli::DeadlineDefault::Unlimited);
+        REQUIRE(deadline);
+        return std::async(
+            std::launch::async, [this, request = std::move(request), deadline]() mutable {
+                Outcome outcome;
+                tgcli::daemon::CallbackSink sink(
+                    [](const json&) {},
+                    [&](json value) { outcome.progress.push_back(std::move(value)); },
+                    [&](json value) {
+                        ++outcome.terminal_count;
+                        outcome.result = std::move(value);
+                        outcome.exit_code = tgcli::kOk;
+                    },
+                    [&](std::string code, std::string message, json details, int exit_code) {
+                        ++outcome.terminal_count;
+                        outcome.error = json{{"error",
+                                              {{"code", std::move(code)},
+                                               {"message", std::move(message)},
+                                               {"details", std::move(details)}}}};
+                        outcome.exit_code = exit_code;
+                    });
+                tgcli::daemon::RequestSession session(
+                    std::move(request), sink, 0, tgcli::daemon::RequestSession::NonceGenerator{},
+                    tgcli::daemon::ActivityTracker::Token{}, nullptr, deadline,
+                    tgcli::daemon::ConfigAdmissionMode::FrozenRuntime, admission_wall_time_);
+                dispatcher_.dispatch(session);
+                return outcome;
+            });
     }
 
     ControlledDispatch dispatch_controlled(tgcli::proto::Request request) {

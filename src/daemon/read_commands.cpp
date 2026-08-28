@@ -660,10 +660,12 @@ void ReadCoordinator::read(const proto::Request& request, RequestSession& sessio
 }
 
 void register_read_command(Dispatcher& dispatcher, ReadCoordinator& coordinator) {
-    dispatcher.register_command("read", {Tier::Read, [&coordinator](const proto::Request& request,
-                                                                    RequestSession& session) {
-                                             coordinator.read(request, session);
-                                         }});
+    dispatcher.register_command(
+        "read",
+        {.tier = Tier::Read,
+         .handler = [&coordinator](const proto::Request& request,
+                                   RequestSession& session) { coordinator.read(request, session); },
+         .config_admission = true});
 }
 
 } // namespace tgcli::daemon

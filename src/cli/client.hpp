@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,6 +23,9 @@ using StreamOutputWriter = std::function<StreamOutputStatus(std::string_view)>;
 namespace tgcli::daemon {
 class Dispatcher;
 class StreamService;
+namespace testing {
+struct ConfigRuntimeHooks;
+}
 } // namespace tgcli::daemon
 
 namespace tgcli::core {
@@ -58,6 +62,8 @@ struct RunOptions {
     const StreamOutputWriter* stream_output_writer = nullptr;
     // Shared fake-boundary seam for request-admission wall-clock tests.
     std::function<std::chrono::system_clock::time_point()> in_process_request_wall_clock;
+    // Test-only deterministic config-admission clock/wait seam.
+    std::shared_ptr<const daemon::testing::ConfigRuntimeHooks> in_process_config_runtime_hooks;
 };
 
 // Only the two M1 dry-runs bypass daemon routing. M3/M4 dry-runs are

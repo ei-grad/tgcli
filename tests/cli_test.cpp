@@ -13,6 +13,7 @@
 #include "common/paths.hpp"
 #include "core/td_client.hpp"
 #include "daemon/commands.hpp"
+#include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/dispatch.hpp"
@@ -54,6 +55,7 @@
 #include <sys/wait.h>
 #include <tgcli/version.hpp>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -4561,6 +4563,86 @@ TEST_CASE("verbose is client-owned diagnostics and leaves command data on stdout
           json{{"diagnostic", {{"account", "main"}, {"transport", "daemon"}}}});
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli/accounts/main/tdlib.log"));
     CHECK(outcome.err.find("setLogVerbosityLevel") == std::string::npos);
+}
+
+TEST_CASE("no-color is visible and byte-preserving at root and nested command scopes",
+          "[cli][process][no-color]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    for (const auto& arguments : {std::vector<std::string>{"--help"},
+                                  std::vector<std::string>{"chat", "set-title", "--help"}}) {
+        const auto help = run_binary_captured(arguments, env, "no-color-help");
+        REQUIRE(help.exit_code == kOk);
+        CHECK((help.out + help.err).find("--no-color") != std::string::npos);
+    }
+
+    const auto baseline = run_binary_captured({"version"}, env, "no-color-baseline");
+    const auto before = run_binary_captured({"--no-color", "version"}, env, "no-color-before");
+    const auto after = run_binary_captured({"version", "--no-color"}, env, "no-color-after");
+    INFO("baseline stdout: " << baseline.out);
+    INFO("baseline stderr: " << baseline.err);
+    REQUIRE(baseline.exit_code == kOk);
+    for (const auto* outcome : {&before, &after}) {
+        CHECK(outcome->exit_code == baseline.exit_code);
+        CHECK(outcome->out == baseline.out);
+        CHECK(outcome->err == baseline.err);
+    }
+}
+
+TEST_CASE("no-daemon config-admission timeout bytes retain M2 command attribution",
+          "[cli][no-daemon][config-runtime][timeout][m2][schema]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_clients(1));
+
+    const auto after_every_request_deadline = RequestClock::now() + std::chrono::hours(1);
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->now = [after_every_request_deadline] { return after_every_request_deadline; };
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+    options.in_process_config_runtime_hooks = hooks;
+
+    std::uint64_t request_id = 1000;
+    for (const auto& [command, operation, schema] :
+         std::array{std::tuple{std::vector<std::string>{"chats"}, "config_admission",
+                               "chats.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"unread"}, "config_admission",
+                               "unread.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"read"}, "config_admission",
+                               "read.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"msg", "get"}, "config_admission",
+                               "msg-get.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"msg", "link"}, "config_admission",
+                               "msg-link.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"fetch"}, "config_admission",
+                               "fetch.error.schema.json"}}) {
+        proto::Request request("main");
+        request.id = request_id++;
+        request.command = command;
+        request.args = json::object();
+        request.context.json = true;
+        request.context.cwd = "/";
+        request.context.timeout_seconds = 0.001;
+        const auto outcome = run_request_captured(request, options, env);
+        REQUIRE(outcome.exit_code == kTimeout);
+        CHECK(outcome.out.empty());
+        const json expected{{"error",
+                             {{"code", "TIMEOUT"},
+                              {"message", "config admission timed out"},
+                              {"details", {{"operation", operation}, {"state", nullptr}}}}}};
+        CHECK(outcome.err == expected.dump() + "\n");
+        CHECK_THAT(expected, test::matches_json_schema(schema));
+    }
+    scripted->push_update(scripted->clients().front(), {},
+                          core::AuthStateData{core::AuthState::Closed});
+    client.close();
 }
 
 TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli][tdlib]") {

@@ -230,7 +230,24 @@ const planFor = (operation) => {
   return request({ const: "optimizeStorage" }, { size: { const: -1 }, ttl: { const: -1 }, count: { const: -1 }, immunity_delay: { const: -1 }, file_types: { const: [] }, chat_ids: { const: [] }, exclude_chat_ids: { const: [] }, return_deleted_file_statistics: { const: false }, chat_limit: { const: 100 } });
 };
 
-const write = (filename, document) => fs.writeFileSync(path.join(directory, filename), `${JSON.stringify(document, null, 2)}\n`);
+const exactInteger = (decimal) => ({ __tgcli_exact_integer__: decimal });
+const serialize = (document) => {
+  const markers = [];
+  const encoded = JSON.stringify(document, (_key, value) => {
+    if (value !== null && typeof value === "object" && Object.keys(value).length === 1 &&
+        typeof value.__tgcli_exact_integer__ === "string") {
+      const marker = `__TGCLI_EXACT_INTEGER_${markers.length}__`;
+      markers.push({ marker, decimal: value.__tgcli_exact_integer__ });
+      return marker;
+    }
+    return value;
+  }, 2);
+  return markers.reduce(
+    (output, { marker, decimal }) => output.replace(`"${marker}"`, decimal),
+    `${encoded}\n`,
+  );
+};
+const write = (filename, document) => fs.writeFileSync(path.join(directory, filename), serialize(document));
 
 for (const [stem, command, operation, mutation] of operations) {
   const document = {
@@ -279,7 +296,7 @@ for (const [filename, family] of Object.entries(familyOperations)) {
       ],
     }),
     errorEnvelope("DAEMON_SHUTDOWN", object({ reason: { const: "daemon_shutdown" } })),
-    errorEnvelope("PROTOCOL_ANSWER_INVALID", object({ request_id: { type: "integer", minimum: 0, maximum: 18446744073709551615 }, reason: { enum: ["future_sequence", "nonce_mismatch", "generation_mismatch", "malformed", "unknown_request"] } })),
+    errorEnvelope("PROTOCOL_ANSWER_INVALID", object({ request_id: { type: "integer", minimum: 0, maximum: exactInteger("18446744073709551615") }, reason: { enum: ["future_sequence", "nonce_mismatch", "generation_mismatch", "malformed", "unknown_request"] } })),
     errorEnvelope("DAEMON_NOT_RUNNING", object({ account: ref("account"), socket: { type: "string" } })),
     errorEnvelope("AUDIT_UNAVAILABLE", object({ account: ref("account"), path: { type: "string" }, reason: { type: "string" } })),
     errorEnvelope("AUDIT_INCOMPLETE", object({ account: ref("account"), path: {}, mutation_state: { enum: ["none", "possible", "confirmed"] }, completed_stages: array({ type: "string" }, 6) })),

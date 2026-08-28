@@ -4,6 +4,7 @@
 #include "proto/frame.hpp"
 
 #include <chrono>
+#include <memory>
 #include <string>
 
 namespace tgcli::core {
@@ -13,6 +14,9 @@ class TdClient;
 namespace tgcli::daemon {
 
 class StreamService;
+namespace testing {
+struct ConfigRuntimeHooks;
+}
 
 // Foreground daemon entrypoint (`tgcli daemon run`): binds the account
 // socket, serves until `daemon stop` or SIGTERM/SIGINT, closes tdlib
@@ -26,7 +30,8 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
                    std::string& error, const Dispatcher* dispatcher_override = nullptr,
                    core::TdClient* td_client_override = nullptr,
                    const testing::RequestWallClock& request_wall_clock = {},
-                   StreamService* stream_service_override = nullptr);
+                   StreamService* stream_service_override = nullptr,
+                   std::shared_ptr<const testing::ConfigRuntimeHooks> config_runtime_hooks = {});
 
 // Reconciles an unmatched account-local logout audit without binding sockets or
 // starting a background daemon. The caller should isolate this bounded DB-open

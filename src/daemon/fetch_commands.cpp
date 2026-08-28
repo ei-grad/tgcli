@@ -442,11 +442,13 @@ void FetchCoordinator::fetch(const proto::Request& request, RequestSession& sess
 
 void register_fetch_command(Dispatcher& dispatcher, FetchCoordinator& coordinator) {
     dispatcher.register_command(
-        "fetch", {Tier::Read,
-                  [&coordinator](const proto::Request& request, RequestSession& session) {
-                      coordinator.fetch(request, session);
-                  },
-                  false, std::nullopt, DeadlineDefault::Unlimited});
+        "fetch", {.tier = Tier::Read,
+                  .handler =
+                      [&coordinator](const proto::Request& request, RequestSession& session) {
+                          coordinator.fetch(request, session);
+                      },
+                  .deadline_default = DeadlineDefault::Unlimited,
+                  .config_admission = true});
 }
 
 } // namespace tgcli::daemon

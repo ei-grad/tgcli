@@ -113,10 +113,13 @@ authoritative implementation status and roadmap (work milestones top-down).
   (`raw -`): argv JSON is always rejected. `--full` remains rejected throughout
   v1 and is post-1.0 only.
 - Raw parsing is duplicate-rejecting and converts once. Classifier, TD-aware
-  canonical hash serializer and future dispatch retain the same typed Function
-  object; a second parse/`from_json` is forbidden. The complete pinned function
-  inventory and policy are exact tl/generated-header bijections with committed
-  count/digests and deny unknown drift. The dormant seed is all-denied and
+  canonical hash serializer and future dispatch retain the same actual owned
+  `td_api::Function`; a second parse/`from_json` is forbidden. The complete
+  pinned function inventory, 3118-constructor type graph and policy are exact
+  tl/generated-header bijections with committed count/digests and deny unknown
+  drift. Generated missing/default/null and abstract-variant rules apply before
+  the single native conversion. Native responses must match the holder's
+  declared result base (or exact `td_api::error`) before canonical hashing. The dormant seed is all-denied and
   unreviewed; an activation check fails until every row has concrete review
   evidence. A body validator can only retain/raise tier or deny, and
   unknown/null/unmatched nested variants deny.

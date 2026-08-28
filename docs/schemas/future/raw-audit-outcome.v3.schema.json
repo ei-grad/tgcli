@@ -146,7 +146,7 @@
                   "const": "error_summary"
                 },
                 "code": {
-                  "const": "INTERNAL"
+                  "const": "RAW_OUTCOME_UNCONFIRMED"
                 },
                 "td_error_code": {
                   "type": "null"

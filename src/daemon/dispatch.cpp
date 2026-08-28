@@ -389,7 +389,7 @@ bool Dispatcher::requires_frozen_config_admission(const proto::Request& request)
     if (descriptor.m6_operation) {
         m6_identity = proto::m6_operation_identity(descriptor.m6_operation.value());
     }
-    return descriptor.m3_operation.has_value() ||
+    return descriptor.config_admission || descriptor.m3_operation.has_value() ||
            (m6_identity != nullptr && m6_identity->mutation) ||
            descriptor.session_operation == proto::SessionOperation::Terminate;
 }

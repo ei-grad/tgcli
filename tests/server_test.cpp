@@ -1040,6 +1040,47 @@ TEST_CASE("config admission and handlers observe one deadline tag",
           json{{"same", true}});
 }
 
+TEST_CASE("socket config-admission timeout bytes retain command attribution",
+          "[server][config-runtime][admission][timeout][m2]") {
+    const RuntimeConfig config;
+    config.write_initial(runtime_account_config("30"));
+    const auto after_every_request_deadline = RequestClock::now() + 1h;
+    auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
+    hooks->now = [after_every_request_deadline] { return after_every_request_deadline; };
+    daemon::ConfigRuntime runtime(config.file(), hooks);
+    const TestDaemon test_daemon({}, true, {}, "main", {}, {}, &runtime);
+
+    const int fd = connect_to(test_daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+
+    std::uint64_t request_id = 900;
+    for (const auto& [command, operation] :
+         std::array{std::pair{std::vector<std::string>{"chats"}, "config_admission"},
+                    std::pair{std::vector<std::string>{"unread"}, "config_admission"},
+                    std::pair{std::vector<std::string>{"read"}, "config_admission"},
+                    std::pair{std::vector<std::string>{"msg", "get"}, "config_admission"},
+                    std::pair{std::vector<std::string>{"msg", "link"}, "config_admission"},
+                    std::pair{std::vector<std::string>{"fetch"}, "config_admission"}}) {
+        auto request = make_request(command, request_id, "main");
+        request.context.timeout_seconds = 0.001;
+        send_frame(fd, request);
+        std::string io_error;
+        const auto line = reader.read_line_until(RequestClock::now() + 5s, io_error);
+        INFO("io error: " << io_error);
+        REQUIRE(line);
+        const proto::Error expected{request_id,
+                                    "TIMEOUT",
+                                    "config admission timed out",
+                                    {{"operation", operation}, {"state", nullptr}},
+                                    kTimeout};
+        CHECK(*line == proto::serialize(proto::Frame{expected}));
+        ++request_id;
+    }
+    ::close(fd);
+}
+
 TEST_CASE("socket admission wall clock survives a logically delayed config refresh",
           "[server][config-runtime][admission][wall-clock][fetch]") {
     const RuntimeConfig config;

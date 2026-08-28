@@ -20,6 +20,7 @@ TDLIB_SOURCE = Path(os.environ["TGCLI_TEST_TDLIB_SOURCE"])
 class RawPolicyTest(unittest.TestCase):
     def test_committed_inventory_is_the_complete_pin_bijection(self) -> None:
         inventory, evidence = raw_policy.source_inventory(TDLIB_SOURCE)
+        graph = raw_policy.source_type_graph(TDLIB_SOURCE)
         self.assertEqual(inventory["function_count"], 1001)
         self.assertEqual(len(inventory["functions"]), 1001)
         self.assertEqual(
@@ -32,6 +33,14 @@ class RawPolicyTest(unittest.TestCase):
                 "td_api_tl_sha256": "sha256:a8166ef37efb1a1440357b81e8e26c68ea45a35901c0bcc8d69964487c98476f",
                 "td_api_header_sha256": "sha256:5926a873f226667dfa69e6cda9f28c03407aefc31a90de73dd96be0e8fa6c536",
             },
+        )
+        self.assertEqual(graph["function_count"], 1001)
+        self.assertEqual(graph["constructor_count"], 3118)
+        self.assertEqual(len(graph["constructors"]), 3118)
+        self.assertEqual(len(graph["result_types"]), 727)
+        self.assertEqual(
+            graph["graph_sha256"],
+            "sha256:c8937fab296da09ca04874ed6b1eb23af40b5232008a77c52b4a8645b4ab5153",
         )
         raw_policy.validate_assets(TDLIB_SOURCE, REPOSITORY, activation=False)
 

@@ -125,10 +125,10 @@ bool valid_error_terminal(const json& value) {
         return false;
     }
     const auto& code = value["code"].get_ref<const std::string&>();
-    if (code != "RATE_LIMITED" && code != "TDLIB_ERROR" && code != "INTERNAL") {
+    if (code != "RATE_LIMITED" && code != "TDLIB_ERROR" && code != "RAW_OUTCOME_UNCONFIRMED") {
         return false;
     }
-    if (code == "INTERNAL") {
+    if (code == "RAW_OUTCOME_UNCONFIRMED") {
         return value["td_error_code"].is_null();
     }
     return value["td_error_code"].is_number_integer() &&
@@ -207,11 +207,13 @@ bool consume_outcome(const json& record, Invocation& invocation) {
         invocation.outcome != nullptr) {
         return reject(invocation);
     }
-    const bool internal_without_response =
+    const bool unconfirmed_without_response =
         invocation.response == nullptr && record["mutation_state"] == "possible" &&
-        record["terminal"]["kind"] == "error_summary" && record["terminal"]["code"] == "INTERNAL";
-    if (!internal_without_response && (invocation.response == nullptr ||
-                                       !outcome_matches_response(*invocation.response, record))) {
+        record["terminal"]["kind"] == "error_summary" &&
+        record["terminal"]["code"] == "RAW_OUTCOME_UNCONFIRMED";
+    if (!unconfirmed_without_response &&
+        (invocation.response == nullptr ||
+         !outcome_matches_response(*invocation.response, record))) {
         return reject(invocation);
     }
     invocation.outcome = &record;

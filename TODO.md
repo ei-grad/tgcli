@@ -453,8 +453,10 @@ before the milestone is closed.
       validator that fails while any row remains unreviewed; count is drift
       evidence, not a timeless constant
 - [x] Add dormant duplicate-rejecting raw parsing, typed canonical value/hash
-      vectors and audit-v3 schema/validator/scanner/recovery foundations; no TD
-      raw send, parser registration, dispatcher admission or catalog mapping
+      vectors, the complete 3118-constructor pinned type graph, one actual
+      native `td_api::Function` holder, declared-result response validation,
+      and audit-v3 schema/validator/scanner/recovery foundations; no TD raw
+      send, parser registration, dispatcher admission or catalog mapping
 - [ ] Implement typed body validators and independently review every admitted
       policy row, then atomically activate raw parser/handler/dispatcher/audit/
       result+error catalogs; unknown/null/unmatched variants remain denied

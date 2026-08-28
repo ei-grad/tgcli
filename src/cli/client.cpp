@@ -1232,7 +1232,8 @@ int run_in_process(const proto::Request& request, const RunOptions& options,
     std::string error;
     if (!daemon::run_no_daemon(request, sink, options.account, error, options.in_process_dispatcher,
                                options.in_process_td_client, options.in_process_request_wall_clock,
-                               options.in_process_stream_service)) {
+                               options.in_process_stream_service,
+                               options.in_process_config_runtime_hooks)) {
         print_error("GENERIC", error, json::object());
         return kGeneric;
     }

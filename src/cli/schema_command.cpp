@@ -26,6 +26,7 @@ Positionals:
 Options:
   -h,--help                    Print this help message and exit
   --all                        include every cataloged result, item, and error schema
+  --no-color                   accepted no-op; output never contains ANSI escapes
 )";
 
 void write_stdout(std::string_view bytes) {

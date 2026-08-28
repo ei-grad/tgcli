@@ -8,7 +8,11 @@
 #include <string>
 #include <string_view>
 #include <variant>
-#include <vector>
+
+namespace td::td_api {
+class Function;
+class Object;
+} // namespace td::td_api
 
 namespace tgcli::daemon::raw {
 
@@ -16,44 +20,6 @@ constexpr std::size_t kMaximumRequestBytes = 1'048'576;
 constexpr std::size_t kMaximumResponseBytes = 16'777'216;
 constexpr std::size_t kMaximumJsonDepth = 64;
 constexpr std::int64_t kMaximumInt53 = 9'007'199'254'740'991LL;
-
-enum class Primitive {
-    Boolean,
-    Int32,
-    Int53,
-    Int64,
-    Bytes,
-    String,
-    Double,
-};
-
-struct Type;
-using TypePtr = std::shared_ptr<const Type>;
-
-struct Field {
-    std::string name;
-    TypePtr type;
-    bool required = true;
-};
-
-struct Type {
-    enum class Kind {
-        Primitive,
-        Object,
-        Vector,
-    };
-
-    Kind kind = Kind::Primitive;
-    Primitive primitive = Primitive::String;
-    std::string object_type;
-    std::vector<Field> fields;
-    TypePtr element;
-};
-
-[[nodiscard]] TypePtr primitive(Primitive kind);
-[[nodiscard]] TypePtr object(std::string type, std::vector<Field> fields);
-[[nodiscard]] TypePtr vector(TypePtr element);
-[[nodiscard]] TypePtr function(std::string type, std::vector<Field> fields);
 
 enum class Error {
     EmptyInput,
@@ -71,6 +37,8 @@ enum class Error {
     InvalidBase64,
     InvalidDouble,
     CanonicalTooLarge,
+    NativeConversionFailed,
+    UnexpectedResponseType,
     InvalidPolicyMetadata,
 };
 
@@ -93,8 +61,10 @@ class TypedFunction final {
     TypedFunction& operator=(const TypedFunction&) = delete;
 
     [[nodiscard]] std::string_view name() const noexcept;
+    [[nodiscard]] std::string_view result_type() const noexcept;
     [[nodiscard]] std::string_view canonical() const noexcept;
     [[nodiscard]] const void* identity() const noexcept;
+    [[nodiscard]] const td::td_api::Function& native() const noexcept;
     [[nodiscard]] std::variant<Digest, Failure>
     request_digest(std::string_view tdlib_sha, std::string_view effective_tier) const;
 
@@ -104,14 +74,15 @@ class TypedFunction final {
 
     std::unique_ptr<Impl> implementation_;
 
-    friend std::variant<TypedFunction, Failure> parse(std::string&& input, const TypePtr& schema,
+    friend std::variant<TypedFunction, Failure> parse(std::string&& input,
                                                       const secure::WipeObserver& wipe_observer);
 };
 
 [[nodiscard]] std::variant<TypedFunction, Failure>
-parse(std::string&& input, const TypePtr& schema, const secure::WipeObserver& wipe_observer = {});
+parse(std::string&& input, const secure::WipeObserver& wipe_observer = {});
 
-[[nodiscard]] std::variant<Digest, Failure> response_digest(std::string_view function_name,
-                                                            std::string&& canonical_response);
+[[nodiscard]] std::variant<Digest, Failure>
+response_digest(const TypedFunction& function, const td::td_api::Object& response,
+                const secure::WipeObserver& wipe_observer = {});
 
 } // namespace tgcli::daemon::raw

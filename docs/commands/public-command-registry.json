@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "selection": "raw-option-b",
+  "global_options": {
+    "flags": ["--json", "--allow-write", "--yes", "--dry-run", "--verbose", "-v", "--no-daemon", "--no-color"],
+    "values": ["--account", "--timeout", "--cursor", "--idempotency-key"]
+  },
   "option_sets": {
     "account_local": ["--json", "--verbose", "-v", "--no-color"],
     "auth": ["--account", "--json", "--timeout", "--verbose", "-v", "--no-daemon", "--no-color"],
@@ -11,151 +15,150 @@
     "read": ["--account", "--json", "--timeout", "--verbose", "-v", "--no-daemon", "--no-color"],
     "read_cursor": ["--account", "--json", "--timeout", "--cursor", "--verbose", "-v", "--no-daemon", "--no-color"],
     "stream": ["--account", "--json", "--timeout", "--verbose", "-v", "--no-daemon", "--no-color"],
-    "write": ["--account", "--json", "--allow-write", "--dry-run", "--timeout", "--idempotency-key", "--verbose", "-v", "--no-daemon", "--no-color"],
-    "write_unkeyed": ["--account", "--json", "--allow-write", "--dry-run", "--timeout", "--verbose", "-v", "--no-daemon", "--no-color"]
+    "write": ["--account", "--json", "--allow-write", "--dry-run", "--timeout", "--idempotency-key", "--verbose", "-v", "--no-daemon", "--no-color"]
   },
   "commands": [
     {
       "name": "account",
       "activation": "active",
       "children": [
-        {"name": "add", "activation": "active", "option_set": "account_local", "options": []},
-        {"name": "list", "activation": "active", "option_set": "account_local", "options": []},
-        {"name": "remove", "activation": "active", "option_set": "account_local", "options": ["--keep-session", "--reassign-default", "--yes"]},
-        {"name": "show", "activation": "active", "option_set": "account_local", "options": []},
-        {"name": "use", "activation": "active", "option_set": "account_local", "options": []}
+        {"name": "add", "activation": "active", "option_set": "account_local", "options": [], "positionals": ["name"]},
+        {"name": "list", "activation": "active", "option_set": "account_local", "options": [], "positionals": []},
+        {"name": "remove", "activation": "active", "option_set": "account_local", "options": ["--keep-session", "--reassign-default", "--yes"], "positionals": ["name"]},
+        {"name": "show", "activation": "active", "option_set": "account_local", "options": [], "positionals": ["name"]},
+        {"name": "use", "activation": "active", "option_set": "account_local", "options": [], "positionals": ["name"]}
       ]
     },
     {
       "name": "chat",
       "activation": "active",
       "children": [
-        {"name": "archive", "activation": "active", "option_set": "write", "options": []},
-        {"name": "ban", "activation": "active", "option_set": "destructive", "options": []},
-        {"name": "demote", "activation": "active", "option_set": "write", "options": []},
-        {"name": "info", "activation": "future", "option_set": "read", "options": []},
-        {"name": "invite-link", "activation": "active", "option_set": "destructive_unkeyed", "options": ["--revoke"]},
-        {"name": "join", "activation": "active", "option_set": "write", "options": []},
-        {"name": "kick", "activation": "active", "option_set": "destructive", "options": []},
-        {"name": "leave", "activation": "active", "option_set": "destructive", "options": []},
-        {"name": "mark-read", "activation": "active", "option_set": "write", "options": []},
-        {"name": "members", "activation": "future", "option_set": "read_cursor", "options": ["--admins", "--bots", "--query", "-n"]},
-        {"name": "mute", "activation": "active", "option_set": "write", "options": ["--for"]},
-        {"name": "pin", "activation": "active", "option_set": "write", "options": []},
-        {"name": "promote", "activation": "active", "option_set": "write", "options": ["--rights"]},
-        {"name": "set-description", "activation": "active", "option_set": "write", "options": []},
-        {"name": "set-permissions", "activation": "active", "option_set": "write", "options": ["--allow", "--deny"]},
-        {"name": "set-photo", "activation": "active", "option_set": "write", "options": ["--delete"]},
-        {"name": "set-title", "activation": "active", "option_set": "write", "options": []},
-        {"name": "unarchive", "activation": "active", "option_set": "write", "options": []},
-        {"name": "unban", "activation": "active", "option_set": "write", "options": []},
-        {"name": "unmute", "activation": "active", "option_set": "write", "options": []},
-        {"name": "unpin", "activation": "active", "option_set": "write", "options": []}
+        {"name": "archive", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat"]},
+        {"name": "ban", "activation": "active", "option_set": "destructive", "options": [], "positionals": ["chat", "user"]},
+        {"name": "demote", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "user"]},
+        {"name": "info", "activation": "future", "option_set": "read", "options": [], "positionals": ["chat"]},
+        {"name": "invite-link", "activation": "active", "option_set": "destructive_unkeyed", "options": ["--revoke"], "positionals": ["chat"]},
+        {"name": "join", "activation": "active", "option_set": "write", "options": [], "positionals": ["invite-link|@username"]},
+        {"name": "kick", "activation": "active", "option_set": "destructive", "options": [], "positionals": ["chat", "user"]},
+        {"name": "leave", "activation": "active", "option_set": "destructive", "options": [], "positionals": ["chat"]},
+        {"name": "mark-read", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat"]},
+        {"name": "members", "activation": "future", "option_set": "read_cursor", "options": ["--admins", "--bots", "--query", "-n"], "positionals": ["chat?"]},
+        {"name": "mute", "activation": "active", "option_set": "write", "options": ["--for"], "positionals": ["chat"]},
+        {"name": "pin", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat"]},
+        {"name": "promote", "activation": "active", "option_set": "write", "options": ["--rights"], "positionals": ["chat", "user"]},
+        {"name": "set-description", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "description"]},
+        {"name": "set-permissions", "activation": "active", "option_set": "write", "options": ["--permissions"], "positionals": ["chat"]},
+        {"name": "set-photo", "activation": "active", "option_set": "write", "options": ["--delete"], "positionals": ["chat", "PATH?"]},
+        {"name": "set-title", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "title"]},
+        {"name": "unarchive", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat"]},
+        {"name": "unban", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "user"]},
+        {"name": "unmute", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat"]},
+        {"name": "unpin", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat"]}
       ]
     },
-    {"name": "chats", "activation": "active", "option_set": "read_cursor", "options": ["--folder", "--archived", "--unread", "-n"]},
-    {"name": "completion", "activation": "future", "option_set": "meta", "options": []},
+    {"name": "chats", "activation": "active", "option_set": "read_cursor", "options": ["--folder", "--archived", "--unread", "-n"], "positionals": []},
+    {"name": "completion", "activation": "future", "option_set": "meta", "options": [], "positionals": ["shell"], "completion_literals": ["bash", "zsh", "fish"]},
     {
       "name": "contact",
       "activation": "active",
       "children": [
-        {"name": "add", "activation": "active", "option_set": "write", "options": ["--first-name", "--last-name", "--phone"]},
-        {"name": "block", "activation": "active", "option_set": "write", "options": []},
-        {"name": "list", "activation": "active", "option_set": "read", "options": []},
-        {"name": "remove", "activation": "active", "option_set": "write", "options": []},
-        {"name": "search", "activation": "active", "option_set": "read", "options": ["-n"]},
-        {"name": "unblock", "activation": "active", "option_set": "write", "options": []}
+        {"name": "add", "activation": "active", "option_set": "write", "options": [], "positionals": ["user"]},
+        {"name": "block", "activation": "active", "option_set": "write", "options": [], "positionals": ["user"]},
+        {"name": "list", "activation": "active", "option_set": "read", "options": [], "positionals": []},
+        {"name": "remove", "activation": "active", "option_set": "write", "options": [], "positionals": ["user"]},
+        {"name": "search", "activation": "active", "option_set": "read", "options": [], "positionals": ["query"]},
+        {"name": "unblock", "activation": "active", "option_set": "write", "options": [], "positionals": ["user"]}
       ]
     },
     {
       "name": "daemon",
       "activation": "active",
       "children": [
-        {"name": "restart", "activation": "active", "option_set": "account_local", "options": []},
-        {"name": "run", "activation": "active", "option_set": "account_local", "options": []},
-        {"name": "status", "activation": "active", "option_set": "account_local", "options": []},
-        {"name": "stop", "activation": "active", "option_set": "account_local", "options": []}
+        {"name": "restart", "activation": "active", "option_set": "account_local", "options": [], "positionals": []},
+        {"name": "run", "activation": "active", "option_set": "account_local", "options": [], "positionals": []},
+        {"name": "status", "activation": "active", "option_set": "account_local", "options": [], "positionals": []},
+        {"name": "stop", "activation": "active", "option_set": "account_local", "options": [], "positionals": []}
       ]
     },
-    {"name": "doctor", "activation": "active", "option_set": "meta", "options": []},
-    {"name": "download", "activation": "future", "option_set": "read", "options": ["-O"]},
-    {"name": "fetch", "activation": "active", "option_set": "read", "options": ["--limit", "--all", "--since"]},
+    {"name": "doctor", "activation": "active", "option_set": "meta", "options": [], "positionals": []},
+    {"name": "download", "activation": "future", "option_set": "read", "options": ["-O"], "positionals": ["chat", "msg-id"]},
+    {"name": "fetch", "activation": "active", "option_set": "read", "options": ["--limit", "--all", "--since"], "positionals": ["chat"]},
     {
       "name": "folder",
       "activation": "active",
       "children": [
-        {"name": "add-chat", "activation": "active", "option_set": "write", "options": []},
-        {"name": "create", "activation": "active", "option_set": "write", "options": ["--chat", "--icon", "--color-id"]},
-        {"name": "delete", "activation": "active", "option_set": "destructive", "options": []},
-        {"name": "edit", "activation": "active", "option_set": "write", "options": ["--name", "--icon", "--color-id", "--clear-icon"]},
-        {"name": "list", "activation": "active", "option_set": "read", "options": []},
-        {"name": "remove-chat", "activation": "active", "option_set": "write", "options": []},
-        {"name": "show", "activation": "active", "option_set": "read", "options": []}
+        {"name": "add-chat", "activation": "active", "option_set": "write", "options": [], "positionals": ["folder-id", "chat"]},
+        {"name": "create", "activation": "active", "option_set": "write", "options": ["--chat", "--icon", "--color"], "positionals": ["name"]},
+        {"name": "delete", "activation": "active", "option_set": "destructive", "options": [], "positionals": ["folder-id"]},
+        {"name": "edit", "activation": "active", "option_set": "write", "options": ["--name", "--icon", "--color"], "positionals": ["folder-id"]},
+        {"name": "list", "activation": "active", "option_set": "read", "options": [], "positionals": []},
+        {"name": "remove-chat", "activation": "active", "option_set": "write", "options": [], "positionals": ["folder-id", "chat"]},
+        {"name": "show", "activation": "active", "option_set": "read", "options": [], "positionals": ["folder-id"]}
       ]
     },
-    {"name": "history", "activation": "active", "alias_of": "read", "option_set": "read_cursor", "options": ["-n", "--before", "--since", "--until", "--topic", "--local"]},
-    {"name": "listen", "activation": "active", "option_set": "stream", "options": ["--chat", "--types", "--count"]},
-    {"name": "login", "activation": "active", "option_set": "auth", "options": ["--qr", "--bot"]},
-    {"name": "logout", "activation": "active", "option_set": "destructive_unkeyed", "options": []},
-    {"name": "me", "activation": "active", "option_set": "auth", "options": []},
+    {"name": "history", "activation": "active", "alias_of": "read", "option_set": "read_cursor", "options": ["-n", "--before", "--since", "--until", "--topic", "--local"], "positionals": ["chat?"]},
+    {"name": "listen", "activation": "active", "option_set": "stream", "options": ["--chat", "--types", "--count"], "positionals": []},
+    {"name": "login", "activation": "active", "option_set": "auth", "options": ["--qr", "--bot"], "positionals": []},
+    {"name": "logout", "activation": "active", "option_set": "destructive_unkeyed", "options": [], "positionals": []},
+    {"name": "me", "activation": "active", "option_set": "auth", "options": [], "positionals": []},
     {
       "name": "msg",
       "activation": "active",
       "children": [
-        {"name": "delete", "activation": "active", "option_set": "destructive", "options": ["--for-all"]},
-        {"name": "edit", "activation": "active", "option_set": "write", "options": []},
-        {"name": "forward", "activation": "active", "option_set": "write", "options": ["--drop-author"]},
-        {"name": "get", "activation": "active", "option_set": "read", "options": []},
-        {"name": "link", "activation": "active", "option_set": "read", "options": []},
-        {"name": "pin", "activation": "active", "option_set": "write", "options": []},
-        {"name": "react", "activation": "active", "option_set": "write", "options": ["--remove", "--big"]},
-        {"name": "unpin", "activation": "active", "option_set": "write", "options": []}
+        {"name": "delete", "activation": "active", "option_set": "destructive", "options": ["--for-all"], "positionals": ["chat", "id..."]},
+        {"name": "edit", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "id", "TEXT|-"]},
+        {"name": "forward", "activation": "active", "option_set": "write", "options": ["--drop-author"], "positionals": ["arg..."]},
+        {"name": "get", "activation": "active", "option_set": "read", "options": [], "positionals": ["chat", "id..."]},
+        {"name": "link", "activation": "active", "option_set": "read", "options": [], "positionals": ["chat", "id"]},
+        {"name": "pin", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "id"]},
+        {"name": "react", "activation": "active", "option_set": "write", "options": ["--remove", "--big"], "positionals": ["chat", "id", "emoji"]},
+        {"name": "unpin", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "id"]}
       ]
     },
-    {"name": "raw", "activation": "future", "option_set": "raw", "options": [], "positionals": ["-"]},
-    {"name": "read", "activation": "active", "option_set": "read_cursor", "options": ["-n", "--before", "--since", "--until", "--topic", "--local"]},
-    {"name": "resolve", "activation": "active", "option_set": "read", "options": []},
+    {"name": "raw", "activation": "future", "option_set": "raw", "options": [], "positionals": ["-"], "completion_literals": ["-"]},
+    {"name": "read", "activation": "active", "option_set": "read_cursor", "options": ["-n", "--before", "--since", "--until", "--topic", "--local"], "positionals": ["chat?"]},
+    {"name": "resolve", "activation": "active", "option_set": "read", "options": [], "positionals": ["selector"]},
     {
       "name": "saved",
       "activation": "active",
       "children": [
-        {"name": "attach", "activation": "active", "option_set": "write", "options": ["--caption"]},
-        {"name": "search", "activation": "active", "option_set": "read_cursor", "options": ["--tag", "-n"]},
-        {"name": "tags", "activation": "active", "option_set": "read", "options": []}
+        {"name": "attach", "activation": "active", "option_set": "write", "options": ["--caption"], "positionals": ["message-id", "PATH"]},
+        {"name": "search", "activation": "active", "option_set": "read_cursor", "options": ["--tag", "-n"], "positionals": ["query?"]},
+        {"name": "tags", "activation": "active", "option_set": "read", "options": [], "positionals": []}
       ]
     },
-    {"name": "schema", "activation": "active", "option_set": "meta", "options": ["--all"]},
-    {"name": "search", "activation": "future", "option_set": "read_cursor", "options": ["--chat", "--global", "--from", "--type", "-n"]},
-    {"name": "send", "activation": "active", "option_set": "write", "options": ["--md", "--html", "--reply-to", "--topic", "--silent", "--schedule"]},
+    {"name": "schema", "activation": "active", "option_set": "meta", "options": ["--all"], "positionals": ["command..."]},
+    {"name": "search", "activation": "future", "option_set": "read_cursor", "options": ["--chat", "--global", "--from", "--type", "-n"], "positionals": ["query?"]},
+    {"name": "send", "activation": "active", "option_set": "write", "options": ["--md", "--html", "--reply-to", "--topic", "--silent", "--schedule"], "positionals": ["chat", "TEXT|-"]},
     {
       "name": "session",
       "activation": "active",
       "children": [
-        {"name": "list", "activation": "active", "option_set": "read", "options": []},
-        {"name": "terminate", "activation": "active", "option_set": "destructive_unkeyed", "options": []}
+        {"name": "list", "activation": "active", "option_set": "read", "options": [], "positionals": []},
+        {"name": "terminate", "activation": "active", "option_set": "destructive_unkeyed", "options": [], "positionals": ["session-id"]}
       ]
     },
     {
       "name": "storage",
       "activation": "active",
       "children": [
-        {"name": "optimize", "activation": "active", "option_set": "destructive_unkeyed", "options": ["--chat-limit"]},
-        {"name": "stats", "activation": "active", "option_set": "read", "options": ["--chat-limit"]}
+        {"name": "optimize", "activation": "active", "option_set": "destructive_unkeyed", "options": [], "positionals": []},
+        {"name": "stats", "activation": "active", "option_set": "read", "options": [], "positionals": []}
       ]
     },
     {
       "name": "topic",
       "activation": "active",
       "children": [
-        {"name": "close", "activation": "active", "option_set": "write", "options": []},
-        {"name": "create", "activation": "active", "option_set": "write", "options": ["--icon-color", "--icon-custom-emoji-id"]},
-        {"name": "edit", "activation": "active", "option_set": "write", "options": []},
-        {"name": "list", "activation": "active", "option_set": "read", "options": []},
-        {"name": "reopen", "activation": "active", "option_set": "write", "options": []}
+        {"name": "close", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "topic-id"]},
+        {"name": "create", "activation": "active", "option_set": "write", "options": ["--icon"], "positionals": ["chat", "name"]},
+        {"name": "edit", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "topic-id", "name"]},
+        {"name": "list", "activation": "active", "option_set": "read", "options": [], "positionals": ["chat"]},
+        {"name": "reopen", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "topic-id"]}
       ]
     },
-    {"name": "unread", "activation": "active", "option_set": "read", "options": []},
-    {"name": "version", "activation": "active", "option_set": "meta", "options": []},
-    {"name": "wait-for", "activation": "active", "option_set": "stream", "options": ["--chat", "--from", "--regex", "--after"]}
+    {"name": "unread", "activation": "active", "option_set": "read", "options": [], "positionals": []},
+    {"name": "version", "activation": "active", "option_set": "meta", "options": [], "positionals": []},
+    {"name": "wait-for", "activation": "active", "option_set": "stream", "options": ["--chat", "--from", "--regex", "--after"], "positionals": []}
   ]
 }

@@ -1745,7 +1745,7 @@ int run(int argc, char** argv) {
                                                          "deduplicate an M3/M4 write invocation");
     app.add_flag("--no-daemon", no_daemon,
                  "run in-process without the daemon (debugging escape hatch)");
-    app.add_flag("--no-color", no_color, "disable colored output")->group("");
+    app.add_flag("--no-color", no_color, "disable colored output");
     CLI::Option* timeout_option =
         app.add_option("--timeout", timeout_seconds, "per-command deadline in seconds");
     saved.cursor_option =
@@ -2047,6 +2047,15 @@ int run(int argc, char** argv) {
     saved_attach_cmd->add_option("message-id", saved.attach_message_id_raw)->required();
     saved_attach_cmd->add_option("PATH", saved.attach_path)->required();
     saved_attach_cmd->add_option("--caption", saved.attach_caption, "plain attachment caption");
+
+    std::function<void(CLI::App&)> expose_no_color;
+    expose_no_color = [&no_color, &expose_no_color](CLI::App& command) {
+        for (auto* child : command.get_subcommands([](CLI::App*) { return true; })) {
+            child->add_flag("--no-color", no_color, "disable colored output");
+            expose_no_color(*child);
+        }
+    };
+    expose_no_color(app);
 
     if (const auto parse_exit = parse_arguments(app, argc, argv); parse_exit.has_value()) {
         return parse_exit.value();

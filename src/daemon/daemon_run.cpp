@@ -359,7 +359,8 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
                    std::string& error, const Dispatcher* dispatcher_override,
                    core::TdClient* td_client_override,
                    const testing::RequestWallClock& request_wall_clock,
-                   StreamService* stream_service_override) {
+                   StreamService* stream_service_override,
+                   std::shared_ptr<const testing::ConfigRuntimeHooks> config_runtime_hooks) {
     auto admitted_request = proto::admit_request_source(request, error);
     if (!admitted_request) {
         return false;
@@ -447,7 +448,8 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     }
     core::TdClient& td = *td_client_override;
     const config::Store config_store(paths::config_file(environment), environment.uid);
-    ConfigRuntime config_runtime(config_store.path(), {}, environment.uid);
+    ConfigRuntime config_runtime(config_store.path(), std::move(config_runtime_hooks),
+                                 environment.uid);
     const auto environment_value = [](const char* name) -> std::optional<std::string> {
         const char* value = std::getenv(name);
         return value != nullptr && *value != '\0' ? std::optional<std::string>{value}
@@ -520,11 +522,8 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     } else {
         const auto admission = config_runtime.admit(admitted.account, *deadline);
         if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
-            const bool fetch = admitted.command == std::vector<std::string>{"fetch"} &&
-                               deadline_policy == DeadlineDefault::Unlimited;
             sink.error("TIMEOUT", "config admission timed out",
-                       {{"operation", fetch ? "fetch" : "config_admission"}, {"state", nullptr}},
-                       kTimeout);
+                       {{"operation", "config_admission"}, {"state", nullptr}}, kTimeout);
         } else if (admission.refresh_status != ConfigRefreshStatus::Completed ||
                    !admission.decision) {
             sink.error("DAEMON_SHUTDOWN", "daemon is shutting down",

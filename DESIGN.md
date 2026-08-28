@@ -146,7 +146,7 @@ tgcli send <chat> <TEXT|-> [--md | --html] [--reply-to ID]
               [--topic <bare-int|forum:int>] [--silent]
               [--schedule <RFC3339|online>]
 tgcli search <query> [--chat <c> | --global] [--from <user>]
-              [--type text|photo|video|doc|link|voice] [-n N]
+              [--type any|text|photo|video|doc|link|voice] [-n N]
               always server-side — tdlib has no local search (§8)
 tgcli search --cursor <token>
 tgcli unread                                      per-chat unread counters
@@ -458,14 +458,16 @@ The response digest uses domain `tgcli.raw.response.v1\0`, the function name,
 the uint64 big-endian canonical response length and canonical response bytes.
 `request_bytes` and `response_bytes` count only canonical typed JSON, excluding
 the hash domain, protocol envelope and LF. Raw stdin, AST string/byte storage,
-canonical request storage and typed request string/byte fields are wiped after
-ownership transfer or on rejection. Response staging is wiped after bounded
+canonical request storage and every recursively reachable native typed request
+string/byte field are wiped by the pin-generated visitor after ownership
+transfer or on rejection. Response staging is wiped after bounded
 frame serialization.
 
 Two checked-in pin-owned assets govern classification:
 
 ```text
 docs/raw/td-functions.a17f87c4cff7b90b278d12b91ba0614383aaee82.json
+docs/raw/td-types.a17f87c4cff7b90b278d12b91ba0614383aaee82.json
 docs/raw/raw-policy.a17f87c4cff7b90b278d12b91ba0614383aaee82.json
 ```
 
@@ -473,7 +475,16 @@ The inventory is derived from the complete pinned function set: at the current
 pin both `td_api.tl` and generated `td_api.h` contain exactly 1001 functions.
 The invariant is equality with both complete sources; 1001 and a committed
 digest are drift evidence, not a timeless API constant. Each inventory row is
-`name,constructor_id,result_type,fields_sha256`. Policy is an exact name
+`name,constructor_id,result_type,fields_sha256`. The type graph contains all
+3118 concrete pinned object/function constructors, every generated field in TD
+declaration order, and each abstract result-type membership; its count and
+digest are likewise pin-specific drift evidence. The duplicate-rejecting AST
+is validated and default-materialized through this graph, then converted once
+directly to the actual owned `td_api::Function`. The stored native object ID,
+function row and canonical bytes remain one holder for classification, hashing
+and eventual move-only dispatch. Native TD responses are revalidated against
+the same graph and the holder's declared result base (with `td_api::error` as
+the sole alternate) before canonical hashing. Policy is an exact name
 bijection and records principal (`user|bot|both`), admission
 (`read|write|destructive|denied`), body validator (`none|deny|<compiled typed
 symbol>`), request and response sensitivity, review decision and reason. The
@@ -523,10 +534,17 @@ bytes. Legal checkpoints are `raw_dispatch_started` and
 and response data retains only result/error kind, response type, nullable TD
 code, response hash and response bytes. Outcome stores a result digest or
 closed error summary, never a body. Recovery never resends: intent without
-dispatch closes `none`; dispatch without response is `AUDIT_INCOMPLETE` with
-mutation `possible` and stops inspecting mutation; a proven response without
-outcome repairs the corresponding confirmed/possible digest outcome; any
-function/hash/generation/token/stage contradiction fails closed. These dormant
+dispatch closes `none`; a valid durable dispatch without a valid response
+closes `RAW_OUTCOME_UNCONFIRMED`, exit 1, message
+`raw request outcome is unconfirmed`, and exact hash-only details
+`{"operation":"raw","function":function,"request_sha256":"sha256:<64-lower-hex>","mutation_state":"possible"}`.
+The same possible-mutation outcome is persisted on a sealable live
+post-dispatch loss/timeout/auth/disconnect and on recovery. It is never emitted
+before dispatch or after a proven response. `AUDIT_INCOMPLETE` is reserved for
+unreadable/schema-invalid records and ordering/token/generation/identity
+contradictions, including inability to inspect or repair. A proven response
+without outcome repairs the corresponding confirmed/possible digest outcome.
+These dormant
 schemas, validators, scanner and recovery rules must be present before raw is
 registered.
 
@@ -1216,7 +1234,8 @@ subject to the same equality/nonempty check. Per-chat search uses
 `searchMessages(chat_list=null)`, covering Main and Archive but not secret
 chats. Results are `{"items":[<MessageSummary>],"next":<cursor|null>}`.
 
-`photo`, `video`, `doc`, `link`, and `voice` map respectively to tdlib's Photo,
+`--type` defaults to the literal `any`, which uses an empty tdlib filter and no
+content postfilter. `photo`, `video`, `doc`, `link`, and `voice` map respectively to tdlib's Photo,
 Video, Document, Url, and VoiceNote search filters. `text` uses an empty tdlib
 filter followed by an exact content-class check for `messageText` or
 `messageAnimatedEmoji`. Per-chat `--from` is the tdlib `sender_id`; global
@@ -1243,6 +1262,33 @@ repeated/cyclic offset. The cursor carries the exact query, resolved sender,
 scope, filter, page size and upstream state plus `last_raw_message_id` for chat
 scope or `last_raw_order:{date,chat_id,message_id}` for global scope; the
 inactive raw-order field is null. Search never calls local history APIs.
+
+The first per-chat request is exactly
+`searchChatMessages(chat_id,null,query,sender,0,0,page_limit,filter)`; every
+continuation replaces only `from_message_id` with the validated upstream
+marker. The first global request is exactly
+`searchMessages(null,query,"",page_limit,filter,chat_type_filter=null,0,0)`;
+continuations replace only the opaque offset. `sender` is null without
+`--from`; a global resolved sender remains a local postfilter and is not sent
+to TDLib. `page_limit` is `min(100, remaining)` before postfiltering.
+
+The version-1 search cursor is exactly:
+
+```json
+{"version":1,"operation":"search","account":"main","user_id":42,"limit":20,"query":"needle","scope":"chat","chat_id":-1001,"sender_user_id":7,"type":"any","next_offset_message_id":123,"next_offset":null,"last_raw_message_id":124,"last_raw_order":null}
+```
+
+For `scope:"chat"`, `chat_id`, positive `next_offset_message_id`, and nonzero
+`last_raw_message_id` are required while `next_offset` and `last_raw_order`
+are null. For `scope:"global"`, `chat_id`, `next_offset_message_id`, and
+`last_raw_message_id` are null; clean nonempty `next_offset` and
+`last_raw_order:{date:int32_nonnegative,chat_id:nonzero_int53,message_id:nonzero_int53}`
+are required. `sender_user_id` is null or the resolved positive user id.
+`query`, `type`, limit, account and current user are authoritative token state;
+any first-page selector spelling is absent. The decoder enforces the exact key
+set, scalar ranges, cross-field rules, current account/user, clean query and
+offset equality, declared scope/filter and strict raw-order continuation before
+the next TD call.
 
 #### `unread`
 
@@ -1297,7 +1343,7 @@ The type-specific sources are closed:
 | chat type | `description` | `member_count` | `is_forum` | `linked_chat_id` |
 |---|---|---|---|---|
 | private | `userFullInfo.bio.text` | null | false | null |
-| basic group | `basicGroupFullInfo.description` | `basicGroup.member_count` | false | null |
+| basic group | `basicGroupFullInfo.description` | required non-null `basicGroup.member_count` | false | null |
 | supergroup/channel | `supergroupFullInfo.description` | `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
 
 List/unread fields come from the already observed resolver `chat`; active
@@ -1317,6 +1363,33 @@ tdlib offset. Every non-empty tdlib page keeps a continuation cursor and an
 empty probe alone sets `next` to null; approximate `total_count` never proves
 exhaustion. A basic-group cursor uses the exact vector offset and vector length
 for exhaustion.
+
+Default filtering is literal `recent` with null query; `--admins` selects
+`administrators`, `--bots` selects `bots`, and `--query Q` selects `search`
+with a byte-identical valid UTF-8 `Q` of 1..256 bytes after pinned input
+cleaning. A first page has offset zero. Supergroup/channel responses require
+`total_count>=0`, `total_count>=members.size()`, at most the requested page
+size, and no null member. A nonempty page advances raw offset by its full
+unfiltered vector length, even if later identity enrichment fails; a short page
+does not prove exhaustion. Exactly one empty request at the next raw offset
+proves exhaustion. Basic-group filtering and slicing are local over one
+atomically validated full vector; continuation re-reads the full-info vector
+and rejects a changed vector length as `source_changed` before returning rows.
+
+The exact cursor is:
+
+```json
+{"version":1,"operation":"chat_members","account":"main","user_id":42,"limit":50,"chat_id":-1001,"chat_type":"supergroup","filter":"recent","query":null,"offset":50,"source_count":null}
+```
+
+`chat_type` is `basic_group|supergroup|channel`. Basic-group cursors require a
+nonnegative `source_count` equal to the validated source vector length;
+supergroup/channel cursors require it null. `query` is nonempty only with
+`filter:"search"`, and every other filter requires null. Offset is a
+nonnegative int32 and is the raw source offset, not the number of emitted or
+enriched rows. Account, current user, chat id/type, limit, filter/query,
+source-count relation and canonical re-encoding are all validated before any
+member RPC.
 
 The result is `{"items":[<MemberSummary>],"next":<cursor|null>}`.
 `MemberSummary` is:
@@ -1339,8 +1412,9 @@ For a user sender, display name is `first_name` plus one space and `last_name`
 only when `last_name` is non-empty, usernames are active in tdlib order, and
 bot status comes from the user type. For a chat sender, display name is `chat.title`,
 usernames come from chat-type metadata, and `is_bot` is false. `tag` is the
-creator/administrator custom title when present and the empty string otherwise;
-`joined_at` comes from tdlib's joined-chat date.
+literal pinned `chatMember.tag` for every status, including member,
+restricted, left and banned; tgcli does not synthesize it from a custom title
+or clear it for a status. `joined_at` comes from tdlib's joined-chat date.
 
 The chat-sender branch is normative: pinned `chatMember` permits other chats
 as Left/Banned senders in supergroups and channels. tgcli enriches user senders
@@ -3527,10 +3601,9 @@ for disconnect, cancellation, shutdown, authorization loss and generation
 replacement. APIs requiring a concrete point are extended; no max-time
 sentinel, repeated long finite wait or polling substitute is allowed.
 
-Fetch-specific config-admission expiry is the sole pre-RequestSession fetch
-timeout and has exact common details
-`{"operation":"fetch","state":null}`. Every other command retains the existing
-`{"operation":"config_admission","state":null}` timeout. After RequestSession
+Config-admission expiry is the sole pre-RequestSession timeout for fetch and
+every other routed command and has exact common details
+`{"operation":"config_admission","state":null}`. After RequestSession
 construction, recovery owns terminals until both preflights succeed:
 
 - incomplete removal is `REMOVAL_INCOMPLETE`;
@@ -6766,6 +6839,31 @@ media, webpage, expired and other unsupported media produce exact
 constructor with null/malformed/nonpositive file id is
 `INTERNAL/malformed_tdlib_response`.
 
+After Ready/getMe and exact chat resolution, download performs one contextual
+message read. A documented absent message is `NOT_FOUND` with exactly
+`{"chat_id":nonzero_int53,"message_id":nonzero_int53}`; wrong/null response
+types are malformed TD data. Direct animation, audio, document, sticker,
+video, video-note and voice-note contents select only their primary file
+field. Photo selects the first `photo.sizes` row having the greatest checked
+`width*height`; dimensions must be nonnegative, every row and file is
+structurally valid, and ties retain TD order. `messagePhoto.video` is never a
+candidate and is neither a fallback nor an alternate media result. Album/
+paid/webpage wrappers are classified before nested primary media and never
+silently unwrapped.
+
+Destination interpretation precedes suggested-name lookup. Without `-O`, the
+selected media directory (environment, then frozen cwd) is directory mode. An
+`-O` value naming an existing directory, or ending in a slash, is directory
+mode; a trailing slash requires an existing safe directory and otherwise is
+`OUTPUT_UNAVAILABLE/invalid_path`. Every other `-O` is exact-file mode. Exact-
+file mode never calls TDLib for a name. Directory mode calls exactly
+`getSuggestedFileName(file_id, absolute_directory)` and accepts only a
+nonempty valid-UTF-8 safe leaf: not `.` or `..`, no slash, NUL, control byte,
+or platform-invalid component. Empty, unsafe, null or malformed output is
+`OUTPUT_UNAVAILABLE/invalid_path` with the resolved absolute destination in
+details. There is no local fallback extension, media-derived name, or direct
+media `file_name` precedence. A final-name collision is only `OUTPUT_EXISTS`.
+
 The generation observer is installed before `downloadFile(file_id,16,0,0,
 false)`. This curated operation never shares a raw `downloadFile` descriptor
 and never calls TDLib's global cancel-download operation. Wrong-file updates
@@ -6857,17 +6955,22 @@ nonempty cursor-or-null. Chat-info has exactly the 16 fields in §4.4 and a
 strict private/basic/supergroup/channel one-of. Chat-members has at most 200
 strict rows, preserves the user/chat sender one-of, closed status enum, exact
 tag and nullable timestamp. Download result has exact chat/message int53,
-positive int32 file id, closed media type, absolute path and `0..INT53_MAX`
-bytes. Raw result is the live/dry one-of in §4.2.
+positive int32 file id, closed media type, a nonempty absolute path with no
+invented schema-length cap, and exact JSON integer bytes in
+`0..18446744073709551615`. Raw result is the live/dry one-of in §4.2.
 
 Search errors close usage/auth/bot/resolver/rate/TD/timeout/internal/resource
 and pagination reasons `invalid_cursor`, `scope_changed`, `source_changed`,
 `marker_not_advancing`, `page_invalid`. Chat-read errors are restricted to
 `chat_info|chat_members` and preserve contextual resolver, unsupported-type,
 pagination/source-change and common lifecycle shapes. Download errors include
-the closed precondition reasons above, OUTPUT_EXISTS `{operation,path}`, and
-OUTPUT_UNAVAILABLE reasons `invalid_path`, `open_failed`, `write_failed`,
-`sync_failed`, `source_changed`, `cleanup_failed`. Raw errors close denied,
+the contextual message `NOT_FOUND`, the closed precondition reasons above,
+OUTPUT_EXISTS `{operation,path}`, and OUTPUT_UNAVAILABLE
+`{operation:"download",path:absolute_string,reason:...}` with reasons
+`invalid_path`, `open_failed`, `write_failed`, `sync_failed`,
+`source_changed`, `cleanup_failed`. `cleanup_failed` is the documented normal
+pre-rename cleanup/fsync replacement failure above, not a crash-orphan sweep.
+Raw errors close denied,
 confirmation, rate/TD/timeout/audit and internal reasons without request body,
 response body, TD message, credential or private preflight output.
 
@@ -7159,8 +7262,8 @@ tgcli chat members --cursor TOKEN
 
 Except for the exact Saved Messages redundancy rule in §4.3, a continuation
 accepts no selector, query, filter, `-n`, or `--before`; all read state comes
-from the token. A cursor is canonical base64url JSON without padding, a MAC, or
-daemon-side state. It contains a version, canonical operation, routed account,
+from the token. A cursor is canonical unpadded base64url JSON. It has no MAC,
+authentication tag, signing key, or daemon-side state. It contains a version, canonical operation, routed account,
 current `getMe.id`, page size, all normalized scopes/filters/resolved ids, and
 the complete upstream continuation or keyset.
 
@@ -7215,6 +7318,17 @@ always `read`. Exact common shapes are:
 | `RATE_LIMITED` | 5 | `{"operation":operation,"tdlib_code":429,"retry_after":integer}` |
 | `TIMEOUT` | 7 | `{"operation":operation,"state":nullable_state}` |
 | `PAGINATION_INVALID` | 1 | `{"operation":operation,"reason":"non_advancing_upstream"}` |
+
+Before RequestSession construction, config-admission expiry for every M2
+command, including fetch, is exactly
+`{"operation":"config_admission","state":null}`. Daemon socket and no-daemon
+paths emit the same terminal bytes. Fetch retains its separate
+`{"operation":"fetch","state":nullable_state}` branch only after
+RequestSession construction. Every M2 family additionally accepts the existing closed
+account/config routing, daemon-shutdown, protocol-answer and prior removal/
+audit recovery terminals without changing their detail shapes. Resolver work
+continues to attribute selector/enrichment TD, rate and internal failures to
+`operation:"resolve"`; the parent command operation is not substituted.
 
 Fetch common TIMEOUT details are:
 
@@ -7317,14 +7431,11 @@ and `next` is exactly null. `msg-link.result.schema.json` has exactly
 `link` is a string with `minLength:1` and no pattern, and `is_public` is
 boolean. Human output renders the same fields and matches the exact goldens
 above. Actual JSON data is validated against these strict schemas.
-The read/history slice adds no error schema and no non-stream error-manifest
-mapping; §4.8's fixed M7 error catalog remains unchanged.
-
-This M2 slice adds only those two result schemas and their result-manifest
-entries. It adds no `msg get`/`msg link` error schema and no error-catalog
-mapping. Naming and cataloging their exact error schemas is explicitly
-deferred to the existing M7 schema/error-manifest task; no filename or mapping
-is inferred by M2.
+The active `chats`, `unread`, `read`, `msg get`, `msg link`, and `fetch`
+commands have exact command-local error schemas and non-stream error-manifest
+mappings. `history` canonicalizes to `read` and therefore has no separate key.
+Future `search`, `chat info`, and `chat members` schemas remain uncataloged
+until their handlers activate atomically.
 
 M2 fake-boundary contract coverage must include:
 

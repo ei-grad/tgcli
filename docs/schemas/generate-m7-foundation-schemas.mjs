@@ -23,10 +23,39 @@ const array = (items, maximum, minimum = 0, unique = false) => ({
   items,
 });
 const nullable = (schema) => ({ oneOf: [{ type: "null" }, schema] });
+const exactInteger = (decimal) => ({ __tgcli_exact_integer__: decimal });
 const error = (code, details, message = { type: "string" }) =>
   object({ code: { const: code }, message, details });
+const serialize = (document) => {
+  const markers = [];
+  const encoded = JSON.stringify(
+    document,
+    (_key, value) => {
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        Object.keys(value).length === 1 &&
+        typeof value.__tgcli_exact_integer__ === "string"
+      ) {
+        const decimal = value.__tgcli_exact_integer__;
+        if (!/^(?:0|[1-9][0-9]*)$/.test(decimal)) {
+          throw new Error(`invalid exact integer: ${decimal}`);
+        }
+        const marker = `__TGCLI_EXACT_INTEGER_${markers.length}__`;
+        markers.push({ marker, decimal });
+        return marker;
+      }
+      return value;
+    },
+    2,
+  );
+  return markers.reduce(
+    (output, { marker, decimal }) => output.replace(`"${marker}"`, decimal),
+    `${encoded}\n`,
+  );
+};
 const write = (filename, document, root = directory) =>
-  fs.writeFileSync(path.join(root, filename), `${JSON.stringify(document, null, 2)}\n`);
+  fs.writeFileSync(path.join(root, filename), serialize(document));
 
 fs.mkdirSync(futureDirectory, { recursive: true });
 
@@ -66,7 +95,17 @@ const timestamp = {
   pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
 };
 const hash = { type: "string", pattern: "^sha256:[0-9a-f]{64}$" };
-const requestId = { type: "integer", minimum: 0, maximum: 18446744073709551615 };
+const tdIdentifier = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,127}$" };
+const requestId = {
+  type: "integer",
+  minimum: 0,
+  maximum: exactInteger("18446744073709551615"),
+};
+const uint64 = {
+  type: "integer",
+  minimum: 0,
+  maximum: exactInteger("18446744073709551615"),
+};
 const topic = structuredClone(messageDefinitions.topic);
 const chatIdentity = object({
   id: int53,
@@ -95,7 +134,9 @@ const notAuthed = error(
     reason: { enum: ["not_ready", "authorization_lost", "login_required"] },
   }),
 );
-const commonTransport = (operation) => [
+const operationSchema = (operation) =>
+  typeof operation === "string" ? { const: operation } : structuredClone(operation);
+const commonTransport = (operation, { includeBot = true } = {}) => [
   error("ACCOUNT_NOT_FOUND", object({ account })),
   error(
     "ACCOUNT_MISMATCH",
@@ -123,18 +164,17 @@ const commonTransport = (operation) => [
       },
     }),
   ),
-  error(
-    "BOT_UNSUPPORTED",
-    object({ operation: { const: operation } }),
-  ),
+  ...(includeBot
+    ? [error("BOT_UNSUPPORTED", object({ operation: operationSchema(operation) }))]
+    : []),
   error(
     "TDLIB_ERROR",
-    object({ operation: { const: operation }, tdlib_code: int32 }),
+    object({ operation: operationSchema(operation), tdlib_code: int32 }),
   ),
   error(
     "RATE_LIMITED",
     object({
-      operation: { const: operation },
+      operation: operationSchema(operation),
       tdlib_code: { const: 429 },
       retry_after: nonnegativeInt32,
     }),
@@ -142,7 +182,7 @@ const commonTransport = (operation) => [
   error(
     "INTERNAL",
     object({
-      operation: { const: operation },
+      operation: operationSchema(operation),
       reason: { enum: ["internal_error", "malformed_tdlib_response"] },
     }),
   ),
@@ -223,7 +263,11 @@ const recoveryBranches = () => [
   ),
 ];
 const readyTimeout = (operation) =>
-  error("TIMEOUT", object({ operation: { const: operation }, state: nullable(state) }));
+  error("TIMEOUT", object({ operation: operationSchema(operation), state: nullable(state) }));
+const configAdmissionTimeout = error(
+  "TIMEOUT",
+  object({ operation: { const: "config_admission" }, state: { type: "null" } }),
+);
 
 const currentSchemas = {
   "chats.error.schema.json": {
@@ -332,6 +376,7 @@ for (const [filename, contract] of Object.entries(currentSchemas)) {
     usage(contract.reasons),
     notAuthed,
     ...commonTransport(contract.operation),
+    configAdmissionTimeout,
     readyTimeout(contract.operation),
     ...contract.extra,
     ...(contract.recovery ? recoveryBranches() : []),
@@ -411,6 +456,7 @@ write(
       }),
       chatInfoBranch("basic_group", {
         is_bot: { const: false },
+        member_count: nonnegativeInt32,
         is_forum: { const: false },
         linked_chat_id: { type: "null" },
       }),
@@ -464,8 +510,8 @@ write(
       media_type: {
         enum: ["animation", "audio", "document", "photo", "sticker", "video", "video_note", "voice_note"],
       },
-      path: { type: "string", minLength: 1, maxLength: 4096, pattern: "^/" },
-      bytes: { type: "integer", minimum: 0, maximum: 9007199254740991 },
+      path: { type: "string", minLength: 1, pattern: "^/" },
+      bytes: uint64,
     }),
   },
   futureDirectory,
@@ -475,7 +521,7 @@ const rawLive = {
   type: "object",
   required: ["@type"],
   properties: {
-    "@type": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]*$" },
+    "@type": tdIdentifier,
     "@extra": false,
     "@client_id": false,
   },
@@ -485,7 +531,7 @@ const rawDry = object({
   dry_run: { const: true },
   plan: object({
     operation: { const: "raw" },
-    function: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]*$" },
+    function: tdIdentifier,
     tier: { enum: ["write", "destructive"] },
     tdlib_sha: { const: "a17f87c4cff7b90b278d12b91ba0614383aaee82" },
     request_sha256: hash,
@@ -519,7 +565,9 @@ const futureCommon = (operation) => [
   ]),
   notAuthed,
   ...commonTransport(operation),
+  configAdmissionTimeout,
   readyTimeout(operation),
+  ...recoveryBranches(),
 ];
 write(
   "search.error.schema.json",
@@ -552,11 +600,11 @@ write(
   futureErrorDocument("tgcli chat read error", [
     usage(["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "unsupported_mode", "invalid_cursor", "cursor_scope_mismatch", "unsupported_chat_type"]),
     notAuthed,
-    error("BOT_UNSUPPORTED", object({ operation: { const: "chat_members" } })),
-    error("TDLIB_ERROR", object({ operation: chatReadOperation, tdlib_code: int32 })),
-    error("RATE_LIMITED", object({ operation: chatReadOperation, tdlib_code: { const: 429 }, retry_after: nonnegativeInt32 })),
+    ...commonTransport(chatReadOperation, { includeBot: false }),
+    configAdmissionTimeout,
+    ...recoveryBranches(),
     error("TIMEOUT", object({ operation: chatReadOperation, state: nullable(state) })),
-    error("INTERNAL", object({ operation: chatReadOperation, reason: { enum: ["internal_error", "malformed_tdlib_response", "source_changed"] } })),
+    error("INTERNAL", object({ operation: chatReadOperation, reason: { const: "source_changed" } })),
     error("PAGINATION_INVALID", object({ operation: { const: "chat_members" }, reason: { enum: ["invalid_cursor", "scope_changed", "source_changed", "marker_not_advancing", "page_invalid"] } })),
     ...resolverBranches(),
   ]),
@@ -567,11 +615,14 @@ write(
   futureErrorDocument("tgcli download error", [
     usage(["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "unsupported_mode"]),
     notAuthed,
-    ...commonTransport("download"),
+    ...commonTransport("download", { includeBot: false }),
+    configAdmissionTimeout,
+    ...recoveryBranches(),
     error("TIMEOUT", object({ operation: { const: "download" }, state: nullable(state) })),
+    error("NOT_FOUND", object({ chat_id: int53, message_id: int53 })),
     error("PRECONDITION_FAILED", object({ operation: { const: "download" }, chat_id: int53, message_id: int53, reason: { enum: ["album_unsupported", "paid_media_unsupported", "web_page_unsupported", "expired_media", "unsupported_media"] } })),
-    error("OUTPUT_EXISTS", object({ operation: { const: "download" }, path: { type: "string", minLength: 1 } })),
-    error("OUTPUT_UNAVAILABLE", object({ operation: { const: "download" }, reason: { enum: ["invalid_path", "open_failed", "write_failed", "sync_failed", "source_changed", "cleanup_failed"] } })),
+    error("OUTPUT_EXISTS", object({ operation: { const: "download" }, path: { type: "string", minLength: 1, pattern: "^/" } })),
+    error("OUTPUT_UNAVAILABLE", object({ operation: { const: "download" }, path: { type: "string", minLength: 1, pattern: "^/" }, reason: { enum: ["invalid_path", "open_failed", "write_failed", "sync_failed", "source_changed", "cleanup_failed"] } })),
     ...resolverBranches(),
   ]),
   futureDirectory,
@@ -581,12 +632,24 @@ write(
   futureErrorDocument("tgcli raw error", [
     usage(["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "unsupported_mode"]),
     notAuthed,
+    ...commonTransport("raw", { includeBot: false }),
+    configAdmissionTimeout,
+    ...recoveryBranches(),
     error("DENIED", object({ operation: { const: "raw" }, function: { type: "string", minLength: 1 }, reason: { enum: ["function_denied", "principal_unsupported", "secret_chat_unsupported", "sensitive_input_unsupported", "write_grant_required"] } })),
     error("CONFIRMATION_REQUIRED", object({ account, action: { const: "raw" }, target: object({ function: { type: "string", minLength: 1 }, request_sha256: hash }) })),
     error("RATE_LIMITED", object({ operation: { const: "raw" }, function: { type: "string", minLength: 1 }, tdlib_code: { const: 429 }, retry_after: nonnegativeInt32 })),
     error("TDLIB_ERROR", object({ operation: { const: "raw" }, function: { type: "string", minLength: 1 }, tdlib_code: int32 })),
     error("TIMEOUT", object({ operation: { const: "raw" }, state: nullable(state) })),
-    error("AUDIT_INCOMPLETE", object({ account, path: { type: "string" }, mutation_state: { const: "possible" }, completed_stages: array({ enum: ["raw_dispatch_started", "raw_response_received"] }, 2, 1, true) })),
+    error(
+      "RAW_OUTCOME_UNCONFIRMED",
+      object({
+        operation: { const: "raw" },
+        function: tdIdentifier,
+        request_sha256: hash,
+        mutation_state: { const: "possible" },
+      }),
+      { const: "raw request outcome is unconfirmed" },
+    ),
     error("INTERNAL", object({ operation: { const: "raw" }, reason: { enum: ["unexpected_response", "result_too_large", "canonicalization_failed", "policy_table_invalid"] } })),
   ]),
   futureDirectory,
@@ -604,7 +667,7 @@ const auditCommon = (recordType) => ({
   record_type: { const: recordType },
   invocation_id: invocationId,
 });
-const responseType = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,127}$" };
+const responseType = tdIdentifier;
 
 write(
   "raw-audit-intent.v3.schema.json",
@@ -674,7 +737,7 @@ const errorTerminal = {
     }),
     object({
       kind: { const: "error_summary" },
-      code: { const: "INTERNAL" },
+      code: { const: "RAW_OUTCOME_UNCONFIRMED" },
       td_error_code: { type: "null" },
     }),
   ],

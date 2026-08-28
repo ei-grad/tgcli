@@ -306,14 +306,16 @@ void MessageCoordinator::link(const proto::Request& request, RequestSession& ses
 void register_message_commands(Dispatcher& dispatcher, MessageCoordinator& coordinator) {
     dispatcher.register_command(
         "msg get",
-        {Tier::Read, [&coordinator](const proto::Request& request, RequestSession& session) {
-             coordinator.get(request, session);
-         }});
+        {.tier = Tier::Read,
+         .handler = [&coordinator](const proto::Request& request,
+                                   RequestSession& session) { coordinator.get(request, session); },
+         .config_admission = true});
     dispatcher.register_command(
         "msg link",
-        {Tier::Read, [&coordinator](const proto::Request& request, RequestSession& session) {
-             coordinator.link(request, session);
-         }});
+        {.tier = Tier::Read,
+         .handler = [&coordinator](const proto::Request& request,
+                                   RequestSession& session) { coordinator.link(request, session); },
+         .config_admission = true});
 }
 
 } // namespace tgcli::daemon
