@@ -1427,11 +1427,15 @@ the live chat again and requires the same `chat_id`, `chat_type`, and
 `source_count` equal to the newly validated and selected filtered-vector
 length;
 supergroup/channel cursors require it null. `query` is nonempty only with
-`filter:"search"`, and every other filter requires null. Offset is a
-nonnegative int32 and is the raw source offset, not the number of emitted or
-enriched rows. Account, current user, chat id/type, limit, filter/query,
-source identity/count relation and canonical re-encoding are all validated
-before any member RPC. A live type or backing-id change is `source_changed`.
+`filter:"search"`, and every other filter requires null. For `basic_group`,
+`offset` is a nonnegative int32 index into the fully validated,
+identity-enriched and filtered vector. For `supergroup` and `channel`, `offset`
+is the raw TD `getSupergroupMembers` offset advanced by the raw returned page
+length, not by the number of enriched or emitted rows; the single empty probe
+at the next raw offset remains the only exhaustion proof. Account, current
+user, chat id/type, limit, filter/query, source identity/count relation and
+canonical re-encoding are all validated before any member RPC. A live type or
+backing-id change is `source_changed`.
 
 The result is `{"items":[<MemberSummary>],"next":<cursor|null>}`.
 `MemberSummary` is:

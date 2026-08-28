@@ -272,8 +272,14 @@ class M7FoundationAssetTest(unittest.TestCase):
             "`source_count` is the exact filtered-vector length",
             "compare its current filtered length to cursor `source_count` before slicing",
             "An unchanged filtered count does not freeze order or member identity",
+            "For `basic_group`, `offset` is a nonnegative int32 index into the fully validated, identity-enriched and filtered vector",
+            "For `supergroup` and `channel`, `offset` is the raw TD `getSupergroupMembers` offset advanced by the raw returned page length",
+            "Exactly one empty request at the next raw offset proves exhaustion",
         ):
             self.assertIn(contract, design)
+        self.assertNotIn(
+            "Offset is a nonnegative int32 and is the raw source offset", design
+        )
 
 
 if __name__ == "__main__":
