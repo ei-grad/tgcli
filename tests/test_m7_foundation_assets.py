@@ -38,6 +38,7 @@ CURRENT_M2_ERRORS = {
     "search": "search.error.schema.json",
     "chat info": "chat-read.error.schema.json",
     "chat members": "chat-read.error.schema.json",
+    "download": "download.error.schema.json",
 }
 
 
@@ -119,10 +120,14 @@ class M7FoundationAssetTest(unittest.TestCase):
             "chat-info.result.schema.json",
             "chat-members.result.schema.json",
             "chat-read.error.schema.json",
+            "download.result.schema.json",
+            "download.error.schema.json",
         }
         self.assertTrue((FUTURE_FILES - materialized).isdisjoint(cataloged_files))
-        self.assertTrue({"download", "raw"}.isdisjoint(cataloged_commands))
-        self.assertTrue({"search", "chat info", "chat members"} <= cataloged_commands)
+        self.assertNotIn("raw", cataloged_commands)
+        self.assertTrue(
+            {"search", "chat info", "chat members", "download"} <= cataloged_commands
+        )
         for filename in materialized:
             self.assertEqual(
                 (SCHEMAS / filename).read_bytes(),
@@ -195,6 +200,17 @@ class M7FoundationAssetTest(unittest.TestCase):
             "for calculating download progress.",
             scheme,
         )
+        filesystem = (
+            REPOSITORY / "src" / "daemon" / "download_filesystem.cpp"
+        ).read_text(encoding="utf-8")
+        for primitive in (
+            "SYS_renameat2",
+            "RENAME_NOREPLACE",
+            "renameatx_np",
+            "RENAME_EXCL",
+            "O_NOFOLLOW",
+        ):
+            self.assertIn(primitive, filesystem)
         chat_handler = requests[
             requests.index(
                 "void Requests::on_request(uint64 id, td_api::searchChatMessages"

@@ -3,6 +3,7 @@
 #include "common/exit_codes.hpp"
 #include "daemon/account_removal.hpp"
 #include "daemon/chats_commands.hpp"
+#include "daemon/download_commands.hpp"
 #include "daemon/fetch_commands.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
@@ -55,29 +56,29 @@ bool uses_account_removal_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "search" || command == "chat info" ||
-           command == "chat members" || command == "msg get" || command == "msg link" ||
-           command == "fetch" || command == "send" || command == "msg edit" ||
-           command == "listen" || command == "wait-for" || command == "msg delete" ||
-           command == "msg forward" || command == "msg react" || command == "msg pin" ||
-           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
-           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
-           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
-           command == "chat leave" || command == "daemon status" || command == "daemon stop" ||
-           command == "daemon restart";
+           command == "chat members" || command == "download" || command == "msg get" ||
+           command == "msg link" || command == "fetch" || command == "send" ||
+           command == "msg edit" || command == "listen" || command == "wait-for" ||
+           command == "msg delete" || command == "msg forward" || command == "msg react" ||
+           command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
+           command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
+           command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
+           command == "chat join" || command == "chat leave" || command == "daemon status" ||
+           command == "daemon stop" || command == "daemon restart";
 }
 
 bool uses_logout_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
            command == "chats" || command == "search" || command == "chat info" ||
-           command == "chat members" || command == "msg get" || command == "msg link" ||
-           command == "fetch" || command == "send" || command == "msg edit" ||
-           command == "listen" || command == "wait-for" || command == "msg delete" ||
-           command == "msg forward" || command == "msg react" || command == "msg pin" ||
-           command == "msg unpin" || command == "chat mark-read" || command == "chat mute" ||
-           command == "chat unmute" || command == "chat pin" || command == "chat unpin" ||
-           command == "chat archive" || command == "chat unarchive" || command == "chat join" ||
-           command == "chat leave";
+           command == "chat members" || command == "download" || command == "msg get" ||
+           command == "msg link" || command == "fetch" || command == "send" ||
+           command == "msg edit" || command == "listen" || command == "wait-for" ||
+           command == "msg delete" || command == "msg forward" || command == "msg react" ||
+           command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
+           command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
+           command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
+           command == "chat join" || command == "chat leave";
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
@@ -160,6 +161,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
         register_search_command(dispatcher, *context.m2_read);
         register_chat_info_command(dispatcher, *context.m2_read);
         register_chat_members_command(dispatcher, *context.m2_read);
+    }
+    if (context.download != nullptr) {
+        register_download_command(dispatcher, *context.download);
     }
     if (context.fetch != nullptr) {
         register_fetch_command(dispatcher, *context.fetch);

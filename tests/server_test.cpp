@@ -1202,6 +1202,62 @@ TEST_CASE("repeated QR progress updates remain display-only", "[server][challeng
     ::close(fd);
 }
 
+TEST_CASE("download progress and result are byte-equivalent over socket and in-process dispatch",
+          "[server][download][parity]") {
+    const auto install = [](daemon::Dispatcher& dispatcher) {
+        dispatcher.register_command(
+            "download", {.tier = daemon::Tier::Read,
+                         .handler =
+                             [](const proto::Request&, daemon::RequestSession& session) {
+                                 session.progress({{"operation", "download"},
+                                                   {"file_id", 7},
+                                                   {"downloaded_bytes", 3},
+                                                   {"total_bytes", 7}});
+                                 session.progress({{"operation", "download"},
+                                                   {"file_id", 7},
+                                                   {"downloaded_bytes", 7},
+                                                   {"total_bytes", 7}});
+                                 session.result({{"chat_id", -1001},
+                                                 {"message_id", 91},
+                                                 {"file_id", 7},
+                                                 {"media_type", "document"},
+                                                 {"path", "/tmp/result.bin"},
+                                                 {"bytes", 7}});
+                             },
+                         .deadline_default = DeadlineDefault::Unlimited});
+    };
+    auto request = make_request({"download"}, 811);
+    request.args = {{"chat", "-1001"}, {"message_id", 91}, {"output", "/tmp/result.bin"}};
+    std::vector<json> in_process_progress;
+    std::optional<json> in_process_result;
+    daemon::CallbackSink sink([](const json&) {},
+                              [&](json data) { in_process_progress.push_back(std::move(data)); },
+                              [&](json data) { in_process_result = std::move(data); },
+                              [](const std::string&, const std::string&, const json&, int) {
+                                  FAIL("in-process download fixture failed");
+                              });
+    daemon::Dispatcher in_process;
+    install(in_process);
+    daemon::RequestSession session(request, sink);
+    in_process.dispatch(session);
+    REQUIRE(in_process_progress.size() == 2);
+    REQUIRE(in_process_result);
+
+    const TestDaemon daemon(install, false);
+    const int fd = connect_to(daemon.socket);
+    proto::FrameReader reader(fd);
+    static_cast<void>(read_frame(reader));
+    send_frame(fd, proto::Hello{"9.9.9", proto::kProtocolVersion});
+    send_frame(fd, std::move(request));
+    const auto first = std::get<proto::Progress>(read_frame(reader));
+    const auto second = std::get<proto::Progress>(read_frame(reader));
+    const auto terminal = std::get<proto::Result>(read_frame(reader));
+    CHECK(first.data == in_process_progress[0]);
+    CHECK(second.data == in_process_progress[1]);
+    CHECK(terminal.data == *in_process_result);
+    ::close(fd);
+}
+
 TEST_CASE("hello handshake then version round-trip over the socket", "[server]") {
     const TestDaemon daemon;
     const int fd = connect_to(daemon.socket);

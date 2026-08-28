@@ -440,7 +440,7 @@ TEST_CASE("fetch retains removal before logout recovery without broadening read 
 
     CHECK(daemon::recovery_preflight_order("read").empty());
     CHECK(daemon::recovery_preflight_order("history").empty());
-    for (const auto* command : {"search", "chat info", "chat members"}) {
+    for (const auto* command : {"search", "chat info", "chat members", "download"}) {
         const auto read = daemon::recovery_preflight_order(command);
         REQUIRE(read.size() == 2);
         CHECK(read[0] == daemon::RecoveryPreflight::Removal);
@@ -648,6 +648,7 @@ TEST_CASE("dispatcher fallback is operation-specific for every descriptor family
         Entry{"search", "search"},
         Entry{"chat info", "chat_info"},
         Entry{"chat members", "chat_members"},
+        Entry{"download", "download"},
         Entry{"fetch", "fetch"},
         Entry{"msg get", "msg_get"},
         Entry{"read", "read"},
@@ -663,7 +664,7 @@ TEST_CASE("dispatcher fallback is operation-specific for every descriptor family
                                              [](const proto::Request&, daemon::RequestSession&) {
                                                  throw std::runtime_error("must not escape");
                                              }};
-        if (entry.command == "fetch" || entry.command == "listen") {
+        if (entry.command == "fetch" || entry.command == "download" || entry.command == "listen") {
             descriptor.deadline_default = DeadlineDefault::Unlimited;
         }
         if (entry.command == "session list") {
@@ -707,6 +708,7 @@ TEST_CASE("dispatcher fallback is operation-specific for every descriptor family
         SchemaCase{"search.error.schema.json", "search"},
         SchemaCase{"chat-read.error.schema.json", "chat_info"},
         SchemaCase{"chat-read.error.schema.json", "chat_members"},
+        SchemaCase{"download.error.schema.json", "download"},
         SchemaCase{"resolve.error.schema.json", "resolve"},
         SchemaCase{"session.error.schema.json", "session_list"},
         SchemaCase{"stream.error.schema.json", "listen"},

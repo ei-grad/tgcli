@@ -100,6 +100,10 @@ class ScriptedTdRuntime final : public core::TdRuntime {
                                               std::int32_t offset, std::int32_t limit);
     core::TdValue make_create_private_chat(std::int64_t user_id, bool force) override;
     core::TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) override;
+    core::TdValue make_get_download_message(std::int64_t chat_id, std::int64_t message_id) override;
+    core::TdValue make_download_file(std::int32_t file_id) override;
+    core::TdValue make_get_suggested_file_name(std::int32_t file_id,
+                                               std::string directory) override;
     core::TdValue make_get_message_properties(std::int64_t chat_id,
                                               std::int64_t message_id) override;
     core::TdValue make_get_message_available_reactions(std::int64_t chat_id,

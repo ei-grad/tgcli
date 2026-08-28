@@ -259,6 +259,9 @@ class TdClient::Impl {
              function != TdFunctionKind::GetSupergroupMembers &&
              function != TdFunctionKind::CreatePrivateChat &&
              function != TdFunctionKind::GetMessage &&
+             function != TdFunctionKind::GetDownloadMessage &&
+             function != TdFunctionKind::DownloadFile &&
+             function != TdFunctionKind::GetSuggestedFileName &&
              function != TdFunctionKind::GetMessageProperties &&
              function != TdFunctionKind::GetMessageAvailableReactions &&
              function != TdFunctionKind::ParseTextEntities)) {
@@ -548,6 +551,27 @@ class TdClient::Impl {
                                      std::int64_t chat_id, std::int64_t message_id) {
         return send_read(authorization, TdFunctionKind::GetMessage,
                          runtime_->make_get_message(chat_id, message_id));
+    }
+
+    std::future<TdValue>
+    get_download_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         std::int64_t chat_id, std::int64_t message_id) {
+        return send_read(authorization, TdFunctionKind::GetDownloadMessage,
+                         runtime_->make_get_download_message(chat_id, message_id));
+    }
+
+    std::future<TdValue>
+    download_file(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                  std::int32_t file_id) {
+        return send_read(authorization, TdFunctionKind::DownloadFile,
+                         runtime_->make_download_file(file_id));
+    }
+
+    std::future<TdValue>
+    get_suggested_file_name(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            std::int32_t file_id, std::string directory) {
+        return send_read(authorization, TdFunctionKind::GetSuggestedFileName,
+                         runtime_->make_get_suggested_file_name(file_id, std::move(directory)));
     }
 
     std::future<TdValue>
@@ -2308,6 +2332,24 @@ std::future<TdValue>
 TdClient::get_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                       std::int64_t chat_id, std::int64_t message_id) {
     return impl_->get_message(authorization, chat_id, message_id);
+}
+
+std::future<TdValue>
+TdClient::get_download_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                               std::int64_t chat_id, std::int64_t message_id) {
+    return impl_->get_download_message(authorization, chat_id, message_id);
+}
+
+std::future<TdValue>
+TdClient::download_file(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                        std::int32_t file_id) {
+    return impl_->download_file(authorization, file_id);
+}
+
+std::future<TdValue>
+TdClient::get_suggested_file_name(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                  std::int32_t file_id, std::string directory) {
+    return impl_->get_suggested_file_name(authorization, file_id, std::move(directory));
 }
 
 std::future<TdValue>

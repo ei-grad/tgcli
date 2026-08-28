@@ -64,6 +64,11 @@ TdValue make_production_get_message_link_for_test(std::int64_t chat_id, std::int
                                                   std::string poll_option_id, bool for_album,
                                                   bool in_message_thread);
 TdValue make_production_get_message_for_test(std::int64_t chat_id, std::int64_t message_id);
+TdValue make_production_get_download_message_for_test(std::int64_t chat_id,
+                                                      std::int64_t message_id);
+TdValue make_production_download_file_for_test(std::int32_t file_id);
+TdValue make_production_get_suggested_file_name_for_test(std::int32_t file_id,
+                                                         const std::string& directory);
 TdValue make_production_get_message_properties_for_test(std::int64_t chat_id,
                                                         std::int64_t message_id);
 TdValue make_production_get_message_available_reactions_for_test(std::int64_t chat_id,
@@ -114,6 +119,10 @@ bool production_get_message_link_matches_for_test(const TdValue& function, std::
                                                   bool in_message_thread);
 bool production_get_message_matches_for_test(const TdValue& function, std::int64_t chat_id,
                                              std::int64_t message_id);
+bool production_download_file_matches_for_test(const TdValue& function, std::int32_t file_id);
+bool production_get_suggested_file_name_matches_for_test(const TdValue& function,
+                                                         std::int32_t file_id,
+                                                         std::string_view directory);
 bool production_get_basic_group_full_info_matches_for_test(const TdValue& function,
                                                            std::int64_t basic_group_id);
 bool production_search_chat_messages_matches_for_test(const TdValue& function,

@@ -11,6 +11,7 @@
 #include "daemon/commands.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/context.hpp"
+#include "daemon/download_commands.hpp"
 #include "daemon/fetch_commands.hpp"
 #include "daemon/idempotency_reconciliation.hpp"
 #include "daemon/login_commands.hpp"
@@ -275,6 +276,7 @@ int run_daemon(const std::string& account) {
     MessageCoordinator messages(td, account);
     ReadCoordinator read(td, account);
     M2ReadCoordinator m2_read(td, account);
+    DownloadCoordinator download(td, account);
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency,
@@ -296,6 +298,7 @@ int run_daemon(const std::string& account) {
     context.messages = &messages;
     context.read = &read;
     context.m2_read = &m2_read;
+    context.download = &download;
     context.fetch = &fetch;
     context.resolver = &resolver;
     context.writes = &writes;
@@ -472,6 +475,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     MessageCoordinator messages(td, account);
     ReadCoordinator read(td, account);
     M2ReadCoordinator m2_read(td, account);
+    DownloadCoordinator download(td, account);
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency);
@@ -495,6 +499,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.messages = &messages;
     context.read = &read;
     context.m2_read = &m2_read;
+    context.download = &download;
     context.fetch = &fetch;
     context.resolver = &resolver;
     context.writes = &writes;

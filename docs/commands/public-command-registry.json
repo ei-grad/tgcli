@@ -81,7 +81,7 @@
       ]
     },
     {"name": "doctor", "activation": "active", "option_set": "meta", "options": [], "positionals": []},
-    {"name": "download", "activation": "future", "option_set": "read", "options": ["-O"], "positionals": ["chat", "msg-id"]},
+    {"name": "download", "activation": "active", "option_set": "read", "options": ["-O"], "positionals": ["chat", "msg-id"]},
     {"name": "fetch", "activation": "active", "option_set": "read", "options": ["--limit", "--all", "--since"], "positionals": ["chat"]},
     {
       "name": "folder",

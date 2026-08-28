@@ -375,6 +375,9 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetSupergroupMembers:
     case TdFunctionKind::CreatePrivateChat:
     case TdFunctionKind::GetMessage:
+    case TdFunctionKind::GetDownloadMessage:
+    case TdFunctionKind::DownloadFile:
+    case TdFunctionKind::GetSuggestedFileName:
     case TdFunctionKind::GetMessageProperties:
     case TdFunctionKind::GetMessageAvailableReactions:
     case TdFunctionKind::ParseTextEntities:

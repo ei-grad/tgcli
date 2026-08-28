@@ -44,10 +44,10 @@ for (const command of registry.commands) {
 }
 const active = [...leaves.values()].filter((leaf) => leaf.activation === "active");
 const future = [...leaves.values()].filter((leaf) => leaf.activation === "future");
-if (leaves.size !== 82 || active.length !== 79 || future.length !== 3) {
+if (leaves.size !== 82 || active.length !== 80 || future.length !== 2) {
   throw new Error("command activation counts differ");
 }
-for (const future of ["completion", "download", "raw"]) {
+for (const future of ["completion", "raw"]) {
   if (leaves.get(future)?.activation !== "future") {
     throw new Error(`future command activation differs: ${future}`);
   }
@@ -150,8 +150,8 @@ for (const shellCase of [bashCase, zshCase]) {
     ["tgcli", "d"],
     1 + (shellCase === zshCase ? 1 : 0),
   );
-  if (!topLevel.includes("daemon") || !topLevel.includes("doctor") || topLevel.includes("download")) {
-    throw new Error("future flat command leaked into completion");
+  if (!topLevel.includes("daemon") || !topLevel.includes("doctor") || !topLevel.includes("download")) {
+    throw new Error("active download command is missing from completion");
   }
 }
 

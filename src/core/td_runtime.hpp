@@ -91,6 +91,9 @@ enum class TdFunctionKind {
     GetSupergroupMembers,
     CreatePrivateChat,
     GetMessage,
+    GetDownloadMessage,
+    DownloadFile,
+    GetSuggestedFileName,
     GetMessageProperties,
     GetMessageAvailableReactions,
     ParseTextEntities,
@@ -255,7 +258,12 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
     case TdFunctionKind::CreatePrivateChat:
         return "createPrivateChat";
     case TdFunctionKind::GetMessage:
+    case TdFunctionKind::GetDownloadMessage:
         return "getMessage";
+    case TdFunctionKind::DownloadFile:
+        return "downloadFile";
+    case TdFunctionKind::GetSuggestedFileName:
+        return "getSuggestedFileName";
     case TdFunctionKind::GetMessageProperties:
         return "getMessageProperties";
     case TdFunctionKind::GetMessageAvailableReactions:
@@ -958,6 +966,73 @@ struct TdMessageSummary {
     std::string text;
 
     bool operator==(const TdMessageSummary&) const = default;
+};
+
+struct TdLocalFile {
+    std::string path;
+    bool can_be_downloaded = false;
+    bool is_downloading_active = false;
+    bool is_downloading_completed = false;
+    std::int64_t download_offset = 0;
+    std::int64_t downloaded_prefix_size = 0;
+    std::int64_t downloaded_size = 0;
+
+    bool operator==(const TdLocalFile&) const = default;
+};
+
+struct TdFile {
+    std::int32_t id = 0;
+    std::int64_t size = 0;
+    std::int64_t expected_size = 0;
+    std::optional<TdLocalFile> local;
+
+    bool operator==(const TdFile&) const = default;
+};
+
+struct TdDownloadPhotoSize {
+    std::int32_t width = 0;
+    std::int32_t height = 0;
+    std::optional<TdFile> file;
+
+    bool operator==(const TdDownloadPhotoSize&) const = default;
+};
+
+enum class TdDownloadMediaKind {
+    Animation,
+    Audio,
+    Document,
+    Photo,
+    Sticker,
+    Video,
+    VideoNote,
+    VoiceNote,
+    PaidMedia,
+    WebPage,
+    Expired,
+    Unsupported,
+};
+
+struct TdDownloadMessage {
+    std::int64_t id = 0;
+    std::int64_t chat_id = 0;
+    std::int64_t media_album_id = 0;
+    TdDownloadMediaKind media_kind = TdDownloadMediaKind::Unsupported;
+    std::optional<TdFile> primary_file;
+    std::vector<TdDownloadPhotoSize> photo_sizes;
+
+    bool operator==(const TdDownloadMessage&) const = default;
+};
+
+struct TdUpdateFile {
+    TdFile file;
+
+    bool operator==(const TdUpdateFile&) const = default;
+};
+
+struct TdSuggestedFileName {
+    std::string value;
+
+    bool operator==(const TdSuggestedFileName&) const = default;
 };
 
 enum class TdMessageSendingStateKind { Stable, Pending, Failed, Unknown };
@@ -1752,6 +1827,7 @@ enum class TdSupportedUpdateKind {
     ChatUnreadReactionCount,
     ChatUnreadPollVoteCount,
     ChatIsMarkedAsUnread,
+    File,
 };
 
 enum class TdMalformedUpdateReason {
@@ -2071,6 +2147,9 @@ class TdRuntime {
                                                 std::int32_t offset, std::int32_t limit) = 0;
     virtual TdValue make_create_private_chat(std::int64_t user_id, bool force) = 0;
     virtual TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) = 0;
+    virtual TdValue make_get_download_message(std::int64_t chat_id, std::int64_t message_id) = 0;
+    virtual TdValue make_download_file(std::int32_t file_id) = 0;
+    virtual TdValue make_get_suggested_file_name(std::int32_t file_id, std::string directory) = 0;
     virtual TdValue make_get_message_properties(std::int64_t chat_id, std::int64_t message_id) = 0;
     virtual TdValue make_get_message_available_reactions(std::int64_t chat_id,
                                                          std::int64_t message_id) = 0;

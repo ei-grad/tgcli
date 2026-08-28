@@ -105,6 +105,7 @@ TEST_CASE("future M2 and M4 result schemas are strict and remain independently v
     const json download{{"chat_id", -1001},         {"message_id", 123},         {"file_id", 7},
                         {"media_type", "document"}, {"path", "/tmp/report.pdf"}, {"bytes", 4096}};
     CHECK_THAT(download, tgcli::test::matches_json_schema("future/download.result.schema.json"));
+    CHECK_THAT(download, tgcli::test::matches_json_schema("download.result.schema.json"));
     auto relative = download;
     relative["path"] = "report.pdf";
     CHECK_FALSE(
@@ -266,6 +267,7 @@ TEST_CASE("future family error schemas reject cross-operation and secret-bearing
                                                            {"message_id", 123},
                                                            {"reason", "album_unsupported"}});
     CHECK_THAT(download, tgcli::test::matches_json_schema("future/download.error.schema.json"));
+    CHECK_THAT(download, tgcli::test::matches_json_schema("download.error.schema.json"));
     const auto missing_download = terminal("NOT_FOUND", {{"chat_id", -1001}, {"message_id", 123}});
     CHECK_THAT(missing_download,
                tgcli::test::matches_json_schema("future/download.error.schema.json"));

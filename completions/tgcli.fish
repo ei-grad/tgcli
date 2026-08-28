@@ -16,7 +16,7 @@ function __tgcli_state
         case '*'
           if test -z "$top"
             switch $token
-              case 'account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for'
+              case 'account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for'
                 set top $token
             end
           else if test -z "$child"
@@ -31,7 +31,7 @@ function __tgcli_state
   end
   echo "$top|$child|$pending"
 end
-complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''||0'\''' -a 'account chat chats completion contact daemon doctor fetch folder history listen login logout me msg read resolve saved schema search send session storage topic unread version wait-for'
+complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''||0'\''' -a 'account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg read resolve saved schema search send session storage topic unread version wait-for'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''account||0'\''' -a 'add list remove show use'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''chat||0'\''' -a 'archive ban demote info invite-link join kick leave mark-read members mute pin promote set-description set-permissions set-photo set-title unarchive unban unmute unpin'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''contact||0'\''' -a 'add block list remove search unblock'
@@ -81,6 +81,7 @@ complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''daemon|ru
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''daemon|status|0'\''' -a '--json --verbose -v --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''daemon|stop|0'\''' -a '--json --verbose -v --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''doctor||0'\''' -a '--json --verbose -v --no-daemon --no-color'
+complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''download||0'\''' -a '--account --json --timeout --verbose -v --no-daemon --no-color -O'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''fetch||0'\''' -a '--account --json --timeout --verbose -v --no-daemon --no-color --limit --all --since'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''folder|add-chat|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''folder|create|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --chat --icon --color'

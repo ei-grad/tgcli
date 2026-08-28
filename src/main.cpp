@@ -200,7 +200,7 @@ std::optional<tgcli::proto::WriteAuthority> write_authority(bool allow_write) {
 
 tgcli::proto::RequestContext make_request_context(bool json_output, bool yes, bool dry_run,
                                                   tgcli::proto::WriteAuthority authority,
-                                                  std::string frozen_cwd) {
+                                                  std::string frozen_cwd, bool capture_media_dir) {
     tgcli::proto::RequestContext context;
     context.tty = ::isatty(STDIN_FILENO) != 0;
     context.json = json_output;
@@ -208,9 +208,11 @@ tgcli::proto::RequestContext make_request_context(bool json_output, bool yes, bo
     context.dry_run = dry_run;
     context.write_authority = authority;
     context.cwd = std::move(frozen_cwd);
-    if (const char* media_dir = std::getenv("TGCLI_MEDIA_DIR");
-        media_dir != nullptr && *media_dir != '\0') {
-        context.media_dir = media_dir;
+    if (capture_media_dir) {
+        if (const char* media_dir = std::getenv("TGCLI_MEDIA_DIR");
+            media_dir != nullptr && *media_dir != '\0') {
+            context.media_dir = media_dir;
+        }
     }
     return context;
 }
@@ -608,6 +610,13 @@ struct FetchCliArguments {
     CLI::Option* limit_option = nullptr;
     CLI::Option* since_option = nullptr;
     CLI::Option* all_option = nullptr;
+};
+
+struct DownloadCliArguments {
+    std::string chat;
+    std::int64_t message_id = 0;
+    std::string output;
+    CLI::Option* output_option = nullptr;
 };
 
 struct M2LongReadCliArguments {
@@ -1194,8 +1203,9 @@ std::optional<int> validate_command_arguments(
     const std::vector<std::string>& command, const SavedCliArguments& saved,
     const ChatsCliArguments& chats, const MessageCliArguments& messages,
     const SendCliArguments& send, const ChatCliArguments& chat, const ReadCliArguments& read,
-    const FetchCliArguments& fetch, const M2LongReadCliArguments& m2_long_read,
-    std::string_view resolve_selector, M6CliArguments& m6, std::string_view frozen_cwd) {
+    const FetchCliArguments& fetch, const DownloadCliArguments& download,
+    const M2LongReadCliArguments& m2_long_read, std::string_view resolve_selector,
+    M6CliArguments& m6, std::string_view frozen_cwd) {
     if (const auto m6_exit = validate_m6_arguments(command, m6, frozen_cwd); m6_exit) {
         return m6_exit;
     }
@@ -1208,6 +1218,17 @@ std::optional<int> validate_command_arguments(
     if (const auto long_read_exit = validate_m2_long_read_arguments(command, m2_long_read, saved);
         long_read_exit) {
         return long_read_exit;
+    }
+    if (command == std::vector<std::string>{"download"}) {
+        if (!tgcli::daemon::valid_resolve_selector(download.chat)) {
+            return report_usage("download chat selector is invalid", "chat");
+        }
+        if (!tgcli::core::valid_td_nonzero_int53(download.message_id)) {
+            return report_usage("download message id is invalid", "msg-id");
+        }
+        if (download.output_option->count() != 0 && download.output.empty()) {
+            return report_usage("download output is invalid", "-O");
+        }
     }
     if (command == std::vector<std::string>{"read"}) {
         const bool cursor = saved.cursor_option->count() != 0;
@@ -1660,16 +1681,15 @@ nlohmann::json m6_request_args(const std::vector<std::string>& command, const M6
     return nlohmann::json::object();
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed CLI request shape table.
-nlohmann::json command_request_args(const std::vector<std::string>& command, bool login_qr,
-                                    bool login_bot, std::string_view resolve_selector,
-                                    const ChatsCliArguments& chats, const SavedCliArguments& saved,
-                                    const MessageCliArguments& messages,
-                                    const SendCliArguments& send, const ChatCliArguments& chat,
-                                    const ReadCliArguments& read, const FetchCliArguments& fetch,
-                                    const StreamCliArguments& stream,
-                                    const M2LongReadCliArguments& m2_long_read,
-                                    const M6CliArguments& m6) {
+// NOLINTBEGIN(readability-function-cognitive-complexity): closed CLI request shape table.
+nlohmann::json
+command_request_args(const std::vector<std::string>& command, bool login_qr, bool login_bot,
+                     std::string_view resolve_selector, const ChatsCliArguments& chats,
+                     const SavedCliArguments& saved, const MessageCliArguments& messages,
+                     const SendCliArguments& send, const ChatCliArguments& chat,
+                     const ReadCliArguments& read, const FetchCliArguments& fetch,
+                     const DownloadCliArguments& download, const StreamCliArguments& stream,
+                     const M2LongReadCliArguments& m2_long_read, const M6CliArguments& m6) {
     if (tgcli::proto::m6_operation_for_command(command) ||
         command == std::vector<std::string>{"session", "list"} ||
         command == std::vector<std::string>{"session", "terminate"}) {
@@ -1703,6 +1723,12 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                 {"all", fetch.all},
                 {"since", fetch.since_option->count() != 0 ? nlohmann::json(fetch.since)
                                                            : nlohmann::json(nullptr)}};
+    }
+    if (command == std::vector<std::string>{"download"}) {
+        return {{"chat", download.chat},
+                {"message_id", download.message_id},
+                {"output", download.output_option->count() != 0 ? nlohmann::json(download.output)
+                                                                : nlohmann::json(nullptr)}};
     }
     if (command == std::vector<std::string>{"listen"} ||
         command == std::vector<std::string>{"wait-for"}) {
@@ -1813,6 +1839,7 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     return nlohmann::json::object();
 }
+// NOLINTEND(readability-function-cognitive-complexity)
 
 std::optional<int> read_send_stdin(SendCliArguments& send) {
     if (send.text != "-") {
@@ -1905,6 +1932,7 @@ int run(int argc, char** argv) {
     ReadCliArguments read;
     ReadCliArguments history;
     FetchCliArguments fetch;
+    DownloadCliArguments download;
     StreamCliArguments stream;
     M2LongReadCliArguments m2_long_read;
     M6CliArguments m6;
@@ -2017,6 +2045,11 @@ int run(int argc, char** argv) {
     fetch.all_option = fetch_cmd->add_flag("--all", fetch.all, "fetch without a numeric limit");
     fetch.since_option =
         fetch_cmd->add_option("--since", fetch.since, "inclusive timestamp lower bound");
+    CLI::App* download_cmd = app.add_subcommand("download", "download message media");
+    download_cmd->add_option("chat", download.chat, "chat selector")->required();
+    download_cmd->add_option("msg-id", download.message_id, "message id")->required();
+    download.output_option =
+        download_cmd->add_option("-O", download.output, "output directory or exact path");
     CLI::App* listen_cmd = app.add_subcommand("listen", "stream Telegram updates");
     listen_cmd->add_option("--chat", stream.listen_chats, "chat selector")->expected(0, 64);
     stream.listen_types_option =
@@ -2407,9 +2440,9 @@ int run(int argc, char** argv) {
     }
     auto captured_cwd = capture_request_cwd();
     std::string frozen_cwd = captured_cwd ? std::move(*captured_cwd) : std::string{};
-    if (const auto argument_exit =
-            validate_command_arguments(command, saved, chats, messages, send, chat, *selected_read,
-                                       fetch, m2_long_read, resolve_selector, m6, frozen_cwd);
+    if (const auto argument_exit = validate_command_arguments(
+            command, saved, chats, messages, send, chat, *selected_read, fetch, download,
+            m2_long_read, resolve_selector, m6, frozen_cwd);
         argument_exit) {
         return *argument_exit;
     }
@@ -2461,9 +2494,10 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
-                             send, chat, *selected_read, fetch, stream, m2_long_read, m6);
+                             send, chat, *selected_read, fetch, download, stream, m2_long_read, m6);
     auto request_context =
-        make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd));
+        make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd),
+                             command == std::vector<std::string>{"download"});
     if (idempotency_key_option->count() != 0) {
         request_context.idempotency_key = std::move(idempotency_key);
     }

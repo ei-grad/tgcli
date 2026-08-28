@@ -444,6 +444,9 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetSupergroupMembers:
     case core::TdFunctionKind::CreatePrivateChat:
     case core::TdFunctionKind::GetMessage:
+    case core::TdFunctionKind::GetDownloadMessage:
+    case core::TdFunctionKind::DownloadFile:
+    case core::TdFunctionKind::GetSuggestedFileName:
     case core::TdFunctionKind::GetMessageProperties:
     case core::TdFunctionKind::GetMessageAvailableReactions:
     case core::TdFunctionKind::ParseTextEntities:

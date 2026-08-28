@@ -112,6 +112,9 @@
     "doctor": {
       "result": "doctor.result.schema.json"
     },
+    "download": {
+      "result": "download.result.schema.json"
+    },
     "fetch": {
       "result": "fetch.result.schema.json"
     },

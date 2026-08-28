@@ -118,6 +118,34 @@ class IsolatedEnv {
     std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
 };
 
+class ScopedEnvironmentVariable {
+  public:
+    ScopedEnvironmentVariable(std::string name, const std::string& value) : name_(std::move(name)) {
+        const char* prior = std::getenv(name_.c_str());
+        if (prior != nullptr) {
+            prior_ = prior;
+        }
+        if (::setenv(name_.c_str(), value.c_str(), 1) != 0) {
+            throw std::runtime_error("setenv failed");
+        }
+    }
+    ~ScopedEnvironmentVariable() {
+        if (prior_) {
+            ::setenv(name_.c_str(), prior_->c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+    ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+    ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) = delete;
+    ScopedEnvironmentVariable(ScopedEnvironmentVariable&&) = delete;
+    ScopedEnvironmentVariable& operator=(ScopedEnvironmentVariable&&) = delete;
+
+  private:
+    std::string name_;
+    std::optional<std::string> prior_;
+};
+
 // Redirects an stdio fd into a file for the duration of a callback.
 class CaptureStream {
   public:
@@ -622,6 +650,7 @@ struct ChildDaemonOptions {
     bool message_write_fixture = false;
     bool m6_fixture = false;
     bool m2_long_read_fixture = false;
+    bool download_fixture = false;
     bool stream_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
@@ -1027,6 +1056,25 @@ class ChildProtocolDaemon {
             dispatcher.register_command("search", {daemon::Tier::Read, normalized});
             dispatcher.register_command("chat info", {daemon::Tier::Read, normalized});
             dispatcher.register_command("chat members", {daemon::Tier::Read, normalized});
+        }
+        if (options.download_fixture) {
+            dispatcher.register_command(
+                "download",
+                {.tier = daemon::Tier::Read,
+                 .handler =
+                     [](const proto::Request& request, daemon::RequestSession& session) {
+                         session.progress({{"operation", "download"},
+                                           {"file_id", 7},
+                                           {"downloaded_bytes", 7},
+                                           {"total_bytes", 7}});
+                         session.result({{"command", request.command},
+                                         {"args", request.args},
+                                         {"cwd", request.context.cwd},
+                                         {"media_dir", request.context.media_dir
+                                                           ? json(*request.context.media_dir)
+                                                           : json(nullptr)}});
+                     },
+                 .deadline_default = DeadlineDefault::Unlimited});
         }
         if (options.stream_fixture) {
             dispatcher.register_command(
@@ -4258,6 +4306,62 @@ TEST_CASE("M2 long-read CLI emits exact first-page and cursor-only request frame
     CHECK(json::parse(query_next.out)["args"]["cursor"] ==
           daemon::encode_members_cursor(query_cursor));
     CHECK(fixture.running());
+}
+
+TEST_CASE("download CLI emits exact active request frame and captures media directory",
+          "[cli][download][parser][process]") {
+    const IsolatedEnv env;
+    const auto media = env.root() + "/media";
+    std::filesystem::create_directory(media);
+    const ScopedEnvironmentVariable media_directory("TGCLI_MEDIA_DIR", "media");
+    const auto root_help = run_binary_captured({"--help"}, env, "download-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("download") != std::string::npos);
+    const auto command_help =
+        run_binary_captured({"download", "--help"}, env, "download-command-help");
+    REQUIRE(command_help.exit_code == kOk);
+    CHECK((command_help.out + command_help.err).find("-O") != std::string::npos);
+
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.download_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    const auto expected_cwd = std::filesystem::current_path().string();
+    const auto outcome = run_binary_captured(
+        {"--json", "download", "-1001", "91", "-O", "result.bin"}, env, "download-frame");
+    INFO(outcome.err);
+    REQUIRE(outcome.exit_code == kOk);
+    CHECK(outcome.err == json{{"progress",
+                               {{"operation", "download"},
+                                {"file_id", 7},
+                                {"downloaded_bytes", 7},
+                                {"total_bytes", 7}}}}
+                                 .dump() +
+                             "\n");
+    CHECK(json::parse(outcome.out) ==
+          json{{"command", json::array({"download"})},
+               {"args", {{"chat", "-1001"}, {"message_id", 91}, {"output", "result.bin"}}},
+               {"cwd", expected_cwd},
+               {"media_dir", "media"}});
+    const json final_progress{
+        {"operation", "download"}, {"file_id", 7}, {"downloaded_bytes", 7}, {"total_bytes", 7}};
+    const auto human = run_binary_captured({"download", "-1001", "-91", "-O", "other.bin"}, env,
+                                           "download-human-frame");
+    REQUIRE(human.exit_code == kOk);
+    CHECK(human.err == "progress: " + final_progress.dump() + "\n");
+    CHECK(fixture.running());
+
+    for (const auto& [stem, arguments] :
+         std::vector<std::pair<std::string, std::vector<std::string>>>{
+             {"download-zero", {"--json", "download", "-1001", "0"}},
+             {"download-over", {"--json", "download", "-1001", "9007199254740992"}},
+             {"download-selector", {"--json", "download", "@", "91"}}}) {
+        const auto invalid = run_binary_captured(arguments, env, stem);
+        INFO(stem);
+        CHECK(invalid.exit_code == kUsage);
+        CHECK(invalid.out.empty());
+        CHECK(json::parse(invalid.err)["error"]["code"] == "USAGE");
+    }
 }
 
 TEST_CASE("M2 long-read CLI rejects normalization and grammar conflicts before routing",

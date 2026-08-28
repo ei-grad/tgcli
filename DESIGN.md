@@ -6901,13 +6901,13 @@ a contact,
 folder, topic, admin, invite-link or optimize mutation, and the spec/generator
 checks themselves require no network.
 
-### 4.10 Dormant M2/M4/M7 freeze foundations
+### 4.10 M2/M4 surfaces and dormant M7 freeze foundations
 
 This section materializes byte-reviewable foundations before each command's
-atomic activation. Search, chat-info and chat-members are now active through
-their parser, handler, dispatcher and result/error mappings. Download and raw
-assets remain uncataloged and unreachable. Existing commands keep their
-current behavior.
+atomic activation. Search, chat-info, chat-members and download are now active
+through their parser, handler, dispatcher and result/error mappings. Raw assets
+remain uncataloged and unreachable. Existing commands keep their current
+behavior.
 
 #### 4.10.1 Curated download
 
@@ -7038,7 +7038,7 @@ rows rather than inferred completion text.
 `--no-color` and nonempty `NO_COLOR` remain byte-preserving no-ops for these
 assets and every v1 renderer because v1 emits no ANSI.
 
-#### 4.10.3 Dormant schemas and catalog activation
+#### 4.10.3 Schemas and catalog activation
 
 The strict self-contained future schemas are frozen under
 `docs/schemas/future/`: `search.result.schema.json`,
@@ -7049,10 +7049,10 @@ The strict self-contained future schemas are frozen under
 the dormant persistence-only `raw-audit-intent.v3.schema.json`,
 `raw-audit-checkpoint.v3.schema.json` and `raw-audit-outcome.v3.schema.json`.
 All twelve assets remain validated as Draft 2020-12 golden sources. The five
-search/chat-read assets are materialized byte-identically at the schema root,
-cataloged, embedded and packaged with their active handlers. Download and raw
-command assets remain absent from all three command catalogs, embedded lookup
-bytes and packages; raw audit-v3 assets remain persistence-only and never
+search/chat-read assets and two download assets are materialized byte-identically
+at the schema root, cataloged, embedded and packaged with their active handlers.
+Raw command assets remain absent from all three command catalogs, embedded
+lookup bytes and packages; raw audit-v3 assets remain persistence-only and never
 become command catalog entries.
 
 Search result is exactly items (at most 100 exact shared MessageSummary) and

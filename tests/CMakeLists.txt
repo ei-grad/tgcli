@@ -37,6 +37,10 @@ add_executable(tgcli_unit_tests
     destructive_contract_test.cpp
     direct_td_runtime_test.cpp
     direct_rpc_test.cpp
+    download_td_runtime_conversion_test.cpp
+    download_domain_test.cpp
+    download_commands_test.cpp
+    download_filesystem_test.cpp
     send_td_runtime_test.cpp
     forward_test.cpp
     single_send_test.cpp

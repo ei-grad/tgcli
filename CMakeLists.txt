@@ -239,6 +239,9 @@ add_library(tgcli_daemon STATIC
     src/daemon/config_runtime.cpp
     src/daemon/destructive_contract.cpp
     src/daemon/direct_rpc.cpp
+    src/daemon/download_domain.cpp
+    src/daemon/download_commands.cpp
+    src/daemon/download_filesystem.cpp
     src/daemon/file_spool.cpp
     src/daemon/fetch_domain.cpp
     src/daemon/fetch_commands.cpp

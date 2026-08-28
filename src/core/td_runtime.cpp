@@ -999,6 +999,135 @@ TdMessageSummary convert_message(const td_api::message& message) {
     return converted;
 }
 
+std::optional<TdLocalFile> convert_download_local_file(const td_api::localFile* local) {
+    if (local == nullptr) {
+        return std::nullopt;
+    }
+    return TdLocalFile{.path = local->path_,
+                       .can_be_downloaded = local->can_be_downloaded_,
+                       .is_downloading_active = local->is_downloading_active_,
+                       .is_downloading_completed = local->is_downloading_completed_,
+                       .download_offset = local->download_offset_,
+                       .downloaded_prefix_size = local->downloaded_prefix_size_,
+                       .downloaded_size = local->downloaded_size_};
+}
+
+std::optional<TdFile> convert_download_file(const td_api::file* file) {
+    if (file == nullptr) {
+        return std::nullopt;
+    }
+    return TdFile{.id = file->id_,
+                  .size = file->size_,
+                  .expected_size = file->expected_size_,
+                  .local = convert_download_local_file(file->local_.get())};
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed TD media union.
+TdDownloadMessage convert_download_message(const td_api::message& message) {
+    TdDownloadMessage converted{.id = message.id_,
+                                .chat_id = message.chat_id_,
+                                .media_album_id = message.media_album_id_,
+                                .media_kind = TdDownloadMediaKind::Unsupported,
+                                .primary_file = std::nullopt,
+                                .photo_sizes = {}};
+    if (message.content_ == nullptr) {
+        return converted;
+    }
+    switch (message.content_->get_id()) {
+    case td_api::messageAnimation::ID: {
+        converted.media_kind = TdDownloadMediaKind::Animation;
+        const auto& content = static_cast<const td_api::messageAnimation&>(*message.content_);
+        converted.primary_file = content.animation_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.animation_->animation_.get());
+        break;
+    }
+    case td_api::messageAudio::ID: {
+        converted.media_kind = TdDownloadMediaKind::Audio;
+        const auto& content = static_cast<const td_api::messageAudio&>(*message.content_);
+        converted.primary_file = content.audio_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.audio_->audio_.get());
+        break;
+    }
+    case td_api::messageDocument::ID: {
+        converted.media_kind = TdDownloadMediaKind::Document;
+        const auto& content = static_cast<const td_api::messageDocument&>(*message.content_);
+        converted.primary_file = content.document_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.document_->document_.get());
+        break;
+    }
+    case td_api::messagePhoto::ID: {
+        converted.media_kind = TdDownloadMediaKind::Photo;
+        const auto& content = static_cast<const td_api::messagePhoto&>(*message.content_);
+        if (content.photo_ != nullptr) {
+            converted.photo_sizes.reserve(content.photo_->sizes_.size());
+            for (const auto& size : content.photo_->sizes_) {
+                converted.photo_sizes.push_back(
+                    size == nullptr
+                        ? TdDownloadPhotoSize{}
+                        : TdDownloadPhotoSize{.width = size->width_,
+                                              .height = size->height_,
+                                              .file = convert_download_file(size->photo_.get())});
+            }
+        }
+        break;
+    }
+    case td_api::messageSticker::ID: {
+        converted.media_kind = TdDownloadMediaKind::Sticker;
+        const auto& content = static_cast<const td_api::messageSticker&>(*message.content_);
+        converted.primary_file = content.sticker_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.sticker_->sticker_.get());
+        break;
+    }
+    case td_api::messageVideo::ID: {
+        converted.media_kind = TdDownloadMediaKind::Video;
+        const auto& content = static_cast<const td_api::messageVideo&>(*message.content_);
+        converted.primary_file = content.video_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.video_->video_.get());
+        break;
+    }
+    case td_api::messageVideoNote::ID: {
+        converted.media_kind = TdDownloadMediaKind::VideoNote;
+        const auto& content = static_cast<const td_api::messageVideoNote&>(*message.content_);
+        converted.primary_file = content.video_note_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.video_note_->video_.get());
+        break;
+    }
+    case td_api::messageVoiceNote::ID: {
+        converted.media_kind = TdDownloadMediaKind::VoiceNote;
+        const auto& content = static_cast<const td_api::messageVoiceNote&>(*message.content_);
+        converted.primary_file = content.voice_note_ == nullptr
+                                     ? std::nullopt
+                                     : convert_download_file(content.voice_note_->voice_.get());
+        break;
+    }
+    case td_api::messagePaidMedia::ID:
+        converted.media_kind = TdDownloadMediaKind::PaidMedia;
+        break;
+    case td_api::messageText::ID:
+        converted.media_kind =
+            static_cast<const td_api::messageText&>(*message.content_).link_preview_ == nullptr
+                ? TdDownloadMediaKind::Unsupported
+                : TdDownloadMediaKind::WebPage;
+        break;
+    case td_api::messageExpiredPhoto::ID:
+    case td_api::messageExpiredVideo::ID:
+    case td_api::messageExpiredVideoNote::ID:
+    case td_api::messageExpiredVoiceNote::ID:
+        converted.media_kind = TdDownloadMediaKind::Expired;
+        break;
+    default:
+        converted.media_kind = TdDownloadMediaKind::Unsupported;
+        break;
+    }
+    return converted;
+}
+
 TdMessageSendingState convert_message_sending_state(const td_api::MessageSendingState* state) {
     if (state == nullptr) {
         return {};
@@ -1995,6 +2124,14 @@ std::optional<TdValue> convert_supported_update(td_api::Object& object,
                              TdMalformedUpdateReason::InvalidEntity);
         }
         return TdValue::from(TdUpdateNewMessage{.message = std::move(message)});
+    }
+    case td_api::updateFile::ID: {
+        const auto& update = static_cast<const td_api::updateFile&>(object);
+        const auto converted = convert_download_file(update.file_.get());
+        if (!converted) {
+            return malformed(TdSupportedUpdateKind::File, TdMalformedUpdateReason::MissingObject);
+        }
+        return TdValue::from(TdUpdateFile{.file = *converted});
     }
     case td_api::updateMessageContent::ID: {
         const auto& update = static_cast<const td_api::updateMessageContent&>(object);
@@ -3243,6 +3380,7 @@ TdValue convert_m6_storage_response(const NativeObjectPtr& object) {
     return TdValue::from(TdM6Response{std::move(converted)});
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): closed TD function union.
 TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
                              std::uint64_t client_generation = 0) {
     if (object == nullptr) {
@@ -3297,6 +3435,27 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
         return convert_supergroup_members_response(object);
     case TdFunctionKind::GetMessage:
         return convert_planning_message_response(object);
+    case TdFunctionKind::GetDownloadMessage:
+        if (object->get_id() == td_api::message::ID) {
+            const auto& message = static_cast<const td_api::message&>(*object);
+            if (message.content_ != nullptr) {
+                return TdValue::from(convert_download_message(message));
+            }
+        }
+        return unexpected_direct_response(object);
+    case TdFunctionKind::DownloadFile:
+        if (object->get_id() == td_api::file::ID) {
+            const auto converted =
+                convert_download_file(static_cast<const td_api::file*>(object.get()));
+            return converted ? TdValue::from(*converted) : unexpected_direct_response(object);
+        }
+        return unexpected_direct_response(object);
+    case TdFunctionKind::GetSuggestedFileName:
+        if (object->get_id() == td_api::text::ID) {
+            return TdValue::from(
+                TdSuggestedFileName{.value = static_cast<const td_api::text&>(*object).text_});
+        }
+        return unexpected_direct_response(object);
     case TdFunctionKind::EditMessageText:
         return convert_write_message_response(object);
     case TdFunctionKind::SendMessage:
@@ -3503,7 +3662,12 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
     case TdFunctionKind::CreatePrivateChat:
         return function.get_id() == td_api::createPrivateChat::ID;
     case TdFunctionKind::GetMessage:
+    case TdFunctionKind::GetDownloadMessage:
         return function.get_id() == td_api::getMessage::ID;
+    case TdFunctionKind::DownloadFile:
+        return function.get_id() == td_api::downloadFile::ID;
+    case TdFunctionKind::GetSuggestedFileName:
+        return function.get_id() == td_api::getSuggestedFileName::ID;
     case TdFunctionKind::GetMessageProperties:
         return function.get_id() == td_api::getMessageProperties::ID;
     case TdFunctionKind::GetMessageAvailableReactions:
@@ -3580,6 +3744,40 @@ TdValue make_native_get_message(std::int64_t chat_id, std::int64_t message_id) {
     return TdValue::function(std::move(native),
                              TdFunctionData{TdFunctionKind::GetMessage,
                                             {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+TdValue make_native_get_download_message(std::int64_t chat_id, std::int64_t message_id) {
+    require_message_locator(chat_id, message_id);
+    NativeFunctionPtr native = td_api::make_object<td_api::getMessage>(chat_id, message_id);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetDownloadMessage,
+                                            {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+TdValue make_native_download_file(std::int32_t file_id) {
+    if (file_id <= 0) {
+        throw std::invalid_argument("downloadFile file id must be positive");
+    }
+    NativeFunctionPtr native = td_api::make_object<td_api::downloadFile>(file_id, 16, 0, 0, false);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::DownloadFile,
+                                            {{"file_id", static_cast<std::int64_t>(file_id)},
+                                             {"priority", std::int64_t{16}},
+                                             {"offset", std::int64_t{0}},
+                                             {"limit", std::int64_t{0}},
+                                             {"synchronous", false}}});
+}
+
+TdValue make_native_get_suggested_file_name(std::int32_t file_id, const std::string& directory) {
+    if (file_id <= 0 || directory.empty()) {
+        throw std::invalid_argument("getSuggestedFileName request is invalid");
+    }
+    NativeFunctionPtr native =
+        td_api::make_object<td_api::getSuggestedFileName>(file_id, directory);
+    return TdValue::function(std::move(native),
+                             TdFunctionData{TdFunctionKind::GetSuggestedFileName,
+                                            {{"file_id", static_cast<std::int64_t>(file_id)},
+                                             {"directory", directory}}});
 }
 
 TdValue make_native_get_message_properties(std::int64_t chat_id, std::int64_t message_id) {
@@ -4888,6 +5086,18 @@ class ProductionTdRuntime final : public TdRuntime {
         return make_native_get_message(chat_id, message_id);
     }
 
+    TdValue make_get_download_message(std::int64_t chat_id, std::int64_t message_id) override {
+        return make_native_get_download_message(chat_id, message_id);
+    }
+
+    TdValue make_download_file(std::int32_t file_id) override {
+        return make_native_download_file(file_id);
+    }
+
+    TdValue make_get_suggested_file_name(std::int32_t file_id, std::string directory) override {
+        return make_native_get_suggested_file_name(file_id, directory);
+    }
+
     TdValue make_get_message_properties(std::int64_t chat_id, std::int64_t message_id) override {
         return make_native_get_message_properties(chat_id, message_id);
     }
@@ -5235,6 +5445,20 @@ TdValue make_production_get_message_for_test(std::int64_t chat_id, std::int64_t 
     return make_native_get_message(chat_id, message_id);
 }
 
+TdValue make_production_get_download_message_for_test(std::int64_t chat_id,
+                                                      std::int64_t message_id) {
+    return make_native_get_download_message(chat_id, message_id);
+}
+
+TdValue make_production_download_file_for_test(std::int32_t file_id) {
+    return make_native_download_file(file_id);
+}
+
+TdValue make_production_get_suggested_file_name_for_test(std::int32_t file_id,
+                                                         const std::string& directory) {
+    return make_native_get_suggested_file_name(file_id, directory);
+}
+
 TdValue make_production_get_message_properties_for_test(std::int64_t chat_id,
                                                         std::int64_t message_id) {
     return make_native_get_message_properties(chat_id, message_id);
@@ -5478,6 +5702,29 @@ bool production_get_message_matches_for_test(const TdValue& function, std::int64
     }
     const auto& request = static_cast<const td_api::getMessage&>(**native);
     return request.chat_id_ == chat_id && request.message_id_ == message_id;
+}
+
+bool production_download_file_matches_for_test(const TdValue& function, std::int32_t file_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::downloadFile::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::downloadFile&>(**native);
+    return request.file_id_ == file_id && request.priority_ == 16 && request.offset_ == 0 &&
+           request.limit_ == 0 && !request.synchronous_;
+}
+
+bool production_get_suggested_file_name_matches_for_test(const TdValue& function,
+                                                         std::int32_t file_id,
+                                                         std::string_view directory) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::getSuggestedFileName::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::getSuggestedFileName&>(**native);
+    return request.file_id_ == file_id && request.directory_ == directory;
 }
 
 bool search_filter_matches(const td_api::SearchMessagesFilter* filter,

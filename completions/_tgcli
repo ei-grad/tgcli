@@ -18,7 +18,7 @@ _tgcli_zsh_normalize() {
         --account=*|--timeout=*|--cursor=*|--idempotency-key=*|--json|--allow-write|--yes|--dry-run|--verbose|-v|--no-daemon|--no-color|-*) ;;
         *)
           if [[ -z "$top" ]]; then
-            case "$token" in account|chat|chats|completion|contact|daemon|doctor|fetch|folder|history|listen|login|logout|me|msg|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
+            case "$token" in account|chat|chats|completion|contact|daemon|doctor|download|fetch|folder|history|listen|login|logout|me|msg|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
           elif [[ -z "$child" ]]; then
             case "$top:$token" in account:add|account:list|account:remove|account:show|account:use|chat:archive|chat:ban|chat:demote|chat:info|chat:invite-link|chat:join|chat:kick|chat:leave|chat:mark-read|chat:members|chat:mute|chat:pin|chat:promote|chat:set-description|chat:set-permissions|chat:set-photo|chat:set-title|chat:unarchive|chat:unban|chat:unmute|chat:unpin|contact:add|contact:block|contact:list|contact:remove|contact:search|contact:unblock|daemon:restart|daemon:run|daemon:status|daemon:stop|folder:add-chat|folder:create|folder:delete|folder:edit|folder:list|folder:remove-chat|folder:show|msg:delete|msg:edit|msg:forward|msg:get|msg:link|msg:pin|msg:react|msg:unpin|saved:attach|saved:search|saved:tags|session:list|session:terminate|storage:optimize|storage:stats|topic:close|topic:create|topic:edit|topic:list|topic:reopen) child="$token" ;; esac
           fi
@@ -45,7 +45,7 @@ _tgcli_zsh_normalize
 local -a candidates
 local key
 if (( CURRENT == 2 )); then
-  candidates=('account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for')
+  candidates=('account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for')
 elif (( CURRENT == 3 )); then
   case "$words[2]" in
       account) candidates=('add' 'list' 'remove' 'show' 'use') ;;
@@ -55,6 +55,7 @@ elif (( CURRENT == 3 )); then
       contact) candidates=('add' 'block' 'list' 'remove' 'search' 'unblock') ;;
       daemon) candidates=('restart' 'run' 'status' 'stop') ;;
       doctor) candidates=('--json' '--verbose' '-v' '--no-daemon' '--no-color') ;;
+      download) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color' '-O') ;;
       fetch) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color' '--limit' '--all' '--since') ;;
       folder) candidates=('add-chat' 'create' 'delete' 'edit' 'list' 'remove-chat' 'show') ;;
       history) candidates=('--account' '--json' '--timeout' '--cursor' '--verbose' '-v' '--no-daemon' '--no-color' '-n' '--before' '--since' '--until' '--topic' '--local') ;;
@@ -118,6 +119,7 @@ else
       daemon\ status) candidates=('--json' '--verbose' '-v' '--no-color') ;;
       daemon\ stop) candidates=('--json' '--verbose' '-v' '--no-color') ;;
       doctor) candidates=('--json' '--verbose' '-v' '--no-daemon' '--no-color') ;;
+      download) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color' '-O') ;;
       fetch) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color' '--limit' '--all' '--since') ;;
       folder\ add-chat) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       folder\ create) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color' '--chat' '--icon' '--color') ;;

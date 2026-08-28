@@ -1438,6 +1438,8 @@ std::string_view m2_operation_name(M2Operation operation) {
         return "chat_info";
     case M2Operation::ChatMembers:
         return "chat_members";
+    case M2Operation::Download:
+        return "download";
     case M2Operation::Listen:
         return "listen";
     case M2Operation::WaitFor:

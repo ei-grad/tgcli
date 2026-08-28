@@ -44,7 +44,7 @@ struct DispatcherOperationIdentity {
     std::string_view operation;
 };
 
-constexpr std::array<DispatcherOperationIdentity, 29> kDispatcherOperationIdentities{{
+constexpr std::array<DispatcherOperationIdentity, 30> kDispatcherOperationIdentities{{
     {"version", "version"},
     {"doctor", "doctor"},
     {"daemon status", "status"},
@@ -64,6 +64,7 @@ constexpr std::array<DispatcherOperationIdentity, 29> kDispatcherOperationIdenti
     {"search", "search"},
     {"chat info", "chat_info"},
     {"chat members", "chat_members"},
+    {"download", "download"},
     {"unread", "unread"},
     {"fetch", "fetch"},
     {"msg get", "msg_get"},

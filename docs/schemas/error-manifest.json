@@ -112,6 +112,9 @@
     "doctor": {
       "error": "meta.error.schema.json"
     },
+    "download": {
+      "error": "download.error.schema.json"
+    },
     "fetch": {
       "error": "fetch.error.schema.json"
     },

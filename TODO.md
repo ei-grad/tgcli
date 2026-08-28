@@ -314,7 +314,7 @@ before the milestone is closed.
       descriptor-walked stable source identity, same-directory 0600 temp,
       exclusive no-replace Linux/macOS publication, cleanup precedence, exact
       schemas and explicit named-temp orphan non-guarantee
-- [ ] Implement and atomically activate `tgcli download` with stderr progress,
+- [x] Implement and atomically activate `tgcli download` with stderr progress,
       unlimited default, opt-in timeout, curated descriptor/observer path and
       result/error catalog mappings; raw `downloadFile` remains denied
 - [x] Add the dormant two-pass file snapshot/spool foundation: exact
@@ -333,7 +333,7 @@ before the milestone is closed.
 - [x] Add `saved attach` result-only manifest/schema and contract coverage for
       final id, NOT_AUTHED/BOT_UNSUPPORTED, NOT_FOUND/USAGE, gate/dry-run,
       two-pass source races, quota/CAS cutpoints, audit, timeout and replay
-- [ ] `TGCLI_MEDIA_DIR` handling
+- [x] `TGCLI_MEDIA_DIR` handling
 - [x] Add a supported M4 media flow to the test-DC E2E milestone gate
 - [ ] Review gate: M4 diff vs DESIGN.md
 

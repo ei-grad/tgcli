@@ -562,6 +562,40 @@ core::TdValue ScriptedTdRuntime::make_get_message(std::int64_t chat_id, std::int
         core::TdFunctionKind::GetMessage, {{"chat_id", chat_id}, {"message_id", message_id}}});
 }
 
+core::TdValue ScriptedTdRuntime::make_get_download_message(std::int64_t chat_id,
+                                                           std::int64_t message_id) {
+    require_message_locator(chat_id, message_id);
+    before_make(core::TdFunctionKind::GetDownloadMessage);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetDownloadMessage,
+                             {{"chat_id", chat_id}, {"message_id", message_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_download_file(std::int32_t file_id) {
+    if (file_id <= 0) {
+        throw std::invalid_argument("scripted download file id must be positive");
+    }
+    before_make(core::TdFunctionKind::DownloadFile);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::DownloadFile,
+                             {{"file_id", static_cast<std::int64_t>(file_id)},
+                              {"priority", std::int64_t{16}},
+                              {"offset", std::int64_t{0}},
+                              {"limit", std::int64_t{0}},
+                              {"synchronous", false}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_suggested_file_name(std::int32_t file_id,
+                                                              std::string directory) {
+    if (file_id <= 0 || directory.empty()) {
+        throw std::invalid_argument("scripted suggested file name request is invalid");
+    }
+    before_make(core::TdFunctionKind::GetSuggestedFileName);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetSuggestedFileName,
+        {{"file_id", static_cast<std::int64_t>(file_id)}, {"directory", std::move(directory)}}});
+}
+
 core::TdValue ScriptedTdRuntime::make_get_message_properties(std::int64_t chat_id,
                                                              std::int64_t message_id) {
     require_message_locator(chat_id, message_id);

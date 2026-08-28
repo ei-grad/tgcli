@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli download result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "chat_id",
+    "message_id",
+    "file_id",
+    "media_type",
+    "path",
+    "bytes"
+  ],
+  "properties": {
+    "chat_id": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": {
+        "const": 0
+      }
+    },
+    "message_id": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": {
+        "const": 0
+      }
+    },
+    "file_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "media_type": {
+      "enum": [
+        "animation",
+        "audio",
+        "document",
+        "photo",
+        "sticker",
+        "video",
+        "video_note",
+        "voice_note"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    }
+  }
+}

@@ -361,6 +361,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                     {"daemon status", {{"result", "daemon-status.result.schema.json"}}},
                     {"daemon stop", {{"result", "daemon-stop.result.schema.json"}}},
                     {"doctor", {{"result", "doctor.result.schema.json"}}},
+                    {"download", {{"result", "download.result.schema.json"}}},
                     {"fetch", {{"result", "fetch.result.schema.json"}}},
                     {"login", {{"result", "login.result.schema.json"}}},
                     {"logout", {{"result", "logout.result.schema.json"}}},
@@ -392,7 +393,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
             {"result", filename + ".result.schema.json"}};
     }
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 75);
+    CHECK(manifest["commands"].size() == 76);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

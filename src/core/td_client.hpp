@@ -320,6 +320,15 @@ class TdClient {
     std::future<TdValue> get_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                      std::int64_t chat_id, std::int64_t message_id);
     std::future<TdValue>
+    get_download_message(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         std::int64_t chat_id, std::int64_t message_id);
+    std::future<TdValue>
+    download_file(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                  std::int32_t file_id);
+    std::future<TdValue>
+    get_suggested_file_name(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                            std::int32_t file_id, std::string directory);
+    std::future<TdValue>
     get_message_properties(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                            std::int64_t chat_id, std::int64_t message_id);
     std::future<TdValue>

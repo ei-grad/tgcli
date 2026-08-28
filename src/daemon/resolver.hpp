@@ -31,6 +31,7 @@ enum class M2Operation {
     Resolve,
     ChatInfo,
     ChatMembers,
+    Download,
     Listen,
     WaitFor,
 };
