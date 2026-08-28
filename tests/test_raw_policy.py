@@ -43,6 +43,13 @@ class RawPolicyTest(unittest.TestCase):
             "sha256:c8937fab296da09ca04874ed6b1eb23af40b5232008a77c52b4a8645b4ab5153",
         )
         raw_policy.validate_assets(TDLIB_SOURCE, REPOSITORY, activation=False)
+        generated = (
+            REPOSITORY / "src" / "daemon" / "raw_td_schema.generated.inc"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'RawBodyValidatorDescriptor{"deny", &validate_raw_body_deny}', generated
+        )
+        self.assertNotIn("kGeneratedRawBodyValidatorSymbols", generated)
 
     def test_dormant_seed_denies_every_unreviewed_function(self) -> None:
         policy = raw_policy.load_json(
@@ -119,6 +126,13 @@ class RawPolicyTest(unittest.TestCase):
         policy["policy_sha256"] = raw_policy.rows_digest(policy["functions"])
         with self.assertRaisesRegex(
             raw_policy.PolicyError, "response-sensitive function is admitted"
+        ):
+            raw_policy.validate_policy(inventory, policy)
+
+        policy["functions"][0]["body_validator"] = "missing_callable"
+        policy["policy_sha256"] = raw_policy.rows_digest(policy["functions"])
+        with self.assertRaisesRegex(
+            raw_policy.PolicyError, "compiled policy validator missing"
         ):
             raw_policy.validate_policy(inventory, policy)
 

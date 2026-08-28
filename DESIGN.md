@@ -460,8 +460,11 @@ the uint64 big-endian canonical response length and canonical response bytes.
 the hash domain, protocol envelope and LF. Raw stdin, AST string/byte storage,
 canonical request storage and every recursively reachable native typed request
 string/byte field are wiped by the pin-generated visitor after ownership
-transfer or on rejection. Response staging is wiped after bounded
-frame serialization.
+transfer or on rejection. Response hashing consumes one owned
+`object_ptr<td_api::Object>`; an RAII guard recursively wipes every native
+response string/byte field and canonical response staging on null, metadata,
+type, canonicalization, oversize, TD-error and success exits before releasing
+the object. No caller retains an unwiped response alias.
 
 Two checked-in pin-owned assets govern classification:
 
@@ -493,7 +496,11 @@ denied with `body_validator:"deny"` and `reviewed:false`. This is drift and
 deny-fallback evidence, not a completed Option-B row review. Dormant validation
 fails on pin/source/count/bijection/digest mismatch; the separate activation
 validator additionally requires every row reviewed with concrete row reasoning
-and every named compiled symbol present. Unknown functions and unknown table
+and every named compiled symbol present. The generated symbol set is an exact
+sorted unique table of `{name,nonnull typed_validator_fn}` descriptors: each
+entry takes the address of its compiled validator, so a missing implementation
+is a compile failure. Runtime lookup uses that same table with no default arm;
+an unknown symbol or null callable denies. Unknown functions and unknown table
 versions are denied.
 
 A typed body validator may preserve or raise a row's tier, never lower it.
@@ -1344,7 +1351,7 @@ The type-specific sources are closed:
 |---|---|---|---|---|
 | private | `userFullInfo.bio.text` | null | false | null |
 | basic group | `basicGroupFullInfo.description` | required non-null `basicGroup.member_count` | false | null |
-| supergroup/channel | `supergroupFullInfo.description` | `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
+| supergroup/channel | `supergroupFullInfo.description` | required non-null nonnegative `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
 
 List/unread fields come from the already observed resolver `chat`; active
 usernames retain tdlib order and no second `getChat` is sent. Private branches
@@ -1364,6 +1371,14 @@ empty probe alone sets `next` to null; approximate `total_count` never proves
 exhaustion. A basic-group cursor uses the exact vector offset and vector length
 for exhaustion.
 
+For the basic-group vector, `--admins` retains exactly `creator` and
+`administrator` statuses. `--bots` retains only user senders whose exact
+`getUser` identity has `is_bot:true`; chat senders never match. `--query Q`
+uses a byte-exact case-sensitive substring over the derived `display_name` or
+any active username. The selected predicate is applied to the fully validated
+and identity-enriched source vector before pagination; slicing first is
+forbidden. Default `recent` retains the full vector in TD order.
+
 Default filtering is literal `recent` with null query; `--admins` selects
 `administrators`, `--bots` selects `bots`, and `--query Q` selects `search`
 with a byte-identical valid UTF-8 `Q` of 1..256 bytes after pinned input
@@ -1379,17 +1394,20 @@ and rejects a changed vector length as `source_changed` before returning rows.
 The exact cursor is:
 
 ```json
-{"version":1,"operation":"chat_members","account":"main","user_id":42,"limit":50,"chat_id":-1001,"chat_type":"supergroup","filter":"recent","query":null,"offset":50,"source_count":null}
+{"version":1,"operation":"chat_members","account":"main","user_id":42,"limit":50,"chat_id":-1001,"chat_type":"supergroup","source_id":55,"filter":"recent","query":null,"offset":50,"source_count":null}
 ```
 
-`chat_type` is `basic_group|supergroup|channel`. Basic-group cursors require a
-nonnegative `source_count` equal to the validated source vector length;
+`chat_type` is `basic_group|supergroup|channel`; `source_id` is the positive
+observed basic-group or supergroup id backing `chat_id`. Continuation resolves
+the live chat again and requires the same `chat_id`, `chat_type`, and
+`source_id` before any member read. Basic-group cursors require a nonnegative
+`source_count` equal to the newly validated source vector length;
 supergroup/channel cursors require it null. `query` is nonempty only with
 `filter:"search"`, and every other filter requires null. Offset is a
 nonnegative int32 and is the raw source offset, not the number of emitted or
 enriched rows. Account, current user, chat id/type, limit, filter/query,
-source-count relation and canonical re-encoding are all validated before any
-member RPC.
+source identity/count relation and canonical re-encoding are all validated
+before any member RPC. A live type or backing-id change is `source_changed`.
 
 The result is `{"items":[<MemberSummary>],"next":<cursor|null>}`.
 `MemberSummary` is:
@@ -6851,8 +6869,11 @@ candidate and is neither a fallback nor an alternate media result. Album/
 paid/webpage wrappers are classified before nested primary media and never
 silently unwrapped.
 
-Destination interpretation precedes suggested-name lookup. Without `-O`, the
-selected media directory (environment, then frozen cwd) is directory mode. An
+Destination interpretation precedes suggested-name lookup. The invocation
+freezes `context.cwd` before routing. A relative `-O` and a relative captured
+`TGCLI_MEDIA_DIR` are each resolved against that same frozen cwd; neither may
+observe a later process cwd or environment change. Without `-O`, the selected
+media directory (captured environment, then frozen cwd) is directory mode. An
 `-O` value naming an existing directory, or ending in a slash, is directory
 mode; a trailing slash requires an existing safe directory and otherwise is
 `OUTPUT_UNAVAILABLE/invalid_path`. Every other `-O` is exact-file mode. Exact-
@@ -6865,14 +6886,22 @@ details. There is no local fallback extension, media-derived name, or direct
 media `file_name` precedence. A final-name collision is only `OUTPUT_EXISTS`.
 
 The generation observer is installed before `downloadFile(file_id,16,0,0,
-false)`. This curated operation never shares a raw `downloadFile` descriptor
-and never calls TDLib's global cancel-download operation. Wrong-file updates
-are ignored. Negative/out-of-int53 progress fields are INTERNAL; duplicate or
-regressing `downloaded_size` is not printed. For each strictly increasing
-advisory observation, `total_bytes` is `file.size` when positive, otherwise
-positive `expected_size`, otherwise null. Once downloaded size exceeds the
-displayed total, total is null for that and later records; it is neither
-clamped nor an integrity error. No final progress record is fabricated.
+false)`. Its initial response may already be a completed local file. The
+response and same-id `updateFile` events enter one sequenced arbitration: the
+first structurally valid completed state is the candidate; an identical
+completed duplicate observed before publication is ignored, while conflicting
+completed local path/size/state is `INTERNAL/malformed_tdlib_response` and
+publishes nothing. A wrong-id response is malformed; wrong-id updates are
+ignored. This curated operation never shares a raw `downloadFile` descriptor
+and never calls TDLib's global cancel-download operation.
+
+Negative/out-of-int53 progress fields are INTERNAL. An advisory progress frame
+is emitted only when `downloaded_size` is strictly greater than the last
+advisory value; duplicates and regressions are suppressed, not errors. For
+each advisory, `total_bytes` is `file.size` when positive, otherwise positive
+`expected_size`, otherwise null. Once downloaded size exceeds the displayed
+total, total is null for that and later advisory records; it is neither clamped
+nor an integrity error.
 
 Destination precedence is explicit `-O`, then `TGCLI_MEDIA_DIR`, then the
 frozen client working directory. No tilde expansion occurs. Each parent is
@@ -6894,8 +6923,20 @@ equal the stable copied count; `expected_size` is never integrity proof.
 Commit order is copy, source revalidation, temp fsync, serialized deadline/
 cancellation arbitration, existing exclusive no-replace rename
 (`renameat2(RENAME_NOREPLACE)` on Linux or `renameatx_np(RENAME_EXCL)` on
-macOS), final-directory fsync, then Result. After exclusive rename succeeds,
-deadline/cancellation loses and sync/terminal complete. Rename `EEXIST` is
+macOS), and final-directory fsync. After that fsync succeeds, tgcli always emits
+exactly one final progress frame before stdout Result:
+
+```json
+{"operation":"download","file_id":7,"downloaded_bytes":4096,"total_bytes":4096}
+```
+
+Both byte fields equal the authoritative copied byte count. This record is
+mandatory for zero-byte, already-complete and no-advisory downloads and is the
+sole permitted duplicate or regression relative to advisory progress. Any
+error emits no final record; already emitted advisory records remain visible.
+Once exclusive publication and final-directory fsync win, deadline,
+cancellation and disconnect cannot suppress the final progress or Result.
+Rename `EEXIST` is
 OUTPUT_EXISTS; other rename failure is `write_failed`. A normal pre-rename
 failure unlinks the temp and fsyncs its directory; cleanup failure replaces the
 filesystem error with `cleanup_failed` without exposing the temp name.
@@ -6963,7 +7004,10 @@ Search errors close usage/auth/bot/resolver/rate/TD/timeout/internal/resource
 and pagination reasons `invalid_cursor`, `scope_changed`, `source_changed`,
 `marker_not_advancing`, `page_invalid`. Chat-read errors are restricted to
 `chat_info|chat_members` and preserve contextual resolver, unsupported-type,
-pagination/source-change and common lifecycle shapes. Download errors include
+pagination/source-change and common lifecycle shapes. Chat-read and download
+both admit the exact resolver terminal `BOT_UNSUPPORTED` with
+`{"operation":"resolve"}`; they do not rewrite it to the owning command.
+Download errors include
 the contextual message `NOT_FOUND`, the closed precondition reasons above,
 OUTPUT_EXISTS `{operation,path}`, and OUTPUT_UNAVAILABLE
 `{operation:"download",path:absolute_string,reason:...}` with reasons

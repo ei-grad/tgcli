@@ -87,8 +87,9 @@ be demonstrated by tests, not argued in prose.
 Raw is always security-sensitive and audit-schema-changing. Its review owns
 the complete pin-derived Function inventory, constructor/type graph and policy
 bijections, one-native-Function ownership, generated default/null/abstract
-variant handling, declared-result response validation, every admitted row and
-compiled body-validator variant, request and response sensitivity,
+variant handling, owned declared-result response validation and recursive wipe
+on every exit, callable body-validator descriptor bijection/runtime lookup,
+every admitted row and compiled body-validator variant, request and response sensitivity,
 duplicate/unknown-field/numeric/int64/bytes/double canonical hash vectors,
 secret-chat provenance, tier monotonicity, wipe paths, audit-v3 crash cuts and
 the parser/descriptor/audit/schema/catalog activation order. A global default

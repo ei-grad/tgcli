@@ -9907,4 +9907,4 @@ inline constexpr std::array<RawTdConstructorSpec, 3118> kRawTdConstructors{
     RawTdConstructorSpec{"webPageInstantView", "WebPageInstantView", 1416158291, RawTdConstructorKind::Object, 6776, 6},
     RawTdConstructorSpec{"writeGeneratedFilePart", "Ok", 214474389, RawTdConstructorKind::Function, 6782, 3},
 };
-inline constexpr std::array<std::string_view, 1> kGeneratedRawBodyValidatorSymbols{"deny"};
+inline constexpr std::array<RawBodyValidatorDescriptor, 1> kRawBodyValidators{RawBodyValidatorDescriptor{"deny", &validate_raw_body_deny}};

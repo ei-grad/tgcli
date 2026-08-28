@@ -764,15 +764,12 @@ void Server::serve_connection(const std::shared_ptr<ConnectionState>& connection
                     break;
                 }
                 if (admission.refresh_status == ConfigRefreshStatus::TimedOut) {
-                    const bool fetch =
-                        request->command == std::vector<std::string>{"fetch"} &&
-                        dispatcher_.deadline_default(*request) == DeadlineDefault::Unlimited;
-                    connection->send(proto::Error{
-                        request->id,
-                        "TIMEOUT",
-                        "config admission timed out",
-                        {{"operation", fetch ? "fetch" : "config_admission"}, {"state", nullptr}},
-                        kTimeout});
+                    connection->send(
+                        proto::Error{request->id,
+                                     "TIMEOUT",
+                                     "config admission timed out",
+                                     {{"operation", "config_admission"}, {"state", nullptr}},
+                                     kTimeout});
                     continue;
                 }
                 if (admission.refresh_status != ConfigRefreshStatus::Completed ||

@@ -203,7 +203,10 @@ const commonTransport = (operation, { includeBot = true } = {}) => [
     }),
   ),
 ];
-const resolverBranches = () => [
+const resolverBranches = ({ includeBot = true } = {}) => [
+  ...(includeBot
+    ? [error("BOT_UNSUPPORTED", object({ operation: { const: "resolve" } }))]
+    : []),
   error("NOT_FOUND", {
     oneOf: [
       object({ selector: { type: "string" } }),
@@ -309,7 +312,7 @@ const currentSchemas = {
       "unsupported_chat_type",
     ],
     extra: [
-      ...resolverBranches(),
+      ...resolverBranches({ includeBot: false }),
       error("NOT_FOUND", object({ chat_id: int53, topic })),
       error(
         "PAGINATION_INVALID",
@@ -349,7 +352,7 @@ const currentSchemas = {
       "unsupported_mode",
     ],
     extra: [
-      ...resolverBranches(),
+      ...resolverBranches({ includeBot: false }),
       error(
         "PAGINATION_INVALID",
         object({ operation: { const: "fetch" }, reason: { const: "non_advancing_upstream" } }),
@@ -460,8 +463,15 @@ write(
         is_forum: { const: false },
         linked_chat_id: { type: "null" },
       }),
-      chatInfoBranch("supergroup", { is_bot: { const: false } }),
-      chatInfoBranch("channel", { is_bot: { const: false }, is_forum: { const: false } }),
+      chatInfoBranch("supergroup", {
+        is_bot: { const: false },
+        member_count: nonnegativeInt32,
+      }),
+      chatInfoBranch("channel", {
+        is_bot: { const: false },
+        member_count: nonnegativeInt32,
+        is_forum: { const: false },
+      }),
     ],
   },
   futureDirectory,

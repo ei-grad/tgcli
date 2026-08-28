@@ -69,6 +69,20 @@ TEST_CASE("future M2 and M4 result schemas are strict and remain independently v
     basic_info["member_count"] = nullptr;
     CHECK_FALSE(
         tgcli::test::matches_json_schema("future/chat-info.result.schema.json").match(basic_info));
+    for (const auto* type : {"supergroup", "channel"}) {
+        auto aggregate_info = private_info;
+        aggregate_info["type"] = type;
+        aggregate_info["is_bot"] = false;
+        aggregate_info["member_count"] = 7;
+        CHECK_THAT(aggregate_info,
+                   tgcli::test::matches_json_schema("future/chat-info.result.schema.json"));
+        aggregate_info["member_count"] = nullptr;
+        CHECK_FALSE(tgcli::test::matches_json_schema("future/chat-info.result.schema.json")
+                        .match(aggregate_info));
+        aggregate_info["member_count"] = -1;
+        CHECK_FALSE(tgcli::test::matches_json_schema("future/chat-info.result.schema.json")
+                        .match(aggregate_info));
+    }
 
     const json chat_member{{"sender", {{"type", "chat"}, {"id", -1002}}},
                            {"display_name", "Linked channel"},
@@ -232,6 +246,10 @@ TEST_CASE("future family error schemas reject cross-operation and secret-bearing
     const auto info_bot = terminal("BOT_UNSUPPORTED", {{"operation", "chat_info"}});
     CHECK_FALSE(
         tgcli::test::matches_json_schema("future/chat-read.error.schema.json").match(info_bot));
+    const auto resolver_bot = terminal("BOT_UNSUPPORTED", {{"operation", "resolve"}});
+    CHECK_THAT(resolver_bot,
+               tgcli::test::matches_json_schema("future/chat-read.error.schema.json"));
+    CHECK_THAT(resolver_bot, tgcli::test::matches_json_schema("future/download.error.schema.json"));
 
     const auto download = terminal("PRECONDITION_FAILED", {{"operation", "download"},
                                                            {"chat_id", -1001},
@@ -318,6 +336,12 @@ TEST_CASE("active M2 error schemas are command-local and cataloged",
             terminal("TIMEOUT", {{"operation", "config_admission"}, {"state", nullptr}});
         CHECK_THAT(timeout, tgcli::test::matches_json_schema(filename));
     }
+
+    const auto resolver_bot = terminal("BOT_UNSUPPORTED", {{"operation", "resolve"}});
+    CHECK_THAT(resolver_bot, tgcli::test::matches_json_schema("msg-get.error.schema.json"));
+    CHECK_THAT(resolver_bot, tgcli::test::matches_json_schema("msg-link.error.schema.json"));
+    CHECK_FALSE(tgcli::test::matches_json_schema("read.error.schema.json").match(resolver_bot));
+    CHECK_FALSE(tgcli::test::matches_json_schema("fetch.error.schema.json").match(resolver_bot));
 
     auto cross_operation = cases.front().second;
     cross_operation["error"]["details"]["operation"] = "unread";

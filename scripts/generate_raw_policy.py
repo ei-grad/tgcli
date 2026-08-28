@@ -35,7 +35,10 @@ POLICY_KEYS = {
     "reviewed",
     "review_reason",
 }
-COMPILED_VALIDATORS = {"deny", "none"}
+COMPILED_VALIDATORS = {
+    "deny": "validate_raw_body_deny",
+    "none": "validate_raw_body_none",
+}
 
 
 class PolicyError(RuntimeError):
@@ -312,9 +315,16 @@ def generated_graph_include(
         ),
         *constructor_rows,
         "};",
-        f"inline constexpr std::array<std::string_view, {len(validator_symbols)}> "
-        "kGeneratedRawBodyValidatorSymbols{"
-        + ", ".join(cpp_string(symbol) for symbol in validator_symbols)
+        f"inline constexpr std::array<RawBodyValidatorDescriptor, {len(validator_symbols)}> "
+        "kRawBodyValidators{"
+        + ", ".join(
+            "RawBodyValidatorDescriptor{"
+            + cpp_string(symbol)
+            + ", &"
+            + COMPILED_VALIDATORS[symbol]
+            + "}"
+            for symbol in validator_symbols
+        )
         + "};",
         "",
     ]

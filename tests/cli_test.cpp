@@ -4640,6 +4640,7 @@ TEST_CASE("no-daemon config-admission timeout bytes retain M2 command attributio
         CHECK(outcome.err == expected.dump() + "\n");
         CHECK_THAT(expected, test::matches_json_schema(schema));
     }
+    CHECK(scripted->sent_functions().size() == 1);
     scripted->push_update(scripted->clients().front(), {},
                           core::AuthStateData{core::AuthState::Closed});
     client.close();

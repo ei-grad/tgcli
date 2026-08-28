@@ -9,11 +9,13 @@
 #include "daemon/context.hpp"
 #include "daemon/destructive_contract.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/fetch_commands.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
 #include "daemon/stream_subscription.hpp"
 #include "proto/frame_io.hpp"
+#include "support/scripted_td_runtime.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1048,7 +1050,24 @@ TEST_CASE("socket config-admission timeout bytes retain command attribution",
     auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
     hooks->now = [after_every_request_deadline] { return after_every_request_deadline; };
     daemon::ConfigRuntime runtime(config.file(), hooks);
-    const TestDaemon test_daemon({}, true, {}, "main", {}, {}, &runtime);
+    auto td_runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = td_runtime.get();
+    core::TdClient client(std::move(td_runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    daemon::FetchCoordinator fetch(client, "main");
+    std::atomic<int> handlers = 0;
+    const auto install = [&](daemon::Dispatcher& dispatcher) {
+        const auto blocked = [&handlers](const proto::Request&, daemon::RequestSession& session) {
+            handlers.fetch_add(1, std::memory_order_relaxed);
+            session.result({{"unexpected", true}});
+        };
+        for (const auto* key : {"chats", "unread", "read", "msg get", "msg link"}) {
+            dispatcher.register_command(
+                key, {.tier = daemon::Tier::Read, .handler = blocked, .config_admission = true});
+        }
+        daemon::register_fetch_command(dispatcher, fetch);
+    };
+    const TestDaemon test_daemon(install, false, {}, "main", {}, {}, &runtime);
 
     const int fd = connect_to(test_daemon.socket);
     proto::FrameReader reader(fd);
@@ -1078,7 +1097,12 @@ TEST_CASE("socket config-admission timeout bytes retain command attribution",
         CHECK(*line == proto::serialize(proto::Frame{expected}));
         ++request_id;
     }
+    CHECK(handlers.load(std::memory_order_relaxed) == 0);
+    CHECK(scripted->sent_functions().size() == 1);
     ::close(fd);
+    scripted->push_update(scripted->clients().front(), {},
+                          core::AuthStateData{core::AuthState::Closed});
+    client.close();
 }
 
 TEST_CASE("socket admission wall clock survives a logically delayed config refresh",

@@ -49,6 +49,8 @@ TEST_CASE("dormant raw parser retains one pinned native Function identity",
     CHECK(static_cast<const td::td_api::testCallBytes&>(parsed.native()).x_ ==
           std::string("\0\1\2\xff", 4));
     CHECK(parsed.canonical() == R"({"@type":"testCallBytes","x":"AAEC/w=="})");
+    CHECK_FALSE(tgcli::daemon::raw::body_policy_allows("deny", parsed));
+    CHECK_FALSE(tgcli::daemon::raw::body_policy_allows("unknown", parsed));
 
     const auto request_hash = digest(parsed);
     CHECK(request_hash.bytes == parsed.canonical().size());
@@ -183,29 +185,55 @@ TEST_CASE("dormant raw canonical doubles follow RFC 8785 thresholds",
 TEST_CASE("dormant raw response hashing validates the declared TD result type",
           "[raw][foundation][response]") {
     auto function = success(R"({"@type":"testCallString","x":""})");
-    const auto empty_response = td::td_api::make_object<td::td_api::testString>("");
-    auto empty_digest = tgcli::daemon::raw::response_digest(function, *empty_response);
-    REQUIRE(std::holds_alternative<Digest>(empty_digest));
-    const auto overhead = std::get<Digest>(empty_digest).bytes;
-    REQUIRE(overhead < tgcli::daemon::raw::kMaximumResponseBytes);
+    std::vector<std::string> wiped_stages;
+    const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
+        CHECK(std::string_view(bytes, size) == std::string(size, '\0'));
+        wiped_stages.emplace_back(stage);
+    };
 
-    const auto exact_response = td::td_api::make_object<td::td_api::testString>(
-        std::string(tgcli::daemon::raw::kMaximumResponseBytes - overhead, 'x'));
-    auto exact = tgcli::daemon::raw::response_digest(function, *exact_response);
+    auto empty_response = td::td_api::make_object<td::td_api::testString>("x");
+    auto empty_digest =
+        tgcli::daemon::raw::response_digest(function, std::move(empty_response), observer);
+    REQUIRE(std::holds_alternative<Digest>(empty_digest));
+    CHECK(empty_response == nullptr);
+    const auto overhead = std::get<Digest>(empty_digest).bytes;
+    REQUIRE(overhead > 1);
+    REQUIRE(overhead <= tgcli::daemon::raw::kMaximumResponseBytes);
+
+    auto exact_response = td::td_api::make_object<td::td_api::testString>(
+        std::string(tgcli::daemon::raw::kMaximumResponseBytes - overhead + 1, 'x'));
+    auto exact = tgcli::daemon::raw::response_digest(function, std::move(exact_response), observer);
     REQUIRE(std::holds_alternative<Digest>(exact));
+    CHECK(exact_response == nullptr);
     CHECK(std::get<Digest>(exact).bytes == tgcli::daemon::raw::kMaximumResponseBytes);
 
-    const auto oversized_response = td::td_api::make_object<td::td_api::testString>(
-        std::string(tgcli::daemon::raw::kMaximumResponseBytes - overhead + 1, 'x'));
-    auto oversized = tgcli::daemon::raw::response_digest(function, *oversized_response);
+    auto oversized_response = td::td_api::make_object<td::td_api::testString>(
+        std::string(tgcli::daemon::raw::kMaximumResponseBytes - overhead + 2, 'x'));
+    auto oversized =
+        tgcli::daemon::raw::response_digest(function, std::move(oversized_response), observer);
     REQUIRE(std::holds_alternative<Failure>(oversized));
+    CHECK(oversized_response == nullptr);
     CHECK(std::get<Failure>(oversized).error == Error::CanonicalTooLarge);
 
-    auto wrong = tgcli::daemon::raw::response_digest(function, td::td_api::ok{});
+    auto wrong_response = td::td_api::make_object<td::td_api::text>("secret mismatch");
+    auto wrong = tgcli::daemon::raw::response_digest(function, std::move(wrong_response), observer);
     REQUIRE(std::holds_alternative<Failure>(wrong));
+    CHECK(wrong_response == nullptr);
     CHECK(std::get<Failure>(wrong).error == Error::UnexpectedResponseType);
-    auto td_error = tgcli::daemon::raw::response_digest(function, td::td_api::error(400, "x"));
+
+    auto null_response = td::td_api::object_ptr<td::td_api::Object>{};
+    auto null_result =
+        tgcli::daemon::raw::response_digest(function, std::move(null_response), observer);
+    REQUIRE(std::holds_alternative<Failure>(null_result));
+    CHECK(std::get<Failure>(null_result).error == Error::UnexpectedResponseType);
+
+    auto error_response = td::td_api::make_object<td::td_api::error>(400, "secret error");
+    auto td_error =
+        tgcli::daemon::raw::response_digest(function, std::move(error_response), observer);
     CHECK(std::holds_alternative<Digest>(td_error));
+    CHECK(error_response == nullptr);
+    CHECK(std::ranges::count(wiped_stages, "raw_response_canonical") == 4);
+    CHECK(std::ranges::count(wiped_stages, "raw_native_string_or_bytes") >= 5);
 }
 
 TEST_CASE("dormant raw owners wipe physical AST conversion and canonical buffers",
@@ -221,9 +249,11 @@ TEST_CASE("dormant raw owners wipe physical AST conversion and canonical buffers
         REQUIRE(std::holds_alternative<TypedFunction>(parsed));
     }
     auto function = success(R"({"@type":"testCallString","x":""})");
-    const auto response = td::td_api::make_object<td::td_api::testString>("sensitive response");
-    const auto response_hash = tgcli::daemon::raw::response_digest(function, *response, observer);
+    auto response = td::td_api::make_object<td::td_api::testString>("sensitive response");
+    const auto response_hash =
+        tgcli::daemon::raw::response_digest(function, std::move(response), observer);
     REQUIRE(std::holds_alternative<Digest>(response_hash));
+    CHECK(response == nullptr);
     // NOLINTNEXTLINE(bugprone-use-after-move): the rvalue contract clears the caller buffer.
     CHECK(physical.empty());
     CHECK(std::ranges::find(stages, "raw_physical_input") != stages.end());

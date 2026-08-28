@@ -119,7 +119,10 @@ authoritative implementation status and roadmap (work milestones top-down).
   tl/generated-header bijections with committed count/digests and deny unknown
   drift. Generated missing/default/null and abstract-variant rules apply before
   the single native conversion. Native responses must match the holder's
-  declared result base (or exact `td_api::error`) before canonical hashing. The dormant seed is all-denied and
+  declared result base (or exact `td_api::error`) before canonical hashing and
+  are consumed through an RAII recursive native wipe. Generated body-validator
+  descriptors bind each name to one nonnull compiled callable; runtime lookup
+  uses the same fail-closed table. The dormant seed is all-denied and
   unreviewed; an activation check fails until every row has concrete review
   evidence. A body validator can only retain/raise tier or deny, and
   unknown/null/unmatched nested variants deny.

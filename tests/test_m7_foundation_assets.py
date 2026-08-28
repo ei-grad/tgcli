@@ -123,6 +123,14 @@ class M7FoundationAssetTest(unittest.TestCase):
                 "downloadFile file_id:int32 priority:int32 offset:int53 limit:int53 "
                 "synchronous:Bool = File;"
             ),
+            "getSuggestedFileName file_id:int32 directory:string = Text;",
+            (
+                "getSupergroupMembers supergroup_id:int53 "
+                "filter:SupergroupMembersFilter offset:int32 limit:int32 = ChatMembers;"
+            ),
+            "supergroupMembersFilterAdministrators = SupergroupMembersFilter;",
+            "supergroupMembersFilterBots = SupergroupMembersFilter;",
+            "supergroupMembersFilterSearch query:string = SupergroupMembersFilter;",
             (
                 "file id:int32 size:int53 expected_size:int53 local:localFile "
                 "remote:remoteFile = File;"
@@ -152,6 +160,16 @@ class M7FoundationAssetTest(unittest.TestCase):
         ]
         self.assertEqual(global_handler.count("CLEAN_INPUT_STRING(request.query_)"), 1)
         self.assertEqual(global_handler.count("CLEAN_INPUT_STRING(request.offset_)"), 1)
+
+        design = (REPOSITORY / "DESIGN.md").read_text(encoding="utf-8")
+        for contract in (
+            "`source_id` is the positive\nobserved basic-group or supergroup id",
+            "byte-exact case-sensitive substring over the derived `display_name` or\nany active username",
+            "relative captured\n`TGCLI_MEDIA_DIR` are each resolved against that same frozen cwd",
+            "first structurally valid completed state is the candidate",
+            "sole permitted duplicate or regression relative to advisory progress",
+        ):
+            self.assertIn(contract, design)
 
 
 if __name__ == "__main__":

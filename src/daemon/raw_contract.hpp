@@ -9,6 +9,8 @@
 #include <string_view>
 #include <variant>
 
+#include <td/tl/TlObject.h>
+
 namespace td::td_api {
 class Function;
 class Object;
@@ -82,7 +84,10 @@ class TypedFunction final {
 parse(std::string&& input, const secure::WipeObserver& wipe_observer = {});
 
 [[nodiscard]] std::variant<Digest, Failure>
-response_digest(const TypedFunction& function, const td::td_api::Object& response,
+response_digest(const TypedFunction& function, td::tl_object_ptr<td::td_api::Object> response,
                 const secure::WipeObserver& wipe_observer = {});
+
+[[nodiscard]] bool body_policy_allows(std::string_view validator,
+                                      const TypedFunction& function) noexcept;
 
 } // namespace tgcli::daemon::raw

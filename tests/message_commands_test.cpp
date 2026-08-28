@@ -4,6 +4,7 @@
 #include "schema_matcher.hpp"
 #include "support/scripted_td_runtime.hpp"
 
+#include <array>
 #include <chrono>
 #include <future>
 #include <limits>
@@ -382,6 +383,29 @@ TEST_CASE("msg consumers use explicit ids while retaining contextual selector me
     CHECK(field_as<std::vector<std::int64_t>>(descriptor, "message_ids") ==
           std::vector<std::int64_t>{123});
     CHECK(pending.get().result.has_value());
+}
+
+TEST_CASE("msg get and link preserve resolver-attributed bot terminals",
+          "[msg][resolver][bot][schema][fake-boundary]") {
+    for (const auto& [request, schema] :
+         std::array{std::pair{get_request("Project", {123}), "msg-get.error.schema.json"},
+                    std::pair{link_request("Project", 123), "msg-link.error.schema.json"}}) {
+        FakeMessages fake;
+        auto pending = fake.dispatch(request);
+        fake.respond_me(true);
+        const auto outcome = pending.get();
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "BOT_UNSUPPORTED");
+        CHECK((*outcome.error)["error"]["details"] == json{{"operation", "resolve"}});
+        CHECK(
+            outcome.error->dump() + "\n" ==
+            R"({"error":{"code":"BOT_UNSUPPORTED","details":{"operation":"resolve"},"message":"this resolver branch requires a user account"}})"
+            "\n");
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema(schema));
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetChats) == 0);
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetChat) == 0);
+        CHECK(outcome.terminal_count == 1);
+    }
 }
 
 TEST_CASE("msg secret targets stop before either selected target call",

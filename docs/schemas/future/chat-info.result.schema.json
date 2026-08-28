@@ -254,16 +254,9 @@
           "type": "string"
         },
         "member_count": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 2147483647
-            }
-          ]
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
         },
         "is_forum": {
           "type": "boolean"
@@ -374,16 +367,9 @@
           "type": "string"
         },
         "member_count": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 2147483647
-            }
-          ]
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
         },
         "is_forum": {
           "const": false

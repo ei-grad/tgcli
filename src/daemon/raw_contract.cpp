@@ -45,10 +45,39 @@ struct RawTdConstructorSpec {
     std::size_t field_count;
 };
 
+using RawBodyValidator = bool (*)(const td::td_api::Function&) noexcept;
+
+struct RawBodyValidatorDescriptor {
+    std::string_view name;
+    RawBodyValidator validate = nullptr;
+};
+
+constexpr bool validate_raw_body_deny(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return false;
+}
+
+[[maybe_unused]] constexpr bool
+validate_raw_body_none(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return true;
+}
+
 #include "daemon/raw_td_schema.generated.inc"
 
-inline constexpr std::array<std::string_view, 1> kCompiledRawBodyValidatorSymbols{"deny"};
-static_assert(kGeneratedRawBodyValidatorSymbols == kCompiledRawBodyValidatorSymbols);
+consteval bool valid_body_validator_table() {
+    std::string_view previous;
+    for (const auto& descriptor : kRawBodyValidators) {
+        if (descriptor.name.empty() || descriptor.validate == nullptr ||
+            (!previous.empty() && previous >= descriptor.name)) {
+            return false;
+        }
+        previous = descriptor.name;
+    }
+    return true;
+}
+
+static_assert(valid_body_validator_table());
 
 enum class ValueKind {
     Null,
@@ -413,6 +442,12 @@ const RawTdConstructorSpec* constructor_by_id(std::int32_t identifier) {
     return row == kRawTdConstructors.end() ? nullptr : &*row;
 }
 
+const RawBodyValidatorDescriptor* body_validator_by_name(std::string_view name) {
+    const auto* const row =
+        std::ranges::lower_bound(kRawBodyValidators, name, {}, &RawBodyValidatorDescriptor::name);
+    return row != kRawBodyValidators.end() && row->name == name ? &*row : nullptr;
+}
+
 std::span<const RawTdFieldSpec> fields_of(const RawTdConstructorSpec& constructor) {
     return std::span(kRawTdFields).subspan(constructor.field_offset, constructor.field_count);
 }
@@ -489,6 +524,47 @@ void wipe_native_value(std::vector<Value>& values, const secure::WipeObserver& o
 }
 
 #include "daemon/raw_td_wipe.generated.inc"
+
+class NativeObjectWipeGuard final {
+  public:
+    NativeObjectWipeGuard(td::td_api::Object* value, secure::WipeObserver observer)
+        : value_(value), observer_(std::move(observer)) {}
+
+    ~NativeObjectWipeGuard() {
+        if (value_ != nullptr) {
+            wipe_native_object(*value_, observer_);
+        }
+    }
+
+    NativeObjectWipeGuard(const NativeObjectWipeGuard&) = delete;
+    NativeObjectWipeGuard& operator=(const NativeObjectWipeGuard&) = delete;
+    NativeObjectWipeGuard(NativeObjectWipeGuard&&) = delete;
+    NativeObjectWipeGuard& operator=(NativeObjectWipeGuard&&) = delete;
+
+  private:
+    td::td_api::Object* value_ = nullptr;
+    secure::WipeObserver observer_;
+};
+
+class StringWipeGuard final {
+  public:
+    StringWipeGuard(std::string& value, secure::WipeObserver observer, std::string_view stage)
+        : value_(value), observer_(std::move(observer)), stage_(stage) {}
+
+    ~StringWipeGuard() {
+        secure::wipe(value_, observer_, stage_);
+    }
+
+    StringWipeGuard(const StringWipeGuard&) = delete;
+    StringWipeGuard& operator=(const StringWipeGuard&) = delete;
+    StringWipeGuard(StringWipeGuard&&) = delete;
+    StringWipeGuard& operator=(StringWipeGuard&&) = delete;
+
+  private:
+    std::string& value_;
+    secure::WipeObserver observer_;
+    std::string_view stage_;
+};
 
 bool append_native_object(const td::td_api::Object& value, std::string& output);
 
@@ -967,6 +1043,12 @@ const td::td_api::Function& TypedFunction::native() const noexcept {
     return *implementation_->native;
 }
 
+bool body_policy_allows(std::string_view validator, const TypedFunction& function) noexcept {
+    const auto* descriptor = body_validator_by_name(validator);
+    return descriptor != nullptr && descriptor->validate != nullptr &&
+           descriptor->validate(function.native());
+}
+
 std::variant<Digest, Failure> TypedFunction::request_digest(std::string_view tdlib_sha,
                                                             std::string_view effective_tier) const {
     if (tdlib_sha.size() != 40 ||
@@ -1054,35 +1136,36 @@ std::variant<TypedFunction, Failure> parse(std::string&& input,
 }
 
 std::variant<Digest, Failure> response_digest(const TypedFunction& function,
-                                              const td::td_api::Object& response,
+                                              td::tl_object_ptr<td::td_api::Object> response,
                                               const secure::WipeObserver& wipe_observer) {
+    const NativeObjectWipeGuard native_guard(response.get(), wipe_observer);
     if (!ascii_identifier(function.name()) || !ascii_identifier(function.result_type()) ||
         function.identity() == nullptr) {
         return Failure{Error::InvalidPolicyMetadata};
     }
-    const auto* response_constructor = constructor_by_id(response.get_id());
+    if (response == nullptr) {
+        return Failure{Error::UnexpectedResponseType};
+    }
+    const auto* response_constructor = constructor_by_id(response->get_id());
     if (response_constructor == nullptr ||
         response_constructor->kind != RawTdConstructorKind::Object) {
         return Failure{Error::UnexpectedResponseType};
     }
-    const std::string_view expected_type = response.get_id() == td::td_api::error::ID
+    const std::string_view expected_type = response->get_id() == td::td_api::error::ID
                                                ? std::string_view("Error")
                                                : function.result_type();
     if (response_constructor->result_type != expected_type) {
         return Failure{Error::UnexpectedResponseType};
     }
     std::string canonical;
-    if (!append_native_object(response, canonical)) {
-        secure::wipe(canonical, wipe_observer, "raw_response_canonical_failure");
+    const StringWipeGuard canonical_guard(canonical, wipe_observer, "raw_response_canonical");
+    if (!append_native_object(*response, canonical)) {
         return Failure{Error::UnexpectedResponseType};
     }
     if (canonical.size() > kMaximumResponseBytes) {
-        secure::wipe(canonical, wipe_observer, "raw_response_canonical_oversized");
         return Failure{Error::CanonicalTooLarge};
     }
-    auto digest = hash_response(function.name(), canonical);
-    secure::wipe(canonical, wipe_observer, "raw_response_canonical");
-    return digest;
+    return hash_response(function.name(), canonical);
 }
 
 } // namespace tgcli::daemon::raw

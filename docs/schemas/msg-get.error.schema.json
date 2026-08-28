@@ -684,6 +684,35 @@
           ],
           "properties": {
             "code": {
+              "const": "BOT_UNSUPPORTED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "resolve"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
               "const": "NOT_FOUND"
             },
             "message": {
