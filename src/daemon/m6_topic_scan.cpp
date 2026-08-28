@@ -38,6 +38,13 @@ bool valid_m6_topic_cursor(const M6TopicCursor& cursor) noexcept {
                                       (cursor.message_id & (kServerMessageUnit - 1)) == 0);
 }
 
+std::size_t M6TopicAccumulator::serialized_size(const nlohmann::json& value) const {
+    if (serialized_size_) {
+        return serialized_size_(value);
+    }
+    return value.dump().size();
+}
+
 M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
                                              const core::TdM6ForumTopics& page) {
     if (complete_ || !valid_m6_topic_cursor(request)) {
@@ -79,7 +86,7 @@ M6TopicScanResult M6TopicAccumulator::append(const M6TopicCursor& request,
                     .capacity_resource = std::nullopt,
                     .capacity_limit = 0};
         }
-        const auto bytes = projected->dump().size();
+        const auto bytes = serialized_size(*projected);
         if (bytes > kMaximumItemBytes) {
             return {.status = M6TopicScanStatus::Capacity,
                     .next = std::nullopt,

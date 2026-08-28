@@ -4124,6 +4124,33 @@ TEST_CASE("M6 contact mutations use the shared audited direct-write kernel",
 
 TEST_CASE("M6 folder mutations preserve full snapshots through the shared kernel",
           "[m6][write-command][folder][fake-boundary]") {
+    SECTION("create rejects secret and structurally unknown chats before mutation") {
+        for (const auto kind : {core::TdChatKind::Secret, core::TdChatKind::Unknown}) {
+            CAPTURE(static_cast<int>(kind));
+            FakeWrites fake;
+            auto input = folder_create_request();
+            input.args["chats"] = json::array({"-1001"});
+            auto pending = fake.m6_mutation(proto::M6Operation::FolderCreate, input);
+            bind_principal(fake);
+            auto chat = basic_chat();
+            chat.kind = kind;
+            fake.respond(core::TdFunctionKind::GetChat, chat);
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] ==
+                  (kind == core::TdChatKind::Secret ? "USAGE" : "INTERNAL"));
+            CHECK((*outcome.error)["error"]["details"] ==
+                  (kind == core::TdChatKind::Secret
+                       ? json{{"argument", "selector"}, {"reason", "unsupported_chat_type"}}
+                       : json{{"operation", "resolve"}, {"reason", "internal_error"}}));
+            CHECK(outcome.terminal_count == 1);
+            CHECK_FALSE(outcome.result);
+            CHECK(fake.count(core::TdFunctionKind::GetChat) == 1);
+            CHECK(fake.count(core::TdFunctionKind::CreateChatFolder) == 0);
+            CHECK_FALSE(std::filesystem::exists(fake.tree().audit_path()));
+        }
+    }
+
     SECTION("create resolves all chats atomically and sorts unique ids") {
         FakeWrites fake;
         auto pending = fake.m6_mutation(proto::M6Operation::FolderCreate, folder_create_request());

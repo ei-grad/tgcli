@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/td_client.hpp"
+#include "daemon/m6_topic_scan.hpp"
 #include "daemon/resolver.hpp"
 #include "proto/frame.hpp"
 #include "proto/operation.hpp"
@@ -33,8 +34,10 @@ m6_wait_for_folders(core::TdClient& client,
 class M6Coordinator final {
   public:
     M6Coordinator(core::TdClient& client, std::string account,
-                  std::shared_ptr<IdempotencyFoundation> foundation = {})
-        : client_(client), account_(std::move(account)), foundation_(std::move(foundation)) {}
+                  std::shared_ptr<IdempotencyFoundation> foundation = {},
+                  testing::M6TopicSerializedSize topic_serialized_size = {})
+        : client_(client), account_(std::move(account)), foundation_(std::move(foundation)),
+          topic_serialized_size_(std::move(topic_serialized_size)) {}
 
     void contact(proto::M6Operation operation, const proto::Request& request,
                  RequestSession& session);
@@ -48,6 +51,7 @@ class M6Coordinator final {
     std::reference_wrapper<core::TdClient> client_;
     std::string account_;
     std::shared_ptr<IdempotencyFoundation> foundation_;
+    testing::M6TopicSerializedSize topic_serialized_size_;
 };
 
 void register_m6_commands(Dispatcher& dispatcher, M6Coordinator& reads, WriteCoordinator& writes);

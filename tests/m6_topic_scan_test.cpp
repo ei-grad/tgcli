@@ -1,5 +1,6 @@
 #include "daemon/m6_topic_scan.hpp"
 
+#include <cstddef>
 #include <limits>
 
 #include <catch2/catch_test_macros.hpp>
@@ -109,6 +110,51 @@ TEST_CASE("M6 topic scanner rejects cross-page order regression and item capacit
     CHECK(overflow.capacity_resource == daemon::M6TopicCapacityResource::Topics);
     CHECK(overflow.capacity_limit == 4'096);
     CHECK(capacity.items().size() == 4'096);
+}
+
+TEST_CASE("M6 topic scanner enforces exact item and aggregate byte boundaries atomically",
+          "[m6][topic-scan][capacity]") {
+    constexpr std::size_t item_limit = 262'144;
+    constexpr std::size_t bytes_limit = 16'777'216;
+    const auto fixed_charge = [](std::size_t bytes) {
+        return [bytes](const nlohmann::json&) { return bytes; };
+    };
+
+    daemon::M6TopicAccumulator item_exact(-1001, fixed_charge(item_limit));
+    const auto exact_item = item_exact.append({}, page({topic(1, 1)}, {}));
+    CHECK(exact_item.status == daemon::M6TopicScanStatus::Complete);
+    CHECK(item_exact.items().size() == 1);
+
+    daemon::M6TopicAccumulator item_overflow(-1001, fixed_charge(item_limit + 1));
+    const auto oversized_item = item_overflow.append({}, page({topic(1, 1)}, {}));
+    CHECK(oversized_item.status == daemon::M6TopicScanStatus::Capacity);
+    CHECK(oversized_item.capacity_resource == daemon::M6TopicCapacityResource::ItemBytes);
+    CHECK(oversized_item.capacity_limit == item_limit);
+    CHECK(item_overflow.items().empty());
+
+    std::vector<core::TdM6ForumTopic> exact_topics;
+    exact_topics.reserve(64);
+    for (std::int32_t id = 1; id <= 64; ++id) {
+        exact_topics.push_back(topic(id, 100 - id));
+    }
+    daemon::M6TopicAccumulator bytes_exact(-1001, fixed_charge(item_limit));
+    const auto exact_bytes = bytes_exact.append({}, page(std::move(exact_topics), {}));
+    CHECK(exact_bytes.status == daemon::M6TopicScanStatus::Complete);
+    CHECK(bytes_exact.items().size() == 64);
+
+    std::vector<core::TdM6ForumTopic> overflow_topics;
+    overflow_topics.reserve(65);
+    for (std::int32_t id = 1; id <= 65; ++id) {
+        overflow_topics.push_back(topic(id, 100 - id));
+    }
+    daemon::M6TopicAccumulator bytes_overflow(-1001, [](const nlohmann::json& value) {
+        return value["id"].get<std::int32_t>() <= 64 ? item_limit : std::size_t{1};
+    });
+    const auto oversized_bytes = bytes_overflow.append({}, page(std::move(overflow_topics), {}));
+    CHECK(oversized_bytes.status == daemon::M6TopicScanStatus::Capacity);
+    CHECK(oversized_bytes.capacity_resource == daemon::M6TopicCapacityResource::Bytes);
+    CHECK(oversized_bytes.capacity_limit == bytes_limit);
+    CHECK(bytes_overflow.items().empty());
 }
 
 } // namespace

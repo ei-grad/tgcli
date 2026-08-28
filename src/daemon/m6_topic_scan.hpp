@@ -2,9 +2,12 @@
 
 #include "core/m6_td.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -31,14 +34,22 @@ struct M6TopicScanResult {
 
 bool valid_m6_topic_cursor(const M6TopicCursor& cursor) noexcept;
 
+namespace testing {
+using M6TopicSerializedSize = std::function<std::size_t(const nlohmann::json&)>;
+}
+
 class M6TopicAccumulator final {
   public:
-    explicit M6TopicAccumulator(std::int64_t chat_id) : chat_id_(chat_id) {}
+    explicit M6TopicAccumulator(std::int64_t chat_id,
+                                testing::M6TopicSerializedSize serialized_size = {})
+        : chat_id_(chat_id), serialized_size_(std::move(serialized_size)) {}
 
     M6TopicScanResult append(const M6TopicCursor& request, const core::TdM6ForumTopics& page);
     [[nodiscard]] const std::vector<nlohmann::json>& items() const noexcept;
 
   private:
+    [[nodiscard]] std::size_t serialized_size(const nlohmann::json& value) const;
+
     std::int64_t chat_id_ = 0;
     std::vector<nlohmann::json> items_;
     std::unordered_set<std::int32_t> topic_ids_;
@@ -46,6 +57,7 @@ class M6TopicAccumulator final {
     std::optional<std::int64_t> previous_order_;
     std::size_t charged_bytes_ = 0;
     bool complete_ = false;
+    testing::M6TopicSerializedSize serialized_size_;
 };
 
 } // namespace tgcli::daemon

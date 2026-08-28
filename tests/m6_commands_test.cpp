@@ -41,7 +41,7 @@ struct Outcome {
 
 class FakeM6 {
   public:
-    FakeM6() {
+    explicit FakeM6(daemon::testing::M6TopicSerializedSize topic_serialized_size = {}) {
         std::string pattern = "/tmp/tgcli-m6-commands-XXXXXX";
         pattern.push_back('\0');
         const auto* created = ::mkdtemp(pattern.data());
@@ -70,7 +70,8 @@ class FakeM6 {
         runtime_->push_response(client_id_, 1, {}, core::AuthStateData{core::AuthState::Ready});
         REQUIRE(eventually(
             [&] { return client_->auth_state()->data.state == core::AuthState::Ready; }));
-        coordinator_ = std::make_unique<daemon::M6Coordinator>(*client_, "main", foundation_);
+        coordinator_ = std::make_unique<daemon::M6Coordinator>(*client_, "main", foundation_,
+                                                               std::move(topic_serialized_size));
     }
 
     ~FakeM6() {
@@ -231,6 +232,63 @@ proto::Request request(std::vector<std::string> command, json args = json::objec
     value.context.timeout_seconds = 1.0;
     value.context.cwd = "/";
     return value;
+}
+
+core::TdChat topic_chat(core::TdChatKind kind) {
+    return {.id = -1001,
+            .title = "Project",
+            .kind = kind,
+            .related_id = kind == core::TdChatKind::Private ? 77 : 55,
+            .tdlib_type_id = 1,
+            .positions = {},
+            .chat_lists = {},
+            .is_marked_unread = false,
+            .unread_count = 0,
+            .unread_mention_count = 0,
+            .unread_reaction_count = 0,
+            .unread_poll_vote_count = 0,
+            .last_message = std::nullopt,
+            .permissions = std::nullopt,
+            .notification_settings = std::nullopt};
+}
+
+core::TdUserSummary topic_peer(bool is_bot, bool has_topics, bool allows_create) {
+    return {.id = 77,
+            .first_name = "Topic",
+            .last_name = "Peer",
+            .usernames = {"topic_peer"},
+            .phone_number = {},
+            .is_bot = is_bot,
+            .is_premium = false,
+            .presence = core::TdUserPresence::Online,
+            .bot_has_topics = has_topics,
+            .bot_allows_users_to_create_topics = allows_create};
+}
+
+core::TdM6ForumTopic topic_row(std::int32_t id, std::int64_t order) {
+    return {.info = {.chat_id = -1001,
+                     .id = id,
+                     .name = "Updates",
+                     .icon = {.color = core::TdM6TopicColor::Blue, .custom_emoji_id = "0"},
+                     .creation_date = 1,
+                     .creator = {.kind = core::TdM6SenderKind::User,
+                                 .id = 42,
+                                 .unsupported_tdlib_type_id = std::nullopt}},
+            .order = order,
+            .is_pinned = false,
+            .unread_count = 0,
+            .unread_mention_count = 0,
+            .unread_reaction_count = 0,
+            .unread_poll_vote_count = 0};
+}
+
+void respond_forum_chat(FakeM6& fake, bool is_forum = true, bool is_channel = false) {
+    fake.respond(core::TdFunctionKind::GetChat,
+                 topic_chat(is_channel ? core::TdChatKind::Channel : core::TdChatKind::Supergroup));
+    fake.respond(core::TdFunctionKind::GetSupergroup, core::TdSupergroup{.id = 55,
+                                                                         .usernames = {"project"},
+                                                                         .is_channel = is_channel,
+                                                                         .is_forum = is_forum});
 }
 
 TEST_CASE("M6 contact list hydrates every id under one bound resolver", "[m6][commands]") {
@@ -659,6 +717,169 @@ TEST_CASE("M6 topic list consumes a complete bounded page with the frozen chat i
     CHECK((*outcome.result)["items"][0]["id"] == 9);
     CHECK((*outcome.result)["items"][0]["name"] == "Updates");
     CHECK((*outcome.result)["next"].is_null());
+}
+
+TEST_CASE("M6 topic list accepts only the exact forum and private topic-bot matrix",
+          "[m6][commands][topic][capability]") {
+    struct PrivateCase {
+        bool is_bot;
+        bool has_topics;
+        bool allows_create;
+        bool allowed;
+    };
+    constexpr std::array private_cases{
+        PrivateCase{false, false, false, false}, PrivateCase{true, false, false, false},
+        PrivateCase{true, false, true, false},   PrivateCase{true, true, false, true},
+        PrivateCase{true, true, true, true},
+    };
+    for (const auto& candidate : private_cases) {
+        CAPTURE(candidate.is_bot, candidate.has_topics, candidate.allows_create, candidate.allowed);
+        FakeM6 fake;
+        auto pending =
+            fake.run(request({"topic", "list"}, {{"chat", "-1001"}}),
+                     [](daemon::M6Coordinator& coordinator, daemon::RequestSession& session) {
+                         coordinator.topic_list(session.request(), session);
+                     });
+        fake.respond_me();
+        fake.respond(core::TdFunctionKind::GetChat, topic_chat(core::TdChatKind::Private));
+        fake.respond(core::TdFunctionKind::GetUser,
+                     topic_peer(candidate.is_bot, candidate.has_topics, candidate.allows_create));
+        if (candidate.allowed) {
+            fake.respond(core::TdFunctionKind::GetForumTopics,
+                         core::TdM6Response{core::TdM6ForumTopics{}});
+        }
+        const auto outcome = pending.get();
+        CHECK(outcome.terminal_count == 1);
+        if (candidate.allowed) {
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["items"].empty());
+            CHECK((*outcome.result)["next"].is_null());
+            CHECK(fake.count(core::TdFunctionKind::GetForumTopics) == 1);
+        } else {
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["code"] == "USAGE");
+            CHECK((*outcome.error)["details"] ==
+                  json{{"argument", "chat"}, {"reason", "unsupported_chat_type"}});
+            CHECK_FALSE(outcome.result);
+            CHECK(fake.count(core::TdFunctionKind::GetForumTopics) == 0);
+        }
+    }
+
+    struct ChatCase {
+        core::TdChatKind kind;
+        bool forum;
+        bool channel;
+        bool allowed;
+    };
+    constexpr std::array chat_cases{
+        ChatCase{core::TdChatKind::BasicGroup, false, false, false},
+        ChatCase{core::TdChatKind::Secret, false, false, false},
+        ChatCase{core::TdChatKind::Supergroup, false, false, false},
+        ChatCase{core::TdChatKind::Channel, true, true, false},
+        ChatCase{core::TdChatKind::Supergroup, true, false, true},
+    };
+    for (const auto& candidate : chat_cases) {
+        CAPTURE(static_cast<int>(candidate.kind), candidate.forum, candidate.channel,
+                candidate.allowed);
+        FakeM6 fake;
+        auto pending =
+            fake.run(request({"topic", "list"}, {{"chat", "-1001"}}),
+                     [](daemon::M6Coordinator& coordinator, daemon::RequestSession& session) {
+                         coordinator.topic_list(session.request(), session);
+                     });
+        fake.respond_me();
+        fake.respond(core::TdFunctionKind::GetChat, topic_chat(candidate.kind));
+        if (candidate.kind == core::TdChatKind::Supergroup ||
+            candidate.kind == core::TdChatKind::Channel) {
+            fake.respond(core::TdFunctionKind::GetSupergroup,
+                         core::TdSupergroup{.id = 55,
+                                            .usernames = {"project"},
+                                            .is_channel = candidate.channel,
+                                            .is_forum = candidate.forum});
+        }
+        if (candidate.allowed) {
+            fake.respond(core::TdFunctionKind::GetForumTopics,
+                         core::TdM6Response{core::TdM6ForumTopics{}});
+        }
+        const auto outcome = pending.get();
+        CHECK(outcome.terminal_count == 1);
+        if (candidate.allowed) {
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["items"].empty());
+            CHECK(fake.count(core::TdFunctionKind::GetForumTopics) == 1);
+        } else {
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["code"] == "USAGE");
+            CHECK(
+                (*outcome.error)["details"] ==
+                json{{"argument", candidate.kind == core::TdChatKind::Secret ? "selector" : "chat"},
+                     {"reason", "unsupported_chat_type"}});
+            CHECK_FALSE(outcome.result);
+            CHECK(fake.count(core::TdFunctionKind::GetForumTopics) == 0);
+        }
+    }
+}
+
+TEST_CASE("M6 topic list exposes exact item and aggregate byte capacity terminals",
+          "[m6][commands][topic][capacity]") {
+    enum class Boundary { ItemExact, ItemOverflow, BytesExact, BytesOverflow };
+    for (const auto boundary : {Boundary::ItemExact, Boundary::ItemOverflow, Boundary::BytesExact,
+                                Boundary::BytesOverflow}) {
+        CAPTURE(static_cast<int>(boundary));
+        const auto item_overflow = boundary == Boundary::ItemOverflow;
+        const auto aggregate =
+            boundary == Boundary::BytesExact || boundary == Boundary::BytesOverflow;
+        const auto aggregate_overflow = boundary == Boundary::BytesOverflow;
+        FakeM6 fake([=](const json& value) {
+            if (item_overflow) {
+                return std::size_t{262'145};
+            }
+            if (aggregate_overflow && value["id"].get<std::int32_t>() == 65) {
+                return std::size_t{1};
+            }
+            return std::size_t{262'144};
+        });
+        auto input = request({"topic", "list"}, {{"chat", "-1001"}});
+        input.context.timeout_seconds = 60.0;
+        auto pending = fake.run(std::move(input), [](daemon::M6Coordinator& coordinator,
+                                                     daemon::RequestSession& session) {
+            coordinator.topic_list(session.request(), session);
+        });
+        fake.respond_me();
+        respond_forum_chat(fake);
+        std::vector<core::TdM6ForumTopic> topics;
+        auto count = 1;
+        if (aggregate) {
+            count = 64;
+        }
+        if (aggregate_overflow) {
+            count = 65;
+        }
+        topics.reserve(count);
+        for (std::int32_t id = 1; id <= count; ++id) {
+            topics.push_back(topic_row(id, 100 - id));
+        }
+        fake.respond(core::TdFunctionKind::GetForumTopics,
+                     core::TdM6Response{
+                         core::TdM6ForumTopics{.total_count = count, .topics = std::move(topics)}});
+        const auto outcome = pending.get();
+        CHECK(outcome.terminal_count == 1);
+        const bool overflow = item_overflow || aggregate_overflow;
+        if (!overflow) {
+            REQUIRE(outcome.result);
+            CHECK((*outcome.result)["items"].size() == static_cast<std::size_t>(count));
+            CHECK_FALSE(outcome.error);
+        } else {
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["code"] == "INTERNAL");
+            CHECK((*outcome.error)["details"] ==
+                  json{{"operation", "topic_list"},
+                       {"reason", "capacity_exhausted"},
+                       {"resource", item_overflow ? "item_bytes" : "bytes"},
+                       {"limit", item_overflow ? 262'144 : 16'777'216}});
+            CHECK_FALSE(outcome.result);
+        }
+    }
 }
 
 TEST_CASE("M6 storage stats validates the complete returned tree", "[m6][commands]") {

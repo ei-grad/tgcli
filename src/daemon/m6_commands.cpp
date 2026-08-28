@@ -632,7 +632,7 @@ void M6Coordinator::topic_list(const proto::Request& request, RequestSession& se
                       {{"argument", "chat"}, {"reason", "unsupported_chat_type"}}, kUsage);
         return;
     }
-    M6TopicAccumulator accumulator(target->chat.id);
+    M6TopicAccumulator accumulator(target->chat.id, topic_serialized_size_);
     M6TopicCursor cursor;
     while (true) {
         auto page = read_topic_page(client_.get(), account_, caller, resolver, target->chat.id,
