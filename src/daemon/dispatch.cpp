@@ -278,6 +278,42 @@ bool ResponseSink::claim_protocol_fallback_terminal() {
     return true;
 }
 
+bool ResponseSink::reserve_terminal_batch() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (terminal_ || !claim_public_terminal()) {
+        return false;
+    }
+    before_direct_terminal_bit();
+    terminal_ = true;
+    terminal_batch_reserved_ = true;
+    return true;
+}
+
+DeliveryOutcome ResponseSink::finish_terminal_batch(nlohmann::json progress,
+                                                    nlohmann::json result) {
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!terminal_batch_reserved_) {
+            return DeliveryOutcome::Suppressed;
+        }
+        terminal_batch_reserved_ = false;
+        emit_progress(std::move(progress));
+    }
+    between_terminal_batch_frames();
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return emit_result(std::move(result));
+}
+
+DeliveryOutcome ResponseSink::fail_terminal_batch(std::string code, std::string message,
+                                                  nlohmann::json details, int exit_code) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!terminal_batch_reserved_) {
+        return DeliveryOutcome::Suppressed;
+    }
+    terminal_batch_reserved_ = false;
+    return emit_error(std::move(code), std::move(message), std::move(details), exit_code);
+}
+
 DeliveryOutcome ResponseSink::forward_stream_result(nlohmann::json data) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (terminal_ || !claim_stream_forward_terminal()) {

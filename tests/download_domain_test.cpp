@@ -145,6 +145,16 @@ TEST_CASE("download zero completed state emits no advisory before authoritative 
     CHECK_FALSE(event.advisory_progress);
 }
 
+TEST_CASE("download completed snapshot accepts advisory can-be-downloaded state",
+          "[download][domain]") {
+    DownloadFileTracker tracker(7);
+    auto completed = observed(7, 10, 10, true);
+    completed.local->can_be_downloaded = true;
+    const auto event = tracker.observe(completed, true);
+    CHECK(event.completed);
+    CHECK(event.status == DownloadFileEventStatus::Accepted);
+}
+
 TEST_CASE("download tracker ignores wrong updates but rejects wrong response and conflicts",
           "[download][domain]") {
     DownloadFileTracker tracker(7);
@@ -155,6 +165,11 @@ TEST_CASE("download tracker ignores wrong updates but rejects wrong response and
     const auto completed = observed(7, 10, 10, true);
     CHECK(tracker.observe(completed, false).completed);
     CHECK(tracker.observe(completed, true).completed);
+    CHECK(tracker.observe(observed(7, 9, 10, false), true).completed);
+    auto advisory_variant = completed;
+    advisory_variant.local->can_be_downloaded = true;
+    advisory_variant.local->downloaded_prefix_size = 8;
+    CHECK(tracker.observe(advisory_variant, true).completed);
     CHECK(tracker.observe(observed(7, 10, 10, true, "/cache/other"), false).status ==
           DownloadFileEventStatus::ConflictingCompletion);
 }

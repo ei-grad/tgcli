@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -33,6 +34,40 @@ struct Outcome {
     std::optional<json> result;
     std::optional<json> error;
     int terminal_count = 0;
+};
+
+class SequencedPause {
+  public:
+    void arm() {
+        const std::lock_guard lock(mutex_);
+        armed_ = true;
+    }
+    void enter_if_armed() {
+        std::unique_lock lock(mutex_);
+        if (!armed_) {
+            return;
+        }
+        armed_ = false;
+        entered_ = true;
+        cv_.notify_all();
+        cv_.wait(lock, [&] { return released_; });
+    }
+    bool wait_until_entered() {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, 2s, [&] { return entered_; });
+    }
+    void release() {
+        const std::lock_guard lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool armed_ = false;
+    bool entered_ = false;
+    bool released_ = false;
 };
 
 class TempDirectory {
@@ -75,11 +110,17 @@ class TempDirectory {
 
 class FakeDownload {
   public:
+    using SessionProbe = std::function<void(tgcli::daemon::RequestSession&,
+                                            tgcli::daemon::testing::RequestSessionProbePoint)>;
+
     explicit FakeDownload(
-        std::shared_ptr<const tgcli::daemon::testing::DownloadFilesystemHooks> hooks = {}) {
+        std::shared_ptr<const tgcli::daemon::testing::DownloadFilesystemHooks> hooks = {},
+        tgcli::core::TdClientEventHooks event_hooks = {}, SessionProbe session_probe = {})
+        : session_probe_(std::move(session_probe)) {
         auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>();
         runtime_ = runtime.get();
-        client_ = std::make_unique<tgcli::core::TdClient>(std::move(runtime));
+        client_ = std::make_unique<tgcli::core::TdClient>(
+            std::move(runtime), tgcli::core::TdLogConfiguration{}, std::move(event_hooks));
         REQUIRE(runtime_->wait_for_sent(1));
         client_id_ = runtime_->clients().front();
         runtime_->push_response(client_id_, 1, {},
@@ -107,7 +148,17 @@ class FakeDownload {
                                            {"details", std::move(details)}}}};
                 });
             tgcli::daemon::RequestSession session(std::move(request), sink);
+            {
+                const std::lock_guard lock(session_pointer_mutex_);
+                session_pointer_ = &session;
+            }
+            tgcli::daemon::testing::RequestSessionTestAccess::install_probe(session, this,
+                                                                            session_probe_callback);
             coordinator_->download(session.request(), session);
+            {
+                const std::lock_guard lock(session_pointer_mutex_);
+                session_pointer_ = nullptr;
+            }
             return outcome;
         });
     }
@@ -188,6 +239,23 @@ class FakeDownload {
         runtime_->push_update(client_id_, {}, tgcli::core::AuthStateData{state});
     }
 
+    bool push_auth_and_wait(tgcli::core::AuthState state) {
+        push_auth(state);
+        return eventually([&] { return client_->auth_state()->data.state == state; });
+    }
+
+    void shutdown_session() {
+        const std::lock_guard lock(session_pointer_mutex_);
+        REQUIRE(session_pointer_ != nullptr);
+        session_pointer_->shutdown();
+    }
+
+    void disconnect_session() {
+        const std::lock_guard lock(session_pointer_mutex_);
+        REQUIRE(session_pointer_ != nullptr);
+        session_pointer_->disconnect();
+    }
+
     void before_download_send(tgcli::core::TdFile file) {
         runtime_->set_before_send([this, file = std::move(file)](const auto& function) mutable {
             if (function.kind() == tgcli::core::TdFunctionKind::DownloadFile) {
@@ -203,6 +271,16 @@ class FakeDownload {
     }
 
   private:
+    static void
+    session_probe_callback(void* context,
+                           tgcli::daemon::testing::RequestSessionProbePoint point) noexcept {
+        auto& self = *static_cast<FakeDownload*>(context);
+        if (self.session_probe_ == nullptr || self.session_pointer_ == nullptr) {
+            return;
+        }
+        self.session_probe_(*self.session_pointer_, point);
+    }
+
     template <typename Predicate> static bool eventually(Predicate predicate) {
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -218,6 +296,9 @@ class FakeDownload {
     tgcli::test::ScriptedClient client_id_{};
     std::unique_ptr<tgcli::core::TdClient> client_;
     std::unique_ptr<tgcli::daemon::DownloadCoordinator> coordinator_;
+    SessionProbe session_probe_;
+    std::mutex session_pointer_mutex_;
+    tgcli::daemon::RequestSession* session_pointer_ = nullptr;
     std::size_t sent_count_ = 1;
 };
 
@@ -254,6 +335,17 @@ message(tgcli::core::TdDownloadMediaKind kind = tgcli::core::TdDownloadMediaKind
             .primary_file =
                 tgcli::core::TdFile{.id = 7, .size = 7, .expected_size = 7, .local = std::nullopt},
             .photo_sizes = {}};
+}
+
+Outcome run_completed_download(FakeDownload& fake, tgcli::proto::Request invocation,
+                               const TempDirectory& temporary) {
+    auto pending = fake.dispatch(std::move(invocation));
+    fake.respond_me();
+    fake.respond_chat();
+    fake.respond(tgcli::core::TdFunctionKind::GetDownloadMessage, message());
+    fake.respond(tgcli::core::TdFunctionKind::DownloadFile,
+                 file(7, true, (temporary.root() / "source.bin").string()));
+    return pending.get();
 }
 
 } // namespace
@@ -336,6 +428,43 @@ TEST_CASE("download zero-byte already-complete response emits only authoritative
                                            {"total_bytes", 0}});
 }
 
+TEST_CASE("download earlier completed update wins over a later TD error or incomplete response",
+          "[download][commands][race]") {
+    const TempDirectory temporary;
+    temporary.write("source.bin", "payload");
+
+    SECTION("later TD error") {
+        FakeDownload fake;
+        fake.before_download_send(file(7, true, (temporary.root() / "source.bin").string()));
+        auto pending = fake.dispatch(request(temporary, "error.bin"));
+        fake.respond_me();
+        fake.respond_chat();
+        fake.respond(tgcli::core::TdFunctionKind::GetDownloadMessage, message());
+        fake.respond(tgcli::core::TdFunctionKind::DownloadFile,
+                     tgcli::core::TdError{.code = 500, .message = "late error"});
+        const auto outcome = pending.get();
+        INFO((outcome.error ? outcome.error->dump() : "no error"));
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK((*outcome.result)["path"] == (temporary.root() / "error.bin").string());
+    }
+
+    SECTION("later incomplete response") {
+        FakeDownload fake;
+        fake.before_download_send(file(7, true, (temporary.root() / "source.bin").string()));
+        auto pending = fake.dispatch(request(temporary, "incomplete.bin"));
+        fake.respond_me();
+        fake.respond_chat();
+        fake.respond(tgcli::core::TdFunctionKind::GetDownloadMessage, message());
+        fake.respond(tgcli::core::TdFunctionKind::DownloadFile, file(6, false));
+        const auto outcome = pending.get();
+        INFO((outcome.error ? outcome.error->dump() : "no error"));
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK((*outcome.result)["path"] == (temporary.root() / "incomplete.bin").string());
+    }
+}
+
 TEST_CASE("download unsupported wrapper stops before observer and local I/O",
           "[download][commands]") {
     const TempDirectory temporary;
@@ -371,6 +500,63 @@ TEST_CASE("download direct-frame grammar rejects before Ready or TD calls",
     CHECK(fake.count(tgcli::core::TdFunctionKind::GetMe) == 0);
     CHECK(fake.count(tgcli::core::TdFunctionKind::GetDownloadMessage) == 0);
     CHECK(fake.count(tgcli::core::TdFunctionKind::DownloadFile) == 0);
+}
+
+TEST_CASE("download rejects write context before Ready or local I/O",
+          "[download][commands][frame]") {
+    const TempDirectory temporary;
+    struct Case {
+        std::string name;
+        std::function<void(tgcli::proto::RequestContext&)> mutate;
+    };
+    const std::vector<Case> cases{
+        {"dry-run", [](auto& context) { context.dry_run = true; }},
+        {"yes", [](auto& context) { context.yes = true; }},
+        {"grant",
+         [](auto& context) { context.write_authority = tgcli::proto::WriteAuthority::Grant; }},
+        {"deny",
+         [](auto& context) { context.write_authority = tgcli::proto::WriteAuthority::Deny; }},
+        {"idempotency", [](auto& context) { context.idempotency_key = "download-key"; }},
+    };
+    for (const auto& value : cases) {
+        DYNAMIC_SECTION(value.name) {
+            FakeDownload fake;
+            auto invalid = request(temporary, value.name + ".bin");
+            value.mutate(invalid.context);
+            auto pending = fake.dispatch(std::move(invalid));
+            if (pending.wait_for(100ms) != std::future_status::ready) {
+                fake.push_auth(tgcli::core::AuthState::LoggingOut);
+            }
+            const auto outcome = pending.get();
+            REQUIRE(outcome.error);
+            CHECK((*outcome.error)["error"]["code"] == "USAGE");
+            CHECK((*outcome.error)["error"]["details"]["reason"] == "unsupported_mode");
+            CHECK(fake.count(tgcli::core::TdFunctionKind::GetMe) == 0);
+            CHECK(fake.count(tgcli::core::TdFunctionKind::GetDownloadMessage) == 0);
+            CHECK(fake.count(tgcli::core::TdFunctionKind::DownloadFile) == 0);
+            CHECK_FALSE(std::filesystem::exists(temporary.root() / (value.name + ".bin")));
+        }
+    }
+}
+
+TEST_CASE("download rejects unavailable or malformed cwd before Ready",
+          "[download][commands][frame]") {
+    const TempDirectory temporary;
+    const std::vector<std::string> invalid_cwds{"", "relative", std::string(4'097, 'x')};
+    for (const auto& cwd : invalid_cwds) {
+        FakeDownload fake;
+        auto invalid = request(temporary, "blocked.bin");
+        invalid.context.cwd = cwd;
+        const auto outcome = fake.dispatch(std::move(invalid)).get();
+        REQUIRE(outcome.error);
+        CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("download.error.schema.json"));
+        CHECK((*outcome.error)["error"]["code"] == "OUTPUT_UNAVAILABLE");
+        CHECK((*outcome.error)["error"]["details"] ==
+              json{{"operation", "download"},
+                   {"path", tgcli::daemon::kUnavailableDownloadCwd},
+                   {"reason", "invalid_path"}});
+        CHECK(fake.count(tgcli::core::TdFunctionKind::GetMe) == 0);
+    }
 }
 
 TEST_CASE("download auth loss while observing emits exact terminal without publication",
@@ -441,5 +627,214 @@ TEST_CASE("download conflicting completion at publication gate fails closed and 
     CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
     CHECK_FALSE(outcome.result);
     CHECK(outcome.progress.size() == 1);
+    CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
+}
+
+TEST_CASE("download claim acknowledges a sequenced update before its ordered callback",
+          "[download][commands][race]") {
+    const TempDirectory temporary;
+    temporary.write("source.bin", "payload");
+    SequencedPause pause;
+    std::mutex claim_mutex;
+    std::condition_variable claim_cv;
+    bool claim_attempted = false;
+    bool ordered_callback_entered = false;
+    auto hooks = std::make_shared<tgcli::daemon::testing::DownloadFilesystemHooks>();
+    hooks->random_hex = [] { return std::string(32, 'a'); };
+    FakeDownload* fake_pointer = nullptr;
+    hooks->observe = [&](tgcli::daemon::DownloadFilesystemStage stage) {
+        if (stage == tgcli::daemon::DownloadFilesystemStage::BeforePublish) {
+            pause.arm();
+            fake_pointer->push_file(file(7, true, (temporary.root() / "conflict.bin").string()));
+            ordered_callback_entered = pause.wait_until_entered();
+        } else if (stage == tgcli::daemon::DownloadFilesystemStage::PublicationClaimAttempt) {
+            {
+                const std::lock_guard lock(claim_mutex);
+                claim_attempted = true;
+            }
+            claim_cv.notify_all();
+        }
+    };
+    tgcli::core::TdClientEventHooks event_hooks;
+    event_hooks.after_observed = [&](auto) { pause.enter_if_armed(); };
+    FakeDownload fake(hooks, std::move(event_hooks));
+    fake_pointer = &fake;
+    auto pending = fake.dispatch(request(temporary));
+    fake.respond_me();
+    fake.respond_chat();
+    fake.respond(tgcli::core::TdFunctionKind::GetDownloadMessage, message());
+    fake.respond(tgcli::core::TdFunctionKind::DownloadFile,
+                 file(7, true, (temporary.root() / "source.bin").string()));
+    {
+        std::unique_lock lock(claim_mutex);
+        REQUIRE(claim_cv.wait_for(lock, 2s, [&] { return claim_attempted; }));
+    }
+    pause.release();
+    const auto outcome = pending.get();
+    REQUIRE(ordered_callback_entered);
+    REQUIRE(outcome.error);
+    CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
+    CHECK_FALSE(outcome.result);
+    CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
+}
+
+TEST_CASE("download publication claim orders auth shutdown disconnect and deadline",
+          "[download][commands][race]") {
+    const auto run = [](tgcli::daemon::DownloadFilesystemStage stage,
+                        const std::function<void(FakeDownload&)>& action, std::string_view output,
+                        double timeout = 2.0) {
+        const TempDirectory temporary;
+        temporary.write("source.bin", "payload");
+        auto hooks = std::make_shared<tgcli::daemon::testing::DownloadFilesystemHooks>();
+        hooks->random_hex = [] { return std::string(32, 'a'); };
+        FakeDownload* fake_pointer = nullptr;
+        hooks->observe = [&](tgcli::daemon::DownloadFilesystemStage current) {
+            if (current == stage) {
+                action(*fake_pointer);
+            }
+        };
+        FakeDownload fake(hooks);
+        fake_pointer = &fake;
+        auto invocation = request(temporary, std::string(output));
+        invocation.context.timeout_seconds = timeout;
+        return std::pair{run_completed_download(fake, std::move(invocation), temporary),
+                         std::filesystem::exists(temporary.root() / output)};
+    };
+
+    SECTION("auth before claim wins") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::BeforePublish,
+            [](FakeDownload& fake) {
+                REQUIRE(fake.push_auth_and_wait(tgcli::core::AuthState::LoggingOut));
+            },
+            "auth-before.bin");
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "NOT_AUTHED");
+        CHECK_FALSE(published);
+    }
+    SECTION("auth after claim loses") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::PublicationClaimed,
+            [](FakeDownload& fake) {
+                REQUIRE(fake.push_auth_and_wait(tgcli::core::AuthState::LoggingOut));
+            },
+            "auth-after.bin");
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(published);
+    }
+    SECTION("shutdown before claim wins") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::BeforePublish,
+            [](FakeDownload& fake) { fake.shutdown_session(); }, "shutdown-before.bin");
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "DAEMON_SHUTDOWN");
+        CHECK_FALSE(published);
+    }
+    SECTION("shutdown after claim loses") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::PublicationClaimed,
+            [](FakeDownload& fake) { fake.shutdown_session(); }, "shutdown-after.bin");
+        REQUIRE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(published);
+    }
+    SECTION("disconnect before claim wins silently") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::BeforePublish,
+            [](FakeDownload& fake) { fake.disconnect_session(); }, "disconnect-before.bin");
+        CHECK_FALSE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 0);
+        CHECK_FALSE(published);
+    }
+    SECTION("disconnect after claim loses") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::PublicationClaimed,
+            [](FakeDownload& fake) { fake.disconnect_session(); }, "disconnect-after.bin");
+        REQUIRE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(published);
+    }
+    SECTION("deadline before claim wins") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::BeforePublish,
+            [](FakeDownload&) { std::this_thread::sleep_for(150ms); }, "deadline-before.bin", 0.1);
+        REQUIRE(outcome.error);
+        CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
+        CHECK_FALSE(published);
+    }
+    SECTION("deadline after claim loses") {
+        const auto [outcome, published] = run(
+            tgcli::daemon::DownloadFilesystemStage::PublicationClaimed,
+            [](FakeDownload&) { std::this_thread::sleep_for(150ms); }, "deadline-after.bin", 0.1);
+        REQUIRE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(published);
+    }
+}
+
+TEST_CASE("download durable publication owns the final progress and result batch",
+          "[download][commands][race]") {
+    SECTION("shutdown after directory fsync loses") {
+        const TempDirectory temporary;
+        temporary.write("source.bin", "payload");
+        auto hooks = std::make_shared<tgcli::daemon::testing::DownloadFilesystemHooks>();
+        hooks->random_hex = [] { return std::string(32, 'a'); };
+        FakeDownload* fake_pointer = nullptr;
+        hooks->observe = [&](tgcli::daemon::DownloadFilesystemStage stage) {
+            if (stage == tgcli::daemon::DownloadFilesystemStage::DirectorySynced) {
+                fake_pointer->shutdown_session();
+            }
+        };
+        FakeDownload fake(hooks);
+        fake_pointer = &fake;
+        const auto outcome = run_completed_download(fake, request(temporary), temporary);
+        REQUIRE(outcome.result);
+        CHECK(outcome.terminal_count == 1);
+        CHECK(outcome.progress.back()["downloaded_bytes"] == 7);
+    }
+
+    SECTION("shutdown between final progress and result loses") {
+        const TempDirectory temporary;
+        temporary.write("source.bin", "payload");
+        bool terminal_owned_before_hook = false;
+        FakeDownload fake(
+            {}, {},
+            [&](tgcli::daemon::RequestSession& session,
+                tgcli::daemon::testing::RequestSessionProbePoint point) {
+                if (point ==
+                    tgcli::daemon::testing::RequestSessionProbePoint::BetweenTerminalBatchFrames) {
+                    terminal_owned_before_hook = session.has_terminal();
+                    session.shutdown();
+                }
+            });
+        const auto outcome = run_completed_download(fake, request(temporary), temporary);
+        CHECK(terminal_owned_before_hook);
+        REQUIRE(outcome.result);
+        CHECK_FALSE(outcome.error);
+        CHECK(outcome.terminal_count == 1);
+        REQUIRE_FALSE(outcome.progress.empty());
+        CHECK(outcome.progress.back()["downloaded_bytes"] == 7);
+    }
+}
+
+TEST_CASE("download claimed filesystem failure completes the reserved error terminal",
+          "[download][commands][race]") {
+    const TempDirectory temporary;
+    temporary.write("source.bin", "payload");
+    auto hooks = std::make_shared<tgcli::daemon::testing::DownloadFilesystemHooks>();
+    hooks->random_hex = [] { return std::string(32, 'a'); };
+    hooks->fail = [](tgcli::daemon::DownloadFilesystemStage stage) {
+        return stage == tgcli::daemon::DownloadFilesystemStage::PublicationClaimed;
+    };
+    FakeDownload fake(hooks);
+    const auto outcome = run_completed_download(fake, request(temporary), temporary);
+    REQUIRE(outcome.error);
+    CHECK_THAT(*outcome.error, tgcli::test::matches_json_schema("download.error.schema.json"));
+    CHECK((*outcome.error)["error"]["code"] == "OUTPUT_UNAVAILABLE");
+    CHECK((*outcome.error)["error"]["details"]["reason"] == "write_failed");
+    CHECK(outcome.terminal_count == 1);
+    CHECK_FALSE(outcome.result);
     CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
 }

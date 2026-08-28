@@ -154,6 +154,14 @@ class FrameRenderer {
     void on_progress(const json& data) const {
         if (json_) {
             std::fputs((json{{"progress", data}}.dump() + "\n").c_str(), stderr);
+        } else if (command_ == "download") {
+            const auto downloaded = data.at("downloaded_bytes").get<std::uint64_t>();
+            std::string rendered = "downloaded " + std::to_string(downloaded);
+            if (!data.at("total_bytes").is_null()) {
+                rendered += "/" + std::to_string(data.at("total_bytes").get<std::uint64_t>());
+            }
+            rendered += " bytes\n";
+            std::fputs(rendered.c_str(), stderr);
         } else {
             std::fputs(("progress: " + data.dump() + "\n").c_str(), stderr);
         }

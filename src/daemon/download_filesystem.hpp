@@ -12,6 +12,8 @@
 
 namespace tgcli::daemon {
 
+inline constexpr std::string_view kUnavailableDownloadCwd = "/.tgcli-cwd-unavailable";
+
 enum class DownloadFilesystemReason {
     InvalidPath,
     OpenFailed,
@@ -61,6 +63,8 @@ enum class DownloadFilesystemStage {
     SourceRevalidated,
     TempSynced,
     BeforePublish,
+    PublicationClaimAttempt,
+    PublicationClaimed,
     Published,
     DirectorySynced,
     Cleanup,

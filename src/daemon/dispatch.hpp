@@ -92,6 +92,7 @@ class ResponseSink {
     virtual ChallengeReply emit_challenge(nlohmann::json data) = 0;
     virtual void emit_abort() noexcept {}
     virtual void before_direct_terminal_bit() noexcept {}
+    virtual void between_terminal_batch_frames() noexcept {}
     [[nodiscard]] virtual bool claim_public_terminal() {
         return true;
     }
@@ -101,12 +102,17 @@ class ResponseSink {
 
   private:
     [[nodiscard]] bool claim_protocol_fallback_terminal();
+    [[nodiscard]] bool reserve_terminal_batch();
+    DeliveryOutcome finish_terminal_batch(nlohmann::json progress, nlohmann::json result);
+    DeliveryOutcome fail_terminal_batch(std::string code, std::string message,
+                                        nlohmann::json details, int exit_code);
     DeliveryOutcome forward_stream_result(nlohmann::json data);
     DeliveryOutcome forward_stream_error(std::string code, std::string message,
                                          nlohmann::json details, int exit_code);
 
     mutable std::mutex mutex_;
     bool terminal_ = false;
+    bool terminal_batch_reserved_ = false;
 
     friend class RequestSession;
     friend class detail::StreamDeliveryRunner;

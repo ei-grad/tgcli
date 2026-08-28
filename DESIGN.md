@@ -6949,13 +6949,17 @@ media `file_name` precedence. A final-name collision is only `OUTPUT_EXISTS`.
 
 The generation observer is installed before `downloadFile(file_id,16,0,0,
 false)`. Its initial response may already be a completed local file. The
-response and same-id `updateFile` events enter one sequenced arbitration: the
-first structurally valid completed state is the candidate; an identical
-completed duplicate observed before publication is ignored, while conflicting
-completed local path/size/state is `INTERNAL/malformed_tdlib_response` and
-publishes nothing. A wrong-id response is malformed; wrong-id updates are
-ignored. This curated operation never shares a raw `downloadFile` descriptor
-and never calls TDLib's global cancel-download operation.
+response File/error/malformed value and same-id `updateFile` events enter one
+stamped sequence arbitration. The first structurally valid completed state is
+the candidate. `local.can_be_downloaded` is advisory and may still be true on
+that completed snapshot. Later incomplete snapshots, TD errors and malformed
+non-file responses are stale after completion and cannot undo it; only a later
+completed tuple with incompatible id/path/size/expected-size/completion state is
+`INTERNAL/malformed_tdlib_response` and publishes nothing. Before completion,
+the first stamped TD error or malformed response is terminal. A wrong-id
+response is malformed; wrong-id updates are ignored. This curated operation
+never shares a raw `downloadFile` descriptor and never calls TDLib's global
+cancel-download operation.
 
 Negative/out-of-int53 progress fields are INTERNAL. An advisory progress frame
 is emitted only when `downloaded_size` is strictly greater than the last
@@ -6977,13 +6981,16 @@ The TD local source path must be absolute with no empty, dot or dot-dot
 component. Starting at `/`, every parent is opened directory/no-follow and the
 leaf read-only/no-follow. The leaf must be regular, current-uid owned and no
 larger than int53. Before copying, tgcli records device, inode, file type/mode,
-size, mtime seconds/nanoseconds and ctime seconds/nanoseconds. After copying it
+size, mtime seconds/nanoseconds and ctime seconds/nanoseconds. Copy reads and
+writes exactly that captured size: early EOF is `source_changed`, and one extra
+source byte is read without writing to detect growth. Thus even continuous
+growth cannot enlarge the private temp beyond captured `st_size`. It then
 re-fstats the same descriptor and requires byte-identical metadata plus copied
 count equal to both stable sizes. When TD `file.size` is positive it must also
 equal the stable copied count; `expected_size` is never integrity proof.
 
 Commit order is copy, source revalidation, temp fsync, serialized deadline/
-cancellation arbitration, existing exclusive no-replace rename
+authorization/cancellation arbitration, existing exclusive no-replace rename
 (`renameat2(RENAME_NOREPLACE)` on Linux or `renameatx_np(RENAME_EXCL)` on
 macOS), and final-directory fsync. After that fsync succeeds, tgcli always emits
 exactly one final progress frame before stdout Result:
@@ -7009,6 +7016,30 @@ such orphans. After rename but before directory fsync, final persistence after
 reboot is unknown and success was not promised. After directory fsync the final
 exists; a retry is OUTPUT_EXISTS. Result `bytes` is the authoritative stable
 copy count, independent of advisory progress.
+
+Publication uses one acknowledged receive-sequence lease. It briefly blocks
+new TD receive-sequence assignment, waits until every earlier assigned event
+has reached the nonblocking ordered download queue, drains those events and
+then reserves one RequestSession terminal-batch owner. No TD callback is held
+across copy, rename or fsync. An update, auth loss, deadline, cancellation or
+disconnect ordered before the claim prevents rename; the same event ordered
+after the claim loses. Filesystem failure after reservation completes the owned
+error terminal. After directory fsync, the owner atomically emits final progress
+then Result under one response-sink claim, so shutdown/disconnect cannot insert
+an error or suppress either frame between them.
+
+`download` is Read-tier but deliberately performs this local output side
+effect. It rejects `--allow-write`, `--yes`, `--dry-run`, any non-unset daemon
+write authority, and `--idempotency-key` before Ready or filesystem access.
+The frozen cwd must be nonempty absolute valid UTF-8 and at most 4096 bytes.
+Capture failure uses the reserved absolute diagnostic
+`/.tgcli-cwd-unavailable`, which always produces
+`OUTPUT_UNAVAILABLE/invalid_path`. Root `/`, `.`, existing-directory output and
+terminal-slash directory intent are valid; terminal separators are removed only
+after directory intent is captured. Human progress is exactly
+`downloaded N/M bytes\n` with a known total or `downloaded N bytes\n` with a null total,
+including the authoritative zero/final record. JSON keeps the normal
+`{"progress":...}` wrapper.
 
 #### 4.10.2 Canonical public registry and completions
 

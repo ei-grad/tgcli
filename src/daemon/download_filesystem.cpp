@@ -167,6 +167,10 @@ std::optional<OpenedParent> open_parent(std::string_view absolute_path) {
 }
 
 bool directory_is_safe(std::string_view absolute_path) {
+    if (absolute_path == "/") {
+        const Descriptor root(::open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY));
+        return static_cast<bool>(root);
+    }
     const auto split = split_absolute(absolute_path, true);
     if (!split) {
         return false;
@@ -191,7 +195,10 @@ std::optional<std::string> absolute_lexical(std::string_view value, std::string_
     }
     candidate = candidate.lexically_normal();
     auto result = candidate.string();
-    if (result.empty() || result.front() != '/' || result == "/") {
+    while (result.size() > 1 && result.back() == '/') {
+        result.pop_back();
+    }
+    if (result.empty() || result.front() != '/') {
         return std::nullopt;
     }
     return result;
@@ -387,10 +394,15 @@ publish_download_file(const core::TdFile& completed_file, const DownloadDestinat
     }
     std::array<std::byte, kCopyBufferSize> buffer{};
     std::uint64_t copied = 0;
-    while (true) {
-        const auto count = ::read(source.get(), buffer.data(), buffer.size());
+    auto remaining = static_cast<std::uint64_t>(source_before.st_size);
+    bool source_has_extra_bytes = false;
+    while (remaining > 0) {
+        const auto requested = std::min<std::uint64_t>(remaining, buffer.size());
+        const auto count = ::read(source.get(), buffer.data(), static_cast<std::size_t>(requested));
         if (count == 0) {
-            break;
+            return cleanup_temp(destination_parent->descriptor.get(), temporary, hooks)
+                       ? error(DownloadFilesystemReason::SourceChanged, final_path)
+                       : error(DownloadFilesystemReason::CleanupFailed, final_path);
         }
         if (count < 0) {
             if (errno == EINTR) {
@@ -415,6 +427,22 @@ publish_download_file(const core::TdFile& completed_file, const DownloadDestinat
             offset += static_cast<std::size_t>(written);
         }
         copied += static_cast<std::uint64_t>(count);
+        remaining -= static_cast<std::uint64_t>(count);
+    }
+    for (;;) {
+        std::byte extra{};
+        const auto count = ::read(source.get(), &extra, 1);
+        if (count > 0) {
+            source_has_extra_bytes = true;
+            break;
+        }
+        if (count == 0) {
+            break;
+        }
+        if (errno != EINTR) {
+            source_has_extra_bytes = true;
+            break;
+        }
     }
     if (injected(hooks, DownloadFilesystemStage::CopyComplete)) {
         return cleanup_temp(destination_parent->descriptor.get(), temporary, hooks)
@@ -424,7 +452,7 @@ publish_download_file(const core::TdFile& completed_file, const DownloadDestinat
     struct stat source_after {};
     struct stat output_status {};
     const auto stable =
-        ::fstat(source.get(), &source_after) == 0 &&
+        !source_has_extra_bytes && ::fstat(source.get(), &source_after) == 0 &&
         identity(source_before) == identity(source_after) &&
         copied == static_cast<std::uint64_t>(source_before.st_size) &&
         ::fstat(output.get(), &output_status) == 0 && S_ISREG(output_status.st_mode) &&
@@ -446,9 +474,19 @@ publish_download_file(const core::TdFile& completed_file, const DownloadDestinat
                    ? error(DownloadFilesystemReason::WriteFailed, final_path)
                    : error(DownloadFilesystemReason::CleanupFailed, final_path);
     }
+    if (injected(hooks, DownloadFilesystemStage::PublicationClaimAttempt)) {
+        return cleanup_temp(destination_parent->descriptor.get(), temporary, hooks)
+                   ? error(DownloadFilesystemReason::WriteFailed, final_path)
+                   : error(DownloadFilesystemReason::CleanupFailed, final_path);
+    }
     if (may_publish && !may_publish()) {
         return cleanup_temp(destination_parent->descriptor.get(), temporary, hooks)
                    ? stopped(final_path)
+                   : error(DownloadFilesystemReason::CleanupFailed, final_path);
+    }
+    if (injected(hooks, DownloadFilesystemStage::PublicationClaimed)) {
+        return cleanup_temp(destination_parent->descriptor.get(), temporary, hooks)
+                   ? error(DownloadFilesystemReason::WriteFailed, final_path)
                    : error(DownloadFilesystemReason::CleanupFailed, final_path);
     }
     if (!rename_exclusive(destination_parent->descriptor.get(), temporary,

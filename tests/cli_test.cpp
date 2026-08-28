@@ -17,6 +17,7 @@
 #include "daemon/context.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/download_filesystem.hpp"
 #include "daemon/m2_read_domain.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
@@ -1063,10 +1064,26 @@ class ChildProtocolDaemon {
                 {.tier = daemon::Tier::Read,
                  .handler =
                      [](const proto::Request& request, daemon::RequestSession& session) {
+                         if (request.context.cwd == daemon::kUnavailableDownloadCwd) {
+                             session.error("OUTPUT_UNAVAILABLE", "download output is unavailable",
+                                           {{"operation", "download"},
+                                            {"path", daemon::kUnavailableDownloadCwd},
+                                            {"reason", "invalid_path"}},
+                                           kGeneric);
+                             return;
+                         }
+                         const auto message_id = request.args.at("message_id").get<std::int64_t>();
+                         std::int64_t downloaded = 7;
+                         if (message_id == -93) {
+                             downloaded = 0;
+                         } else if (message_id == -92) {
+                             downloaded = 5;
+                         }
+                         const auto total = message_id == -92 ? json(nullptr) : json(downloaded);
                          session.progress({{"operation", "download"},
                                            {"file_id", 7},
-                                           {"downloaded_bytes", 7},
-                                           {"total_bytes", 7}});
+                                           {"downloaded_bytes", downloaded},
+                                           {"total_bytes", total}});
                          session.result({{"command", request.command},
                                          {"args", request.args},
                                          {"cwd", request.context.cwd},
@@ -4343,12 +4360,18 @@ TEST_CASE("download CLI emits exact active request frame and captures media dire
                {"args", {{"chat", "-1001"}, {"message_id", 91}, {"output", "result.bin"}}},
                {"cwd", expected_cwd},
                {"media_dir", "media"}});
-    const json final_progress{
-        {"operation", "download"}, {"file_id", 7}, {"downloaded_bytes", 7}, {"total_bytes", 7}};
     const auto human = run_binary_captured({"download", "-1001", "-91", "-O", "other.bin"}, env,
                                            "download-human-frame");
     REQUIRE(human.exit_code == kOk);
-    CHECK(human.err == "progress: " + final_progress.dump() + "\n");
+    CHECK(human.err == "downloaded 7/7 bytes\n");
+    const auto unknown_total = run_binary_captured(
+        {"download", "-1001", "-92", "-O", "unknown.bin"}, env, "download-human-unknown");
+    REQUIRE(unknown_total.exit_code == kOk);
+    CHECK(unknown_total.err == "downloaded 5 bytes\n");
+    const auto zero = run_binary_captured({"download", "-1001", "-93", "-O", "zero.bin"}, env,
+                                          "download-human-zero");
+    REQUIRE(zero.exit_code == kOk);
+    CHECK(zero.err == "downloaded 0/0 bytes\n");
     CHECK(fixture.running());
 
     for (const auto& [stem, arguments] :
@@ -4362,6 +4385,46 @@ TEST_CASE("download CLI emits exact active request frame and captures media dire
         CHECK(invalid.out.empty());
         CHECK(json::parse(invalid.err)["error"]["code"] == "USAGE");
     }
+    for (const auto& [stem, option] :
+         {std::pair{"download-allow-write", "--allow-write"}, std::pair{"download-yes", "--yes"},
+          std::pair{"download-dry", "--dry-run"}}) {
+        const auto invalid = run_binary_captured(
+            {option, "download", "-1001", "91", "-O", "blocked.bin"}, env, stem);
+        INFO(stem);
+        CHECK(invalid.exit_code == kUsage);
+        CHECK(json::parse(invalid.err)["error"]["details"] ==
+              json{{"argument", option}, {"reason", "unsupported_mode"}});
+    }
+    const auto idempotency = run_binary_captured(
+        {"--idempotency-key", "key", "download", "-1001", "91", "-O", "blocked.bin"}, env,
+        "download-idempotency");
+    REQUIRE(idempotency.exit_code == kUsage);
+    CHECK(json::parse(idempotency.err)["error"]["details"] ==
+          json{{"argument", "--idempotency-key"}, {"reason", "unsupported_mode"}});
+
+    const auto removed = env.root() + "/removed-download-cwd";
+    REQUIRE(std::filesystem::create_directory(removed));
+    const int removed_descriptor = ::open(removed.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    REQUIRE(removed_descriptor >= 0);
+    const auto removed_cwd = run_binary_captured(
+        {"--json", "download", "-1001", "91", "-O", "/tmp/result.bin"}, env, "download-removed-cwd",
+        std::nullopt,
+        BinaryChildCwd{.descriptor = removed_descriptor, .remove_after_chdir = removed});
+    ::close(removed_descriptor);
+    REQUIRE(removed_cwd.exit_code == kGeneric);
+    CHECK(json::parse(removed_cwd.err)["error"]["details"] ==
+          json{{"operation", "download"},
+               {"path", daemon::kUnavailableDownloadCwd},
+               {"reason", "invalid_path"}});
+
+    const DeepWorkingDirectory oversized_cwd(env, 4097);
+    const auto oversized = run_binary_captured(
+        {"--json", "download", "-1001", "91", "-O", "/tmp/result.bin"}, env,
+        "download-oversized-cwd", std::nullopt,
+        BinaryChildCwd{.descriptor = oversized_cwd.descriptor(), .remove_after_chdir = {}});
+    REQUIRE(oversized.exit_code == kGeneric);
+    CHECK(json::parse(oversized.err)["error"]["details"]["path"] ==
+          daemon::kUnavailableDownloadCwd);
 }
 
 TEST_CASE("M2 long-read CLI rejects normalization and grammar conflicts before routing",

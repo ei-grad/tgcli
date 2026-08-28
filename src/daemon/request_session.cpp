@@ -471,6 +471,10 @@ void RequestSession::disconnect() {
             return;
         }
         disconnected_at_ = Clock::now();
+        if (terminal_batch_claimed_) {
+            cancellation_source_.request_stop();
+            return;
+        }
         state_ = State::Disconnected;
         cancellation_source_.request_stop();
         answer_reserved_ = false;
@@ -502,7 +506,7 @@ void RequestSession::shutdown() {
             shutdown_at_ = Clock::now();
         }
         shutdown_requested_ = true;
-        audited = audited_terminal_;
+        audited = audited_terminal_ || terminal_batch_claimed_;
         cancellation_source_.request_stop();
         answer_reserved_ = false;
         reserved_identity_.reset();
@@ -521,6 +525,61 @@ void RequestSession::shutdown() {
     }
     static_cast<void>(error("DAEMON_SHUTDOWN", "daemon is shutting down",
                             {{"reason", "daemon_shutdown"}}, kGeneric));
+}
+
+TerminalBatchStatus RequestSession::begin_terminal_batch() {
+    const std::lock_guard lock(session_mutex_);
+    if (shutdown_requested_) {
+        return TerminalBatchStatus::Shutdown;
+    }
+    switch (state_) {
+    case State::Running:
+        if (deadline_expired(deadline_)) {
+            state_ = State::TimedOut;
+            return TerminalBatchStatus::TimedOut;
+        }
+        if (!static_cast<ResponseSink&>(*this).reserve_terminal_batch()) {
+            return TerminalBatchStatus::ProtocolError;
+        }
+        terminal_batch_claimed_ = true;
+        return TerminalBatchStatus::Designated;
+    case State::Disconnected:
+        return TerminalBatchStatus::Disconnected;
+    case State::Shutdown:
+        return TerminalBatchStatus::Shutdown;
+    case State::TimedOut:
+        return TerminalBatchStatus::TimedOut;
+    case State::ProtocolError:
+    case State::AuditFatal:
+        return TerminalBatchStatus::ProtocolError;
+    }
+    return TerminalBatchStatus::ProtocolError;
+}
+
+DeliveryOutcome RequestSession::complete_terminal_batch(nlohmann::json progress,
+                                                        nlohmann::json result) {
+    {
+        const std::lock_guard lock(session_mutex_);
+        if (!terminal_batch_claimed_ || terminal_batch_finished_) {
+            return DeliveryOutcome::Suppressed;
+        }
+        terminal_batch_finished_ = true;
+    }
+    return static_cast<ResponseSink&>(*this).finish_terminal_batch(std::move(progress),
+                                                                   std::move(result));
+}
+
+DeliveryOutcome RequestSession::fail_terminal_batch(std::string code, std::string message,
+                                                    nlohmann::json details, int exit_code) {
+    {
+        const std::lock_guard lock(session_mutex_);
+        if (!terminal_batch_claimed_ || terminal_batch_finished_) {
+            return DeliveryOutcome::Suppressed;
+        }
+        terminal_batch_finished_ = true;
+    }
+    return static_cast<ResponseSink&>(*this).fail_terminal_batch(
+        std::move(code), std::move(message), std::move(details), exit_code);
 }
 
 AuditedTerminalStatus RequestSession::begin_audited_terminal() {
@@ -927,6 +986,10 @@ void RequestSession::emit_abort() noexcept {
 
 void RequestSession::before_direct_terminal_bit() noexcept {
     notify_probe(testing::RequestSessionProbePoint::BeforePublicTerminalBit);
+}
+
+void RequestSession::between_terminal_batch_frames() noexcept {
+    notify_probe(testing::RequestSessionProbePoint::BetweenTerminalBatchFrames);
 }
 
 } // namespace tgcli::daemon

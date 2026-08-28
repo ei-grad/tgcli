@@ -141,6 +141,11 @@ struct TdSendLease::State {
     std::function<std::future<TdValue>(TdlibParameters)> submit;
 };
 
+struct TdOrderedEventLease::State {
+    explicit State(std::unique_lock<std::mutex> lock_value) : lock(std::move(lock_value)) {}
+    std::unique_lock<std::mutex> lock;
+};
+
 struct TdPreparedWrite::State {
     std::function<std::future<TdValue>()> submit;
     std::optional<TdAuthorizationFailure> authorization_failure;
@@ -1177,6 +1182,14 @@ class TdClient::Impl {
         send_updates_.unsubscribe(id);
     }
 
+    std::uint64_t subscribe_ordered_updates(UpdateHandler handler) {
+        return ordered_updates_.subscribe(std::move(handler));
+    }
+
+    void unsubscribe_ordered_updates(std::uint64_t id) {
+        ordered_updates_.unsubscribe(id);
+    }
+
     std::uint64_t subscribe_response_completions(ResponseCompletionHandler handler) {
         return response_completions_.subscribe(std::move(handler));
     }
@@ -1199,6 +1212,15 @@ class TdClient::Impl {
 
     std::mutex& event_publication_mutex() const {
         return event_publication_mutex_;
+    }
+
+    std::unique_ptr<TdOrderedEventLease::State> lock_ordered_events() const {
+        std::unique_lock assignment_lock(receive_sequence_mutex_);
+        const auto target = next_receive_event_sequence_ - 1;
+        std::unique_lock acknowledgment_lock(ordered_acknowledgment_mutex_);
+        ordered_acknowledgment_cv_.wait(
+            acknowledgment_lock, [this, target] { return last_ordered_acknowledgment_ >= target; });
+        return std::make_unique<TdOrderedEventLease::State>(std::move(assignment_lock));
     }
 
     bool close_until(std::chrono::steady_clock::time_point deadline) {
@@ -1663,7 +1685,11 @@ class TdClient::Impl {
         if (closes_generation) {
             close_generation_admission(generation);
         }
-        const auto receive_event_sequence = next_receive_event_sequence_++;
+        std::uint64_t receive_event_sequence = 0;
+        {
+            const std::lock_guard lock(receive_sequence_mutex_);
+            receive_event_sequence = next_receive_event_sequence_++;
+        }
         generation->last_receive_event_sequence = receive_event_sequence;
 
         if (event.authorization_state) {
@@ -1722,6 +1748,7 @@ class TdClient::Impl {
             if (response) {
                 response->promise.set_value(std::move(event.object));
             }
+            acknowledge_ordered_event(receive_event_sequence);
         }
         auth_locks.reset();
         if (auth_publication) {
@@ -1753,6 +1780,8 @@ class TdClient::Impl {
                 commit_auth_state_locked(generation, auth_publication, true);
                 observe_authorization(generation, *event.authorization_state,
                                       receive_event_sequence);
+                ordered_updates_.publish(event.object);
+                acknowledge_ordered_event(receive_event_sequence);
             }
             locks = {};
             finish_auth_publication(generation, auth_publication);
@@ -1777,11 +1806,15 @@ class TdClient::Impl {
             if (!generation->initial_state_installed) {
                 generation->pending_updates.push_back(std::move(event.object));
                 pending = true;
-            } else if (event.object.get_if<TdUpdateMessageSendSucceeded>() != nullptr ||
-                       event.object.get_if<TdUpdateMessageSendFailed>() != nullptr ||
-                       event.object.get_if<TdUpdateDeleteMessages>() != nullptr) {
-                send_updates_.publish(event.object);
+            } else {
+                ordered_updates_.publish(event.object);
+                if (event.object.get_if<TdUpdateMessageSendSucceeded>() != nullptr ||
+                    event.object.get_if<TdUpdateMessageSendFailed>() != nullptr ||
+                    event.object.get_if<TdUpdateDeleteMessages>() != nullptr) {
+                    send_updates_.publish(event.object);
+                }
             }
+            acknowledge_ordered_event(receive_event_sequence);
         }
         if (!pending) {
             retain_m6_folder_update(generation, event.object);
@@ -1836,6 +1869,14 @@ class TdClient::Impl {
             updates_.publish(update);
         }
         auth_states_.publish(publication.snapshot);
+    }
+
+    void acknowledge_ordered_event(std::uint64_t sequence) {
+        {
+            const std::lock_guard lock(ordered_acknowledgment_mutex_);
+            last_ordered_acknowledgment_ = sequence;
+        }
+        ordered_acknowledgment_cv_.notify_all();
     }
 
     static void close_generation_admission(const std::shared_ptr<Generation>& generation) {
@@ -1896,6 +1937,10 @@ class TdClient::Impl {
     std::function<void()> before_closed_decisions_drain_wait_;
     TdGenerationObserverFactory generation_observer_factory_;
     mutable std::mutex event_publication_mutex_;
+    mutable std::mutex receive_sequence_mutex_;
+    mutable std::mutex ordered_acknowledgment_mutex_;
+    mutable std::condition_variable ordered_acknowledgment_cv_;
+    std::uint64_t last_ordered_acknowledgment_ = 0;
     mutable std::mutex state_mutex_;
     std::shared_ptr<Generation> current_;
     std::uint64_t next_generation_ = 1;
@@ -1905,6 +1950,7 @@ class TdClient::Impl {
     std::uint64_t shutdown_generation_ = 0;
     std::atomic<std::shared_ptr<const AuthStateSnapshot>> auth_state_;
     UpdateBus<TdValue> updates_;
+    UpdateBus<TdValue> ordered_updates_;
     UpdateBus<TdValue> send_updates_;
     UpdateBus<std::uint64_t> response_completions_;
     UpdateBus<std::shared_ptr<const AuthStateSnapshot>> auth_states_;
@@ -1928,6 +1974,16 @@ TdSendLease::TdSendLease(TdSendLease&&) noexcept = default;
 TdSendLease& TdSendLease::operator=(TdSendLease&& other) noexcept = default;
 
 TdSendLease::operator bool() const noexcept {
+    return state_ != nullptr;
+}
+
+TdOrderedEventLease::TdOrderedEventLease() = default;
+TdOrderedEventLease::~TdOrderedEventLease() = default;
+TdOrderedEventLease::TdOrderedEventLease(std::unique_ptr<State> state) : state_(std::move(state)) {}
+TdOrderedEventLease::TdOrderedEventLease(TdOrderedEventLease&&) noexcept = default;
+TdOrderedEventLease& TdOrderedEventLease::operator=(TdOrderedEventLease&& other) noexcept = default;
+
+TdOrderedEventLease::operator bool() const noexcept {
     return state_ != nullptr;
 }
 
@@ -2509,6 +2565,14 @@ std::uint64_t TdClient::subscribe_send_updates(UpdateHandler handler) {
     return impl_->subscribe_send_updates(std::move(handler));
 }
 
+std::uint64_t TdClient::subscribe_ordered_updates(UpdateHandler handler) {
+    return impl_->subscribe_ordered_updates(std::move(handler));
+}
+
+void TdClient::unsubscribe_ordered_updates(std::uint64_t id) {
+    impl_->unsubscribe_ordered_updates(id);
+}
+
 void TdClient::unsubscribe_send_updates(std::uint64_t id) {
     impl_->unsubscribe_send_updates(id);
 }
@@ -2535,6 +2599,10 @@ void TdClient::unsubscribe_auth_states(std::uint64_t id) {
 
 std::unique_lock<std::mutex> TdClient::lock_event_publication() const {
     return std::unique_lock(impl_->event_publication_mutex());
+}
+
+TdOrderedEventLease TdClient::lock_ordered_events() const {
+    return TdOrderedEventLease(impl_->lock_ordered_events());
 }
 
 void TdClient::close() {

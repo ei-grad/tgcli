@@ -1,4 +1,5 @@
 #include "core/td_runtime_test_adapter.hpp"
+#include "daemon/download_domain.hpp"
 
 #include <cstdint>
 #include <string>
@@ -151,6 +152,9 @@ TEST_CASE("download file response and update preserve the same file snapshot",
     REQUIRE(file != nullptr);
     REQUIRE(file->local);
     CHECK(file->local->is_downloading_completed);
+    CHECK(file->local->can_be_downloaded);
+    tgcli::daemon::DownloadFileTracker tracker(7);
+    CHECK(tracker.observe(*file, true).completed);
 
     auto update = td_api::make_object<td_api::updateFile>(native_file(7, "/cache/a", 10, 10, true));
     td_api::object_ptr<td_api::Object> update_object = std::move(update);

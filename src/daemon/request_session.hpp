@@ -76,6 +76,7 @@ enum class AnswerDisposition {
 enum class InFlightState { None, InFlight, Orphaned };
 enum class AuditedDispatchStatus { Dispatched, Disconnected, Shutdown, TimedOut, ProtocolError };
 enum class AuditedTerminalStatus { Designated, Disconnected, Shutdown, TimedOut, ProtocolError };
+enum class TerminalBatchStatus { Designated, Disconnected, Shutdown, TimedOut, ProtocolError };
 enum class ConfigAdmissionMode { DirectFallback, FrozenRuntime };
 
 namespace testing {
@@ -83,7 +84,8 @@ namespace testing {
 enum class RequestSessionProbePoint : std::uint8_t {
     BeforeProtocolTerminalRoute,
     AfterProtocolTerminalRoute,
-    BeforePublicTerminalBit
+    BeforePublicTerminalBit,
+    BetweenTerminalBatchFrames
 };
 using RequestSessionProbeHook = void (*)(void*, RequestSessionProbePoint) noexcept;
 class RequestSessionTestAccess;
@@ -140,6 +142,10 @@ class RequestSession final : public ResponseSink {
     void audit_fatal();
     AuditedDispatchStatus dispatch_audited(const std::function<void()>& dispatch);
     [[nodiscard]] bool promote_to_subscription();
+    TerminalBatchStatus begin_terminal_batch();
+    DeliveryOutcome complete_terminal_batch(nlohmann::json progress, nlohmann::json result);
+    DeliveryOutcome fail_terminal_batch(std::string code, std::string message,
+                                        nlohmann::json details, int exit_code);
     [[nodiscard]] StreamSubscriptionActivationResult activate_stream_subscription(
         const std::shared_ptr<StreamIngressHub>& hub, const StreamIngressRequest& request,
         StreamActivityMode activity_mode, testing::StreamActivationProbe probe = {});
@@ -208,6 +214,7 @@ class RequestSession final : public ResponseSink {
     ChallengeReply emit_challenge(nlohmann::json data) override;
     void emit_abort() noexcept override;
     void before_direct_terminal_bit() noexcept override;
+    void between_terminal_batch_frames() noexcept override;
     [[nodiscard]] bool claim_public_terminal() override;
     [[nodiscard]] bool claim_stream_forward_terminal() override;
 
@@ -236,6 +243,8 @@ class RequestSession final : public ResponseSink {
     ChallengeReturnHook challenge_return_hook_;
     std::stop_source cancellation_source_;
     bool audited_terminal_ = false;
+    bool terminal_batch_claimed_ = false;
+    bool terminal_batch_finished_ = false;
     std::optional<AuditedTerminalStatus> audited_terminal_event_;
     std::optional<Clock::time_point> disconnected_at_;
     std::optional<Clock::time_point> shutdown_at_;

@@ -235,7 +235,10 @@ class M7FoundationAssetTest(unittest.TestCase):
             "`source_id` is the positive\nobserved basic-group or supergroup id",
             "byte-exact case-sensitive substring over the derived `display_name` or\nany active username",
             "relative captured\n`TGCLI_MEDIA_DIR` are each resolved against that same frozen cwd",
-            "first structurally valid completed state is the candidate",
+            "The first structurally valid completed state is\nthe candidate",
+            "`local.can_be_downloaded` is advisory and may still be true",
+            "Publication uses one acknowledged receive-sequence lease",
+            "writes exactly that captured size",
             "sole permitted duplicate or regression relative to advisory progress",
         ):
             self.assertIn(contract, design)

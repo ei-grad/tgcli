@@ -70,6 +70,15 @@ void write_file(const std::filesystem::path& file, std::string_view bytes) {
     }
 }
 
+void append_file(const std::filesystem::path& file, std::string_view bytes) {
+    const int descriptor = ::open(file.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (descriptor < 0 ||
+        ::write(descriptor, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size()) ||
+        ::close(descriptor) != 0) {
+        throw std::runtime_error("append test file failed");
+    }
+}
+
 std::string read_file(const std::filesystem::path& file) {
     const int descriptor = ::open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (descriptor < 0) {
@@ -145,6 +154,17 @@ TEST_CASE("download destination freezes relative precedence and distinguishes di
         prepare_download_destination("missing/", "media", temporary.root().string());
     CHECK(std::get<DownloadFilesystemError>(missing_directory).reason ==
           DownloadFilesystemReason::InvalidPath);
+
+    const auto dot = prepare_download_destination(std::nullopt, ".", temporary.root().string());
+    CHECK(std::get<DownloadDestination>(dot).directory == temporary.root().string());
+    const auto trailing = prepare_download_destination(std::nullopt, media_directory.string() + "/",
+                                                       temporary.root().string());
+    CHECK(std::get<DownloadDestination>(trailing).directory == media_directory.string());
+    const auto root = prepare_download_destination(std::nullopt, std::nullopt, "/");
+    const auto* root_plan = std::get_if<DownloadDestination>(&root);
+    REQUIRE(root_plan != nullptr);
+    CHECK(root_plan->directory == "/");
+    CHECK(root_plan->directory_mode);
 }
 
 TEST_CASE("download suggested name is a strict leaf and exact mode never needs one",
@@ -227,6 +247,10 @@ TEST_CASE("download publication enforces size and pre-publish stop with cleanup"
     CHECK(std::get<DownloadFilesystemError>(mismatch).reason ==
           DownloadFilesystemReason::SourceChanged);
     CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
+    auto short_mismatch = publish_download_file(completed_file(source, 6), destination, {}, hooks);
+    CHECK(std::get<DownloadFilesystemError>(short_mismatch).reason ==
+          DownloadFilesystemReason::SourceChanged);
+    CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
 
     auto stopped_outcome =
         publish_download_file(completed_file(source, 7), destination, [] { return false; }, hooks);
@@ -235,6 +259,33 @@ TEST_CASE("download publication enforces size and pre-publish stop with cleanup"
     CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
     CHECK(std::distance(std::filesystem::directory_iterator(temporary.root()),
                         std::filesystem::directory_iterator{}) == 1);
+}
+
+TEST_CASE("download copy never writes beyond the captured source size",
+          "[download][filesystem][race]") {
+    const TempDirectory temporary;
+    const auto source = temporary.root() / "source.bin";
+    write_file(source, "payload");
+    auto destination = std::get<DownloadDestination>(
+        prepare_download_destination("result.bin", std::nullopt, temporary.root().string()));
+    auto hooks = std::make_shared<testing::DownloadFilesystemHooks>();
+    hooks->random_hex = [] { return std::string(32, 'a'); };
+    hooks->observe = [&](DownloadFilesystemStage stage) {
+        if (stage == DownloadFilesystemStage::TempCreated) {
+            append_file(source, "growth");
+        }
+    };
+    hooks->fail = [](DownloadFilesystemStage stage) {
+        return stage == DownloadFilesystemStage::Cleanup;
+    };
+
+    const auto outcome = publish_download_file(completed_file(source, 7), destination, {}, hooks);
+    CHECK(std::get<DownloadFilesystemError>(outcome).reason ==
+          DownloadFilesystemReason::CleanupFailed);
+    const auto temporary_file =
+        temporary.root() / ".result.bin.tgcli-download.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp";
+    REQUIRE(std::filesystem::exists(temporary_file));
+    CHECK(std::filesystem::file_size(temporary_file) == 7);
 }
 
 TEST_CASE("download filesystem cutpoints preserve cleanup and crash contracts",

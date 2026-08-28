@@ -70,6 +70,14 @@ bool strict_absolute_source(std::string_view value) {
     return false;
 }
 
+bool same_completed_source(const core::TdFile& left, const core::TdFile& right) {
+    return left.id == right.id && left.size == right.size &&
+           left.expected_size == right.expected_size && left.local && right.local &&
+           left.local->path == right.local->path &&
+           left.local->is_downloading_completed == right.local->is_downloading_completed &&
+           left.local->is_downloading_active == right.local->is_downloading_active;
+}
+
 } // namespace
 
 DownloadMediaOutcome select_download_media(const core::TdDownloadMessage& message) {
@@ -175,6 +183,20 @@ DownloadFileEvent DownloadFileTracker::observe(const core::TdFile& file, bool re
     }
     const auto& local = *file.local;
     DownloadFileEvent event;
+    if (completed_) {
+        event.completed = true;
+        if (!local.is_downloading_completed) {
+            return event;
+        }
+        if (!strict_absolute_source(local.path) || local.is_downloading_active) {
+            event.status = DownloadFileEventStatus::Malformed;
+            return event;
+        }
+        if (!same_completed_source(*completed_, file)) {
+            event.status = DownloadFileEventStatus::ConflictingCompletion;
+        }
+        return event;
+    }
     if (local.downloaded_size > last_advisory_) {
         auto total = total_invalidated_ ? std::optional<std::int64_t>{} : displayed_total(file);
         if (total && local.downloaded_size > *total) {
@@ -189,27 +211,14 @@ DownloadFileEvent DownloadFileTracker::observe(const core::TdFile& file, bool re
         last_advisory_ = local.downloaded_size;
     }
     if (!local.is_downloading_completed) {
-        if (completed_) {
-            event.status = DownloadFileEventStatus::Malformed;
-            event.advisory_progress.reset();
-        }
         return event;
     }
-    if (!strict_absolute_source(local.path) || local.is_downloading_active ||
-        local.can_be_downloaded) {
+    if (!strict_absolute_source(local.path) || local.is_downloading_active) {
         event.status = DownloadFileEventStatus::Malformed;
         event.advisory_progress.reset();
         return event;
     }
-    if (completed_) {
-        if (*completed_ != file) {
-            event.status = DownloadFileEventStatus::ConflictingCompletion;
-            event.advisory_progress.reset();
-            return event;
-        }
-    } else {
-        completed_ = file;
-    }
+    completed_ = file;
     event.completed = true;
     return event;
 }

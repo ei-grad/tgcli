@@ -7,6 +7,7 @@
 #include "common/secure_wipe.hpp"
 #include "daemon/chats_commands.hpp"
 #include "daemon/daemon_run.hpp"
+#include "daemon/download_filesystem.hpp"
 #include "daemon/fetch_domain.hpp"
 #include "daemon/file_spool.hpp"
 #include "daemon/local_selector.hpp"
@@ -2428,6 +2429,18 @@ int run(int argc, char** argv) {
                                 "session", "unsupported_mode");
         }
     }
+    if (command == std::vector<std::string>{"download"}) {
+        for (const auto& [option, argument] :
+             {std::pair{allow_write_option, std::string_view{"--allow-write"}},
+              std::pair{yes_option, std::string_view{"--yes"}},
+              std::pair{dry_run_option, std::string_view{"--dry-run"}},
+              std::pair{idempotency_key_option, std::string_view{"--idempotency-key"}}}) {
+            if (option->count() != 0) {
+                return report_usage(std::string(argument) + " is not supported for download",
+                                    argument, "unsupported_mode");
+            }
+        }
+    }
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
             command, *account_option, *full_option, *allow_write_option, *yes_option,
             *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
@@ -2439,7 +2452,12 @@ int run(int argc, char** argv) {
         return report_missing_command();
     }
     auto captured_cwd = capture_request_cwd();
-    std::string frozen_cwd = captured_cwd ? std::move(*captured_cwd) : std::string{};
+    std::string frozen_cwd;
+    if (captured_cwd) {
+        frozen_cwd = std::move(*captured_cwd);
+    } else if (command == std::vector<std::string>{"download"}) {
+        frozen_cwd = tgcli::daemon::kUnavailableDownloadCwd;
+    }
     if (const auto argument_exit = validate_command_arguments(
             command, saved, chats, messages, send, chat, *selected_read, fetch, download,
             m2_long_read, resolve_selector, m6, frozen_cwd);

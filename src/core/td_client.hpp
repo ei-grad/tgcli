@@ -101,6 +101,27 @@ class TdSendLease {
     friend class TdClient;
 };
 
+// Prevents new receive-event sequence assignment after acknowledging that all
+// already-assigned events have reached the ordered in-gate subscribers.
+class TdOrderedEventLease {
+  public:
+    TdOrderedEventLease();
+    ~TdOrderedEventLease();
+    TdOrderedEventLease(const TdOrderedEventLease&) = delete;
+    TdOrderedEventLease& operator=(const TdOrderedEventLease&) = delete;
+    TdOrderedEventLease(TdOrderedEventLease&&) noexcept;
+    TdOrderedEventLease& operator=(TdOrderedEventLease&& other) noexcept;
+
+    explicit operator bool() const noexcept;
+
+  private:
+    struct State;
+    explicit TdOrderedEventLease(std::unique_ptr<State> state);
+
+    std::unique_ptr<State> state_;
+    friend class TdClient;
+};
+
 class TdPreparedWrite {
   public:
     TdPreparedWrite();
@@ -392,6 +413,10 @@ class TdClient {
     // they must only queue the update and return.
     std::uint64_t subscribe_send_updates(UpdateHandler handler);
     void unsubscribe_send_updates(std::uint64_t id);
+    // Ordered handlers run inside the receive-event publication domain and
+    // must only enqueue stamped state before returning.
+    std::uint64_t subscribe_ordered_updates(UpdateHandler handler);
+    void unsubscribe_ordered_updates(std::uint64_t id);
     std::uint64_t subscribe_response_completions(ResponseCompletionHandler handler);
     void unsubscribe_response_completions(std::uint64_t id);
 
@@ -404,6 +429,7 @@ class TdClient {
     // Serializes a deadline decision with receive-event stamping and publication.
     // The caller must keep the returned lock while inspecting response/auth visibility.
     [[nodiscard]] std::unique_lock<std::mutex> lock_event_publication() const;
+    [[nodiscard]] TdOrderedEventLease lock_ordered_events() const;
 
     // Graceful shutdown (DESIGN.md §10): asks tdlib to close, waits for
     // authorizationStateClosed so the database is flushed, then stops the
