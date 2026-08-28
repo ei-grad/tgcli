@@ -51,6 +51,27 @@ class RawPolicyTest(unittest.TestCase):
         )
         self.assertNotIn("kGeneratedRawBodyValidatorSymbols", generated)
 
+        policy = raw_policy.load_json(
+            REPOSITORY
+            / "docs"
+            / "raw"
+            / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
+        )
+        for index, validator in enumerate(("none", "raise_write", "raise_destructive")):
+            policy["functions"][index]["body_validator"] = validator
+        generated_fixture = raw_policy.generated_graph_include(graph, policy).decode()
+        for symbol, callable_name in raw_policy.COMPILED_VALIDATORS.items():
+            self.assertEqual(
+                generated_fixture.count(
+                    f'RawBodyValidatorDescriptor{{"{symbol}", &{callable_name}}}'
+                ),
+                1,
+            )
+        self.assertEqual(
+            len(set(raw_policy.COMPILED_VALIDATORS.values())),
+            len(raw_policy.COMPILED_VALIDATORS),
+        )
+
     def test_dormant_seed_denies_every_unreviewed_function(self) -> None:
         policy = raw_policy.load_json(
             REPOSITORY

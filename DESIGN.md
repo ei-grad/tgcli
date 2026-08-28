@@ -503,8 +503,18 @@ is a compile failure. Runtime lookup uses that same table with no default arm;
 an unknown symbol or null callable denies. Unknown functions and unknown table
 versions are denied.
 
-A typed body validator may preserve or raise a row's tier, never lower it.
-Null, unknown or unmatched nested variants deny. Functions that change
+A typed body validator returns exactly one closed decision:
+`Deny|Preserve|RaiseWrite|RaiseDestructive`. `deny` returns `Deny`; `none`
+returns `Preserve`. The runtime evaluator takes the row's closed static
+admission tier (`Denied|Read|Write|Destructive`) and the same owned native
+Function used for classification and hashing, invokes the callable from the
+generated table, and returns a typed effective tier or denial. A static
+`Denied` remains denied under every decision. `Preserve` retains a Read, Write
+or Destructive static tier; `RaiseWrite` maps Read to Write and retains Write
+or Destructive; `RaiseDestructive` maps every valid tier to Destructive. No
+decision can lower a tier. An invalid static tier, decision, symbol,
+missing/null callable, or unknown/unmatched nested variant is `Deny`. Functions
+that change
 authorization, TD parameters, lifecycle or logging, accept authentication,
 credential, payment or proxy secrets, or can expose secret-chat/private data
 without preprovable provenance are denied whole. Generic chat selectors need
@@ -1387,9 +1397,22 @@ cleaning. A first page has offset zero. Supergroup/channel responses require
 size, and no null member. A nonempty page advances raw offset by its full
 unfiltered vector length, even if later identity enrichment fails; a short page
 does not prove exhaustion. Exactly one empty request at the next raw offset
-proves exhaustion. Basic-group filtering and slicing are local over one
-atomically validated full vector; continuation re-reads the full-info vector
-and rejects a changed vector length as `source_changed` before returning rows.
+proves exhaustion. Basic-group processing first atomically validates and
+identity-enriches the entire full-info vector, then applies the selected
+`recent|admins|bots|search` predicate to that whole vector. Only then may it
+paginate: `source_count` is the exact filtered-vector length stored in the
+first-page cursor, and offset slices the filtered vector rather than the
+unfiltered TD vector.
+Continuation repeats full-vector validation, enrichment and filtering, then
+must compare its current filtered length to cursor `source_count` before
+slicing. A mismatch is `PAGINATION_INVALID` with
+`{"operation":"chat_members","reason":"source_changed"}` and returns no
+partial rows. Therefore an unchanged full-vector length does not hide a
+status, `getUser.is_bot`, `display_name` or active-username change that changes
+the selected count. An unchanged filtered count does not freeze order or
+member identity: v1 accepts that continuation as a fresh live view, so
+reordering or equal-count membership replacement can shift rows across page
+boundaries; the cursor is not a snapshot.
 
 The exact cursor is:
 
@@ -1401,7 +1424,8 @@ The exact cursor is:
 observed basic-group or supergroup id backing `chat_id`. Continuation resolves
 the live chat again and requires the same `chat_id`, `chat_type`, and
 `source_id` before any member read. Basic-group cursors require a nonnegative
-`source_count` equal to the newly validated source vector length;
+`source_count` equal to the newly validated and selected filtered-vector
+length;
 supergroup/channel cursors require it null. `query` is nonempty only with
 `filter:"search"`, and every other filter requires null. Offset is a
 nonnegative int32 and is the raw source offset, not the number of emitted or

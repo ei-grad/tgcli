@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -15,6 +16,10 @@ namespace td::td_api {
 class Function;
 class Object;
 } // namespace td::td_api
+
+namespace tgcli::daemon {
+enum class Tier;
+}
 
 namespace tgcli::daemon::raw {
 
@@ -53,6 +58,14 @@ struct Digest {
     std::uint64_t bytes = 0;
 };
 
+enum class BodyPolicyDecision { Deny, Preserve, RaiseWrite, RaiseDestructive };
+enum class AdmissionTier { Denied, Read, Write, Destructive };
+
+struct BodyPolicyOutcome {
+    BodyPolicyDecision decision = BodyPolicyDecision::Deny;
+    std::optional<Tier> effective_tier;
+};
+
 class TypedFunction final {
   public:
     TypedFunction(TypedFunction&&) noexcept;
@@ -87,7 +100,11 @@ parse(std::string&& input, const secure::WipeObserver& wipe_observer = {});
 response_digest(const TypedFunction& function, td::tl_object_ptr<td::td_api::Object> response,
                 const secure::WipeObserver& wipe_observer = {});
 
-[[nodiscard]] bool body_policy_allows(std::string_view validator,
-                                      const TypedFunction& function) noexcept;
+[[nodiscard]] BodyPolicyOutcome apply_body_policy_decision(AdmissionTier static_tier,
+                                                           BodyPolicyDecision decision) noexcept;
+
+[[nodiscard]] BodyPolicyOutcome evaluate_body_policy(std::string_view validator,
+                                                     AdmissionTier static_tier,
+                                                     const TypedFunction& function) noexcept;
 
 } // namespace tgcli::daemon::raw

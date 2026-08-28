@@ -39,6 +39,34 @@ CURRENT_M2_ERRORS = {
 
 
 class M7FoundationAssetTest(unittest.TestCase):
+    @staticmethod
+    def _filtered_basic_members(
+        members: list[dict[str, object]], mode: str, query: str = ""
+    ) -> list[int]:
+        def selected(member: dict[str, object]) -> bool:
+            if mode == "admins":
+                return member["status"] in {"creator", "administrator"}
+            if mode == "bots":
+                return member["sender_type"] == "user" and member["is_bot"] is True
+            if mode == "query":
+                return query in str(member["display_name"]) or any(
+                    query in username for username in member["usernames"]
+                )
+            return mode == "recent"
+
+        return [int(member["id"]) for member in members if selected(member)]
+
+    @staticmethod
+    def _basic_member_cursor_error(
+        cursor_source_count: int, current_filtered: list[int]
+    ) -> dict[str, object] | None:
+        if len(current_filtered) == cursor_source_count:
+            return None
+        return {
+            "code": "PAGINATION_INVALID",
+            "details": {"operation": "chat_members", "reason": "source_changed"},
+        }
+
     def test_generator_is_byte_deterministic(self) -> None:
         selected = {
             SCHEMAS / "error-manifest.json",
@@ -168,6 +196,82 @@ class M7FoundationAssetTest(unittest.TestCase):
             "relative captured\n`TGCLI_MEDIA_DIR` are each resolved against that same frozen cwd",
             "first structurally valid completed state is the candidate",
             "sole permitted duplicate or regression relative to advisory progress",
+        ):
+            self.assertIn(contract, design)
+
+    def test_basic_member_cursor_counts_the_filtered_live_vector(self) -> None:
+        source = [
+            {
+                "id": 1,
+                "status": "administrator",
+                "sender_type": "user",
+                "is_bot": True,
+                "display_name": "Build Bot",
+                "usernames": ["build_bot"],
+            },
+            {
+                "id": 2,
+                "status": "creator",
+                "sender_type": "user",
+                "is_bot": False,
+                "display_name": "Ada Project",
+                "usernames": ["ada_project"],
+            },
+        ]
+        mutations = {
+            "admins": {"status": "member"},
+            "bots": {"is_bot": False},
+            "query-name": {"display_name": "Ada"},
+            "query-username": {"usernames": ["ada"]},
+        }
+        selectors = {
+            "admins": ("admins", ""),
+            "bots": ("bots", ""),
+            "query-name": ("query", "Project"),
+            "query-username": ("query", "project"),
+        }
+        for label, mutation in mutations.items():
+            current = [dict(member) for member in source]
+            current[1 if label.startswith("query") else 0].update(mutation)
+            mode, query = selectors[label]
+            before = self._filtered_basic_members(source, mode, query)
+            after = self._filtered_basic_members(current, mode, query)
+            self.assertEqual(len(current), len(source))
+            self.assertNotEqual(len(after), len(before))
+            self.assertEqual(
+                self._basic_member_cursor_error(len(before), after),
+                {
+                    "code": "PAGINATION_INVALID",
+                    "details": {
+                        "operation": "chat_members",
+                        "reason": "source_changed",
+                    },
+                },
+            )
+
+        reordered = list(reversed(source))
+        self.assertEqual(
+            len(self._filtered_basic_members(reordered, "recent")),
+            len(self._filtered_basic_members(source, "recent")),
+        )
+        self.assertNotEqual(
+            self._filtered_basic_members(reordered, "recent"),
+            self._filtered_basic_members(source, "recent"),
+        )
+        self.assertIsNone(
+            self._basic_member_cursor_error(
+                len(self._filtered_basic_members(source, "recent")),
+                self._filtered_basic_members(reordered, "recent"),
+            )
+        )
+
+        design = " ".join(
+            (REPOSITORY / "DESIGN.md").read_text(encoding="utf-8").split()
+        )
+        for contract in (
+            "`source_count` is the exact filtered-vector length",
+            "compare its current filtered length to cursor `source_count` before slicing",
+            "An unchanged filtered count does not freeze order or member identity",
         ):
             self.assertIn(contract, design)
 

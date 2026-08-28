@@ -2,6 +2,7 @@
 
 #include "common/sha256.hpp"
 #include "common/utf8.hpp"
+#include "daemon/dispatch.hpp"
 
 #include <algorithm>
 #include <array>
@@ -45,22 +46,34 @@ struct RawTdConstructorSpec {
     std::size_t field_count;
 };
 
-using RawBodyValidator = bool (*)(const td::td_api::Function&) noexcept;
+using RawBodyValidator = BodyPolicyDecision (*)(const td::td_api::Function&) noexcept;
 
 struct RawBodyValidatorDescriptor {
     std::string_view name;
     RawBodyValidator validate = nullptr;
 };
 
-constexpr bool validate_raw_body_deny(const td::td_api::Function& function) noexcept {
+constexpr BodyPolicyDecision validate_raw_body_deny(const td::td_api::Function& function) noexcept {
     static_cast<void>(function);
-    return false;
+    return BodyPolicyDecision::Deny;
 }
 
-[[maybe_unused]] constexpr bool
+[[maybe_unused]] constexpr BodyPolicyDecision
 validate_raw_body_none(const td::td_api::Function& function) noexcept {
     static_cast<void>(function);
-    return true;
+    return BodyPolicyDecision::Preserve;
+}
+
+[[maybe_unused]] constexpr BodyPolicyDecision
+validate_raw_body_raise_write(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return BodyPolicyDecision::RaiseWrite;
+}
+
+[[maybe_unused]] constexpr BodyPolicyDecision
+validate_raw_body_raise_destructive(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return BodyPolicyDecision::RaiseDestructive;
 }
 
 #include "daemon/raw_td_schema.generated.inc"
@@ -1043,10 +1056,47 @@ const td::td_api::Function& TypedFunction::native() const noexcept {
     return *implementation_->native;
 }
 
-bool body_policy_allows(std::string_view validator, const TypedFunction& function) noexcept {
+BodyPolicyOutcome apply_body_policy_decision(AdmissionTier static_tier,
+                                             BodyPolicyDecision decision) noexcept {
+    switch (static_tier) {
+    case AdmissionTier::Denied:
+        return {};
+    case AdmissionTier::Read:
+    case AdmissionTier::Write:
+    case AdmissionTier::Destructive:
+        break;
+    default:
+        return {};
+    }
+    switch (decision) {
+    case BodyPolicyDecision::Deny:
+        return {};
+    case BodyPolicyDecision::Preserve: {
+        Tier effective_tier = Tier::Read;
+        if (static_tier == AdmissionTier::Write) {
+            effective_tier = Tier::Write;
+        } else if (static_tier == AdmissionTier::Destructive) {
+            effective_tier = Tier::Destructive;
+        }
+        return {.decision = decision, .effective_tier = effective_tier};
+    }
+    case BodyPolicyDecision::RaiseWrite:
+        return {.decision = decision,
+                .effective_tier =
+                    static_tier == AdmissionTier::Destructive ? Tier::Destructive : Tier::Write};
+    case BodyPolicyDecision::RaiseDestructive:
+        return {.decision = decision, .effective_tier = Tier::Destructive};
+    }
+    return {};
+}
+
+BodyPolicyOutcome evaluate_body_policy(std::string_view validator, AdmissionTier static_tier,
+                                       const TypedFunction& function) noexcept {
     const auto* descriptor = body_validator_by_name(validator);
-    return descriptor != nullptr && descriptor->validate != nullptr &&
-           descriptor->validate(function.native());
+    if (descriptor == nullptr || descriptor->validate == nullptr) {
+        return {};
+    }
+    return apply_body_policy_decision(static_tier, descriptor->validate(function.native()));
 }
 
 std::variant<Digest, Failure> TypedFunction::request_digest(std::string_view tdlib_sha,

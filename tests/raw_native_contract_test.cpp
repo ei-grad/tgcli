@@ -1,9 +1,13 @@
+#include "daemon/dispatch.hpp"
 #include "daemon/raw_contract.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -12,6 +16,9 @@
 
 namespace {
 
+using tgcli::daemon::Tier;
+using tgcli::daemon::raw::AdmissionTier;
+using tgcli::daemon::raw::BodyPolicyDecision;
 using tgcli::daemon::raw::Digest;
 using tgcli::daemon::raw::Error;
 using tgcli::daemon::raw::Failure;
@@ -49,8 +56,12 @@ TEST_CASE("dormant raw parser retains one pinned native Function identity",
     CHECK(static_cast<const td::td_api::testCallBytes&>(parsed.native()).x_ ==
           std::string("\0\1\2\xff", 4));
     CHECK(parsed.canonical() == R"({"@type":"testCallBytes","x":"AAEC/w=="})");
-    CHECK_FALSE(tgcli::daemon::raw::body_policy_allows("deny", parsed));
-    CHECK_FALSE(tgcli::daemon::raw::body_policy_allows("unknown", parsed));
+    for (const auto* const validator : {"deny", "unknown", ""}) {
+        const auto outcome =
+            tgcli::daemon::raw::evaluate_body_policy(validator, AdmissionTier::Read, parsed);
+        CHECK(outcome.decision == BodyPolicyDecision::Deny);
+        CHECK_FALSE(outcome.effective_tier);
+    }
 
     const auto request_hash = digest(parsed);
     CHECK(request_hash.bytes == parsed.canonical().size());
@@ -66,6 +77,43 @@ TEST_CASE("dormant raw parser retains one pinned native Function identity",
         REQUIRE(std::holds_alternative<Failure>(invalid));
         CHECK(std::get<Failure>(invalid).error == Error::InvalidPolicyMetadata);
     }
+}
+
+TEST_CASE("dormant raw body policy decisions preserve or raise static tiers",
+          "[raw][foundation][policy][tier]") {
+    using Case = std::tuple<AdmissionTier, BodyPolicyDecision, std::optional<Tier>>;
+    const std::array cases{
+        Case{AdmissionTier::Denied, BodyPolicyDecision::Deny, std::nullopt},
+        Case{AdmissionTier::Denied, BodyPolicyDecision::Preserve, std::nullopt},
+        Case{AdmissionTier::Denied, BodyPolicyDecision::RaiseWrite, std::nullopt},
+        Case{AdmissionTier::Denied, BodyPolicyDecision::RaiseDestructive, std::nullopt},
+        Case{AdmissionTier::Read, BodyPolicyDecision::Deny, std::nullopt},
+        Case{AdmissionTier::Read, BodyPolicyDecision::Preserve, Tier::Read},
+        Case{AdmissionTier::Read, BodyPolicyDecision::RaiseWrite, Tier::Write},
+        Case{AdmissionTier::Read, BodyPolicyDecision::RaiseDestructive, Tier::Destructive},
+        Case{AdmissionTier::Write, BodyPolicyDecision::Deny, std::nullopt},
+        Case{AdmissionTier::Write, BodyPolicyDecision::Preserve, Tier::Write},
+        Case{AdmissionTier::Write, BodyPolicyDecision::RaiseWrite, Tier::Write},
+        Case{AdmissionTier::Write, BodyPolicyDecision::RaiseDestructive, Tier::Destructive},
+        Case{AdmissionTier::Destructive, BodyPolicyDecision::Deny, std::nullopt},
+        Case{AdmissionTier::Destructive, BodyPolicyDecision::Preserve, Tier::Destructive},
+        Case{AdmissionTier::Destructive, BodyPolicyDecision::RaiseWrite, Tier::Destructive},
+        Case{AdmissionTier::Destructive, BodyPolicyDecision::RaiseDestructive, Tier::Destructive},
+    };
+    for (const auto& [static_tier, decision, expected] : cases) {
+        const auto outcome = tgcli::daemon::raw::apply_body_policy_decision(static_tier, decision);
+        CHECK(outcome.decision == (expected ? decision : BodyPolicyDecision::Deny));
+        CHECK(outcome.effective_tier == expected);
+    }
+
+    const auto invalid = tgcli::daemon::raw::apply_body_policy_decision(
+        static_cast<AdmissionTier>(-1), BodyPolicyDecision::Preserve);
+    CHECK(invalid.decision == BodyPolicyDecision::Deny);
+    CHECK_FALSE(invalid.effective_tier);
+    const auto invalid_decision = tgcli::daemon::raw::apply_body_policy_decision(
+        AdmissionTier::Read, static_cast<BodyPolicyDecision>(-1));
+    CHECK(invalid_decision.decision == BodyPolicyDecision::Deny);
+    CHECK_FALSE(invalid_decision.effective_tier);
 }
 
 TEST_CASE("dormant raw graph rejects duplicate unknown reserved and malformed input",

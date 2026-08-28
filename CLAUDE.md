@@ -121,11 +121,12 @@ authoritative implementation status and roadmap (work milestones top-down).
   the single native conversion. Native responses must match the holder's
   declared result base (or exact `td_api::error`) before canonical hashing and
   are consumed through an RAII recursive native wipe. Generated body-validator
-  descriptors bind each name to one nonnull compiled callable; runtime lookup
-  uses the same fail-closed table. The dormant seed is all-denied and
-  unreviewed; an activation check fails until every row has concrete review
-  evidence. A body validator can only retain/raise tier or deny, and
-  unknown/null/unmatched nested variants deny.
+  descriptors bind each name to one nonnull compiled decision callable;
+  runtime lookup uses the same fail-closed table and derives a typed effective
+  tier from the static row tier without permitting a decrease. The dormant
+  seed is all-denied and unreviewed; an activation check fails until every row
+  has concrete review evidence. A body validator can only retain/raise tier or
+  deny, and unknown/null/unmatched nested variants deny.
 - Raw request/response bodies, TD messages, credentials and curated preflight
   output never enter audit, errors, diagnostics or logs. Request/response
   staging is wiped on every terminal path. Dormant hash-only audit-v3 schemas,

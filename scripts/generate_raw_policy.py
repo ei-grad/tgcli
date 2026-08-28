@@ -38,6 +38,8 @@ POLICY_KEYS = {
 COMPILED_VALIDATORS = {
     "deny": "validate_raw_body_deny",
     "none": "validate_raw_body_none",
+    "raise_destructive": "validate_raw_body_raise_destructive",
+    "raise_write": "validate_raw_body_raise_write",
 }
 
 
