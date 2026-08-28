@@ -23,11 +23,26 @@ const expectedPackageFiles = [
   "completions/_tgcli",
   "completions/tgcli.bash",
   "completions/tgcli.fish",
+  "cmake/command_assets.generated.cmake",
   "docs/man/tgcli.1",
   "docs/commands/public-command-registry.json",
+  "docs/release/command-assets.json",
 ];
 if (JSON.stringify(packageFiles) !== JSON.stringify(expectedPackageFiles)) {
   throw new Error("command asset package list differs");
+}
+const releasePackageAssets = run("node", [generator, "list-release-package-assets"])
+  .trimEnd()
+  .split("\n");
+const expectedReleasePackageAssets = [
+  "completions/tgcli.bash\tshare/bash-completion/completions/tgcli",
+  "completions/tgcli.fish\tshare/fish/vendor_completions.d/tgcli.fish",
+  "completions/_tgcli\tshare/zsh/site-functions/_tgcli",
+  "docs/commands/public-command-registry.json\tshare/tgcli/public-command-registry.json",
+  "docs/man/tgcli.1\tshare/man/man1/tgcli.1",
+];
+if (JSON.stringify(releasePackageAssets) !== JSON.stringify(expectedReleasePackageAssets)) {
+  throw new Error("release command asset package manifest differs");
 }
 
 const registry = JSON.parse(

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "source": "completions/tgcli.bash",
+      "package": "share/bash-completion/completions/tgcli",
+      "shell": "bash"
+    },
+    {
+      "source": "completions/tgcli.fish",
+      "package": "share/fish/vendor_completions.d/tgcli.fish",
+      "shell": "fish"
+    },
+    {
+      "source": "completions/_tgcli",
+      "package": "share/zsh/site-functions/_tgcli",
+      "shell": "zsh"
+    },
+    {
+      "source": "docs/commands/public-command-registry.json",
+      "package": "share/tgcli/public-command-registry.json",
+      "shell": null
+    },
+    {
+      "source": "docs/man/tgcli.1",
+      "package": "share/man/man1/tgcli.1",
+      "shell": null
+    }
+  ]
+}

@@ -327,14 +327,7 @@ target_link_libraries(tgcli
     PRIVATE tgcli_cli tgcli_daemon tgcli_schema CLI11::CLI11)
 
 install(TARGETS tgcli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(FILES completions/tgcli.bash
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/bash-completion/completions"
-    RENAME tgcli)
-install(FILES completions/_tgcli
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/zsh/site-functions")
-install(FILES completions/tgcli.fish
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/fish/vendor_completions.d")
-install(FILES docs/man/tgcli.1 DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
+include(cmake/command_assets.generated.cmake)
 
 if(TGCLI_BUILD_TESTS)
     set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "Disable jsoncons upstream tests" FORCE)

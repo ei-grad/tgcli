@@ -448,11 +448,12 @@ before the milestone is closed.
       and audit-v3 no-body/no-resend recovery and activation order
 - [x] Add pin-derived exhaustive 1001-function inventory/policy foundations for
       clean TDLib a17f87c4: exact tl/header bijection, committed count/digests,
-      an exhaustive reviewed dormant candidate with 57 admitted typed rows and
-      944 frozen whole-function denies, pinned principal evidence, compiled
+      an exhaustive reviewed dormant candidate with 54 admitted typed rows and
+      947 frozen whole-function denies, pinned principal evidence, compiled
       exact direct/nested chat-selector preflight plans, request/response
-      sensitivity metadata and an independent-acceptance activation blocker;
-      count is drift evidence, not a timeless constant
+      sensitivity metadata, whole-function denial of indirect-result dialogs,
+      honest allowlist evidence and an independent-acceptance activation
+      blocker; count is drift evidence, not a timeless constant
 - [x] Add dormant duplicate-rejecting raw parsing, typed canonical value/hash
       vectors, the complete 3118-constructor pinned type graph, one actual
       native `td_api::Function` holder, declared-result response validation,
@@ -482,7 +483,8 @@ before the milestone is closed.
       checked-in byte-stable bash/zsh/fish completion assets; retain future
       activation bits so assets cannot expose unimplemented handlers
 - [x] Activate `completion bash|zsh|fish` as a client-local meta-command and
-      package byte-identical assets with the installed `tgcli(1)` page
+      package byte-identical assets, registry and `tgcli(1)` page through one
+      generated CMake/Linux/macOS release manifest with unpacked archive checks
 - [ ] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
       schemas out of command catalogs unless a later reviewed mapping explicitly
       adds them, and byte-preserve semantic markers only for explicitly

@@ -124,13 +124,15 @@ authoritative implementation status and roadmap (work milestones top-down).
   descriptors bind each name to one nonnull compiled decision callable;
   runtime lookup uses the same fail-closed table and derives a typed effective
   tier from the static row tier without permitting a decrease. The dormant
-  candidate has explicit evidence for all 1001 rows and admits only 57 typed
-  functions (8 local transforms, 45 direct-chat-target functions, 3 with an
+  candidate has explicit evidence for all 1001 rows and admits only 54 typed
+  functions (8 local transforms, 42 direct-chat-target functions, 3 with an
   additional required member sender, and 1 with an optional sender); the other
-  944 are frozen whole-function denies. Generated typed preflight planners
-  collect every direct and nested chat selector. It remains activation-blocked
-  on independent policy acceptance. A body validator can only retain/raise
-  tier or deny, and unknown/null/unmatched nested variants deny.
+  947 are frozen whole-function denies under the single honest
+  `denied_not_in_v1_allowlist` category. Generated typed preflight planners
+  collect every direct and nested chat selector. Indirect-result dialog
+  functions are denied whole. It remains activation-blocked on independent
+  policy acceptance. A body validator can only retain/raise tier or deny, and
+  unknown/null/unmatched nested variants deny.
 - Raw request/response bodies, TD messages, credentials and curated preflight
   output never enter audit, errors, diagnostics or logs. Request/response
   staging is wiped on every terminal path. Dormant hash-only audit-v3 schemas,
@@ -143,7 +145,9 @@ authoritative implementation status and roadmap (work milestones top-down).
 - Public shell completion bytes are generated only from the checked-in command
   registry and must equal checked-in/package/runtime bytes. Scripts never run
   tgcli or inspect config/network. No v1 output contains ANSI, so `--no-color`
-  and nonempty `NO_COLOR` are byte-preserving no-ops.
+  and nonempty `NO_COLOR` are byte-preserving no-ops. The generated release
+  command-asset manifest is authoritative for CMake, Linux and macOS package
+  paths and includes the man page and public registry.
 
 ## Build & dev
 

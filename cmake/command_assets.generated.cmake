@@ -1,0 +1,16 @@
+# Generated from scripts/generate_command_assets.mjs. Do not edit.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/completions/tgcli.bash"
+    DESTINATION "share/bash-completion/completions"
+    RENAME "tgcli")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/completions/tgcli.fish"
+    DESTINATION "share/fish/vendor_completions.d"
+    RENAME "tgcli.fish")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/completions/_tgcli"
+    DESTINATION "share/zsh/site-functions"
+    RENAME "_tgcli")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/commands/public-command-registry.json"
+    DESTINATION "share/tgcli"
+    RENAME "public-command-registry.json")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/man/tgcli.1"
+    DESTINATION "share/man/man1"
+    RENAME "tgcli.1")

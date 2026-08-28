@@ -108,7 +108,7 @@ class RawPolicyTest(unittest.TestCase):
                 self.assertFalse(row["sensitive_input"])
                 self.assertFalse(row["sensitive_output"])
         self.assertEqual(
-            admission, {"denied": 944, "destructive": 6, "read": 32, "write": 19}
+            admission, {"denied": 947, "destructive": 6, "read": 29, "write": 19}
         )
         self.assertEqual(principals, {"bot": 80, "both": 28, "user": 893})
         self.assertEqual(
@@ -116,8 +116,8 @@ class RawPolicyTest(unittest.TestCase):
             {
                 "chat_member_target": 3,
                 "chat_optional_sender_target": 1,
-                "chat_targets": 45,
-                "deny": 944,
+                "chat_targets": 42,
+                "deny": 947,
                 "none": 8,
             },
         )
@@ -200,18 +200,38 @@ class RawPolicyTest(unittest.TestCase):
             / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
         )
         rows = {row["name"]: row for row in policy["functions"]}
-        for name, category in {
-            "checkAuthenticationPassword": "denied_auth_or_credential",
-            "createSecretChat": "denied_secret_chat_surface",
-            "downloadFile": "denied_file_or_bytes_provenance",
-            "getChat": "denied_unscoped_chat_or_message_surface",
-            "getMe": "denied_identity_or_private_account_data",
-            "getPaymentForm": "denied_payment_or_store",
-            "setLogStream": "denied_logging_network_or_proxy",
-        }.items():
+        inventory_rows = {row["name"]: row for row in inventory["functions"]}
+        for name in (
+            "checkAuthenticationPassword",
+            "createSecretChat",
+            "downloadFile",
+            "getChat",
+            "getMe",
+            "getMessageThread",
+            "getMessageThreadHistory",
+            "getPaymentForm",
+            "getRepliedMessage",
+            "setLogStream",
+        ):
             self.assertEqual(rows[name]["admission"], "denied")
             self.assertEqual(rows[name]["body_validator"], "deny")
-            self.assertEqual(rows[name]["evidence_category"], category)
+            self.assertEqual(
+                rows[name]["evidence_category"], "denied_not_in_v1_allowlist"
+            )
+            self.assertTrue(rows[name]["sensitive_input"])
+            self.assertTrue(rows[name]["sensitive_output"])
+            self.assertIn(
+                f"inventory constructor_id {inventory_rows[name]['constructor_id']}",
+                rows[name]["review_reason"],
+            )
+            self.assertIn(
+                f"fields_sha256 {inventory_rows[name]['fields_sha256']}",
+                rows[name]["review_reason"],
+            )
+            self.assertIn(
+                "outside the frozen reviewed v1 allowlist; denied whole",
+                rows[name]["review_reason"],
+            )
 
         for name, (admission, validator, target_fields) in {
             "deleteMessages": ("destructive", "chat_targets", ["chat_id"]),
@@ -235,6 +255,39 @@ class RawPolicyTest(unittest.TestCase):
             raw_policy.PolicyError, "compiled policy validator missing"
         ):
             raw_policy.validate_policy(inventory, policy)
+
+    def test_indirect_message_targets_are_pinned_and_denied_whole(self) -> None:
+        requests = (TDLIB_SOURCE / "td" / "telegram" / "Requests.cpp").read_text(
+            encoding="utf-8"
+        )
+        messages = (TDLIB_SOURCE / "td" / "telegram" / "MessagesManager.cpp").read_text(
+            encoding="utf-8"
+        )
+        for source_anchor in (
+            "replied_message_full_id_ =\n        td_->messages_manager_->get_replied_message",
+            'get_message_object(replied_message_full_id_, "GetRepliedMessageRequest")',
+            "messages_ = td_->messages_manager_->get_message_thread_history",
+            "get_messages_object(-1, messages_.first, messages_.second, true",
+        ):
+            self.assertIn(source_anchor, requests)
+        self.assertIn("Dialog *d = get_dialog(info.dialog_id);", messages)
+        self.assertIn('get_chat_id_object(d->dialog_id, "messageThreadInfo")', messages)
+
+        policy = raw_policy.load_json(
+            REPOSITORY
+            / "docs"
+            / "raw"
+            / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
+        )
+        rows = {row["name"]: row for row in policy["functions"]}
+        for name in raw_policy.INDIRECT_TARGET_DENIAL_EVIDENCE:
+            self.assertEqual(rows[name]["admission"], "denied")
+            self.assertEqual(rows[name]["body_validator"], "deny")
+            self.assertEqual(rows[name]["target_fields"], [])
+            self.assertIn(
+                raw_policy.INDIRECT_TARGET_DENIAL_EVIDENCE[name],
+                rows[name]["review_reason"],
+            )
 
     def test_admitted_message_senders_have_exhaustive_typed_preflight(self) -> None:
         graph = raw_policy.load_json(

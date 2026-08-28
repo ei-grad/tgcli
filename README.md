@@ -32,8 +32,8 @@ implemented and what remains.
 - **Streaming primitives** — `listen` (NDJSON updates) and `wait-for`
   (block until a matching message arrives).
 - **Reviewed raw subset (planned)** — selected-B `tgcli raw -` is stdin-only;
-  its dormant pinned candidate admits 57 typed functions and denies the other
-  944. Raw remains unreachable until independent policy acceptance and atomic
+  its dormant pinned candidate admits 54 typed functions and denies the other
+  947. Raw remains unreachable until independent policy acceptance and atomic
   parser/handler/catalog activation.
 - **Daemon-first** — a per-account daemon (auto-spawned, zero setup) owns the
   tdlib client: ~instant CLI startup, safe concurrent commands, and a local

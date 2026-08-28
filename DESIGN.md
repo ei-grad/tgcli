@@ -492,11 +492,15 @@ name/constructor/result/fields-digest bijection and records principal
 (`user|bot|both`) with pinned TL/Requests evidence, admission
 (`read|write|destructive|denied`), body validator, exact direct/nested target
 fields, request/response sensitivity, evidence category, review decision and
-row rationale.
+row rationale. Every denied row uses the single truthful category
+`denied_not_in_v1_allowlist`: its rationale records the exact pinned TL
+signature/line and inventory constructor/result/fields digest, then states the
+deliberate whole-function v1 denial. No generated name/field heuristic claims a
+more specific semantic reason.
 
-The committed dormant candidate reviews all 1001 rows: exactly 32 are Read, 19
-Write, 6 Destructive and 944 denied whole for v1. Eight admitted rows are
-account-independent synchronous typed transforms. Of the other 49, 45 have one
+The committed dormant candidate reviews all 1001 rows: exactly 29 are Read, 19
+Write, 6 Destructive and 947 denied whole for v1. Eight admitted rows are
+account-independent synchronous typed transforms. Of the other 46, 42 have one
 direct `chat_id:int53`; three also have a required `member_id:MessageSender` and
 one has an optional `sender_id:MessageSender`. The generated typed planner
 collects the direct chat plus every `messageSenderChat.chat_id`; a
@@ -505,6 +509,10 @@ sender, and an unknown/null required selector denies. Every collected target
 requires a generation-bound curated non-secret `getChat` preflight. The
 principal distribution is 893 user, 80 bot and 28 both; `both` is used only for
 functions present in the pinned account-independent synchronous dispatcher.
+`getRepliedMessage`, `getMessageThread` and `getMessageThreadHistory` are denied
+whole: pinned TDLib may return or render a secondary dialog independently of
+the input `chat_id`, so one direct-chat preflight does not prove every result
+target non-secret.
 
 The candidate remains `activation_ready:false` with the sole exact blocker
 `independent_policy_acceptance`; `unfinished_functions` is empty. Row reasoning
@@ -7079,6 +7087,15 @@ execute tgcli. Assets contain active registry rows only, so dormant raw is
 absent. Atomic raw activation will make its row active and regenerate the
 assets to suggest literal `-` and only its accepted flags; `--full`,
 `--bot-token`, raw cursor and raw idempotency remain absent.
+
+`docs/release/command-assets.json` is the generated authoritative mapping from
+the three completion sources, `docs/man/tgcli.1` and the public registry to
+their `share/` package paths. The generator emits the mechanically identical
+CMake install fragment; Linux and macOS release assembly consume the JSON
+mapping directly. CMake installs and both platform archives must contain every
+mapped file byte-equal to its source. Archive verification also executes the
+packaged binary and requires each completion output to equal the same source
+bytes after unpacking.
 
 Completion rejects `--account`, `--json`, `--full`, `--allow-write`, `--yes`,
 `--dry-run`, `--timeout`, `--cursor` and `--idempotency-key` with exit 2 before

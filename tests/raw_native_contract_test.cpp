@@ -165,6 +165,28 @@ TEST_CASE("dormant raw policy owns tier principal and non-secret chat preflight"
     CHECK(destructive_member_outcome.preflight.non_secret_chat_ids[0] == -1001);
     CHECK(destructive_member_outcome.preflight.non_secret_chat_ids[1] == -2002);
 
+    for (
+        const auto& [name, request] : std::array{
+            std::pair{std::string_view{"getRepliedMessage"},
+                      std::string_view{
+                          R"({"@type":"getRepliedMessage","chat_id":-1001,"message_id":7})"}},
+            std::pair{
+                std::string_view{"getMessageThread"},
+                std::string_view{R"({"@type":"getMessageThread","chat_id":-1001,"message_id":7})"}},
+            std::pair{
+                std::string_view{"getMessageThreadHistory"},
+                std::string_view{
+                    R"({"@type":"getMessageThreadHistory","chat_id":-1001,"message_id":7,"from_message_id":0,"offset":0,"limit":1})"}},
+        }) {
+        auto indirect = success(std::string(request));
+        const auto indirect_policy = tgcli::daemon::raw::policy_metadata(indirect);
+        REQUIRE(indirect_policy);
+        CHECK(indirect_policy->name == name);
+        CHECK(indirect_policy->admission == AdmissionTier::Denied);
+        CHECK(indirect_policy->body_validator == "deny");
+        CHECK_FALSE(tgcli::daemon::raw::evaluate_body_policy(indirect).effective_tier);
+    }
+
     auto circular = success(R"({"@type":"getChat","chat_id":-1001})");
     const auto circular_policy = tgcli::daemon::raw::policy_metadata(circular);
     REQUIRE(circular_policy);

@@ -90,10 +90,7 @@ ADMITTED_FUNCTIONS = {
     "getMessageAddedReactions": ("read", "chat_targets", "non_secret_chat_read"),
     "getMessageAvailableReactions": ("read", "chat_targets", "non_secret_chat_read"),
     "getMessageProperties": ("read", "chat_targets", "non_secret_chat_read"),
-    "getMessageThread": ("read", "chat_targets", "non_secret_chat_read"),
-    "getMessageThreadHistory": ("read", "chat_targets", "non_secret_chat_read"),
     "getMessages": ("read", "chat_targets", "non_secret_chat_read"),
-    "getRepliedMessage": ("read", "chat_targets", "non_secret_chat_read"),
     "searchChatMembers": ("read", "chat_targets", "non_secret_chat_read"),
     "searchChatMessages": (
         "read",
@@ -143,15 +140,20 @@ EVIDENCE_CATEGORIES = {
     "non_secret_chat_read",
     "non_secret_chat_write",
     "non_secret_chat_destructive",
-    "denied_secret_chat_surface",
-    "denied_auth_or_credential",
-    "denied_logging_network_or_proxy",
-    "denied_payment_or_store",
-    "denied_file_or_bytes_provenance",
-    "denied_identity_or_private_account_data",
-    "denied_unscoped_chat_or_message_surface",
-    "denied_non_allowlisted_mutation_surface",
-    "denied_non_allowlisted_read_surface",
+    "denied_not_in_v1_allowlist",
+}
+INDIRECT_TARGET_DENIAL_EVIDENCE = {
+    "getMessageThread": (
+        "Requests.cpp:629-654 returns MessageThreadInfo whose result chat is "
+        "MessagesManager.cpp:14607-14663 info.dialog_id"
+    ),
+    "getMessageThreadHistory": (
+        "Requests.cpp:980-1011 renders messages_.first, the dialog returned by "
+        "get_message_thread_history"
+    ),
+    "getRepliedMessage": (
+        "Requests.cpp:607-626 renders replied_message_full_id_, including its returned dialog"
+    ),
 }
 USER_PRINCIPAL_OVERRIDES = {
     "banChatMember",
@@ -460,170 +462,6 @@ def reviewed_principal(
         ),
         False,
     )
-
-
-def denied_category(
-    name: str, result_type: str, fields: list[dict[str, object]], contract: str
-) -> str:
-    lowered_name = name.lower()
-    lowered_contract = contract.lower()
-    field_text = " ".join(
-        f"{field['name']}:{field['type']}" for field in fields
-    ).lower()
-    combined = f"{lowered_name} {result_type.lower()} {field_text} {lowered_contract}"
-    if (
-        "secretchat" in combined
-        or "secret chat" in combined
-        or "secretmessages" in combined
-    ):
-        return "denied_secret_chat_surface"
-    if any(
-        marker in combined
-        for marker in (
-            "authentication",
-            "authorizationstate",
-            "password",
-            "passkey",
-            "recoveryemail",
-            "recovery_email",
-            "loginemail",
-            "login_email",
-            "oauth",
-            "terms_of_service",
-            "phone_number",
-            "email_address",
-            "credential",
-        )
-    ):
-        return "denied_auth_or_credential"
-    if any(
-        marker in combined
-        for marker in (
-            "logstream",
-            "logverbosity",
-            "logtag",
-            "addlogmessage",
-            "tdlibparameters",
-            "networkstatistics",
-            "networktype",
-            "proxy",
-            "connectioncreator",
-        )
-    ):
-        return "denied_logging_network_or_proxy"
-    if any(
-        marker in combined
-        for marker in (
-            "payment",
-            "invoice",
-            "transaction",
-            "premium",
-            "gift",
-            "starcount",
-            "star_count",
-            "store",
-            "precheckout",
-            "shippingquery",
-        )
-    ):
-        return "denied_payment_or_store"
-    if any(
-        marker in field_text or marker in result_type.lower()
-        for marker in ("inputfile", "file", "bytes")
-    ) or any(marker in lowered_name for marker in ("download", "upload", "filepart")):
-        return "denied_file_or_bytes_provenance"
-    if result_type in {
-        "User",
-        "Users",
-        "UserFullInfo",
-        "Session",
-        "Sessions",
-        "PasswordState",
-        "EmailAddressAuthenticationCodeInfo",
-        "PhoneNumberInfo",
-        "TemporaryPasswordState",
-    } or lowered_name in {"getme", "getuser", "getuserfullinfo"}:
-        return "denied_identity_or_private_account_data"
-    if "chat_id:int53" in field_text or result_type in {
-        "Chat",
-        "Chats",
-        "Message",
-        "Messages",
-        "FoundMessages",
-    }:
-        return "denied_unscoped_chat_or_message_surface"
-    if lowered_name.startswith(
-        (
-            "add",
-            "allow",
-            "answer",
-            "approve",
-            "assign",
-            "ban",
-            "block",
-            "cancel",
-            "change",
-            "clear",
-            "click",
-            "close",
-            "commit",
-            "confirm",
-            "connect",
-            "create",
-            "delete",
-            "destroy",
-            "disable",
-            "discard",
-            "disconnect",
-            "edit",
-            "enable",
-            "end",
-            "import",
-            "join",
-            "leave",
-            "mark",
-            "open",
-            "optimize",
-            "pin",
-            "process",
-            "publish",
-            "read",
-            "remove",
-            "reorder",
-            "replace",
-            "report",
-            "request",
-            "resend",
-            "reset",
-            "revoke",
-            "save",
-            "send",
-            "set",
-            "start",
-            "stop",
-            "synchronize",
-            "terminate",
-            "toggle",
-            "transfer",
-            "unpin",
-            "upgrade",
-            "view",
-        )
-    ):
-        return "denied_non_allowlisted_mutation_surface"
-    return "denied_non_allowlisted_read_surface"
-
-
-def category_sensitivity(category: str) -> tuple[bool, bool]:
-    if category == "denied_non_allowlisted_mutation_surface":
-        return True, False
-    if category in {
-        "denied_non_allowlisted_read_surface",
-        "denied_unscoped_chat_or_message_surface",
-        "denied_identity_or_private_account_data",
-    }:
-        return False, True
-    return True, True
 
 
 def source_type_graph(tdlib_source: Path) -> dict[str, object]:
@@ -1119,20 +957,26 @@ def candidate_policy(
             sensitive_output = False
             reviewed = True
         else:
-            category = denied_category(
-                name,
-                str(inventory_row["result_type"]),
-                fields,
-                str(contract["contract"]),
-            )
+            category = "denied_not_in_v1_allowlist"
             admission = "denied"
             body_validator = "deny"
             target_fields = []
-            sensitive_input, sensitive_output = category_sensitivity(category)
+            sensitive_input = True
+            sensitive_output = True
             reviewed = True
+            indirect_evidence = INDIRECT_TARGET_DENIAL_EVIDENCE.get(name)
+            evidence_suffix = (
+                f"; indirect target evidence {indirect_evidence}"
+                if indirect_evidence is not None
+                else ""
+            )
             reason = (
-                f"reviewed:td_api.tl:{contract['line']}; {name} -> "
-                f"{inventory_row['result_type']}; {category}; v1 freezes whole-function deny"
+                f"reviewed:td_api.tl:{contract['line']} exact signature "
+                f"[{contract['signature']}] inventory constructor_id "
+                f"{inventory_row['constructor_id']}, result_type "
+                f"{inventory_row['result_type']}, fields_sha256 "
+                f"{inventory_row['fields_sha256']}; outside the frozen reviewed v1 allowlist; "
+                f"denied whole{evidence_suffix}"
             )
         rows.append(
             {

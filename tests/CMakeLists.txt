@@ -209,6 +209,13 @@ add_test(
         -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/verify_completion_install.cmake")
 add_test(
+    NAME release-command-assets
+    COMMAND "${CMAKE_COMMAND}"
+        -DBINARY=$<TARGET_FILE:tgcli>
+        -DBUILD_ROOT=${CMAKE_BINARY_DIR}
+        -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/verify_release_command_assets.cmake")
+add_test(
     NAME raw-policy-source-contract
     COMMAND "${Python3_EXECUTABLE}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/test_raw_policy.py")

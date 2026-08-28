@@ -364,6 +364,14 @@ jobs:
           for schema_file in "${packaged_schema_files[@]}"; do
             install -Dm0644 "$schema_file" "dist/$package/$schema_file"
           done
+          release_command_asset_files=()
+          while IFS=$'\t' read -r source_file package_file; do
+            release_command_asset_files+=("$package_file")
+            install -Dm0644 "$source_file" "dist/$package/$package_file"
+          done < <(
+            jq -r '.assets[] | [.source, .package] | @tsv' \
+              docs/release/command-assets.json
+          )
           runtime_license_files=()
           while IFS= read -r license_file; do
             runtime_license_files+=("$license_file")
@@ -394,6 +402,7 @@ jobs:
             "$DEPENDENCY_LOCK_SCHEMA"
             tgcli
             "${packaged_schema_files[@]}"
+            "${release_command_asset_files[@]}"
             "${runtime_license_files[@]}"
           )
           expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)"
@@ -412,6 +421,11 @@ jobs:
           bash scripts/check-release-artifact.sh verify-schema-package \
             "dist/$package" \
             docs/schemas
+          bash scripts/check-release-artifact.sh verify-command-assets-package \
+            "dist/$package" \
+            . \
+            "dist/$package/tgcli" \
+            docs/release/command-assets.json
           python3 scripts/release/build_provenance.py verify-sbom \
             --artifact "dist/$package/tgcli" \
             --lock "dist/$package/$DEPENDENCY_LOCK" \
@@ -1085,6 +1099,16 @@ jobs:
           for schema_file in "${packaged_schema_files[@]}"; do
             install -m 0644 "$schema_file" "package/$package/$schema_file"
           done
+          release_command_asset_files=()
+          while IFS=$'\t' read -r source_file package_file; do
+            release_command_asset_files+=("$package_file")
+            destination="package/$package/$package_file"
+            install -d "$(dirname "$destination")"
+            install -m 0644 "$source_file" "$destination"
+          done < <(
+            jq -r '.assets[] | [.source, .package] | @tsv' \
+              docs/release/command-assets.json
+          )
           runtime_license_files=()
           while IFS= read -r license_file; do
             runtime_license_files+=("$license_file")
@@ -1121,6 +1145,7 @@ jobs:
             "$DEPENDENCY_LOCK_SCHEMA"
             tgcli
             "${packaged_schema_files[@]}"
+            "${release_command_asset_files[@]}"
             "${runtime_license_files[@]}"
           )
           expected_listing="$(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort -u)"
@@ -1139,6 +1164,11 @@ jobs:
           bash scripts/check-release-artifact.sh verify-schema-package \
             "package/$package" \
             docs/schemas
+          bash scripts/check-release-artifact.sh verify-command-assets-package \
+            "package/$package" \
+            . \
+            "package/$package/tgcli" \
+            docs/release/command-assets.json
           bash scripts/check-release-artifact.sh verify-macos-build \
             "package/$package/tgcli" \
             "package/$package/PROVENANCE.json" \

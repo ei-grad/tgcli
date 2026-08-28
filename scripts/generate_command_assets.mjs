@@ -13,6 +13,8 @@ const outputPaths = {
   fish: path.join(outputDirectory, "tgcli.fish"),
 };
 const embeddedOutput = path.join(repository, "src", "cli", "completion_assets.generated.inc");
+const releaseManifestOutput = path.join(repository, "docs", "release", "command-assets.json");
+const cmakeInstallOutput = path.join(repository, "cmake", "command_assets.generated.cmake");
 const commandName = /^[a-z0-9][a-z0-9-]*$/;
 const optionSetName = /^[a-z][a-z0-9_]*$/;
 const optionName = /^(?:-[A-Za-z]|--[a-z0-9][a-z0-9-]*)$/;
@@ -27,6 +29,53 @@ const sortedUnique = (values) =>
   values.length === new Set(values).size &&
   values.every((value, index) => index === 0 || values[index - 1] < value);
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+
+const releasePackageAssets = [
+  {
+    source: "completions/tgcli.bash",
+    package: "share/bash-completion/completions/tgcli",
+    shell: "bash",
+  },
+  {
+    source: "completions/tgcli.fish",
+    package: "share/fish/vendor_completions.d/tgcli.fish",
+    shell: "fish",
+  },
+  {
+    source: "completions/_tgcli",
+    package: "share/zsh/site-functions/_tgcli",
+    shell: "zsh",
+  },
+  {
+    source: "docs/commands/public-command-registry.json",
+    package: "share/tgcli/public-command-registry.json",
+    shell: null,
+  },
+  {
+    source: "docs/man/tgcli.1",
+    package: "share/man/man1/tgcli.1",
+    shell: null,
+  },
+];
+const safeRelativeAsset = /^[A-Za-z0-9._/-]+$/;
+for (const key of ["source", "package"]) {
+  const values = releasePackageAssets.map((asset) => asset[key]);
+  requireCondition(sortedUnique([...values].sort()), `release ${key} paths differ`);
+  requireCondition(
+    values.every(
+      (value) =>
+        safeRelativeAsset.test(value) &&
+        !value.startsWith("/") &&
+        !value.split("/").some((component) => ["", ".", ".."].includes(component)),
+    ),
+    `unsafe release ${key} path`,
+  );
+}
+requireCondition(
+  JSON.stringify(releasePackageAssets.filter((asset) => asset.shell).map((asset) => asset.shell).sort()) ===
+    JSON.stringify(["bash", "fish", "zsh"]),
+  "release completion shells differ",
+);
 
 const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
 requireCondition(
@@ -271,24 +320,54 @@ const embedded = [
   embeddedLiteral("kFishCompletion", "TGFISH", generatedFish),
   "",
 ].join("\n");
+const releaseManifest = `${JSON.stringify(
+  { schema_version: 1, assets: releasePackageAssets },
+  null,
+  2,
+)}\n`;
+const cmakeInstall = [
+  "# Generated from scripts/generate_command_assets.mjs. Do not edit.",
+  ...releasePackageAssets.flatMap((asset) => {
+    const destination = path.posix.dirname(asset.package);
+    const filename = path.posix.basename(asset.package);
+    return [
+      `install(FILES "\${CMAKE_CURRENT_SOURCE_DIR}/${asset.source}"`,
+      `    DESTINATION "${destination}"`,
+      `    RENAME "${filename}")`,
+    ];
+  }),
+  "",
+].join("\n");
 const command = process.argv[2];
 if (command === "emit") {
   fs.mkdirSync(outputDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(releaseManifestOutput), { recursive: true });
+  fs.mkdirSync(path.dirname(cmakeInstallOutput), { recursive: true });
   for (const [shell, data] of Object.entries(outputs)) {
     fs.writeFileSync(outputPaths[shell], data);
   }
   fs.writeFileSync(embeddedOutput, embedded);
+  fs.writeFileSync(releaseManifestOutput, releaseManifest);
+  fs.writeFileSync(cmakeInstallOutput, cmakeInstall);
 } else if (command === "check") {
   for (const [shell, data] of Object.entries(outputs)) {
     requireCondition(fs.readFileSync(outputPaths[shell], "utf8") === data, `${shell} completion differs`);
   }
   requireCondition(fs.readFileSync(embeddedOutput, "utf8") === embedded, "embedded completion differs");
+  requireCondition(fs.readFileSync(releaseManifestOutput, "utf8") === releaseManifest, "release command asset manifest differs");
+  requireCondition(fs.readFileSync(cmakeInstallOutput, "utf8") === cmakeInstall, "CMake command asset install differs");
 } else if (command === "list-package-files") {
   console.log("completions/_tgcli");
   console.log("completions/tgcli.bash");
   console.log("completions/tgcli.fish");
+  console.log("cmake/command_assets.generated.cmake");
   console.log("docs/man/tgcli.1");
   console.log("docs/commands/public-command-registry.json");
+  console.log("docs/release/command-assets.json");
+} else if (command === "list-release-package-assets") {
+  for (const asset of releasePackageAssets) {
+    console.log(`${asset.source}\t${asset.package}`);
+  }
 } else {
-  fail("expected emit, check, or list-package-files");
+  fail("expected emit, check, list-package-files, or list-release-package-assets");
 }

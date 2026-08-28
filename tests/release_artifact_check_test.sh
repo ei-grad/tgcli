@@ -1212,6 +1212,7 @@ required = [
     "verify-macos-build",
     "verify-version-revision",
     "verify-schema-package",
+    "verify-command-assets-package",
     "verify_re2_build.py",
     "write-sbom",
     "verify-sbom",
@@ -1237,6 +1238,8 @@ if workflow.count("contents: write") != 1 or workflow.count("id-token: write") !
     raise SystemExit("release privileges must be scoped to separate single jobs")
 if workflow.count("verify-version-revision") != 3:
     raise SystemExit("every native and universal release binary needs one revision check")
+if workflow.count("verify-command-assets-package") != 2:
+    raise SystemExit("both release archives need command asset verification")
 if "--env HOME=" in workflow or "--env TMPDIR=" in workflow:
     raise SystemExit("the workflow must not override recipe-owned HOME or TMPDIR")
 metadata = workflow.split("\n  metadata:\n", 1)[1].split("\n  linux-musl:\n", 1)[0]
@@ -1262,6 +1265,10 @@ for schema_file in (
         raise SystemExit(f"Linux package is missing packaged schema {schema_file}")
 if "verify-schema-package" not in linux_package:
     raise SystemExit("Linux package does not verify its stream schema catalog")
+if "docs/release/command-assets.json" not in linux_package:
+    raise SystemExit("Linux package does not consume the command asset manifest")
+if "release_command_asset_files" not in linux_package:
+    raise SystemExit("Linux expected files omit command assets")
 
 macos = workflow.split("\n  macos-arch:\n", 1)[1].split(
     "\n  macos-universal:\n", 1
@@ -1308,6 +1315,10 @@ for schema_file in (
         raise SystemExit(f"universal package is missing packaged schema {schema_file}")
 if "verify-schema-package" not in package_step:
     raise SystemExit("universal package does not verify its stream schema catalog")
+if "docs/release/command-assets.json" not in package_step:
+    raise SystemExit("universal package does not consume the command asset manifest")
+if "release_command_asset_files" not in package_step:
+    raise SystemExit("universal expected files omit command assets")
 package_verification = package_step.split(
     "bash scripts/check-release-artifact.sh verify-macos-build \\\n", 1
 )[1].split('          find "package/$package"', 1)[0]

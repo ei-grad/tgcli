@@ -151,9 +151,14 @@ well:
   resolution, or typed preflight extraction of every direct/nested chat
   selector; raw remains unreachable while independent policy acceptance is an
   activation blocker;
+- a denied raw row with an inferred semantic category: denied rows use the
+  exact pinned signature/inventory evidence and the single deliberate
+  `denied_not_in_v1_allowlist` decision; indirect-result dialogs are denied
+  whole;
 - download publication that follows a symlink, overwrites an existing leaf,
   omits stable source revalidation/exclusive rename, or claims automatic
   cleanup of crash-orphaned named temps;
 - completion bytes not derived from the canonical public registry, or a future
   registry row becoming invocable before its atomic handler activation; source,
-  runtime and installed package bytes must be identical.
+  runtime, CMake-installed and unpacked Linux/macOS release bytes must be
+  identical through the generated command-asset manifest.

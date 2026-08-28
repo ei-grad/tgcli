@@ -975,6 +975,193 @@ for filename in sorted(expected_files - {"stream-manifest.json"}):
 PY
 }
 
+verify_command_assets_package() {
+    local package_root="$1"
+    local source_root="$2"
+    local binary="$3"
+    local manifest="$4"
+
+    python3 - "$package_root" "$source_root" "$binary" "$manifest" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import subprocess
+import sys
+
+
+def fail(message: str) -> None:
+    raise SystemExit(message)
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        fail(message)
+
+
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        require(key not in result, f"command asset manifest has duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+package_root = pathlib.Path(sys.argv[1])
+source_root = pathlib.Path(sys.argv[2])
+binary = pathlib.Path(sys.argv[3])
+manifest_path = pathlib.Path(sys.argv[4])
+for owner, candidate, required_type in (
+    ("package root", package_root, "directory"),
+    ("source root", source_root, "directory"),
+    ("release binary", binary, "file"),
+    ("command asset manifest", manifest_path, "file"),
+):
+    try:
+        mode = candidate.lstat().st_mode
+    except OSError as error:
+        fail(f"{owner} is missing or unsafe: {error}")
+    require(not stat.S_ISLNK(mode), f"{owner} cannot be a symlink")
+    require(
+        stat.S_ISDIR(mode) if required_type == "directory" else stat.S_ISREG(mode),
+        f"{owner} has the wrong type",
+    )
+
+try:
+    resolved_package_root = package_root.resolve(strict=True)
+    resolved_source_root = source_root.resolve(strict=True)
+    resolved_binary = binary.resolve(strict=True)
+    resolved_binary.relative_to(resolved_package_root)
+except (OSError, ValueError) as error:
+    fail(f"release command asset roots are unsafe: {error}")
+require(os.access(resolved_binary, os.X_OK), "release binary is not executable")
+
+try:
+    manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object
+    )
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    fail(f"command asset manifest is invalid: {error}")
+require(
+    isinstance(manifest, dict)
+    and set(manifest) == {"schema_version", "assets"}
+    and manifest["schema_version"] == 1
+    and isinstance(manifest["assets"], list),
+    "command asset manifest root differs",
+)
+expected = {
+    (
+        "completions/tgcli.bash",
+        "share/bash-completion/completions/tgcli",
+        "bash",
+    ),
+    (
+        "completions/tgcli.fish",
+        "share/fish/vendor_completions.d/tgcli.fish",
+        "fish",
+    ),
+    ("completions/_tgcli", "share/zsh/site-functions/_tgcli", "zsh"),
+    (
+        "docs/commands/public-command-registry.json",
+        "share/tgcli/public-command-registry.json",
+        None,
+    ),
+    ("docs/man/tgcli.1", "share/man/man1/tgcli.1", None),
+}
+actual: set[tuple[str, str, str | None]] = set()
+runtime_sources: dict[str, pathlib.Path] = {}
+
+
+def checked_file(root: pathlib.Path, relative_name: str, owner: str) -> pathlib.Path:
+    relative = pathlib.PurePosixPath(relative_name)
+    require(
+        not relative.is_absolute()
+        and relative.parts
+        and all(part not in {"", ".", ".."} for part in relative.parts),
+        f"unsafe {owner} path: {relative_name}",
+    )
+    candidate = root
+    for index, component in enumerate(relative.parts):
+        candidate /= component
+        try:
+            mode = candidate.lstat().st_mode
+        except OSError as error:
+            fail(f"{owner} is missing: {relative_name}: {error}")
+        require(not stat.S_ISLNK(mode), f"{owner} cannot be a symlink: {relative_name}")
+        leaf = index == len(relative.parts) - 1
+        require(
+            stat.S_ISREG(mode) if leaf else stat.S_ISDIR(mode),
+            f"{owner} has the wrong type: {relative_name}",
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        fail(f"{owner} escapes its root: {relative_name}: {error}")
+    return candidate
+
+
+for asset in manifest["assets"]:
+    require(
+        isinstance(asset, dict) and set(asset) == {"source", "package", "shell"},
+        "command asset manifest row differs",
+    )
+    source_name = asset["source"]
+    package_name = asset["package"]
+    shell = asset["shell"]
+    require(
+        isinstance(source_name, str)
+        and isinstance(package_name, str)
+        and (shell is None or shell in {"bash", "zsh", "fish"}),
+        "command asset manifest row types differ",
+    )
+    identity = (source_name, package_name, shell)
+    require(identity not in actual, "duplicate command asset manifest row")
+    actual.add(identity)
+    source_file = checked_file(resolved_source_root, source_name, "source command asset")
+    package_file = checked_file(resolved_package_root, package_name, "packaged command asset")
+    source_bytes = source_file.read_bytes()
+    package_bytes = package_file.read_bytes()
+    require(
+        hashlib.sha256(source_bytes).digest() == hashlib.sha256(package_bytes).digest()
+        and source_bytes == package_bytes,
+        f"packaged command asset differs: {package_name}",
+    )
+    if shell is not None:
+        runtime_sources[shell] = source_file
+
+require(actual == expected, "command asset manifest file set differs")
+environment = os.environ.copy()
+environment.update(
+    {
+        "HOME": "/tgcli-release-command-assets-missing-home",
+        "NO_COLOR": "1",
+        "TGCLI_ACCOUNT": "invalid account value",
+        "TGCLI_ALLOW_WRITE": "invalid",
+        "XDG_CONFIG_HOME": "/tgcli-release-command-assets-missing-config",
+        "XDG_RUNTIME_DIR": "/tgcli-release-command-assets-missing-runtime",
+    }
+)
+for shell, source_file in sorted(runtime_sources.items()):
+    result = subprocess.run(
+        [str(resolved_binary), "--no-color", "completion", shell],
+        cwd=resolved_package_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+    )
+    require(
+        result.returncode == 0 and not result.stderr,
+        f"packaged runtime completion failed: {shell}",
+    )
+    require(
+        result.stdout == source_file.read_bytes(),
+        f"packaged runtime completion differs: {shell}",
+    )
+PY
+}
+
 staged_archive_name() {
     python3 - "$1" "$2" <<'PY'
 import pathlib
@@ -1171,6 +1358,7 @@ usage() {
     printf '       %s classify-release-state <version> <directory> <tag> <source-sha> <release-json>\n' "$0" >&2
     printf '       %s verify-remote-tag <source-sha> <owner/repository> <tag>\n' "$0" >&2
     printf '       %s verify-schema-package <package-root> <source-schema-directory>\n' "$0" >&2
+    printf '       %s verify-command-assets-package <package-root> <source-root> <binary> <manifest>\n' "$0" >&2
     printf '       %s verify-version-revision <artifact> <source-sha>\n' "$0" >&2
     printf '       %s staged-archive-name <component-id> <source-url>\n' "$0" >&2
     printf '       %s classify-linux|classify-macos\n' "$0" >&2
@@ -1217,6 +1405,10 @@ case "${1:-}" in
     verify-schema-package)
         [[ "$#" -eq 3 ]] || usage
         verify_schema_package "$2" "$3"
+        ;;
+    verify-command-assets-package)
+        [[ "$#" -eq 5 ]] || usage
+        verify_command_assets_package "$2" "$3" "$4" "$5"
         ;;
     verify-version-revision)
         [[ "$#" -eq 3 ]] || usage
