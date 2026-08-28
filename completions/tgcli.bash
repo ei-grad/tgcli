@@ -60,7 +60,7 @@ _tgcli_complete() {
       storage) candidates='optimize stats' ;;
       topic) candidates='close create edit list reopen' ;;
       chats) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color --folder --archived --unread -n' ;;
-      completion) candidates='bash zsh fish --json --verbose -v --no-daemon --no-color' ;;
+      completion) candidates='bash zsh fish --verbose -v --no-daemon --no-color' ;;
       doctor) candidates='--json --verbose -v --no-daemon --no-color' ;;
       download) candidates='--account --json --timeout --verbose -v --no-daemon --no-color -O' ;;
       fetch) candidates='--account --json --timeout --verbose -v --no-daemon --no-color --limit --all --since' ;;
@@ -108,7 +108,7 @@ _tgcli_complete() {
       chat\ unmute) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ unpin) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chats) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color --folder --archived --unread -n' ;;
-      completion) candidates='bash zsh fish --json --verbose -v --no-daemon --no-color' ;;
+      completion) candidates='bash zsh fish --verbose -v --no-daemon --no-color' ;;
       contact\ add) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       contact\ block) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       contact\ list) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;

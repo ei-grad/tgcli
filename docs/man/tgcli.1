@@ -1,0 +1,37 @@
+.TH TGCLI 1
+.SH NAME
+tgcli \- Telegram command-line client
+.SH SYNOPSIS
+.B tgcli
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B tgcli
+uses a per-account daemon for Telegram operations. Client-local metadata commands
+do not read account configuration or contact the daemon.
+.SH SHELL COMPLETION
+.B tgcli completion bash
+prints the byte-stable Bash 3.2-compatible completion asset.
+.PP
+.B tgcli completion zsh
+prints the byte-stable zsh completion asset.
+.PP
+.B tgcli completion fish
+prints the byte-stable fish completion asset.
+.PP
+The assets are generated from the canonical public-command registry. They do not
+execute tgcli or read configuration. The
+.B --no-color
+option and a nonempty
+.B NO_COLOR
+environment variable do not alter their bytes.
+.SH FILES
+.TP
+.I share/bash-completion/completions/tgcli
+Bash completion asset.
+.TP
+.I share/zsh/site-functions/_tgcli
+zsh completion asset.
+.TP
+.I share/fish/vendor_completions.d/tgcli.fish
+fish completion asset.

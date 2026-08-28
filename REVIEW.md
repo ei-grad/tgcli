@@ -146,8 +146,14 @@ well:
   unknown/unclassified function fallback, a raw request/response body or TD
   message in audit/error/log output, name-only secret-chat proof, or raw
   handler/catalog activation before audit-v3 recovery;
+- a raw policy claim without a pin-derived exact 1001-row bijection, positive
+  principal evidence, concrete whole-function rationale, compiled callable
+  resolution, or typed preflight extraction of every direct/nested chat
+  selector; raw remains unreachable while independent policy acceptance is an
+  activation blocker;
 - download publication that follows a symlink, overwrites an existing leaf,
   omits stable source revalidation/exclusive rename, or claims automatic
   cleanup of crash-orphaned named temps;
 - completion bytes not derived from the canonical public registry, or a future
-  registry row becoming invocable before its atomic handler activation.
+  registry row becoming invocable before its atomic handler activation; source,
+  runtime and installed package bytes must be identical.

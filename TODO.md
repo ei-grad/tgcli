@@ -448,18 +448,19 @@ before the milestone is closed.
       and audit-v3 no-body/no-resend recovery and activation order
 - [x] Add pin-derived exhaustive 1001-function inventory/policy foundations for
       clean TDLib a17f87c4: exact tl/header bijection, committed count/digests,
-      an explicit unreviewed deny-all dormant seed, principal/admission/body-
-      validator and request/response sensitivity metadata, plus an activation
-      validator that fails while any row remains unreviewed; count is drift
-      evidence, not a timeless constant
+      an exhaustive reviewed dormant candidate with 57 admitted typed rows and
+      944 frozen whole-function denies, pinned principal evidence, compiled
+      exact direct/nested chat-selector preflight plans, request/response
+      sensitivity metadata and an independent-acceptance activation blocker;
+      count is drift evidence, not a timeless constant
 - [x] Add dormant duplicate-rejecting raw parsing, typed canonical value/hash
       vectors, the complete 3118-constructor pinned type graph, one actual
       native `td_api::Function` holder, declared-result response validation,
       and audit-v3 schema/validator/scanner/recovery foundations; no TD raw
       send, parser registration, dispatcher admission or catalog mapping
-- [ ] Implement typed body validators and independently review every admitted
-      policy row, then atomically activate raw parser/handler/dispatcher/audit/
-      result+error catalogs; unknown/null/unmatched variants remain denied
+- [ ] Independently accept the exhaustive raw candidate, then atomically
+      activate raw parser/handler/dispatcher/audit/result+error catalogs;
+      unknown/null/unmatched variants remain denied
 - [x] Implement local `tgcli schema <command-token>... [--all]`: exact
       result/item fallback, fixed result/item/error aggregation, history alias,
       embedded byte-authoritative catalogs, separate non-stream error manifest,
@@ -480,8 +481,8 @@ before the milestone is closed.
 - [x] Add the deterministic selected-B public-command registry generator and
       checked-in byte-stable bash/zsh/fish completion assets; retain future
       activation bits so assets cannot expose unimplemented handlers
-- [ ] Activate `completion bash|zsh|fish` as a client-local meta-command and
-      package byte-identical assets; add man pages
+- [x] Activate `completion bash|zsh|fish` as a client-local meta-command and
+      package byte-identical assets with the installed `tgcli(1)` page
 - [ ] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
       schemas out of command catalogs unless a later reviewed mapping explicitly
       adds them, and byte-preserve semantic markers only for explicitly

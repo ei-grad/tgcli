@@ -23,6 +23,7 @@ const expectedPackageFiles = [
   "completions/_tgcli",
   "completions/tgcli.bash",
   "completions/tgcli.fish",
+  "docs/man/tgcli.1",
   "docs/commands/public-command-registry.json",
 ];
 if (JSON.stringify(packageFiles) !== JSON.stringify(expectedPackageFiles)) {
@@ -44,13 +45,14 @@ for (const command of registry.commands) {
 }
 const active = [...leaves.values()].filter((leaf) => leaf.activation === "active");
 const future = [...leaves.values()].filter((leaf) => leaf.activation === "future");
-if (leaves.size !== 82 || active.length !== 80 || future.length !== 2) {
+if (leaves.size !== 82 || active.length !== 81 || future.length !== 1) {
   throw new Error("command activation counts differ");
 }
-for (const future of ["completion", "raw"]) {
-  if (leaves.get(future)?.activation !== "future") {
-    throw new Error(`future command activation differs: ${future}`);
-  }
+if (leaves.get("completion")?.activation !== "active") {
+  throw new Error("completion activation differs");
+}
+if (leaves.get("raw")?.activation !== "future") {
+  throw new Error("raw activation differs");
 }
 const raw = leaves.get("raw");
 const rawOptions = [
@@ -64,6 +66,13 @@ for (const forbidden of ["--cursor", "--idempotency-key", "--full", "--bot-token
 }
 if (raw.positionals.join(" ") !== "-") {
   throw new Error("raw completion positional differs");
+}
+const completion = leaves.get("completion");
+if (
+  JSON.stringify([...registry.option_sets[completion.option_set], ...completion.options]) !==
+  JSON.stringify(["--verbose", "-v", "--no-daemon", "--no-color"])
+) {
+  throw new Error("completion options differ");
 }
 
 const assets = [
@@ -169,6 +178,47 @@ if (spawnSync("fish", ["--version"], { encoding: "utf8" }).status === 0) {
 
 const binary = process.argv[2];
 if (binary) {
+  const isolatedEnvironment = {
+    ...process.env,
+    HOME: "/tgcli-completion-missing-home",
+    XDG_CONFIG_HOME: "/tgcli-completion-missing-config",
+    XDG_RUNTIME_DIR: "/tgcli-completion-missing-runtime",
+    TGCLI_ACCOUNT: "invalid account value",
+    TGCLI_ALLOW_WRITE: "invalid",
+    NO_COLOR: "1",
+  };
+  for (const [shell, asset] of [["bash", assets[0]], ["zsh", assets[1]], ["fish", assets[2]]]) {
+    const expected = fs.readFileSync(asset);
+    for (const extra of [[], ["--no-color"], ["--verbose"], ["--no-daemon"]]) {
+      const outcome = spawnSync(binary, [...extra, "completion", shell], {
+        env: isolatedEnvironment,
+      });
+      if (outcome.status !== 0 || outcome.stderr.length !== 0 || !outcome.stdout.equals(expected)) {
+        throw new Error(`runtime completion bytes differ: ${shell} ${extra.join(" ")}`);
+      }
+    }
+  }
+  const rejected = [
+    ["completion"],
+    ["completion", "powershell"],
+    ["completion", "bash", "extra"],
+    ["--account", "main", "completion", "bash"],
+    ["--json", "completion", "bash"],
+    ["--full", "completion", "bash"],
+    ["--allow-write", "completion", "bash"],
+    ["--yes", "completion", "bash"],
+    ["--dry-run", "completion", "bash"],
+    ["--timeout", "1", "completion", "bash"],
+    ["--cursor", "opaque", "completion", "bash"],
+    ["--idempotency-key", "key", "completion", "bash"],
+  ];
+  for (const args of rejected) {
+    const outcome = spawnSync(binary, args, { env: isolatedEnvironment });
+    if (outcome.status !== 2 || outcome.stdout.length !== 0 || outcome.stderr.length === 0) {
+      throw new Error(`completion rejection differs: ${args.join(" ")}`);
+    }
+  }
+
   const parsedHelpOptions = (help) => {
     const options = new Set();
     for (const line of help.split("\n")) {

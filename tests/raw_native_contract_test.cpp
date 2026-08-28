@@ -22,6 +22,7 @@ using tgcli::daemon::raw::BodyPolicyDecision;
 using tgcli::daemon::raw::Digest;
 using tgcli::daemon::raw::Error;
 using tgcli::daemon::raw::Failure;
+using tgcli::daemon::raw::RawPrincipal;
 using tgcli::daemon::raw::TypedFunction;
 
 Failure failure(std::string input) {
@@ -56,12 +57,17 @@ TEST_CASE("dormant raw parser retains one pinned native Function identity",
     CHECK(static_cast<const td::td_api::testCallBytes&>(parsed.native()).x_ ==
           std::string("\0\1\2\xff", 4));
     CHECK(parsed.canonical() == R"({"@type":"testCallBytes","x":"AAEC/w=="})");
-    for (const auto* const validator : {"deny", "unknown", ""}) {
-        const auto outcome =
-            tgcli::daemon::raw::evaluate_body_policy(validator, AdmissionTier::Read, parsed);
-        CHECK(outcome.decision == BodyPolicyDecision::Deny);
-        CHECK_FALSE(outcome.effective_tier);
-    }
+    const auto policy = tgcli::daemon::raw::policy_metadata(parsed);
+    REQUIRE(policy);
+    CHECK(policy->name == "testCallBytes");
+    CHECK(policy->admission == AdmissionTier::Denied);
+    CHECK(policy->body_validator == "deny");
+    CHECK(policy->sensitive_input);
+    CHECK(policy->sensitive_output);
+    CHECK(policy->reviewed);
+    const auto denied = tgcli::daemon::raw::evaluate_body_policy(parsed);
+    CHECK(denied.decision == BodyPolicyDecision::Deny);
+    CHECK_FALSE(denied.effective_tier);
 
     const auto request_hash = digest(parsed);
     CHECK(request_hash.bytes == parsed.canonical().size());
@@ -77,6 +83,93 @@ TEST_CASE("dormant raw parser retains one pinned native Function identity",
         REQUIRE(std::holds_alternative<Failure>(invalid));
         CHECK(std::get<Failure>(invalid).error == Error::InvalidPolicyMetadata);
     }
+}
+
+TEST_CASE("dormant raw policy owns tier principal and non-secret chat preflight",
+          "[raw][foundation][policy][preflight]") {
+    auto local = success(R"({"@type":"cleanFileName","file_name":"a/b"})");
+    const auto local_policy = tgcli::daemon::raw::policy_metadata(local);
+    REQUIRE(local_policy);
+    CHECK(local_policy->principal == RawPrincipal::Both);
+    CHECK(local_policy->admission == AdmissionTier::Read);
+    CHECK(local_policy->body_validator == "none");
+    const auto local_outcome = tgcli::daemon::raw::evaluate_body_policy(local);
+    CHECK(local_outcome.decision == BodyPolicyDecision::Preserve);
+    CHECK(local_outcome.effective_tier == Tier::Read);
+    CHECK(local_outcome.preflight.non_secret_chat_count == 0);
+
+    auto read = success(R"({"@type":"getMessage","chat_id":-1001,"message_id":7})");
+    const auto read_policy = tgcli::daemon::raw::policy_metadata(read);
+    REQUIRE(read_policy);
+    CHECK(read_policy->principal == RawPrincipal::User);
+    CHECK(read_policy->admission == AdmissionTier::Read);
+    CHECK(read_policy->body_validator == "chat_targets");
+    const auto read_outcome = tgcli::daemon::raw::evaluate_body_policy(read);
+    CHECK(read_outcome.decision == BodyPolicyDecision::Preserve);
+    CHECK(read_outcome.effective_tier == Tier::Read);
+    REQUIRE(read_outcome.preflight.non_secret_chat_count == 1);
+    CHECK(read_outcome.preflight.non_secret_chat_ids[0] == -1001);
+
+    auto member_chat = success(
+        R"({"@type":"getChatMember","chat_id":-1001,"member_id":{"@type":"messageSenderChat","chat_id":-2002}})");
+    const auto member_chat_outcome = tgcli::daemon::raw::evaluate_body_policy(member_chat);
+    CHECK(member_chat_outcome.effective_tier == Tier::Read);
+    REQUIRE(member_chat_outcome.preflight.non_secret_chat_count == 2);
+    CHECK(member_chat_outcome.preflight.non_secret_chat_ids[0] == -1001);
+    CHECK(member_chat_outcome.preflight.non_secret_chat_ids[1] == -2002);
+
+    auto member_user = success(
+        R"({"@type":"getChatMember","chat_id":-1001,"member_id":{"@type":"messageSenderUser","user_id":7}})");
+    const auto member_user_outcome = tgcli::daemon::raw::evaluate_body_policy(member_user);
+    CHECK(member_user_outcome.effective_tier == Tier::Read);
+    REQUIRE(member_user_outcome.preflight.non_secret_chat_count == 1);
+    CHECK(member_user_outcome.preflight.non_secret_chat_ids[0] == -1001);
+
+    auto missing_member = success(R"({"@type":"getChatMember","chat_id":-1001})");
+    CHECK_FALSE(tgcli::daemon::raw::evaluate_body_policy(missing_member).effective_tier);
+
+    auto optional_sender = success(
+        R"({"@type":"searchChatMessages","chat_id":-1001,"sender_id":{"@type":"messageSenderChat","chat_id":-2002}})");
+    const auto optional_sender_outcome = tgcli::daemon::raw::evaluate_body_policy(optional_sender);
+    CHECK(optional_sender_outcome.effective_tier == Tier::Read);
+    REQUIRE(optional_sender_outcome.preflight.non_secret_chat_count == 2);
+    CHECK(optional_sender_outcome.preflight.non_secret_chat_ids[0] == -1001);
+    CHECK(optional_sender_outcome.preflight.non_secret_chat_ids[1] == -2002);
+
+    auto missing_optional_sender = success(R"({"@type":"searchChatMessages","chat_id":-1001})");
+    const auto missing_optional_outcome =
+        tgcli::daemon::raw::evaluate_body_policy(missing_optional_sender);
+    CHECK(missing_optional_outcome.effective_tier == Tier::Read);
+    REQUIRE(missing_optional_outcome.preflight.non_secret_chat_count == 1);
+    CHECK(missing_optional_outcome.preflight.non_secret_chat_ids[0] == -1001);
+
+    auto invalid_target = success(R"({"@type":"getMessage","chat_id":0,"message_id":7})");
+    CHECK_FALSE(tgcli::daemon::raw::evaluate_body_policy(invalid_target).effective_tier);
+
+    auto destructive =
+        success(R"({"@type":"deleteMessages","chat_id":-1001,"message_ids":[7],"revoke":false})");
+    const auto destructive_policy = tgcli::daemon::raw::policy_metadata(destructive);
+    REQUIRE(destructive_policy);
+    CHECK(destructive_policy->admission == AdmissionTier::Destructive);
+    const auto destructive_outcome = tgcli::daemon::raw::evaluate_body_policy(destructive);
+    CHECK(destructive_outcome.effective_tier == Tier::Destructive);
+    REQUIRE(destructive_outcome.preflight.non_secret_chat_count == 1);
+    CHECK(destructive_outcome.preflight.non_secret_chat_ids[0] == -1001);
+
+    auto destructive_member = success(
+        R"({"@type":"setChatMemberStatus","chat_id":-1001,"member_id":{"@type":"messageSenderChat","chat_id":-2002},"status":{"@type":"chatMemberStatusLeft"}})");
+    const auto destructive_member_outcome =
+        tgcli::daemon::raw::evaluate_body_policy(destructive_member);
+    CHECK(destructive_member_outcome.effective_tier == Tier::Destructive);
+    REQUIRE(destructive_member_outcome.preflight.non_secret_chat_count == 2);
+    CHECK(destructive_member_outcome.preflight.non_secret_chat_ids[0] == -1001);
+    CHECK(destructive_member_outcome.preflight.non_secret_chat_ids[1] == -2002);
+
+    auto circular = success(R"({"@type":"getChat","chat_id":-1001})");
+    const auto circular_policy = tgcli::daemon::raw::policy_metadata(circular);
+    REQUIRE(circular_policy);
+    CHECK(circular_policy->admission == AdmissionTier::Denied);
+    CHECK_FALSE(tgcli::daemon::raw::evaluate_body_policy(circular).effective_tier);
 }
 
 TEST_CASE("dormant raw body policy decisions preserve or raise static tiers",

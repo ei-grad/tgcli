@@ -203,6 +203,12 @@ add_test(
     COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs"
         "$<TARGET_FILE:tgcli>")
 add_test(
+    NAME completion-install-assets
+    COMMAND "${CMAKE_COMMAND}"
+        -DBUILD_ROOT=${CMAKE_BINARY_DIR}
+        -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/verify_completion_install.cmake")
+add_test(
     NAME raw-policy-source-contract
     COMMAND "${Python3_EXECUTABLE}" -B
         "${CMAKE_CURRENT_SOURCE_DIR}/test_raw_policy.py")

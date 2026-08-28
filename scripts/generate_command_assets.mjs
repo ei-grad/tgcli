@@ -12,6 +12,7 @@ const outputPaths = {
   zsh: path.join(outputDirectory, "_tgcli"),
   fish: path.join(outputDirectory, "tgcli.fish"),
 };
+const embeddedOutput = path.join(repository, "src", "cli", "completion_assets.generated.inc");
 const commandName = /^[a-z0-9][a-z0-9-]*$/;
 const optionSetName = /^[a-z][a-z0-9_]*$/;
 const optionName = /^(?:-[A-Za-z]|--[a-z0-9][a-z0-9-]*)$/;
@@ -113,13 +114,13 @@ requireCondition(raw.positionals.join(" ") === "-", "raw positional differs");
 requireCondition(raw.completion_literals.join(" ") === "-", "raw completion literal differs");
 requireCondition(!raw.effectiveOptions.includes("--cursor"), "raw cursor leaked");
 requireCondition(!raw.effectiveOptions.includes("--idempotency-key"), "raw idempotency leaked");
-for (const future of ["completion", "raw"]) {
-  requireCondition(leaves.find((leaf) => leaf.path === future)?.activation === "future", `future command activated: ${future}`);
-}
-
-const visibleLeaves = leaves.filter(
-  (leaf) => leaf.activation === "active" || leaf.path === "completion",
+requireCondition(
+  leaves.find((leaf) => leaf.path === "completion")?.activation === "active",
+  "completion must be active",
 );
+requireCondition(leaves.find((leaf) => leaf.path === "raw")?.activation === "future", "raw must remain future");
+
+const visibleLeaves = leaves.filter((leaf) => leaf.activation === "active");
 const visibleCommands = registry.commands
   .map((command) => ({
     ...command,
@@ -127,7 +128,7 @@ const visibleCommands = registry.commands
   }))
   .filter(
     (command) =>
-      command.activation === "active" || command.name === "completion" || command.children?.length,
+      command.activation === "active" || command.children?.length,
   );
 const visibleTopNames = visibleCommands.map((command) => command.name);
 const topNames = visibleTopNames;
@@ -259,20 +260,34 @@ for (const leaf of visibleLeaves) {
 const generatedFish = `${fishWalkerLines.join("\n")}\n`;
 
 const outputs = { bash: generatedBash, zsh: generatedZsh, fish: generatedFish };
+const embeddedLiteral = (name, delimiter, data) => {
+  requireCondition(!data.includes(`)${delimiter}\"`), `unsafe C++ delimiter: ${name}`);
+  return `inline constexpr std::string_view ${name} = R\"${delimiter}(${data})${delimiter}\";`;
+};
+const embedded = [
+  "// Generated from docs/commands/public-command-registry.json. Do not edit.",
+  embeddedLiteral("kBashCompletion", "TGBASH", generatedBash),
+  embeddedLiteral("kZshCompletion", "TGZSH", generatedZsh),
+  embeddedLiteral("kFishCompletion", "TGFISH", generatedFish),
+  "",
+].join("\n");
 const command = process.argv[2];
 if (command === "emit") {
   fs.mkdirSync(outputDirectory, { recursive: true });
   for (const [shell, data] of Object.entries(outputs)) {
     fs.writeFileSync(outputPaths[shell], data);
   }
+  fs.writeFileSync(embeddedOutput, embedded);
 } else if (command === "check") {
   for (const [shell, data] of Object.entries(outputs)) {
     requireCondition(fs.readFileSync(outputPaths[shell], "utf8") === data, `${shell} completion differs`);
   }
+  requireCondition(fs.readFileSync(embeddedOutput, "utf8") === embedded, "embedded completion differs");
 } else if (command === "list-package-files") {
   console.log("completions/_tgcli");
   console.log("completions/tgcli.bash");
   console.log("completions/tgcli.fish");
+  console.log("docs/man/tgcli.1");
   console.log("docs/commands/public-command-registry.json");
 } else {
   fail("expected emit, check, or list-package-files");

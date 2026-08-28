@@ -9907,4 +9907,1263 @@ inline constexpr std::array<RawTdConstructorSpec, 3118> kRawTdConstructors{
     RawTdConstructorSpec{"webPageInstantView", "WebPageInstantView", 1416158291, RawTdConstructorKind::Object, 6776, 6},
     RawTdConstructorSpec{"writeGeneratedFilePart", "Ok", 214474389, RawTdConstructorKind::Function, 6782, 3},
 };
-inline constexpr std::array<RawBodyValidatorDescriptor, 1> kRawBodyValidators{RawBodyValidatorDescriptor{"deny", &validate_raw_body_deny}};
+bool plan_raw_body_chat_targets(const td::td_api::Function& function,
+                                RawPreflightPlan& plan) noexcept {
+    switch (function.get_id()) {
+case td::td_api::addMessageReaction::ID: {
+    const auto& typed = static_cast<const td::td_api::addMessageReaction&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::banChatMember::ID: {
+    const auto& typed = static_cast<const td::td_api::banChatMember&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    if (!append_raw_message_sender_target(typed.member_id_, plan, true)) { return false; }
+    return true;
+}
+case td::td_api::createForumTopic::ID: {
+    const auto& typed = static_cast<const td::td_api::createForumTopic&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::deleteChatHistory::ID: {
+    const auto& typed = static_cast<const td::td_api::deleteChatHistory&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::deleteForumTopic::ID: {
+    const auto& typed = static_cast<const td::td_api::deleteForumTopic&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::deleteMessages::ID: {
+    const auto& typed = static_cast<const td::td_api::deleteMessages&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::editForumTopic::ID: {
+    const auto& typed = static_cast<const td::td_api::editForumTopic&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatAdministrators::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatAdministrators&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatHistory::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatHistory&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatMember::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatMember&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    if (!append_raw_message_sender_target(typed.member_id_, plan, true)) { return false; }
+    return true;
+}
+case td::td_api::getChatMessageByDate::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatMessageByDate&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatMessageCalendar::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatMessageCalendar&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatMessageCount::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatMessageCount&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatMessagePosition::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatMessagePosition&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatPinnedMessage::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatPinnedMessage&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatScheduledMessages::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatScheduledMessages&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getChatSparseMessagePositions::ID: {
+    const auto& typed = static_cast<const td::td_api::getChatSparseMessagePositions&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getForumTopic::ID: {
+    const auto& typed = static_cast<const td::td_api::getForumTopic&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getForumTopicHistory::ID: {
+    const auto& typed = static_cast<const td::td_api::getForumTopicHistory&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getForumTopicLink::ID: {
+    const auto& typed = static_cast<const td::td_api::getForumTopicLink&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getForumTopics::ID: {
+    const auto& typed = static_cast<const td::td_api::getForumTopics&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessage::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessage&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessageAddedReactions::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessageAddedReactions&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessageAvailableReactions::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessageAvailableReactions&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessageProperties::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessageProperties&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessageThread::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessageThread&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessageThreadHistory::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessageThreadHistory&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getMessages::ID: {
+    const auto& typed = static_cast<const td::td_api::getMessages&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::getRepliedMessage::ID: {
+    const auto& typed = static_cast<const td::td_api::getRepliedMessage&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::leaveChat::ID: {
+    const auto& typed = static_cast<const td::td_api::leaveChat&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::readAllChatMentions::ID: {
+    const auto& typed = static_cast<const td::td_api::readAllChatMentions&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::readAllChatPollVotes::ID: {
+    const auto& typed = static_cast<const td::td_api::readAllChatPollVotes&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::readAllChatReactions::ID: {
+    const auto& typed = static_cast<const td::td_api::readAllChatReactions&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::removeMessageReaction::ID: {
+    const auto& typed = static_cast<const td::td_api::removeMessageReaction&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::searchChatMembers::ID: {
+    const auto& typed = static_cast<const td::td_api::searchChatMembers&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::searchChatMessages::ID: {
+    const auto& typed = static_cast<const td::td_api::searchChatMessages&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    if (!append_raw_message_sender_target(typed.sender_id_, plan, false)) { return false; }
+    return true;
+}
+case td::td_api::setChatDescription::ID: {
+    const auto& typed = static_cast<const td::td_api::setChatDescription&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::setChatMemberStatus::ID: {
+    const auto& typed = static_cast<const td::td_api::setChatMemberStatus&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    if (!append_raw_message_sender_target(typed.member_id_, plan, true)) { return false; }
+    return true;
+}
+case td::td_api::setChatMessageAutoDeleteTime::ID: {
+    const auto& typed = static_cast<const td::td_api::setChatMessageAutoDeleteTime&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::setChatTitle::ID: {
+    const auto& typed = static_cast<const td::td_api::setChatTitle&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleChatHasProtectedContent::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleChatHasProtectedContent&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleChatIsMarkedAsUnread::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleChatIsMarkedAsUnread&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleChatIsPinned::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleChatIsPinned&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleChatIsTranslatable::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleChatIsTranslatable&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleChatViewAsTopics::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleChatViewAsTopics&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleForumTopicIsClosed::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleForumTopicIsClosed&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleForumTopicIsPinned::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleForumTopicIsPinned&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::toggleGeneralForumTopicIsHidden::ID: {
+    const auto& typed = static_cast<const td::td_api::toggleGeneralForumTopicIsHidden&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+case td::td_api::viewMessages::ID: {
+    const auto& typed = static_cast<const td::td_api::viewMessages&>(function);
+    if (!append_raw_chat_target(typed.chat_id_, plan)) { return false; }
+    return true;
+}
+    default:
+        return false;
+    }
+}
+inline constexpr std::array<RawBodyValidatorDescriptor, 5> kRawBodyValidators{RawBodyValidatorDescriptor{"chat_member_target", &validate_raw_body_chat_member_target, &plan_raw_body_chat_targets}, RawBodyValidatorDescriptor{"chat_optional_sender_target", &validate_raw_body_chat_optional_sender_target, &plan_raw_body_chat_targets}, RawBodyValidatorDescriptor{"chat_targets", &validate_raw_body_chat_targets, &plan_raw_body_chat_targets}, RawBodyValidatorDescriptor{"deny", &validate_raw_body_deny, &plan_raw_body_none}, RawBodyValidatorDescriptor{"none", &validate_raw_body_none, &plan_raw_body_none}};
+inline constexpr std::array<RawPolicyDescriptor, 1001> kRawPolicies{
+    RawPolicyDescriptor{"acceptCall", -646618416, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"acceptOauthRequest", -427442108, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"acceptTermsOfService", 2130576356, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"activateStoryStealthMode", -1009023855, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addBotMediaPreview", 1347126571, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addChatFolderByInviteLink", -858593816, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addChatMember", 1720144407, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addChatMembers", -1675991329, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addChatToList", -80523595, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addChecklistTasks", 1554619499, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addContact", -2098628252, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addCustomServerLanguagePack", 4492771, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addFavoriteSticker", 324504799, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addFileToDownloads", 867533751, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addGiftCollectionGifts", -263464606, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addLocalMessage", -166217823, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addLogMessage", 1597427692, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addLoginPasskey", 1838899694, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addMessageReaction", 1419269613, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"addNetworkStatistics", 1264825305, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addOffer", 682451739, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addPendingLiveStoryReaction", 661166197, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addPendingPaidMessageReaction", -342110765, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addPollOption", -382845167, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addProfileAudio", 919192907, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addProxy", 267660616, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addQuickReplyShortcutInlineQueryResultMessage", -2017449468, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addQuickReplyShortcutMessage", 1058573098, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addQuickReplyShortcutMessageAlbum", 1348436244, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addRecentSticker", -1478109026, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addRecentlyFoundChat", -1746396787, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addSavedAnimation", -1538525088, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addSavedNotificationSound", 1043956975, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"addStickerToSet", 1457266235, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addStoryAlbumStories", -537692984, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"addTextCompositionStyle", 1478640138, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"addWebBrowserSettingsException", -1890467106, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"allowBotToSendMessages", 1776928142, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"allowUnpaidMessagesFromUser", 803569495, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"answerCallbackQuery", -1153028490, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"answerChatJoinRequestQuery", 219345954, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"answerCustomQuery", -1293603521, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"answerGuestQuery", -41729622, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"answerInlineQuery", 1343853844, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"answerPreCheckoutQuery", -1486789653, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"answerShippingQuery", -434601324, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"answerWebAppQuery", -1447316391, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"applyPremiumGiftCode", -1347138530, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"approveSuggestedPost", -924807202, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"assignStoreTransaction", -2046202900, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"banChatMember", -888111748, RawPrincipal::User, AdmissionTier::Destructive, "chat_member_target", false, false, true},
+    RawPolicyDescriptor{"banGroupCallParticipants", 624883173, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"blockMessageSenderFromReplies", -1214384757, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"boostChat", 1945750252, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"buyGiftUpgrade", 154296026, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"canBotSendMessages", 544052364, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"canPostStory", 668621518, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"canPurchaseFromStore", 1017811816, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"canSendGift", 1307059830, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"canSendMessageToUser", 1529489462, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"canTransferOwnership", 634602508, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"cancelDownloadFile", -1954524450, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"cancelPasswordReset", 940733538, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"cancelPreliminaryUploadFile", 823412414, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"cancelRecoveryEmailAddressVerification", -1516728691, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"changeImportedContacts", 1119625871, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"changeStickerSet", 449357293, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"changeWebBrowserSettings", 1972325811, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"checkAuthenticationBotToken", 639321206, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationCode", -302103382, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationEmailCode", -582827361, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationPasskey", 1225325317, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationPassword", -2025698400, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationPasswordRecoveryCode", -603309083, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationPremiumPurchase", 876306570, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkAuthenticationWebToken", -1957846722, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkBotUsername", -1358454679, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkChatFolderInviteLink", 522557851, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkChatInviteLink", -496940997, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkChatUsername", -119119344, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkCreatedPublicChatsLimit", -445546591, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkEmailAddressVerificationCode", -426386685, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkLoginEmailAddressCode", -1454244766, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkOauthRequestMatchCode", -1383896724, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkPasswordRecoveryCode", -200794600, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkPhoneNumberCode", -603626079, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkPremiumGiftCode", -1786063260, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkQuickReplyShortcutName", 2101203241, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkRecoveryEmailAddressCode", -1997039589, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"checkStickerSetName", -1789392642, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"checkWebAppFileDownload", -389397278, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"cleanFileName", 967964667, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"clearAllDraftMessages", -46369573, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"clearAutosaveSettingsExceptions", 1475109874, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clearImportedContacts", 869503298, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clearRecentEmojiStatuses", -428749986, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clearRecentReactions", 1298253650, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clearRecentStickers", -321242684, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clearRecentlyFoundChats", -285582542, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clearSearchedForTags", 512017238, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"clickAnimatedEmojiMessage", 196179554, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"clickChatSponsoredMessage", 971995671, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"clickPremiumSubscriptionButton", -369319162, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"clickVideoMessageAdvertisement", 1367156622, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"close", -1187782273, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"closeChat", 39749353, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"closeGiftAuction", 115495644, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"closeSecretChat", -471006133, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"closeStory", 1553967851, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"closeWebApp", 1755391174, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"commitPendingLiveStoryReactions", -1786229016, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"commitPendingPaidMessageReactions", -171354618, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"composeTextWithAi", 1121392794, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"confirmBusinessConnectedBot", 1301613953, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"confirmQrCodeAuthentication", -376199379, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"confirmSession", -674647009, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"connectAffiliateProgram", 1661392684, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"craftGift", 2124593259, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createBasicGroupChat", 1972024548, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createBot", -1890858327, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createBusinessChatLink", -1861018304, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createCall", -1104663024, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createChatFolder", 1015399680, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createChatFolderInviteLink", -2037911099, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createChatInviteLink", 287744833, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createChatSubscriptionInviteLink", 2255717, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createForumTopic", -15242103, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"createGiftCollection", -397088099, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createGroupCall", 1930068672, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createInvoiceLink", -814692249, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createNewBasicGroupChat", 1806454709, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createNewSecretChat", -620682651, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createNewStickerSet", -481065727, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createNewSupergroupChat", 804058822, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createPrivateChat", -947758327, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createSecretChat", 1930285615, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createStoryAlbum", -804362185, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createSupergroupChat", 1187475691, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"createTemporaryPassword", -1626509434, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"createTextCompositionStyle", -1549417869, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"createVideoChat", 2124715405, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"declineGroupCallInvitation", 1843919377, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"declineOauthRequest", 420650996, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"declineSuggestedPost", -1758260609, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"decryptGroupCallData", 1781743076, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteAccount", 1395816134, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteAllCallMessages", -1466445325, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteAllRecentMessageReactionsFromSender", -699051658, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteAllRevokedChatInviteLinks", 1112020698, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteBotMediaPreviews", -1397512722, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteBusinessChatLink", -1101895865, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteBusinessConnectedBot", -1633976747, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteBusinessMessages", 1425721828, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteBusinessStory", 1024585042, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteChat", -171253666, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteChatBackground", 320267896, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteChatFolder", -1956364551, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteChatFolderInviteLink", -930057858, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteChatHistory", -1472081761, RawPrincipal::User, AdmissionTier::Destructive, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"deleteChatMessagesByDate", -1639653185, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteChatMessagesBySender", -1164235161, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteChatReplyMarkup", 100637531, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteCommands", 1002732586, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteDefaultBackground", -1297814210, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteDirectMessagesChatTopicHistory", -1906080196, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteDirectMessagesChatTopicMessagesByDate", 945080841, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteFile", 1807653676, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteForumTopic", -2121212039, RawPrincipal::User, AdmissionTier::Destructive, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"deleteGiftCollection", -183749499, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteGroupCallMessages", 339562398, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteGroupCallMessagesBySender", 1677247618, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteLanguagePack", -2108761026, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteMessageReactionsFromSender", 780354493, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteMessages", 1130090173, RawPrincipal::User, AdmissionTier::Destructive, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"deletePassportElement", -1719555468, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deletePollOption", -1459634839, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteProfilePhoto", 1319794625, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteQuickReplyShortcut", -246911978, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteQuickReplyShortcutMessages", -40522947, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteRevokedChatInviteLink", -1859711873, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteSavedCredentials", 826300114, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"deleteSavedMessagesTopicHistory", 1776237930, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteSavedMessagesTopicMessagesByDate", 1444389, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteSavedOrderInfo", 1629058164, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteStickerSet", 1577745325, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"deleteStory", -2020144472, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteStoryAlbum", -658327628, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"deleteTextCompositionStyle", -1239832880, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"destroy", 685331274, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"disableAllSupergroupUsernames", 843511216, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"disableProxy", -2100095102, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"discardCall", -1545983346, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"disconnectAffiliateProgram", -105831172, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"disconnectAllWebsites", -1082985981, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"disconnectWebsite", -778767395, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"downloadFile", 1059402292, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"dropGiftOriginalDetails", -1394445843, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"editBotMediaPreview", -2037031582, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"editBusinessChatLink", 1594947110, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editBusinessMessageCaption", -1071562045, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editBusinessMessageChecklist", -445013904, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editBusinessMessageLiveLocation", 390194248, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editBusinessMessageMedia", -60733576, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editBusinessMessageReplyMarkup", 701787159, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editBusinessMessageText", -1149169252, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editBusinessStory", 472538940, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editChatFolder", 53672754, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editChatFolderInviteLink", -2141872095, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editChatInviteLink", 1320303996, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editChatSubscriptionInviteLink", -951826989, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editCustomLanguagePackInfo", 1320751257, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editForumTopic", 1112389547, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"editInlineMessageCaption", 1409762552, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editInlineMessageLiveLocation", 211862379, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editInlineMessageMedia", 23553921, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editInlineMessageReplyMarkup", -67565858, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editInlineMessageText", -855457307, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editMessageCaption", -2020117951, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editMessageChecklist", 1497856700, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editMessageLiveLocation", 419474098, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editMessageMedia", -1152678125, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editMessageReplyMarkup", 332127881, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editMessageSchedulingState", -1372976192, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editMessageText", 196272567, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editProxy", 349913011, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"editQuickReplyMessage", 80517006, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editStarSubscription", 2048538904, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editStory", 355296788, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editStoryCover", -1035823266, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"editTextCompositionStyle", 1251035657, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"editUserStarSubscription", 1370582665, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"enableProxy", 1494450838, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"encryptGroupCallData", -377997690, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"endGroupCall", 573131959, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"endGroupCallRecording", -75799927, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"endGroupCallScreenSharing", -2047599540, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"finishFileGeneration", -1055060835, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"fixTextWithAi", -2139647563, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"forwardMessages", -247889118, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getAccountTtl", -443905161, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getActiveSessions", 1119710526, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getAllPassportElements", -2038945045, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getAllStickerEmojis", 296562224, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getAnimatedEmoji", 1065635702, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getApplicationConfig", -1823144318, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getApplicationDownloadLink", 112013252, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getArchiveChatListSettings", -2087874976, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getArchivedStickerSets", 1001931341, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getAttachedStickerSets", 1302172429, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getAttachmentMenuBot", 1034248699, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getAuthenticationPasskeyParameters", -686037865, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getAuthorizationState", 1949154877, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getAutoDownloadSettingsPresets", -1721088201, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getAutosaveSettings", 2136207914, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getAvailableChatBoostSlots", 1929898965, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getAvailableGifts", -4559695, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getBackgroundUrl", 733769682, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBankCardInfo", -1310515792, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBasicGroup", -1635174828, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBasicGroupFullInfo", -1822039253, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBlockedMessageSenders", -1931137258, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotInfoDescription", -762841035, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotInfoShortDescription", 1243358740, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotMediaPreviewInfo", 1358299446, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotMediaPreviews", 577131608, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotName", -1707118036, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotSimilarBotCount", -1271545369, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBotSimilarBots", -825139275, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBusinessAccountStarAmount", -1817136693, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBusinessChatLinkInfo", 797670986, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBusinessChatLinks", 710287703, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBusinessConnectedBot", 1494823093, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBusinessConnection", -2114706400, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getBusinessFeatures", -997171199, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCallbackQueryAnswer", 116357727, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCallbackQueryMessage", -1121939086, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChat", 1866601536, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatActiveStories", 776993781, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatAdministrators", 1544468155, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatArchivedStories", -1356950392, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatAvailableMessageSenders", 1158670635, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatAvailablePaidMessageReactionSenders", -1244619639, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatBoostFeatures", -389994336, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatBoostLevelFeatures", 1172717195, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatBoostLink", 1458662533, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatBoostLinkInfo", 654068572, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatBoostStatus", -810775857, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatBoosts", -1419859400, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getChatEventLog", -1281344669, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatFolder", 92809880, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatFolderChatCount", 2111097790, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatFolderChatsToLeave", -1916672337, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatFolderDefaultIconName", 754425959, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatFolderInviteLinks", 329079776, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatFolderNewChats", 2123181260, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatHistory", -799960451, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatInviteLink", -479575555, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatInviteLinkCounts", 890299025, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatInviteLinkMembers", 1728376124, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatInviteLinks", 883252396, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatJoinRequests", -388428126, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatListsToAddChat", 654956193, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatMember", -792636814, RawPrincipal::User, AdmissionTier::Read, "chat_member_target", false, false, true},
+    RawPolicyDescriptor{"getChatMessageByDate", 1062564150, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatMessageCalendar", 1644001372, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatMessageCount", 1641001101, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatMessagePosition", -1468174577, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatNotificationSettingsExceptions", 201199121, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatOwnerAfterLeaving", -1637776102, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatPinnedMessage", 359865008, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatPostedToChatPageStories", -46414037, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatRevenueStatistics", 701995836, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatRevenueTransactions", -1120110117, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getChatRevenueWithdrawalUrl", 506595104, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getChatScheduledMessages", -549638149, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatSimilarChatCount", 1178506894, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatSimilarChats", -1152348285, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatSparseMessagePositions", 994389757, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getChatSponsoredMessages", 1353203864, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatStatistics", 327057816, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatStoryAlbums", -1559582892, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatStoryInteractions", 354545268, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChats", -972768574, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatsForChatFolderInviteLink", 1873561929, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getChatsToPostStories", 1893901427, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCloseFriends", -1445628722, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCollectibleItemInfo", -217797238, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCommands", 1488621559, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getConnectedAffiliateProgram", -1755191440, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getConnectedAffiliatePrograms", -1960029582, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getConnectedWebsites", -170536110, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getContacts", -1417722768, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCountries", -51902050, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCountry", 1094306864, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCountryCode", 1540593906, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCountryFlagEmoji", 981871098, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"getCreatedPublicChats", 710354415, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCurrentState", -1191417719, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getCurrentWeather", -1965384759, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCustomEmojiReactionAnimations", 1232375250, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getCustomEmojiStickers", -2127427955, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDatabaseStatistics", -1942760263, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDeepLinkInfo", 680673150, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDefaultBackgroundCustomEmojiStickers", 485910542, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDefaultChatEmojiStatuses", 1553698018, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDefaultChatPhotoCustomEmojiStickers", -376342683, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDefaultEmojiStatuses", -539392025, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDefaultMessageAutoDeleteTime", -450857574, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDefaultProfilePhotoCustomEmojiStickers", 1280041655, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDirectMessagesChatTopic", 1990530052, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDirectMessagesChatTopicHistory", 1035221188, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDirectMessagesChatTopicMessageByDate", 1837500879, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getDirectMessagesChatTopicRevenue", -792382961, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getDisallowedChatEmojiStatuses", -2004787831, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getEmojiCategories", 2139537774, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getEmojiReaction", -449572388, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getEmojiSuggestionsUrl", -1404101841, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getExternalLink", 1586688235, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getExternalLinkInfo", 1175288383, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getFavoriteStickers", -338964672, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getFile", 1553923406, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getFileDownloadedPrefixSize", 855948589, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getFileExtension", -106055372, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"getFileMimeType", -2073879671, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"getForumTopic", 1931459984, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getForumTopicDefaultIcons", 1479898332, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getForumTopicHistory", -339129791, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getForumTopicLink", 330405972, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getForumTopics", 1368275676, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getFullRichMessage", 784619552, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGameHighScores", 15746459, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGiftAuctionAcquiredGifts", -937975215, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getGiftAuctionState", 989210247, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getGiftChatThemes", -1051327876, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getGiftCollections", -1533138835, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getGiftUpgradePreview", 1303475628, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getGiftsForCrafting", 1571822730, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getGiveawayInfo", -1215852357, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGreetingStickers", 374873372, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGrossingWebAppBots", 1696779802, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGroupCall", 1468491406, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGroupCallParticipants", 1986739394, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGroupCallStreamSegment", -502273424, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGroupCallStreams", -1619226268, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getGroupsInCommon", 381539178, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getImportedContactCount", -656336346, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getInactiveSupergroupChats", -657720907, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getInlineGameHighScores", -533107798, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getInlineQueryResults", 2044524652, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getInstalledBackgrounds", -1051406241, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getInstalledStickerSets", 1630467830, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getInternalLink", 962654640, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getInternalLinkType", -1948428535, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getJsonString", 663458849, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getJsonValue", -1829086715, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getKeywordEmojis", -1969795990, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLanguagePackInfo", 2077809320, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLanguagePackString", 150789747, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getLanguagePackStrings", 1246259088, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLinkPreview", -1039572191, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLinkWebBrowserType", 2035736166, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLiveStoryAvailableMessageSenders", 1252390532, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLiveStoryRtmpUrl", 1267168178, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLiveStoryStreamer", -718164721, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLiveStoryTopDonors", -700264064, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLocalizationTargetInfo", 1849499526, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLogStream", 1167608667, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getLogTagVerbosityLevel", 951004547, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getLogTags", -254449190, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getLogVerbosityLevel", 594057956, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getLoginPasskeys", -165927873, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getLoginUrl", 791844305, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getLoginUrlInfo", -859202125, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMainWebApp", 594050214, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getManagedBotAccessSettings", -867390575, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getManagedBotToken", -938215629, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMapThumbnailFile", -152660070, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getMarkdownText", 164524584, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"getMe", -191516033, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMenuButton", -437324736, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessage", -1821196160, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getMessageAddedReactions", 2110172754, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getMessageAuthor", 1890166449, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageAvailableReactions", 1994098354, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getMessageEffect", -1638843116, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageEmbeddingCode", 1654967561, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageFileType", -490270764, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getMessageImportConfirmationText", 390627752, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageLink", -498469915, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageLinkInfo", -700533672, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageLocally", -603575444, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageProperties", 773382571, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getMessagePublicForwards", 1369285812, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageReadDate", -1484455101, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageStatistics", 1270194648, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessageThread", 2062695998, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getMessageThreadHistory", -1808411608, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getMessageViewers", -1584457010, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getMessages", 425299338, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getNetworkStatistics", -986228706, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getNewChatPrivacySettings", -1295299657, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getOauthLinkInfo", -1235634833, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getOption", -1572495746, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getOwnedBots", -1954035715, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getOwnedStickerSets", 1493074208, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPaidMessageRevenue", 1976589102, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPasskeyParameters", -680161058, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPassportAuthorizationForm", 1636107398, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPassportAuthorizationFormAvailableElements", 1068700924, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPassportElement", -1882398342, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPasswordState", -174752904, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPaymentForm", -1924172076, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPaymentReceipt", 1013758294, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPersonalChatHistory", -1727554525, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPhoneNumberInfo", -1608344583, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPhoneNumberInfoSync", 547061048, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPollOptionProperties", -1191094872, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPollVoteStatistics", -379637947, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPollVoters", -1602915575, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPreferredCountryLanguage", -933049386, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPremiumFeatures", -1260640695, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumGiftPaymentOptions", -480334244, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumGiveawayPaymentOptions", 1222168073, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumInfoSticker", 2043562651, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumLimit", 1075313898, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumState", 663632610, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumStickerExamples", 1399442328, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPremiumStickers", -280950192, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getPreparedInlineMessage", -83179701, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPreparedKeyboardButton", 1162619742, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getProxies", 1234066431, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPublicPostSearchLimits", -1724216773, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getPushReceiverId", -286505294, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getReadDatePrivacySettings", 451435451, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getReceivedGift", -446535239, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getReceivedGifts", 1411782110, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getRecentEmojiStatuses", -1371914967, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecentInlineBots", 1437823548, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecentStickers", -579622241, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecentlyOpenedChats", -1924156893, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecentlyVisitedTMeUrls", 806754961, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecommendedChatFolders", -145540217, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecommendedChats", -649884303, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getRecoveryEmailAddress", -1594770947, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getRemoteFile", 2137204530, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getRepliedMessage", -641918531, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"getSavedAnimations", 7051032, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSavedMessagesTags", -1932105815, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSavedMessagesTopicHistory", 2011552360, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSavedMessagesTopicMessageByDate", -1050786176, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSavedNotificationSound", 1790319616, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSavedNotificationSounds", -1070305368, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSavedOrderInfo", -1152016675, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getScopeNotificationSettings", -995613361, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSearchSponsoredChats", 1568505164, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSearchedForTags", -1692716851, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSecretChat", 40599169, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStakeDiceState", 1389168065, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStarAdAccountUrl", 1940473181, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStarGiftPaymentOptions", -500735773, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStarGiveawayPaymentOptions", -883172578, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStarPaymentOptions", 1838351940, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStarRevenueStatistics", -260356841, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStarSubscriptions", -641223956, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStarTransactions", -304141747, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStarWithdrawalUrl", -1445841134, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStatisticalGraph", 1100975515, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStickerEmojis", -1895508665, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStickerOutline", -1550504539, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStickerOutlineSvgPath", -1615497803, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getStickerSet", 1052318659, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStickerSetName", 1039849089, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStickers", 1158058819, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStorageStatistics", -853193929, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStorageStatisticsFast", 61368066, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStory", -2011076366, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStoryAlbumStories", 1915090076, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStoryAvailableReactions", 595938619, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStoryInteractions", 483475469, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStoryNotificationSettingsExceptions", 627715760, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStoryPublicForwards", 1810378546, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getStoryStatistics", 982926146, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSuggestedFileName", -2049399674, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getSuggestedStickerSetName", -1340995520, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSuitableDiscussionChats", 49044982, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSuitablePersonalChats", -1870357515, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSupergroup", 989663458, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSupergroupFullInfo", 1099776056, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSupergroupMembers", -570940984, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSupportName", 1302205794, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getSupportUser", -1733497700, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getTemporaryPasswordState", -12670830, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getTextCompositionStyleExample", -1657648173, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getTextEntities", -341490693, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"getThemeParametersJsonString", -1850145288, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getThemedChatEmojiStatuses", 1924568314, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getThemedEmojiStatuses", -1468220543, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getTimeZones", 1340268632, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getTonRevenueStatistics", -1315591160, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getTonTransactions", -1935011115, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getTonWithdrawalUrl", -1482519601, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getTopChats", -388410847, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getTrendingStickerSets", -531085986, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUpgradedGift", -1331821135, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getUpgradedGiftEmojiStatuses", -1748975723, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getUpgradedGiftValueInfo", 1818813417, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getUpgradedGiftVariants", -1388671540, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getUpgradedGiftWithdrawalUrl", -784331188, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getUpgradedGiftsPromotionalAnimation", 1944094513, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"getUser", 1117363211, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserChatBoosts", -1190205543, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserFullInfo", -776823720, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserLink", 1226839270, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserPrivacySettingRules", -2077223311, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserProfileAudios", -208876086, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserProfilePhotos", -908132798, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getUserSupportInfo", 1957008133, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getVideoChatAvailableParticipants", -1000496379, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getVideoChatInviteLink", -1394707321, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getVideoChatRtmpUrl", 1210784543, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getVideoMessageAdvertisements", -285681331, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getWebAppLinkUrl", -379857548, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getWebAppPlaceholder", 583470479, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getWebAppUrl", -2128908038, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"getWebPageInstantView", 1741395197, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"giftPremiumWithStars", -2058395432, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"hideContactCloseBirthdays", -1163065221, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"hideSuggestedAction", -1561384065, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"importContacts", -662555959, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"importMessages", -1864116784, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"increaseGiftAuctionBid", -493509001, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"inviteGroupCallParticipant", -631535414, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"inviteVideoChatParticipants", -473149298, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"isLoginEmailAddressRequired", -874594326, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"isProfileAudio", -245729314, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"joinChat", 1906378229, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"joinChatByInviteLink", -28699137, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"joinGroupCall", -2026079917, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"joinLiveStory", 227825676, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"joinVideoChat", 1322989999, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"launchPrepaidGiveaway", 639465530, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"leaveChat", -1825080735, RawPrincipal::User, AdmissionTier::Destructive, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"leaveGroupCall", 980152233, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"listenToAudio", 589191881, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"loadActiveStories", 2106390328, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"loadChats", -1885635205, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"loadDirectMessagesChatTopics", 1488065975, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"loadGroupCallParticipants", 938720974, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"loadQuickReplyShortcutMessages", -46092588, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"loadQuickReplyShortcuts", -1016614243, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"loadSavedMessagesTopics", 289855160, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"logOut", -1581923301, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"markChecklistTasksAsDone", 386950739, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"openBotSimilarBot", -369688872, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"openChat", -323371509, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"openChatSimilarChat", -1884883949, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"openGiftAuction", -694137370, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"openMessageContent", -739088005, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"openSponsoredChat", 865985573, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"openStory", -696723005, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"openWebApp", -950685122, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"optimizeStorage", 853186759, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"parseMarkdown", 756366063, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"parseTextEntities", -1709194593, RawPrincipal::Both, AdmissionTier::Read, "none", false, false, true},
+    RawPolicyDescriptor{"pinChatMessage", 2034719663, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"pingProxy", 2144501959, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"placeGiftAuctionBid", 1437176980, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"postStory", -1725643742, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"preliminaryUploadFile", 1894239129, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"processChatFolderNewChats", 1498280672, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"processChatHasProtectedContentDisableRequest", -2078059411, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"processChatJoinRequest", 1004876963, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"processChatJoinRequests", 1048722894, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"processGiftPurchaseOffer", -1177407462, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"processPushNotification", 786679952, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"rateSpeechRecognition", -287521867, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"readAllChatMentions", 1357558453, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"readAllChatPollVotes", -1882393298, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"readAllChatReactions", 1421973357, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"readAllDirectMessagesChatTopicReactions", 1154665542, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"readAllForumTopicMentions", -996864148, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"readAllForumTopicPollVotes", 320081488, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"readAllForumTopicReactions", -1986498949, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"readBusinessMessage", -1723531538, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"readChatList", -1117480790, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"readFilePart", -174576822, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"readdQuickReplyShortcutMessages", 387399566, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"recognizeSpeech", 1741947577, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"recoverAuthenticationPassword", -131001053, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"recoverPassword", -1524262541, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"refundStarPayment", -1804165035, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"registerDevice", 366088823, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"registerUser", -1012247828, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeAllFilesFromDownloads", -1186433402, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeAllWebBrowserSettingsExceptions", -2086257000, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeBusinessConnectedBotFromChat", 2020766707, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"removeChatActionBar", -1650968070, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"removeContacts", 1943858054, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeFavoriteSticker", 1152945264, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeFileFromDownloads", 1460060142, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeGiftCollectionGifts", -692316949, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeInstalledBackground", 1346446652, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeLoginPasskey", -1728940387, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeMessageReaction", -1756934789, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"removeMessageSenderBotVerification", -1710174374, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeNotification", 862630734, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeNotificationGroup", 1713005454, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removePendingLiveStoryReactions", 868601112, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removePendingPaidMessageReactions", 1100258555, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"removeProfileAudio", 1292263034, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeProxy", 1369219847, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeRecentHashtag", -1013735260, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeRecentSticker", 1246577677, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeRecentlyFoundChat", 717340444, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"removeSavedAnimation", -495605479, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeSavedNotificationSound", -480032946, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeSearchedForTag", 891382730, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeStickerFromSet", 1642196644, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"removeStoryAlbumStories", 1901872465, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"removeTextCompositionStyle", -543700866, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"removeTopChat", -1907876267, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"removeWebBrowserSettingsException", -1498406903, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reorderActiveUsernames", -455399375, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reorderBotActiveUsernames", -1602301664, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reorderBotMediaPreviews", 630851043, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reorderChatFolders", 1665299546, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reorderGiftCollectionGifts", -1545340419, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reorderGiftCollections", -1607216912, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reorderInstalledStickerSets", 1074928158, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reorderQuickReplyShortcuts", -2052799232, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reorderStoryAlbumStories", 438104756, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"reorderStoryAlbums", 514423948, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"reorderSupergroupActiveUsernames", -1962466095, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"replaceLiveStoryRtmpUrl", 585361229, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"replacePrimaryChatInviteLink", 1067350941, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"replaceStickerInSet", -406311399, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"replaceVideoChatRtmpUrl", 558862304, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"reportAuthenticationCodeMissing", -1846555064, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportChat", 1058475058, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportChatPhoto", -646966648, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportChatSponsoredMessage", -979984820, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportMessageReactions", 919111719, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"reportPhoneNumberCodeMissing", -895175341, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportSponsoredChat", -902673019, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportStory", 1823256372, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reportSupergroupAntiSpamFalsePositive", -516050872, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reportSupergroupSpam", -94825000, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"reportVideoMessageAdvertisement", 617137942, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"requestAuthenticationPasswordRecovery", 1393896118, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"requestPasswordRecovery", -13777582, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"requestQrCodeAuthentication", 1363496527, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resendAuthenticationCode", -1506755656, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resendEmailAddressVerificationCode", -1872416732, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resendLoginEmailAddressCode", 292966933, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resendMessages", 526374678, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resendPhoneNumberCode", 1808704551, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resendRecoveryEmailAddressCode", 433483548, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resetAllNotificationSettings", -174020359, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"resetAuthenticationEmailAddress", -415075796, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resetInstalledBackgrounds", 1884553559, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"resetNetworkStatistics", 1646452102, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"resetPassword", -593589091, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"reuseStarSubscription", 778531905, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"revokeChatInviteLink", -776514135, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"revokeGroupCallInviteLink", 501589140, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"saveApplicationLogEvent", -811154930, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"savePreparedInlineMessage", -954963751, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"savePreparedKeyboardButton", -894817192, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"searchAffiliatePrograms", 681156625, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchBackground", -2130996959, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchCallMessages", -1942229221, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchChatAffiliateProgram", -1339291206, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchChatMembers", -445823291, RawPrincipal::User, AdmissionTier::Read, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"searchChatMessages", 1072442212, RawPrincipal::User, AdmissionTier::Read, "chat_optional_sender_target", false, false, true},
+    RawPolicyDescriptor{"searchChatRecentLocationMessages", 950238950, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchChats", 1829367610, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchChatsOnServer", 707218193, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchContacts", -1794690715, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchEmojis", -1456187668, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchFileDownloads", 706611286, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchGiftsForResale", 1947702322, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchHashtags", 1043637617, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchInstalledStickerSets", 2120122276, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchMessages", 1225448885, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchOutgoingDocumentMessages", -1071397762, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchPublicChat", 857135533, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchPublicChats", -1467609397, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchPublicMessagesByTag", 630680746, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchPublicPosts", 618133347, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchPublicStoriesByLocation", 1596709256, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchPublicStoriesByTag", 1778102602, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchPublicStoriesByVenue", -686136790, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchQuote", 1751384351, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchRecentlyFoundChats", -1323794817, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchSavedMessages", -1969512554, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchSecretMessages", -852865892, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchStickerSet", 1676592898, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchStickerSets", 262801004, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchStickers", -1856294754, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchStringsByPrefix", -2023251463, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchTextCompositionStyle", -704463202, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchUserByPhoneNumber", -343757368, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"searchUserByToken", -666766282, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"searchWebApp", -1241740747, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sellGift", -298298375, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendAuthenticationFirebaseSms", 364994111, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendBotStartMessage", -1435877650, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendBusinessMessage", 159888387, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendBusinessMessageAlbum", 788608366, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendCallDebugInformation", -1671879106, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"sendCallLog", -608809175, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendCallRating", -158354447, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"sendCallSignalingData", 1412280732, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendChatAction", -1586808788, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendCustomRequest", 285045153, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"sendEmailAddressVerificationCode", -221621379, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendGift", -1199356118, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendGiftPurchaseOffer", 917878931, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendGroupCallMessage", 2133590097, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendInlineQueryResultMessage", -1445935970, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendMessage", 964116012, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendMessageAlbum", -1488607732, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendMessageViewMetrics", 698012087, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendPassportAuthorizationForm", 652160701, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"sendPaymentForm", -965855094, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendPhoneNumberCode", 1084112144, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendPhoneNumberFirebaseSms", 261910660, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendQuickReplyShortcutMessages", 232068765, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendResoldGift", -1427446834, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"sendRichMessageDraft", -1509401116, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendTextMessageDraft", 2121571326, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sendWebAppCustomRequest", 922705352, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"sendWebAppData", -1423978996, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setAccentColor", 1669974841, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setAccountTtl", 701389032, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setAlarm", -873497067, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setApplicationVerificationToken", 927248261, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setArchiveChatListSettings", -884650998, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setAuthenticationEmailAddress", 1773323522, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setAuthenticationPhoneNumber", 868276259, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setAuthenticationPremiumPurchaseTransaction", 2014147806, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setAutoDownloadSettings", -353671948, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setAutosaveSettings", 6846656, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBio", -1619582124, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBirthdate", 1319755160, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBotInfoDescription", 693574984, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBotInfoShortDescription", 982956771, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBotName", -761922959, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBotProfilePhoto", -1115272346, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBotUpdatesStatus", -1154926191, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessAccountBio", -1698538041, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessAccountGiftSettings", 1757763090, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setBusinessAccountName", 999582546, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessAccountProfilePhoto", 1174440149, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessAccountUsername", -1520126367, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessAwayMessageSettings", 1232357484, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessConnectedBot", -1393459472, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessGreetingMessageSettings", -873120707, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessLocation", -344717547, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessMessageIsPinned", -15403536, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setBusinessOpeningHours", -462379918, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setBusinessStartPage", -1628616290, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setChatAccentColor", 882857930, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatActiveStoriesList", -521970415, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatAffiliateProgram", 14680631, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatAvailableReactions", 267075078, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatBackground", 246727678, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setChatClientData", -827119811, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatDescription", 1957213277, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"setChatDirectMessagesGroup", 1633150115, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setChatDiscussionGroup", -918801736, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatDraftMessage", -555614927, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatEmojiStatus", 1434982674, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatLocation", -767091286, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatMemberStatus", 81794847, RawPrincipal::User, AdmissionTier::Destructive, "chat_member_target", false, false, true},
+    RawPolicyDescriptor{"setChatMemberTag", 937859366, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatMessageAutoDeleteTime", -1505643265, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"setChatMessageSender", -1421513858, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatNotificationSettings", 777199614, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatPaidMessageStarCount", -1187053289, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setChatPermissions", 2138507006, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatPhoto", -377778941, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatPinnedStories", -669062355, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatProfileAccentColor", 1109896826, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setChatSlowModeDelay", -540350914, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setChatTheme", 1474791506, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setChatTitle", 164282047, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"setCloseFriends", -1908013258, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setCommands", -907165606, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setCustomEmojiStickerSetThumbnail", -1122836246, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setCustomLanguagePack", -296742819, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setCustomLanguagePackString", 1316365592, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setDatabaseEncryptionKey", -1204599371, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setDefaultBackground", -1982748511, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setDefaultChannelAdministratorRights", -234004967, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setDefaultGroupAdministratorRights", 1700231016, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setDefaultMessageAutoDeleteTime", -1772301460, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setDefaultReactionType", 1694730813, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setDirectMessagesChatTopicIsMarkedAsUnread", 1569655059, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setEmojiStatus", -1829224867, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setFileGenerationProgress", 1836403518, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setForumTopicNotificationSettings", -1989500300, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setGameScore", 2127359430, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setGiftCollectionName", 1108355593, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setGiftResalePrice", 373916170, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setGiftSettings", -519330046, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setGroupCallPaidMessageStarCount", -1764341527, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setGroupCallParticipantIsSpeaking", -1019676164, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setGroupCallParticipantVolumeLevel", -1753769944, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setInactiveSessionTtl", 1570548048, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setInlineGameScore", -948871797, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setLiveStoryMessageSender", -1855297410, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setLogStream", -1364199535, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setLogTagVerbosityLevel", -2095589738, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setLogVerbosityLevel", -303429678, RawPrincipal::Both, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setLoginEmailAddress", 935019476, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setMainProfileTab", 1663496423, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setManagedBotAccessSettings", -662104110, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setMenuButton", -1269841599, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setMessageFactCheck", -4309752, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setMessageReactions", -372524900, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setMessageSenderBlockList", -1987355503, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setMessageSenderBotVerification", -1262364086, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setName", 1711693584, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setNetworkType", -701635234, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setNewChatPrivacySettings", 1774139215, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setOption", 2114670322, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setPaidMessageReactionType", -829934930, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setPassportElement", 2068173212, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setPassportElementErrors", -2056754881, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setPassword", -1193589027, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setPersonalChat", -1068782668, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setPinnedChats", -695640000, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setPinnedForumTopics", -1871668497, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setPinnedGifts", 1613526306, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setPinnedSavedMessagesTopics", -194818924, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setPollAnswer", -1399388792, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setProfileAccentColor", -1986281112, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setProfileAudioPosition", 1209963614, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setProfilePhoto", -2048260627, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setQuickReplyShortcutName", 186709105, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setReactionNotificationSettings", 1186124949, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setReadDatePrivacySettings", 493913782, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setRecoveryEmailAddress", -1981836385, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setSavedMessagesTagLabel", -1338323696, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setScopeNotificationSettings", -2049984966, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setStickerEmojis", -638843855, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setStickerKeywords", 137223565, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setStickerMaskPosition", 1202280912, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setStickerPositionInSet", 2075281185, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setStickerSetThumbnail", 1677617458, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setStickerSetTitle", 1693004706, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setStoryAlbumName", -1143129794, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setStoryPrivacySettings", -655801550, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setStoryReaction", 250731529, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setSupergroupCustomEmojiStickerSet", 1328894639, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setSupergroupMainProfileTab", 1314899548, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setSupergroupStickerSet", -2056344215, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setSupergroupUnrestrictBoostCount", 969814179, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setSupergroupUsername", 1346325252, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setTdlibParameters", -775883218, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setUpgradedGiftColors", -966832402, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"setUserEmojiStatus", -451519541, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setUserNote", -351487655, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setUserPersonalProfilePhoto", 464136438, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setUserPrivacySettingRules", -473812741, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setUserSupportInfo", -2088986621, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setUsername", 439901214, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"setVideoChatDefaultParticipant", -240749901, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"setVideoChatTitle", 1915482994, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"shareChatWithBot", -917243698, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"sharePhoneNumber", 1097130069, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"shareUsersWithBot", 1154320179, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"startGroupCallRecording", 1757774971, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"startGroupCallScreenSharing", -884068051, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"startLiveStory", 1253467958, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"startScheduledVideoChat", -1300829822, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"stopBusinessPoll", -1142218400, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"stopPoll", 1659374253, RawPrincipal::Bot, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"suggestUserBirthdate", 39506613, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"suggestUserProfilePhoto", -1788742557, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"summarizeMessage", -1464885562, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"synchronizeLanguagePack", -2065307858, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"terminateAllOtherSessions", 1874485523, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"terminateSession", -407385812, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"testCallBytes", -736011607, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"testCallEmpty", -627291626, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testCallString", -1732818385, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testCallVectorInt", -2137277793, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testCallVectorIntObject", 1825428218, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testCallVectorString", -408600900, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testCallVectorStringObject", 1527666429, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testGetDifference", 1747084069, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testNetwork", -1343998901, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testProxy", 2057109116, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"testReturnError", 455179506, RawPrincipal::Both, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testSquareInt", -60135024, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"testUseUpdate", 717094686, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"toggleAllDownloadsArePaused", 1251512322, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleBotCanManageEmojiStatus", 622495770, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleBotIsAddedToAttachmentMenu", -1906712934, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleBotUsernameIsActive", 2036569097, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleBusinessConnectedBotChatIsPaused", 1328957509, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"toggleChatDefaultDisableNotification", 314794002, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"toggleChatFolderTags", -2092209084, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleChatGiftNotifications", -2069429154, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleChatHasProtectedContent", 975231309, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleChatIsMarkedAsUnread", -986129697, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleChatIsPinned", -1485429186, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleChatIsTranslatable", -1812345889, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleChatViewAsTopics", 724009948, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleDirectMessagesChatTopicCanSendUnpaidMessages", -335898703, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleDownloadIsPaused", -947493099, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleForumTopicIsClosed", 982153376, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleForumTopicIsPinned", 1474651795, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleGeneralForumTopicIsHidden", 1595741256, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"toggleGiftIsSaved", 693198065, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleGroupCallAreMessagesAllowed", -1535668758, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleGroupCallIsMyVideoEnabled", -1624289030, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleGroupCallIsMyVideoPaused", -478875239, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleGroupCallParticipantIsHandRaised", -1896127519, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleGroupCallParticipantIsMuted", -1308093433, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleGroupCallScreenSharingIsPaused", -1602530464, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleHasSponsoredMessagesEnabled", 1963285740, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleSavedMessagesTopicIsPinned", -1588378164, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleSessionCanAcceptCalls", 1819027208, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSessionCanAcceptSecretChats", 1000843390, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"toggleStoryIsPostedToChatPage", -2141806228, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"toggleSupergroupCanHaveSponsoredMessages", -1098204302, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupHasAggressiveAntiSpamEnabled", 1748956943, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupHasAutomaticTranslation", -184993048, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupHasHiddenMembers", -1537892918, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupIsAllHistoryAvailable", 1155110478, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupIsBroadcastGroup", 884089365, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupIsForum", 371064337, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupJoinByRequest", 957605043, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupJoinToSendMessages", -182022642, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupSignMessages", 572268491, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleSupergroupUsernameIsActive", -1500811777, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleUsernameIsActive", 1244098019, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleVideoChatEnabledStartNotification", 1851489086, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"toggleVideoChatMuteNewParticipants", 987023756, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"transferBusinessAccountStars", 732562464, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"transferChatOwnership", 2006977043, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"transferGift", -1167293126, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"translateMessageText", -1995371403, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"translateText", -617975379, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"unpinAllChatMessages", -1437805385, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"unpinAllDirectMessagesChatTopicMessages", 89671100, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"unpinAllForumTopicMessages", -1113340771, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"unpinChatMessage", 2065448670, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"upgradeBasicGroupChatToSupergroupChat", 300488122, RawPrincipal::User, AdmissionTier::Denied, "deny", false, true, true},
+    RawPolicyDescriptor{"upgradeGift", -1782136103, RawPrincipal::Bot, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"uploadStickerFile", 647385283, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"validateOrderInfo", -1248305201, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"viewMessages", 960236656, RawPrincipal::User, AdmissionTier::Write, "chat_targets", false, false, true},
+    RawPolicyDescriptor{"viewPremiumFeature", 192950706, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+    RawPolicyDescriptor{"viewSponsoredChat", 1722644778, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"viewTrendingStickerSets", -952416520, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"viewVideoMessageAdvertisement", -808563006, RawPrincipal::User, AdmissionTier::Denied, "deny", true, false, true},
+    RawPolicyDescriptor{"writeGeneratedFilePart", 214474389, RawPrincipal::User, AdmissionTier::Denied, "deny", true, true, true},
+};

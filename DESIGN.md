@@ -487,21 +487,36 @@ directly to the actual owned `td_api::Function`. The stored native object ID,
 function row and canonical bytes remain one holder for classification, hashing
 and eventual move-only dispatch. Native TD responses are revalidated against
 the same graph and the holder's declared result base (with `td_api::error` as
-the sole alternate) before canonical hashing. Policy is an exact name
-bijection and records principal (`user|bot|both`), admission
-(`read|write|destructive|denied`), body validator (`none|deny|<compiled typed
-symbol>`), request and response sensitivity, review decision and reason. The
-initial dormant bootstrap is explicitly `activation_ready:false`: every row is
-denied with `body_validator:"deny"` and `reviewed:false`. This is drift and
-deny-fallback evidence, not a completed Option-B row review. Dormant validation
-fails on pin/source/count/bijection/digest mismatch; the separate activation
-validator additionally requires every row reviewed with concrete row reasoning
-and every named compiled symbol present. The generated symbol set is an exact
-sorted unique table of `{name,nonnull typed_validator_fn}` descriptors: each
-entry takes the address of its compiled validator, so a missing implementation
-is a compile failure. Runtime lookup uses that same table with no default arm;
-an unknown symbol or null callable denies. Unknown functions and unknown table
-versions are denied.
+the sole alternate) before canonical hashing. Policy is an exact
+name/constructor/result/fields-digest bijection and records principal
+(`user|bot|both`) with pinned TL/Requests evidence, admission
+(`read|write|destructive|denied`), body validator, exact direct/nested target
+fields, request/response sensitivity, evidence category, review decision and
+row rationale.
+
+The committed dormant candidate reviews all 1001 rows: exactly 32 are Read, 19
+Write, 6 Destructive and 944 denied whole for v1. Eight admitted rows are
+account-independent synchronous typed transforms. Of the other 49, 45 have one
+direct `chat_id:int53`; three also have a required `member_id:MessageSender` and
+one has an optional `sender_id:MessageSender`. The generated typed planner
+collects the direct chat plus every `messageSenderChat.chat_id`; a
+`messageSenderUser` adds no chat target, null is accepted only for the optional
+sender, and an unknown/null required selector denies. Every collected target
+requires a generation-bound curated non-secret `getChat` preflight. The
+principal distribution is 893 user, 80 bot and 28 both; `both` is used only for
+functions present in the pinned account-independent synchronous dispatcher.
+
+The candidate remains `activation_ready:false` with the sole exact blocker
+`independent_policy_acceptance`; `unfinished_functions` is empty. Row reasoning
+and compiled mechanics are complete, but raw is not publicly accepted or
+reachable. Dormant validation fails on
+pin/source/count/bijection/digest/evidence mismatch. Activation additionally
+requires the blocker to be removed and `activation_ready:true` in the
+independently accepted asset. The generated symbol table contains exact sorted
+unique `{name,nonnull typed_validator_fn,nonnull typed_preflight_fn}` rows and
+the generated 1001-row runtime policy table references those same symbols.
+Missing implementations are compile failures; unknown functions, symbols,
+constructors and table versions deny.
 
 A typed body validator returns exactly one closed decision:
 `Deny|Preserve|RaiseWrite|RaiseDestructive`. `deny` returns `Deny`; `none`
@@ -517,11 +532,15 @@ missing/null callable, or unknown/unmatched nested variant is `Deny`. Functions
 that change
 authorization, TD parameters, lifecycle or logging, accept authentication,
 credential, payment or proxy secrets, or can expose secret-chat/private data
-without preprovable provenance are denied whole. Generic chat selectors need
-an exact compiled validator that walks every direct and nested selector and
-uses curated same-generation `getChat` preflights; Secret, Unknown, error or
-stale generation denies. Raw `getChat` itself and file-id-only `downloadFile`
-are denied because executing them cannot first prove non-secret provenance.
+without preprovable provenance are denied whole. Admitted chat selectors use a
+generated exact Function-ID switch that extracts the direct `chat_id` plus the
+known required/optional `MessageSender` variants into a fixed-capacity preflight
+plan. Every admitted nested variant is enumerated; unexpected/null-required
+selectors deny. Other multiple, indirect or unknown-provenance selectors are
+denied whole. Curated same-generation `getChat` preflights reject Secret,
+Unknown, errors and stale generations. Raw `getChat` itself and file-id-only
+`downloadFile` are denied because executing them cannot first prove non-secret
+provenance.
 Curated download is a separate M4 path. No function is admitted on its name
 alone.
 
@@ -7056,8 +7075,17 @@ the registry, checked in as `completions/tgcli.bash`, `completions/_tgcli` and
 `completions/tgcli.fish`, and must be byte-identical across generator output,
 runtime output and packaged files. Assets use LF only, contain no timestamp,
 version, cwd or environment-derived byte, have exactly one final LF, and never
-execute tgcli. Raw completion suggests literal `-` and only its accepted flags;
-`--full`, `--bot-token`, raw cursor and raw idempotency are absent.
+execute tgcli. Assets contain active registry rows only, so dormant raw is
+absent. Atomic raw activation will make its row active and regenerate the
+assets to suggest literal `-` and only its accepted flags; `--full`,
+`--bot-token`, raw cursor and raw idempotency remain absent.
+
+Completion rejects `--account`, `--json`, `--full`, `--allow-write`, `--yes`,
+`--dry-run`, `--timeout`, `--cursor` and `--idempotency-key` with exit 2 before
+state access. `--verbose`/`-v`, `--no-daemon`, `--no-color` and nonempty
+`NO_COLOR` are accepted byte-preserving no-ops. Missing, unknown or extra shell
+arguments exit 2; success writes the exact asset to stdout and leaves stderr
+empty.
 
 Top-level final rows are `account`, `chat`, `chats`, `completion`, `contact`,
 `daemon`, `doctor`, `download`, `fetch`, `folder`, `history`, `listen`, `login`,

@@ -51,7 +51,7 @@ elif (( CURRENT == 3 )); then
       account) candidates=('add' 'list' 'remove' 'show' 'use') ;;
       chat) candidates=('archive' 'ban' 'demote' 'info' 'invite-link' 'join' 'kick' 'leave' 'mark-read' 'members' 'mute' 'pin' 'promote' 'set-description' 'set-permissions' 'set-photo' 'set-title' 'unarchive' 'unban' 'unmute' 'unpin') ;;
       chats) candidates=('--account' '--json' '--timeout' '--cursor' '--verbose' '-v' '--no-daemon' '--no-color' '--folder' '--archived' '--unread' '-n') ;;
-      completion) candidates=('bash' 'zsh' 'fish' '--json' '--verbose' '-v' '--no-daemon' '--no-color') ;;
+      completion) candidates=('bash' 'zsh' 'fish' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       contact) candidates=('add' 'block' 'list' 'remove' 'search' 'unblock') ;;
       daemon) candidates=('restart' 'run' 'status' 'stop') ;;
       doctor) candidates=('--json' '--verbose' '-v' '--no-daemon' '--no-color') ;;
@@ -107,7 +107,7 @@ else
       chat\ unmute) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       chat\ unpin) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       chats) candidates=('--account' '--json' '--timeout' '--cursor' '--verbose' '-v' '--no-daemon' '--no-color' '--folder' '--archived' '--unread' '-n') ;;
-      completion) candidates=('bash' 'zsh' 'fish' '--json' '--verbose' '-v' '--no-daemon' '--no-color') ;;
+      completion) candidates=('bash' 'zsh' 'fish' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       contact\ add) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       contact\ block) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       contact\ list) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;

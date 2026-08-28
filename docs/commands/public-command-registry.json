@@ -8,6 +8,7 @@
   "option_sets": {
     "account_local": ["--json", "--verbose", "-v", "--no-color"],
     "auth": ["--account", "--json", "--timeout", "--verbose", "-v", "--no-daemon", "--no-color"],
+    "completion_local": ["--verbose", "-v", "--no-daemon", "--no-color"],
     "destructive": ["--account", "--json", "--allow-write", "--dry-run", "--yes", "--timeout", "--idempotency-key", "--verbose", "-v", "--no-daemon", "--no-color"],
     "destructive_unkeyed": ["--account", "--json", "--allow-write", "--dry-run", "--yes", "--timeout", "--verbose", "-v", "--no-daemon", "--no-color"],
     "meta": ["--json", "--verbose", "-v", "--no-daemon", "--no-color"],
@@ -57,7 +58,7 @@
       ]
     },
     {"name": "chats", "activation": "active", "option_set": "read_cursor", "options": ["--folder", "--archived", "--unread", "-n"], "positionals": []},
-    {"name": "completion", "activation": "future", "option_set": "meta", "options": [], "positionals": ["shell"], "completion_literals": ["bash", "zsh", "fish"]},
+    {"name": "completion", "activation": "active", "option_set": "completion_local", "options": [], "positionals": ["shell"], "completion_literals": ["bash", "zsh", "fish"]},
     {
       "name": "contact",
       "activation": "active",

@@ -9,6 +9,7 @@ tgcli read @somechannel -n 50
 tgcli send @user "hi there"
 tgcli search "release notes" --global --json
 tgcli wait-for --chat @buildbot --regex 'deploy (succeeded|failed)' --timeout 600
+tgcli completion bash > ~/.local/share/bash-completion/completions/tgcli
 ```
 
 **Status: pre-release development.** [DESIGN.md](DESIGN.md) defines the target
@@ -30,8 +31,10 @@ implemented and what remains.
   meaningful exit codes, `--dry-run`, idempotency keys.
 - **Streaming primitives** — `listen` (NDJSON updates) and `wait-for`
   (block until a matching message arrives).
-- **Full API reach** — `tgcli raw '<td_api JSON>'` escape hatch before a
-  dedicated subcommand exists.
+- **Reviewed raw subset (planned)** — selected-B `tgcli raw -` is stdin-only;
+  its dormant pinned candidate admits 57 typed functions and denies the other
+  944. Raw remains unreachable until independent policy acceptance and atomic
+  parser/handler/catalog activation.
 - **Daemon-first** — a per-account daemon (auto-spawned, zero setup) owns the
   tdlib client: ~instant CLI startup, safe concurrent commands, and a local
   DB that stays continuously warm.

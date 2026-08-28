@@ -2,6 +2,7 @@
 
 #include "common/secure_wipe.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -60,10 +61,28 @@ struct Digest {
 
 enum class BodyPolicyDecision { Deny, Preserve, RaiseWrite, RaiseDestructive };
 enum class AdmissionTier { Denied, Read, Write, Destructive };
+enum class RawPrincipal { User, Bot, Both };
+
+struct RawPreflightPlan {
+    static constexpr std::size_t kMaximumChatTargets = 8;
+    std::array<std::int64_t, kMaximumChatTargets> non_secret_chat_ids{};
+    std::size_t non_secret_chat_count = 0;
+};
 
 struct BodyPolicyOutcome {
     BodyPolicyDecision decision = BodyPolicyDecision::Deny;
     std::optional<Tier> effective_tier;
+    RawPreflightPlan preflight;
+};
+
+struct RawPolicyMetadata {
+    std::string_view name;
+    RawPrincipal principal = RawPrincipal::Both;
+    AdmissionTier admission = AdmissionTier::Denied;
+    std::string_view body_validator;
+    bool sensitive_input = true;
+    bool sensitive_output = true;
+    bool reviewed = false;
 };
 
 class TypedFunction final {
@@ -103,8 +122,9 @@ response_digest(const TypedFunction& function, td::tl_object_ptr<td::td_api::Obj
 [[nodiscard]] BodyPolicyOutcome apply_body_policy_decision(AdmissionTier static_tier,
                                                            BodyPolicyDecision decision) noexcept;
 
-[[nodiscard]] BodyPolicyOutcome evaluate_body_policy(std::string_view validator,
-                                                     AdmissionTier static_tier,
-                                                     const TypedFunction& function) noexcept;
+[[nodiscard]] std::optional<RawPolicyMetadata>
+policy_metadata(const TypedFunction& function) noexcept;
+
+[[nodiscard]] BodyPolicyOutcome evaluate_body_policy(const TypedFunction& function) noexcept;
 
 } // namespace tgcli::daemon::raw

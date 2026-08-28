@@ -47,7 +47,8 @@ class RawPolicyTest(unittest.TestCase):
             REPOSITORY / "src" / "daemon" / "raw_td_schema.generated.inc"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'RawBodyValidatorDescriptor{"deny", &validate_raw_body_deny}', generated
+            'RawBodyValidatorDescriptor{"deny", &validate_raw_body_deny, &plan_raw_body_none}',
+            generated,
         )
         self.assertNotIn("kGeneratedRawBodyValidatorSymbols", generated)
 
@@ -60,19 +61,22 @@ class RawPolicyTest(unittest.TestCase):
         for index, validator in enumerate(("none", "raise_write", "raise_destructive")):
             policy["functions"][index]["body_validator"] = validator
         generated_fixture = raw_policy.generated_graph_include(graph, policy).decode()
-        for symbol, callable_name in raw_policy.COMPILED_VALIDATORS.items():
+        for symbol, (
+            callable_name,
+            planner_name,
+        ) in raw_policy.COMPILED_VALIDATORS.items():
             self.assertEqual(
                 generated_fixture.count(
-                    f'RawBodyValidatorDescriptor{{"{symbol}", &{callable_name}}}'
+                    f'RawBodyValidatorDescriptor{{"{symbol}", &{callable_name}, &{planner_name}}}'
                 ),
                 1,
             )
         self.assertEqual(
-            len(set(raw_policy.COMPILED_VALIDATORS.values())),
+            len({value[0] for value in raw_policy.COMPILED_VALIDATORS.values()}),
             len(raw_policy.COMPILED_VALIDATORS),
         )
 
-    def test_dormant_seed_denies_every_unreviewed_function(self) -> None:
+    def test_dormant_candidate_is_exhaustive_reviewed_and_not_accepted(self) -> None:
         policy = raw_policy.load_json(
             REPOSITORY
             / "docs"
@@ -80,13 +84,43 @@ class RawPolicyTest(unittest.TestCase):
             / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
         )
         self.assertFalse(policy["activation_ready"])
+        self.assertEqual(
+            policy["activation_blockers"], ["independent_policy_acceptance"]
+        )
+        self.assertEqual(policy["unfinished_functions"], [])
         self.assertEqual(policy["function_count"], 1001)
+        admission = {}
+        principals = {}
+        validators = {}
         for row in policy["functions"]:
-            self.assertFalse(row["reviewed"])
-            self.assertEqual(row["admission"], "denied")
-            self.assertEqual(row["body_validator"], "deny")
-            self.assertTrue(row["sensitive_input"])
-            self.assertTrue(row["sensitive_output"])
+            self.assertTrue(row["reviewed"])
+            self.assertTrue(row["review_reason"].startswith("reviewed:td_api.tl:"))
+            admission[row["admission"]] = admission.get(row["admission"], 0) + 1
+            principals[row["principal"]] = principals.get(row["principal"], 0) + 1
+            validators[row["body_validator"]] = (
+                validators.get(row["body_validator"], 0) + 1
+            )
+            if row["principal"] == "both":
+                self.assertTrue(
+                    row["principal_evidence"].startswith("SynchronousRequests.cpp:")
+                )
+            if row["admission"] != "denied":
+                self.assertFalse(row["sensitive_input"])
+                self.assertFalse(row["sensitive_output"])
+        self.assertEqual(
+            admission, {"denied": 944, "destructive": 6, "read": 32, "write": 19}
+        )
+        self.assertEqual(principals, {"bot": 80, "both": 28, "user": 893})
+        self.assertEqual(
+            validators,
+            {
+                "chat_member_target": 3,
+                "chat_optional_sender_target": 1,
+                "chat_targets": 45,
+                "deny": 944,
+                "none": 8,
+            },
+        )
 
     def test_activation_validator_rejects_the_dormant_seed(self) -> None:
         with self.assertRaisesRegex(raw_policy.PolicyError, "not activation-ready"):
@@ -99,6 +133,7 @@ class RawPolicyTest(unittest.TestCase):
             shutil.copytree(REPOSITORY / "docs" / "raw", destination)
             policy_file = destination / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
             policy = json.loads(policy_file.read_text(encoding="utf-8"))
+            policy["functions"][0]["reviewed"] = False
             policy["functions"][0]["admission"] = "read"
             policy["policy_sha256"] = raw_policy.rows_digest(policy["functions"])
             policy_file.write_bytes(raw_policy.json_bytes(policy))
@@ -132,7 +167,7 @@ class RawPolicyTest(unittest.TestCase):
             / "raw"
             / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
         )
-        policy["functions"][0]["reviewed"] = True
+        policy["functions"][0]["review_reason"] = "reviewed:"
         policy["policy_sha256"] = raw_policy.rows_digest(policy["functions"])
         with self.assertRaisesRegex(raw_policy.PolicyError, "lacks concrete reasoning"):
             raw_policy.validate_policy(inventory, policy)
@@ -142,6 +177,7 @@ class RawPolicyTest(unittest.TestCase):
                 "review_reason": "reviewed:fixture evidence",
                 "admission": "read",
                 "body_validator": "none",
+                "target_fields": [],
             }
         )
         policy["policy_sha256"] = raw_policy.rows_digest(policy["functions"])
@@ -150,12 +186,104 @@ class RawPolicyTest(unittest.TestCase):
         ):
             raw_policy.validate_policy(inventory, policy)
 
+    def test_security_critical_rows_have_exact_frozen_policy(self) -> None:
+        inventory = raw_policy.load_json(
+            REPOSITORY
+            / "docs"
+            / "raw"
+            / f"td-functions.{raw_policy.PINNED_TDLIB_SHA}.json"
+        )
+        policy = raw_policy.load_json(
+            REPOSITORY
+            / "docs"
+            / "raw"
+            / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
+        )
+        rows = {row["name"]: row for row in policy["functions"]}
+        for name, category in {
+            "checkAuthenticationPassword": "denied_auth_or_credential",
+            "createSecretChat": "denied_secret_chat_surface",
+            "downloadFile": "denied_file_or_bytes_provenance",
+            "getChat": "denied_unscoped_chat_or_message_surface",
+            "getMe": "denied_identity_or_private_account_data",
+            "getPaymentForm": "denied_payment_or_store",
+            "setLogStream": "denied_logging_network_or_proxy",
+        }.items():
+            self.assertEqual(rows[name]["admission"], "denied")
+            self.assertEqual(rows[name]["body_validator"], "deny")
+            self.assertEqual(rows[name]["evidence_category"], category)
+
+        for name, (admission, validator, target_fields) in {
+            "deleteMessages": ("destructive", "chat_targets", ["chat_id"]),
+            "setChatMemberStatus": (
+                "destructive",
+                "chat_member_target",
+                ["chat_id", "member_id.chat_id|required"],
+            ),
+            "viewMessages": ("write", "chat_targets", ["chat_id"]),
+            "getMessage": ("read", "chat_targets", ["chat_id"]),
+        }.items():
+            self.assertEqual(rows[name]["admission"], admission)
+            self.assertEqual(rows[name]["body_validator"], validator)
+            self.assertEqual(rows[name]["target_fields"], target_fields)
+            self.assertFalse(rows[name]["sensitive_input"])
+            self.assertFalse(rows[name]["sensitive_output"])
+
         policy["functions"][0]["body_validator"] = "missing_callable"
         policy["policy_sha256"] = raw_policy.rows_digest(policy["functions"])
         with self.assertRaisesRegex(
             raw_policy.PolicyError, "compiled policy validator missing"
         ):
             raw_policy.validate_policy(inventory, policy)
+
+    def test_admitted_message_senders_have_exhaustive_typed_preflight(self) -> None:
+        graph = raw_policy.load_json(
+            REPOSITORY / "docs" / "raw" / f"td-types.{raw_policy.PINNED_TDLIB_SHA}.json"
+        )
+        policy = raw_policy.load_json(
+            REPOSITORY
+            / "docs"
+            / "raw"
+            / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
+        )
+        graph_functions = {
+            row["name"]: row
+            for row in graph["constructors"]
+            if row["kind"] == "function"
+        }
+        expected = {
+            "banChatMember": (
+                "chat_member_target",
+                ["chat_id", "member_id.chat_id|required"],
+            ),
+            "getChatMember": (
+                "chat_member_target",
+                ["chat_id", "member_id.chat_id|required"],
+            ),
+            "searchChatMessages": (
+                "chat_optional_sender_target",
+                ["chat_id", "sender_id.chat_id|optional"],
+            ),
+            "setChatMemberStatus": (
+                "chat_member_target",
+                ["chat_id", "member_id.chat_id|required"],
+            ),
+        }
+        found = {}
+        for row in policy["functions"]:
+            if row["admission"] == "denied":
+                continue
+            sender_fields = [
+                field["name"]
+                for field in graph_functions[row["name"]]["fields"]
+                if field["type"] == "MessageSender"
+            ]
+            if sender_fields:
+                found[row["name"]] = (
+                    row["body_validator"],
+                    row["target_fields"],
+                )
+        self.assertEqual(found, expected)
 
 
 if __name__ == "__main__":

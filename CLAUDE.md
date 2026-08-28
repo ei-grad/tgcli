@@ -124,9 +124,13 @@ authoritative implementation status and roadmap (work milestones top-down).
   descriptors bind each name to one nonnull compiled decision callable;
   runtime lookup uses the same fail-closed table and derives a typed effective
   tier from the static row tier without permitting a decrease. The dormant
-  seed is all-denied and unreviewed; an activation check fails until every row
-  has concrete review evidence. A body validator can only retain/raise tier or
-  deny, and unknown/null/unmatched nested variants deny.
+  candidate has explicit evidence for all 1001 rows and admits only 57 typed
+  functions (8 local transforms, 45 direct-chat-target functions, 3 with an
+  additional required member sender, and 1 with an optional sender); the other
+  944 are frozen whole-function denies. Generated typed preflight planners
+  collect every direct and nested chat selector. It remains activation-blocked
+  on independent policy acceptance. A body validator can only retain/raise
+  tier or deny, and unknown/null/unmatched nested variants deny.
 - Raw request/response bodies, TD messages, credentials and curated preflight
   output never enter audit, errors, diagnostics or logs. Request/response
   staging is wiped on every terminal path. Dormant hash-only audit-v3 schemas,

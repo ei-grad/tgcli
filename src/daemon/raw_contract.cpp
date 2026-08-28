@@ -47,10 +47,23 @@ struct RawTdConstructorSpec {
 };
 
 using RawBodyValidator = BodyPolicyDecision (*)(const td::td_api::Function&) noexcept;
+using RawBodyPlanner = bool (*)(const td::td_api::Function&, RawPreflightPlan&) noexcept;
 
 struct RawBodyValidatorDescriptor {
     std::string_view name;
     RawBodyValidator validate = nullptr;
+    RawBodyPlanner plan = nullptr;
+};
+
+struct RawPolicyDescriptor {
+    std::string_view name;
+    std::int32_t constructor_id = 0;
+    RawPrincipal principal = RawPrincipal::Both;
+    AdmissionTier admission = AdmissionTier::Denied;
+    std::string_view body_validator;
+    bool sensitive_input = true;
+    bool sensitive_output = true;
+    bool reviewed = false;
 };
 
 constexpr BodyPolicyDecision validate_raw_body_deny(const td::td_api::Function& function) noexcept {
@@ -76,13 +89,70 @@ validate_raw_body_raise_destructive(const td::td_api::Function& function) noexce
     return BodyPolicyDecision::RaiseDestructive;
 }
 
+[[maybe_unused]] constexpr BodyPolicyDecision
+validate_raw_body_chat_targets(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return BodyPolicyDecision::Preserve;
+}
+
+[[maybe_unused]] constexpr BodyPolicyDecision
+validate_raw_body_chat_member_target(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return BodyPolicyDecision::Preserve;
+}
+
+[[maybe_unused]] constexpr BodyPolicyDecision
+validate_raw_body_chat_optional_sender_target(const td::td_api::Function& function) noexcept {
+    static_cast<void>(function);
+    return BodyPolicyDecision::Preserve;
+}
+
+bool append_raw_chat_target(std::int64_t chat_id, RawPreflightPlan& plan) noexcept {
+    if (chat_id == 0 || chat_id < -kMaximumInt53 || chat_id > kMaximumInt53) {
+        return false;
+    }
+    const auto targets = std::span(plan.non_secret_chat_ids).first(plan.non_secret_chat_count);
+    if (std::ranges::find(targets, chat_id) != targets.end()) {
+        return true;
+    }
+    if (plan.non_secret_chat_count == plan.non_secret_chat_ids.size()) {
+        return false;
+    }
+    plan.non_secret_chat_ids.at(plan.non_secret_chat_count++) = chat_id;
+    return true;
+}
+
+bool append_raw_message_sender_target(
+    const td::td_api::object_ptr<td::td_api::MessageSender>& sender, RawPreflightPlan& plan,
+    bool required) noexcept {
+    if (sender == nullptr) {
+        return !required;
+    }
+    switch (sender->get_id()) {
+    case td::td_api::messageSenderUser::ID:
+        return true;
+    case td::td_api::messageSenderChat::ID:
+        return append_raw_chat_target(
+            static_cast<const td::td_api::messageSenderChat&>(*sender).chat_id_, plan);
+    default:
+        return false;
+    }
+}
+
+constexpr bool plan_raw_body_none(const td::td_api::Function& function,
+                                  RawPreflightPlan& plan) noexcept {
+    static_cast<void>(function);
+    static_cast<void>(plan);
+    return true;
+}
+
 #include "daemon/raw_td_schema.generated.inc"
 
 consteval bool valid_body_validator_table() {
     std::string_view previous;
     for (const auto& descriptor : kRawBodyValidators) {
         if (descriptor.name.empty() || descriptor.validate == nullptr ||
-            (!previous.empty() && previous >= descriptor.name)) {
+            descriptor.plan == nullptr || (!previous.empty() && previous >= descriptor.name)) {
             return false;
         }
         previous = descriptor.name;
@@ -91,6 +161,25 @@ consteval bool valid_body_validator_table() {
 }
 
 static_assert(valid_body_validator_table());
+
+consteval bool valid_policy_table() {
+    std::string_view previous;
+    for (const auto& policy : kRawPolicies) {
+        if (policy.name.empty() || policy.constructor_id == 0 || policy.body_validator.empty() ||
+            (!previous.empty() && previous >= policy.name)) {
+            return false;
+        }
+        const auto* const validator = std::ranges::find_if(
+            kRawBodyValidators, [&](const auto& row) { return row.name == policy.body_validator; });
+        if (validator == kRawBodyValidators.end()) {
+            return false;
+        }
+        previous = policy.name;
+    }
+    return true;
+}
+
+static_assert(valid_policy_table());
 
 enum class ValueKind {
     Null,
@@ -459,6 +548,14 @@ const RawBodyValidatorDescriptor* body_validator_by_name(std::string_view name) 
     const auto* const row =
         std::ranges::lower_bound(kRawBodyValidators, name, {}, &RawBodyValidatorDescriptor::name);
     return row != kRawBodyValidators.end() && row->name == name ? &*row : nullptr;
+}
+
+const RawPolicyDescriptor* policy_by_function(std::string_view name, std::int32_t constructor_id) {
+    const auto* const row =
+        std::ranges::lower_bound(kRawPolicies, name, {}, &RawPolicyDescriptor::name);
+    return row != kRawPolicies.end() && row->name == name && row->constructor_id == constructor_id
+               ? &*row
+               : nullptr;
 }
 
 std::span<const RawTdFieldSpec> fields_of(const RawTdConstructorSpec& constructor) {
@@ -1078,25 +1175,49 @@ BodyPolicyOutcome apply_body_policy_decision(AdmissionTier static_tier,
         } else if (static_tier == AdmissionTier::Destructive) {
             effective_tier = Tier::Destructive;
         }
-        return {.decision = decision, .effective_tier = effective_tier};
+        return {.decision = decision, .effective_tier = effective_tier, .preflight = {}};
     }
     case BodyPolicyDecision::RaiseWrite:
         return {.decision = decision,
                 .effective_tier =
-                    static_tier == AdmissionTier::Destructive ? Tier::Destructive : Tier::Write};
+                    static_tier == AdmissionTier::Destructive ? Tier::Destructive : Tier::Write,
+                .preflight = {}};
     case BodyPolicyDecision::RaiseDestructive:
-        return {.decision = decision, .effective_tier = Tier::Destructive};
+        return {.decision = decision, .effective_tier = Tier::Destructive, .preflight = {}};
     }
     return {};
 }
 
-BodyPolicyOutcome evaluate_body_policy(std::string_view validator, AdmissionTier static_tier,
-                                       const TypedFunction& function) noexcept {
-    const auto* descriptor = body_validator_by_name(validator);
-    if (descriptor == nullptr || descriptor->validate == nullptr) {
+std::optional<RawPolicyMetadata> policy_metadata(const TypedFunction& function) noexcept {
+    const auto* policy = policy_by_function(function.name(), function.native().get_id());
+    if (policy == nullptr) {
+        return std::nullopt;
+    }
+    return RawPolicyMetadata{.name = policy->name,
+                             .principal = policy->principal,
+                             .admission = policy->admission,
+                             .body_validator = policy->body_validator,
+                             .sensitive_input = policy->sensitive_input,
+                             .sensitive_output = policy->sensitive_output,
+                             .reviewed = policy->reviewed};
+}
+
+BodyPolicyOutcome evaluate_body_policy(const TypedFunction& function) noexcept {
+    const auto* policy = policy_by_function(function.name(), function.native().get_id());
+    if (policy == nullptr || !policy->reviewed || policy->sensitive_input ||
+        policy->sensitive_output) {
         return {};
     }
-    return apply_body_policy_decision(static_tier, descriptor->validate(function.native()));
+    const auto* descriptor = body_validator_by_name(policy->body_validator);
+    if (descriptor == nullptr || descriptor->validate == nullptr || descriptor->plan == nullptr) {
+        return {};
+    }
+    auto outcome =
+        apply_body_policy_decision(policy->admission, descriptor->validate(function.native()));
+    if (!outcome.effective_tier || !descriptor->plan(function.native(), outcome.preflight)) {
+        return {};
+    }
+    return outcome;
 }
 
 std::variant<Digest, Failure> TypedFunction::request_digest(std::string_view tdlib_sha,

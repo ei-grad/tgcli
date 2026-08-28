@@ -1,4 +1,5 @@
 #include "cli/client.hpp"
+#include "cli/completion_assets.hpp"
 #include "cli/routing.hpp"
 #include "cli/schema_command.hpp"
 #include "common/exit_codes.hpp"
@@ -332,12 +333,52 @@ std::string_view schema_unsupported_option(const CLI::Option& account, const CLI
     return {};
 }
 
-std::optional<int> handle_client_local_or_reserved_command(
-    const std::vector<std::string>& command, const CLI::Option& account, const CLI::Option& full,
+std::string_view completion_unsupported_option(
+    const CLI::Option& account, const CLI::Option& json, const CLI::Option& full,
     const CLI::Option& allow_write, const CLI::Option& yes, const CLI::Option& dry_run,
-    const CLI::Option& timeout, double timeout_seconds, const CLI::Option& cursor,
-    const CLI::Option& idempotency_key, const std::vector<std::string>& schema_target,
+    const CLI::Option& timeout, const CLI::Option& cursor, const CLI::Option& idempotency_key) {
+    for (const auto& [option, name] :
+         {std::pair{&account, std::string_view{"--account"}},
+          std::pair{&json, std::string_view{"--json"}},
+          std::pair{&full, std::string_view{"--full"}},
+          std::pair{&allow_write, std::string_view{"--allow-write"}},
+          std::pair{&yes, std::string_view{"--yes"}},
+          std::pair{&dry_run, std::string_view{"--dry-run"}},
+          std::pair{&timeout, std::string_view{"--timeout"}},
+          std::pair{&cursor, std::string_view{"--cursor"}},
+          std::pair{&idempotency_key, std::string_view{"--idempotency-key"}}}) {
+        if (option->count() != 0) {
+            return name;
+        }
+    }
+    return {};
+}
+
+int emit_completion(std::string_view shell) {
+    const auto asset = tgcli::cli::completion_asset(shell);
+    if (!asset) {
+        return report_usage("completion shell must be bash, zsh, or fish", "shell");
+    }
+    const auto written = std::fwrite(asset->data(), 1, asset->size(), stdout);
+    return written == asset->size() && std::fflush(stdout) == 0 ? tgcli::kOk : tgcli::kGeneric;
+}
+
+std::optional<int> handle_client_local_or_reserved_command(
+    const std::vector<std::string>& command, const CLI::Option& account, const CLI::Option& json,
+    const CLI::Option& full, const CLI::Option& allow_write, const CLI::Option& yes,
+    const CLI::Option& dry_run, const CLI::Option& timeout, double timeout_seconds,
+    const CLI::Option& cursor, const CLI::Option& idempotency_key,
+    const std::vector<std::string>& schema_target, std::string_view completion_shell,
     bool schema_all, bool schema_help, bool verbose) {
+    if (command == std::vector<std::string>{"completion"}) {
+        const auto unsupported_option = completion_unsupported_option(
+            account, json, full, allow_write, yes, dry_run, timeout, cursor, idempotency_key);
+        if (!unsupported_option.empty()) {
+            return report_usage("completion does not accept this global option", unsupported_option,
+                                "unsupported_mode");
+        }
+        return emit_completion(completion_shell);
+    }
     if (command == std::vector<std::string>{"schema"}) {
         if (timeout.count() != 0 &&
             !tgcli::request_deadline(timeout_seconds, tgcli::DeadlineDefault::Default60)) {
@@ -1939,7 +1980,7 @@ int run(int argc, char** argv) {
     M6CliArguments m6;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
-    app.add_flag("--json", json_output, "machine-readable JSON output");
+    CLI::Option* json_option = app.add_flag("--json", json_output, "machine-readable JSON output");
     CLI::Option* full_option = app.add_flag("--full", full, "reserved through v1");
     app.add_flag("-v,--verbose", verbose, "show tgcli diagnostics on stderr");
     CLI::Option* allow_write_option =
@@ -1968,6 +2009,11 @@ int run(int argc, char** argv) {
     schema_cmd->add_flag("--all", schema_all,
                          "include every cataloged result, item, and error schema");
     schema_cmd->add_option("command", schema_target, "command path (for example: account list)");
+    std::string completion_shell;
+    auto* completion_cmd = app.add_subcommand("completion", "print static shell completion");
+    completion_cmd->add_option("shell", completion_shell, "bash, zsh, or fish")
+        ->required()
+        ->check(CLI::IsMember({"bash", "zsh", "fish"}));
     CLI::App* raw_cmd = app.add_subcommand("raw", "reserved until M7");
     raw_cmd->set_help_flag();
     raw_cmd->fallthrough(false)->prefix_command();
@@ -2442,9 +2488,10 @@ int run(int argc, char** argv) {
         }
     }
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
-            command, *account_option, *full_option, *allow_write_option, *yes_option,
+            command, *account_option, *json_option, *full_option, *allow_write_option, *yes_option,
             *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
-            *idempotency_key_option, schema_target, schema_all, schema_help, verbose);
+            *idempotency_key_option, schema_target, completion_shell, schema_all, schema_help,
+            verbose);
         pre_routing_exit) {
         return *pre_routing_exit;
     }

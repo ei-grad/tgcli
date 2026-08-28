@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(tgcli VERSION 0.1.0 LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
 # C++20 is applied per-target through tgcli_common below — a global
 # CMAKE_CXX_STANDARD would leak into the FetchContent tdlib build and break
 # its C++17 sources (u8"" literals become char8_t under C++20).
@@ -308,6 +310,7 @@ add_dependencies(tgcli_daemon tgcli_version_header)
 
 add_library(tgcli_cli STATIC
     src/cli/client.cpp
+    src/cli/completion_assets.cpp
     src/cli/control_stop.cpp
     src/cli/prompt.cpp
     src/cli/render.cpp
@@ -322,6 +325,16 @@ add_executable(tgcli
     src/main.cpp)
 target_link_libraries(tgcli
     PRIVATE tgcli_cli tgcli_daemon tgcli_schema CLI11::CLI11)
+
+install(TARGETS tgcli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES completions/tgcli.bash
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/bash-completion/completions"
+    RENAME tgcli)
+install(FILES completions/_tgcli
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/zsh/site-functions")
+install(FILES completions/tgcli.fish
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/fish/vendor_completions.d")
+install(FILES docs/man/tgcli.1 DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
 
 if(TGCLI_BUILD_TESTS)
     set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "Disable jsoncons upstream tests" FORCE)

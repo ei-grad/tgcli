@@ -27,19 +27,154 @@ HEADER_CONSTRUCTOR = re.compile(
 HEADER_ID = re.compile(r"static const std::int32_t ID = (?P<id>-?[0-9]+);")
 POLICY_KEYS = {
     "name",
+    "constructor_id",
+    "result_type",
+    "fields_sha256",
     "principal",
+    "principal_evidence",
     "admission",
     "body_validator",
+    "target_fields",
     "sensitive_input",
     "sensitive_output",
     "reviewed",
+    "evidence_category",
     "review_reason",
 }
 COMPILED_VALIDATORS = {
-    "deny": "validate_raw_body_deny",
-    "none": "validate_raw_body_none",
-    "raise_destructive": "validate_raw_body_raise_destructive",
-    "raise_write": "validate_raw_body_raise_write",
+    "chat_member_target": (
+        "validate_raw_body_chat_member_target",
+        "plan_raw_body_chat_targets",
+    ),
+    "chat_optional_sender_target": (
+        "validate_raw_body_chat_optional_sender_target",
+        "plan_raw_body_chat_targets",
+    ),
+    "chat_targets": (
+        "validate_raw_body_chat_targets",
+        "plan_raw_body_chat_targets",
+    ),
+    "deny": ("validate_raw_body_deny", "plan_raw_body_none"),
+    "none": ("validate_raw_body_none", "plan_raw_body_none"),
+    "raise_destructive": (
+        "validate_raw_body_raise_destructive",
+        "plan_raw_body_none",
+    ),
+    "raise_write": ("validate_raw_body_raise_write", "plan_raw_body_none"),
+}
+
+ADMITTED_FUNCTIONS = {
+    "cleanFileName": ("read", "none", "local_pure_read"),
+    "getCountryFlagEmoji": ("read", "none", "local_pure_read"),
+    "getFileExtension": ("read", "none", "local_pure_read"),
+    "getFileMimeType": ("read", "none", "local_pure_read"),
+    "getMarkdownText": ("read", "none", "local_pure_read"),
+    "getTextEntities": ("read", "none", "local_pure_read"),
+    "parseMarkdown": ("read", "none", "local_pure_read"),
+    "parseTextEntities": ("read", "none", "local_pure_read"),
+    "getChatAdministrators": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatHistory": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatMember": ("read", "chat_member_target", "non_secret_chat_read"),
+    "getChatMessageByDate": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatMessageCalendar": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatMessageCount": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatMessagePosition": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatPinnedMessage": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatScheduledMessages": ("read", "chat_targets", "non_secret_chat_read"),
+    "getChatSparseMessagePositions": ("read", "chat_targets", "non_secret_chat_read"),
+    "getForumTopic": ("read", "chat_targets", "non_secret_chat_read"),
+    "getForumTopicHistory": ("read", "chat_targets", "non_secret_chat_read"),
+    "getForumTopicLink": ("read", "chat_targets", "non_secret_chat_read"),
+    "getForumTopics": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessage": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessageAddedReactions": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessageAvailableReactions": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessageProperties": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessageThread": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessageThreadHistory": ("read", "chat_targets", "non_secret_chat_read"),
+    "getMessages": ("read", "chat_targets", "non_secret_chat_read"),
+    "getRepliedMessage": ("read", "chat_targets", "non_secret_chat_read"),
+    "searchChatMembers": ("read", "chat_targets", "non_secret_chat_read"),
+    "searchChatMessages": (
+        "read",
+        "chat_optional_sender_target",
+        "non_secret_chat_read",
+    ),
+    "addMessageReaction": ("write", "chat_targets", "non_secret_chat_write"),
+    "createForumTopic": ("write", "chat_targets", "non_secret_chat_write"),
+    "editForumTopic": ("write", "chat_targets", "non_secret_chat_write"),
+    "readAllChatMentions": ("write", "chat_targets", "non_secret_chat_write"),
+    "readAllChatPollVotes": ("write", "chat_targets", "non_secret_chat_write"),
+    "readAllChatReactions": ("write", "chat_targets", "non_secret_chat_write"),
+    "removeMessageReaction": ("write", "chat_targets", "non_secret_chat_write"),
+    "setChatDescription": ("write", "chat_targets", "non_secret_chat_write"),
+    "setChatMessageAutoDeleteTime": ("write", "chat_targets", "non_secret_chat_write"),
+    "setChatTitle": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleChatHasProtectedContent": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleChatIsMarkedAsUnread": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleChatIsPinned": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleChatIsTranslatable": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleChatViewAsTopics": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleForumTopicIsClosed": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleForumTopicIsPinned": ("write", "chat_targets", "non_secret_chat_write"),
+    "toggleGeneralForumTopicIsHidden": (
+        "write",
+        "chat_targets",
+        "non_secret_chat_write",
+    ),
+    "viewMessages": ("write", "chat_targets", "non_secret_chat_write"),
+    "banChatMember": (
+        "destructive",
+        "chat_member_target",
+        "non_secret_chat_destructive",
+    ),
+    "deleteChatHistory": ("destructive", "chat_targets", "non_secret_chat_destructive"),
+    "deleteForumTopic": ("destructive", "chat_targets", "non_secret_chat_destructive"),
+    "deleteMessages": ("destructive", "chat_targets", "non_secret_chat_destructive"),
+    "leaveChat": ("destructive", "chat_targets", "non_secret_chat_destructive"),
+    "setChatMemberStatus": (
+        "destructive",
+        "chat_member_target",
+        "non_secret_chat_destructive",
+    ),
+}
+EVIDENCE_CATEGORIES = {
+    "local_pure_read",
+    "non_secret_chat_read",
+    "non_secret_chat_write",
+    "non_secret_chat_destructive",
+    "denied_secret_chat_surface",
+    "denied_auth_or_credential",
+    "denied_logging_network_or_proxy",
+    "denied_payment_or_store",
+    "denied_file_or_bytes_provenance",
+    "denied_identity_or_private_account_data",
+    "denied_unscoped_chat_or_message_surface",
+    "denied_non_allowlisted_mutation_surface",
+    "denied_non_allowlisted_read_surface",
+}
+USER_PRINCIPAL_OVERRIDES = {
+    "banChatMember",
+    "createForumTopic",
+    "deleteForumTopic",
+    "deleteMessages",
+    "editForumTopic",
+    "getChatAdministrators",
+    "getChatMember",
+    "getChatPinnedMessage",
+    "getForumTopic",
+    "getForumTopicLink",
+    "getMessage",
+    "getMessageProperties",
+    "getMessages",
+    "getRepliedMessage",
+    "leaveChat",
+    "searchChatMembers",
+    "setChatDescription",
+    "setChatMemberStatus",
+    "setChatTitle",
+    "toggleForumTopicIsClosed",
+    "toggleGeneralForumTopicIsHidden",
 }
 
 
@@ -187,6 +322,310 @@ def parse_header(source: Path) -> dict[str, int]:
     return rows
 
 
+def source_function_contracts(source: Path) -> dict[str, dict[str, object]]:
+    contracts: dict[str, dict[str, object]] = {}
+    comments: list[str] = []
+    in_functions = False
+    for line_number, line in enumerate(
+        source.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if line == FUNCTION_MARKER:
+            in_functions = True
+            comments.clear()
+            continue
+        if not in_functions:
+            continue
+        if line.startswith("//"):
+            comments.append(line.removeprefix("//").strip())
+            continue
+        if not line:
+            continue
+        match = TL_FUNCTION.fullmatch(line)
+        require(match is not None, f"unparsed function contract: {line}")
+        name = match.group("name")
+        contracts[name] = {
+            "line": line_number,
+            "contract": " ".join(comments),
+            "signature": line,
+        }
+        comments.clear()
+    require(len(contracts) == PINNED_FUNCTION_COUNT, "function contract count differs")
+    return contracts
+
+
+def source_principal_evidence(
+    tdlib_source: Path, contracts: dict[str, dict[str, object]]
+) -> dict[str, tuple[str, str] | None]:
+    requests_source = tdlib_source / "td" / "telegram" / "Requests.cpp"
+    synchronous_source = tdlib_source / "td" / "telegram" / "SynchronousRequests.cpp"
+    require(
+        requests_source.is_file()
+        and not requests_source.is_symlink()
+        and synchronous_source.is_file()
+        and not synchronous_source.is_symlink(),
+        "unsafe TDLib principal evidence source",
+    )
+    request_text = requests_source.read_text(encoding="utf-8")
+    handler = re.compile(
+        r"^void Requests::on_request\([^\n]*td_api::(?P<name>[A-Za-z][A-Za-z0-9_]*) "
+        r"&request\) \{$",
+        re.MULTILINE,
+    )
+    matches = list(handler.finditer(request_text))
+    request_principals: dict[str, tuple[str, str]] = {}
+    request_handler_lines: dict[str, int] = {}
+    for index, match in enumerate(matches):
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(request_text)
+        )
+        body = request_text[match.end() : end]
+        line = request_text.count("\n", 0, match.start()) + 1
+        request_handler_lines[match.group("name")] = line
+        if "CHECK_IS_BOT();" in body:
+            request_principals[match.group("name")] = (
+                "bot",
+                f"Requests.cpp:{line}:CHECK_IS_BOT",
+            )
+        elif "CHECK_IS_USER();" in body or "CHECK_IS_USER_OR_BUSINESS();" in body:
+            request_principals[match.group("name")] = (
+                "user",
+                f"Requests.cpp:{line}:explicit user admission guard",
+            )
+
+    synchronous_text = synchronous_source.read_text(encoding="utf-8")
+    synchronous_functions = set(
+        re.findall(r"case td_api::([A-Za-z][A-Za-z0-9_]*)::ID:", synchronous_text)
+    )
+    evidence: dict[str, tuple[str, str] | None] = {}
+    for name, contract in contracts.items():
+        text = str(contract["contract"]).lower()
+        line = int(contract["line"])
+        if any(
+            marker in text
+            for marker in (
+                "for bots only",
+                "only for bots",
+                "can be called only by bots",
+            )
+        ):
+            evidence[name] = ("bot", f"td_api.tl:{line}:explicit bot-only contract")
+        elif any(
+            marker in text
+            for marker in (
+                "not supported for bots",
+                "not supported for bot accounts",
+                "for non-bot users only",
+                "only for non-bot users",
+            )
+        ):
+            evidence[name] = ("user", f"td_api.tl:{line}:explicit non-bot contract")
+        elif name in synchronous_functions:
+            evidence[name] = (
+                "both",
+                "SynchronousRequests.cpp:account-independent static dispatcher",
+            )
+        elif name in USER_PRINCIPAL_OVERRIDES:
+            require(
+                name in request_handler_lines,
+                f"principal override handler missing: {name}",
+            )
+            evidence[name] = (
+                "user",
+                (
+                    f"td_api.tl:{line}+Requests.cpp:{request_handler_lines[name]}:"
+                    "direct typed user path; raw v1 restricts principal to user"
+                ),
+            )
+        else:
+            evidence[name] = request_principals.get(name)
+    return evidence
+
+
+def reviewed_principal(
+    name: str,
+    contract: dict[str, object],
+    evidence: dict[str, tuple[str, str] | None],
+) -> tuple[str, str, bool]:
+    resolved = evidence[name]
+    if resolved is not None:
+        return resolved[0], resolved[1], True
+    line = int(contract["line"])
+    return (
+        "user",
+        (
+            f"td_api.tl:{line}+Requests.cpp:ambiguous principal; whole function denied and "
+            "principal conservatively restricted to user"
+        ),
+        False,
+    )
+
+
+def denied_category(
+    name: str, result_type: str, fields: list[dict[str, object]], contract: str
+) -> str:
+    lowered_name = name.lower()
+    lowered_contract = contract.lower()
+    field_text = " ".join(
+        f"{field['name']}:{field['type']}" for field in fields
+    ).lower()
+    combined = f"{lowered_name} {result_type.lower()} {field_text} {lowered_contract}"
+    if (
+        "secretchat" in combined
+        or "secret chat" in combined
+        or "secretmessages" in combined
+    ):
+        return "denied_secret_chat_surface"
+    if any(
+        marker in combined
+        for marker in (
+            "authentication",
+            "authorizationstate",
+            "password",
+            "passkey",
+            "recoveryemail",
+            "recovery_email",
+            "loginemail",
+            "login_email",
+            "oauth",
+            "terms_of_service",
+            "phone_number",
+            "email_address",
+            "credential",
+        )
+    ):
+        return "denied_auth_or_credential"
+    if any(
+        marker in combined
+        for marker in (
+            "logstream",
+            "logverbosity",
+            "logtag",
+            "addlogmessage",
+            "tdlibparameters",
+            "networkstatistics",
+            "networktype",
+            "proxy",
+            "connectioncreator",
+        )
+    ):
+        return "denied_logging_network_or_proxy"
+    if any(
+        marker in combined
+        for marker in (
+            "payment",
+            "invoice",
+            "transaction",
+            "premium",
+            "gift",
+            "starcount",
+            "star_count",
+            "store",
+            "precheckout",
+            "shippingquery",
+        )
+    ):
+        return "denied_payment_or_store"
+    if any(
+        marker in field_text or marker in result_type.lower()
+        for marker in ("inputfile", "file", "bytes")
+    ) or any(marker in lowered_name for marker in ("download", "upload", "filepart")):
+        return "denied_file_or_bytes_provenance"
+    if result_type in {
+        "User",
+        "Users",
+        "UserFullInfo",
+        "Session",
+        "Sessions",
+        "PasswordState",
+        "EmailAddressAuthenticationCodeInfo",
+        "PhoneNumberInfo",
+        "TemporaryPasswordState",
+    } or lowered_name in {"getme", "getuser", "getuserfullinfo"}:
+        return "denied_identity_or_private_account_data"
+    if "chat_id:int53" in field_text or result_type in {
+        "Chat",
+        "Chats",
+        "Message",
+        "Messages",
+        "FoundMessages",
+    }:
+        return "denied_unscoped_chat_or_message_surface"
+    if lowered_name.startswith(
+        (
+            "add",
+            "allow",
+            "answer",
+            "approve",
+            "assign",
+            "ban",
+            "block",
+            "cancel",
+            "change",
+            "clear",
+            "click",
+            "close",
+            "commit",
+            "confirm",
+            "connect",
+            "create",
+            "delete",
+            "destroy",
+            "disable",
+            "discard",
+            "disconnect",
+            "edit",
+            "enable",
+            "end",
+            "import",
+            "join",
+            "leave",
+            "mark",
+            "open",
+            "optimize",
+            "pin",
+            "process",
+            "publish",
+            "read",
+            "remove",
+            "reorder",
+            "replace",
+            "report",
+            "request",
+            "resend",
+            "reset",
+            "revoke",
+            "save",
+            "send",
+            "set",
+            "start",
+            "stop",
+            "synchronize",
+            "terminate",
+            "toggle",
+            "transfer",
+            "unpin",
+            "upgrade",
+            "view",
+        )
+    ):
+        return "denied_non_allowlisted_mutation_surface"
+    return "denied_non_allowlisted_read_surface"
+
+
+def category_sensitivity(category: str) -> tuple[bool, bool]:
+    if category == "denied_non_allowlisted_mutation_surface":
+        return True, False
+    if category in {
+        "denied_non_allowlisted_read_surface",
+        "denied_unscoped_chat_or_message_surface",
+        "denied_identity_or_private_account_data",
+    }:
+        return False, True
+    return True, True
+
+
 def source_type_graph(tdlib_source: Path) -> dict[str, object]:
     scheme, header = verify_tdlib(tdlib_source)
     text = scheme.read_text(encoding="utf-8")
@@ -302,9 +741,99 @@ def generated_graph_include(
     ]
     policy_rows = policy["functions"]
     assert isinstance(policy_rows, list)
+    graph_by_name = {
+        str(row["name"]): row for row in constructors if isinstance(row, dict)
+    }
     validator_symbols = sorted(
         {str(row["body_validator"]) for row in policy_rows if isinstance(row, dict)}
     )
+    chat_target_cases: list[str] = []
+    for row in policy_rows:
+        assert isinstance(row, dict)
+        if row["body_validator"] not in {
+            "chat_member_target",
+            "chat_optional_sender_target",
+            "chat_targets",
+        }:
+            continue
+        name = str(row["name"])
+        target_fields = row["target_fields"]
+        assert isinstance(target_fields, list)
+        graph_fields = graph_by_name[name]["fields"]
+        assert isinstance(graph_fields, list)
+        field_types = {
+            str(field["name"]): str(field["type"])
+            for field in graph_fields
+            if isinstance(field, dict)
+        }
+        planner_lines: list[str] = []
+        for field in target_fields:
+            if field == "chat_id":
+                require(
+                    field_types[field] == "int53", f"chat target type differs: {name}"
+                )
+                planner_lines.append(
+                    f"    if (!append_raw_chat_target(typed.{field}_, plan)) {{ return false; }}"
+                )
+            elif field == "member_id.chat_id|required":
+                require(
+                    field_types["member_id"] == "MessageSender",
+                    f"member target type differs: {name}",
+                )
+                planner_lines.append(
+                    "    if (!append_raw_message_sender_target(typed.member_id_, plan, true)) "
+                    "{ return false; }"
+                )
+            elif field == "sender_id.chat_id|optional":
+                require(
+                    field_types["sender_id"] == "MessageSender",
+                    f"sender target type differs: {name}",
+                )
+                planner_lines.append(
+                    "    if (!append_raw_message_sender_target(typed.sender_id_, plan, false)) "
+                    "{ return false; }"
+                )
+            else:
+                raise PolicyError(f"unsupported admitted raw target: {name}.{field}")
+        chat_target_cases.extend(
+            [
+                f"case td::td_api::{name}::ID: {{",
+                f"    const auto& typed = static_cast<const td::td_api::{name}&>(function);",
+                *planner_lines,
+                "    return true;",
+                "}",
+            ]
+        )
+    policy_descriptors: list[str] = []
+    for row in policy_rows:
+        assert isinstance(row, dict)
+        principal = {
+            "user": "RawPrincipal::User",
+            "bot": "RawPrincipal::Bot",
+            "both": "RawPrincipal::Both",
+        }[str(row["principal"])]
+        admission = {
+            "denied": "AdmissionTier::Denied",
+            "read": "AdmissionTier::Read",
+            "write": "AdmissionTier::Write",
+            "destructive": "AdmissionTier::Destructive",
+        }[str(row["admission"])]
+        policy_descriptors.append(
+            "    RawPolicyDescriptor{"
+            + ", ".join(
+                [
+                    cpp_string(str(row["name"])),
+                    str(row["constructor_id"]),
+                    principal,
+                    admission,
+                    cpp_string(str(row["body_validator"])),
+                    "true" if row["sensitive_input"] else "false",
+                    "true" if row["sensitive_output"] else "false",
+                    "true" if row["reviewed"] else "false",
+                ]
+            )
+            + "},"
+        )
     output = [
         "// Generated from pinned td_api.tl. Do not edit.",
         f"inline constexpr std::string_view kRawTdGraphSha256 = {cpp_string(str(graph['graph_sha256']).removeprefix('sha256:'))};",
@@ -317,17 +846,33 @@ def generated_graph_include(
         ),
         *constructor_rows,
         "};",
+        "bool plan_raw_body_chat_targets(const td::td_api::Function& function,",
+        "                                RawPreflightPlan& plan) noexcept {",
+        "    switch (function.get_id()) {",
+        *chat_target_cases,
+        "    default:",
+        "        return false;",
+        "    }",
+        "}",
         f"inline constexpr std::array<RawBodyValidatorDescriptor, {len(validator_symbols)}> "
         "kRawBodyValidators{"
         + ", ".join(
             "RawBodyValidatorDescriptor{"
             + cpp_string(symbol)
             + ", &"
-            + COMPILED_VALIDATORS[symbol]
+            + COMPILED_VALIDATORS[symbol][0]
+            + ", &"
+            + COMPILED_VALIDATORS[symbol][1]
             + "}"
             for symbol in validator_symbols
         )
         + "};",
+        (
+            f"inline constexpr std::array<RawPolicyDescriptor, {len(policy_descriptors)}> "
+            "kRawPolicies{"
+        ),
+        *policy_descriptors,
+        "};",
         "",
     ]
     return "\n".join(output).encode()
@@ -486,26 +1031,138 @@ def source_inventory(tdlib_source: Path) -> tuple[dict[str, object], dict[str, o
     return inventory, evidence
 
 
-def dormant_policy(inventory: dict[str, object]) -> dict[str, object]:
+def candidate_policy(
+    inventory: dict[str, object], graph: dict[str, object], tdlib_source: Path
+) -> dict[str, object]:
     functions = inventory["functions"]
-    assert isinstance(functions, list)
-    rows = [
-        {
-            "name": row["name"],
-            "principal": "both",
-            "admission": "denied",
-            "body_validator": "deny",
-            "sensitive_input": True,
-            "sensitive_output": True,
-            "reviewed": False,
-            "review_reason": "dormant_unreviewed_default_deny",
-        }
-        for row in functions
-    ]
+    constructors = graph["constructors"]
+    assert isinstance(functions, list) and isinstance(constructors, list)
+    graph_functions = {
+        str(row["name"]): row
+        for row in constructors
+        if isinstance(row, dict) and row["kind"] == "function"
+    }
+    scheme, _ = verify_tdlib(tdlib_source)
+    contracts = source_function_contracts(scheme)
+    principal_contracts = source_principal_evidence(tdlib_source, contracts)
+    require(
+        set(ADMITTED_FUNCTIONS) <= set(graph_functions),
+        "admitted raw function is absent from pin",
+    )
+    rows: list[dict[str, object]] = []
+    unfinished_functions: list[str] = []
+    for inventory_row in functions:
+        assert isinstance(inventory_row, dict)
+        name = str(inventory_row["name"])
+        graph_row = graph_functions[name]
+        contract = contracts[name]
+        fields = graph_row["fields"]
+        assert isinstance(fields, list)
+        principal, principal_evidence, principal_reviewed = reviewed_principal(
+            name, contract, principal_contracts
+        )
+        admitted = ADMITTED_FUNCTIONS.get(name)
+        if admitted is not None:
+            require(principal_reviewed, f"admitted principal evidence missing: {name}")
+            admission, body_validator, category = admitted
+            target_fields = {
+                "chat_member_target": ["chat_id", "member_id.chat_id|required"],
+                "chat_optional_sender_target": [
+                    "chat_id",
+                    "sender_id.chat_id|optional",
+                ],
+                "chat_targets": ["chat_id"],
+                "none": [],
+            }[body_validator]
+            if target_fields:
+                matching_fields = [
+                    field
+                    for field in fields
+                    if isinstance(field, dict) and field["name"] == "chat_id"
+                ]
+                require(
+                    matching_fields == [{"name": "chat_id", "type": "int53"}],
+                    f"admitted chat target differs: {name}",
+                )
+                if body_validator == "chat_member_target":
+                    require(
+                        {
+                            str(field["name"]): str(field["type"])
+                            for field in fields
+                            if isinstance(field, dict)
+                        }.get("member_id")
+                        == "MessageSender",
+                        f"admitted member selector differs: {name}",
+                    )
+                if body_validator == "chat_optional_sender_target":
+                    require(
+                        {
+                            str(field["name"]): str(field["type"])
+                            for field in fields
+                            if isinstance(field, dict)
+                        }.get("sender_id")
+                        == "MessageSender",
+                        f"admitted sender selector differs: {name}",
+                    )
+                reason = (
+                    f"reviewed:td_api.tl:{contract['line']}; {name} has exact generated "
+                    f"chat target metadata {','.join(target_fields)} requiring generation-bound "
+                    f"non-secret getChat preflight; static {admission} is worst-case"
+                )
+            else:
+                reason = (
+                    f"reviewed:td_api.tl:{contract['line']}; {name} is a local typed "
+                    f"transform with result {inventory_row['result_type']} and no account, "
+                    "chat, file, credential, logging, payment, or lifecycle target"
+                )
+            sensitive_input = False
+            sensitive_output = False
+            reviewed = True
+        else:
+            category = denied_category(
+                name,
+                str(inventory_row["result_type"]),
+                fields,
+                str(contract["contract"]),
+            )
+            admission = "denied"
+            body_validator = "deny"
+            target_fields = []
+            sensitive_input, sensitive_output = category_sensitivity(category)
+            reviewed = True
+            reason = (
+                f"reviewed:td_api.tl:{contract['line']}; {name} -> "
+                f"{inventory_row['result_type']}; {category}; v1 freezes whole-function deny"
+            )
+        rows.append(
+            {
+                "name": name,
+                "constructor_id": inventory_row["constructor_id"],
+                "result_type": inventory_row["result_type"],
+                "fields_sha256": inventory_row["fields_sha256"],
+                "principal": principal,
+                "principal_evidence": principal_evidence,
+                "admission": admission,
+                "body_validator": body_validator,
+                "target_fields": target_fields,
+                "sensitive_input": sensitive_input,
+                "sensitive_output": sensitive_output,
+                "reviewed": reviewed,
+                "evidence_category": category,
+                "review_reason": reason,
+            }
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "tdlib_sha": PINNED_TDLIB_SHA,
         "activation_ready": False,
+        "activation_blockers": [
+            "independent_policy_acceptance",
+            "unfinished_function_reviews",
+        ]
+        if unfinished_functions
+        else ["independent_policy_acceptance"],
+        "unfinished_functions": unfinished_functions,
         "function_count": len(rows),
         "inventory_sha256": inventory["functions_sha256"],
         "policy_sha256": rows_digest(rows),
@@ -538,6 +1195,8 @@ def validate_policy(inventory: dict[str, object], policy: dict[str, object]) -> 
             "schema_version",
             "tdlib_sha",
             "activation_ready",
+            "activation_blockers",
+            "unfinished_functions",
             "function_count",
             "inventory_sha256",
             "policy_sha256",
@@ -549,6 +1208,20 @@ def validate_policy(inventory: dict[str, object], policy: dict[str, object]) -> 
     require(policy["tdlib_sha"] == PINNED_TDLIB_SHA, "policy pin differs")
     require(
         isinstance(policy["activation_ready"], bool), "activation_ready is not boolean"
+    )
+    blockers = policy["activation_blockers"]
+    require(
+        isinstance(blockers, list)
+        and all(isinstance(blocker, str) and blocker for blocker in blockers)
+        and blockers == sorted(set(blockers)),
+        "activation blockers differ",
+    )
+    unfinished_functions = policy["unfinished_functions"]
+    require(
+        isinstance(unfinished_functions, list)
+        and unfinished_functions == sorted(set(unfinished_functions))
+        and all(isinstance(name, str) and name for name in unfinished_functions),
+        "unfinished function set differs",
     )
     rows = policy["functions"]
     inventory_rows = inventory["functions"]
@@ -571,7 +1244,25 @@ def validate_policy(inventory: dict[str, object], policy: dict[str, object]) -> 
             isinstance(row, dict) and set(row) == POLICY_KEYS, "policy row keys differ"
         )
         require(row["name"] == inventory_row["name"], "policy row order/name differs")
+        for identity_field in (
+            "constructor_id",
+            "result_type",
+            "fields_sha256",
+        ):
+            require(
+                row[identity_field] == inventory_row[identity_field],
+                f"policy {identity_field} differs",
+            )
         require(row["principal"] in {"user", "bot", "both"}, "policy principal differs")
+        require(
+            isinstance(row["principal_evidence"], str)
+            and re.match(
+                r"^(?:td_api\.tl|Requests\.cpp|SynchronousRequests\.cpp):",
+                row["principal_evidence"],
+            )
+            is not None,
+            "policy principal evidence differs",
+        )
         require(
             row["admission"] in {"read", "write", "destructive", "denied"},
             "policy admission differs",
@@ -581,11 +1272,22 @@ def validate_policy(inventory: dict[str, object], policy: dict[str, object]) -> 
             row["body_validator"] in COMPILED_VALIDATORS,
             "compiled policy validator missing",
         )
+        target_fields = row["target_fields"]
+        require(
+            isinstance(target_fields, list)
+            and target_fields == sorted(set(target_fields))
+            and all(isinstance(field, str) and field for field in target_fields),
+            "policy target fields differ",
+        )
         require(isinstance(row["sensitive_input"], bool), "request sensitivity differs")
         require(
             isinstance(row["sensitive_output"], bool), "response sensitivity differs"
         )
         require(isinstance(row["reviewed"], bool), "review state differs")
+        require(
+            row["evidence_category"] in EVIDENCE_CATEGORIES,
+            "policy evidence category differs",
+        )
         require(
             isinstance(row["review_reason"], str) and row["review_reason"],
             "review reason missing",
@@ -596,7 +1298,7 @@ def validate_policy(inventory: dict[str, object], policy: dict[str, object]) -> 
                 row["body_validator"] == "deny", "unreviewed function validator differs"
             )
             require(
-                row["review_reason"] == "dormant_unreviewed_default_deny",
+                row["review_reason"].startswith("unfinished:td_api.tl:"),
                 "unreviewed function reason differs",
             )
         else:
@@ -614,7 +1316,37 @@ def validate_policy(inventory: dict[str, object], policy: dict[str, object]) -> 
             require(
                 not row["sensitive_output"], "response-sensitive function is admitted"
             )
-    ready = all(row["reviewed"] for row in rows)
+            require(
+                (
+                    row["body_validator"]
+                    in {
+                        "chat_member_target",
+                        "chat_optional_sender_target",
+                        "chat_targets",
+                    }
+                )
+                == bool(row["target_fields"]),
+                "admitted preflight metadata differs",
+            )
+    expected_unfinished = [row["name"] for row in rows if not row["reviewed"]]
+    require(
+        unfinished_functions == expected_unfinished,
+        "unfinished function names differ",
+    )
+    all_reviewed = not expected_unfinished
+    if all_reviewed:
+        require(
+            blockers in ([], ["independent_policy_acceptance"]),
+            "reviewed policy blockers differ",
+        )
+    else:
+        require(not policy["activation_ready"], "unreviewed policy is activation-ready")
+        require(
+            blockers
+            == ["independent_policy_acceptance", "unfinished_function_reviews"],
+            "unfinished policy blockers differ",
+        )
+    ready = all_reviewed and not blockers
     require(
         policy["activation_ready"] == ready, "activation_ready/review relation differs"
     )
@@ -634,6 +1366,10 @@ def validate_assets(tdlib_source: Path, output_root: Path, activation: bool) -> 
     )
     require(graph == expected_graph, "committed type graph differs from pinned source")
     validate_policy(inventory, policy)
+    require(
+        policy == candidate_policy(expected_inventory, expected_graph, tdlib_source),
+        "committed raw policy differs from reviewed candidate",
+    )
     require(
         lock == lock_document(inventory, policy, graph, evidence),
         "committed raw policy lock differs",
@@ -661,10 +1397,10 @@ def validate_assets(tdlib_source: Path, output_root: Path, activation: bool) -> 
         )
 
 
-def emit_seed(tdlib_source: Path, output_root: Path) -> None:
+def emit_candidate(tdlib_source: Path, output_root: Path) -> None:
     inventory, evidence = source_inventory(tdlib_source)
     graph = source_type_graph(tdlib_source)
-    policy = dormant_policy(inventory)
+    policy = candidate_policy(inventory, graph, tdlib_source)
     raw_root = output_root / "docs" / "raw"
     raw_root.mkdir(parents=True, exist_ok=True)
     (raw_root / f"td-functions.{PINNED_TDLIB_SHA}.json").write_bytes(
@@ -691,7 +1427,7 @@ def parse_args() -> argparse.Namespace:
         description="Generate and validate dormant raw policy assets"
     )
     parser.add_argument(
-        "command", choices=("emit-seed", "validate-dormant", "validate-activation")
+        "command", choices=("emit-candidate", "validate-dormant", "validate-activation")
     )
     parser.add_argument("--tdlib-source", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -701,8 +1437,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        if args.command == "emit-seed":
-            emit_seed(args.tdlib_source, args.output_root)
+        if args.command == "emit-candidate":
+            emit_candidate(args.tdlib_source, args.output_root)
         else:
             validate_assets(
                 args.tdlib_source,
