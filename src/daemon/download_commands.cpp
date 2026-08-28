@@ -327,6 +327,13 @@ struct DownloadArbitration {
     std::uint64_t last_sequence = 0;
 };
 
+void collect_advisory_progress(std::optional<json> progress, std::vector<json>* advisory_progress) {
+    if (!progress || advisory_progress == nullptr) {
+        return;
+    }
+    advisory_progress->push_back(std::move(*progress));
+}
+
 StopReason current_stop(core::TdClient& client, ResolverConsumer& resolver,
                         RequestSession& session) {
     if (session.cancellation_requested()) {
@@ -397,7 +404,7 @@ void emit_stop(StopReason stop, core::TdClient& client, ResolverConsumer& resolv
 }
 
 bool process_file_events(std::vector<StampedDownloadEvent> events, DownloadArbitration& state,
-                         RequestSession& session) {
+                         const RequestDeadline& deadline, std::vector<json>* advisory_progress) {
     std::ranges::sort(events, {}, &StampedDownloadEvent::sequence);
     for (const auto& item : events) {
         if (item.sequence == 0 || item.sequence <= state.last_sequence || !item.observed_at) {
@@ -418,7 +425,7 @@ bool process_file_events(std::vector<StampedDownloadEvent> events, DownloadArbit
             }
             continue;
         }
-        if (!event_precedes_deadline(item.observed_at, session.deadline())) {
+        if (!event_precedes_deadline(item.observed_at, deadline)) {
             state.stop = StopReason::TimedOut;
             return false;
         }
@@ -438,9 +445,7 @@ bool process_file_events(std::vector<StampedDownloadEvent> events, DownloadArbit
             state.stop = StopReason::Malformed;
             return false;
         }
-        if (event.advisory_progress) {
-            session.progress(std::move(*event.advisory_progress));
-        }
+        collect_advisory_progress(std::move(event.advisory_progress), advisory_progress);
     }
     return true;
 }
@@ -647,7 +652,17 @@ void DownloadCoordinator::download(const proto::Request& request, RequestSession
     }
     updates.enqueue_response(download_read.value);
     DownloadArbitration arbitration(media.file.id);
-    static_cast<void>(process_file_events(updates.take(), arbitration, session));
+    const auto deadline = session.deadline();
+    const auto drain_with_advisories = [&] {
+        std::vector<json> advisory_progress;
+        const bool accepted =
+            process_file_events(updates.take(), arbitration, deadline, &advisory_progress);
+        for (auto& progress : advisory_progress) {
+            session.progress(std::move(progress));
+        }
+        return accepted;
+    };
+    static_cast<void>(drain_with_advisories());
     while (arbitration.stop == StopReason::None && !arbitration.tracker.completed_file()) {
         arbitration.stop = current_stop(client_.get(), resolver, session);
         if (arbitration.stop != StopReason::None) {
@@ -661,7 +676,7 @@ void DownloadCoordinator::download(const proto::Request& request, RequestSession
                                                                  std::chrono::milliseconds(50));
         updates.wait_until(
             std::min(wake, core::TdEventClock::now() + std::chrono::milliseconds(50)));
-        if (!process_file_events(updates.take(), arbitration, session)) {
+        if (!drain_with_advisories()) {
             break;
         }
     }
@@ -678,7 +693,9 @@ void DownloadCoordinator::download(const proto::Request& request, RequestSession
             arbitration.stop = StopReason::Malformed;
             return false;
         }
-        if (!process_file_events(updates.take(), arbitration, session)) {
+        // The ordered-event lease may only arbitrate in-memory state. Advisory
+        // progress is optional and deliberately discarded at this final drain.
+        if (!process_file_events(updates.take(), arbitration, deadline, nullptr)) {
             return false;
         }
         if (updates.authorization_lost()) {

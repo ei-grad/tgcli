@@ -33,6 +33,7 @@ struct Outcome {
     std::vector<json> progress;
     std::optional<json> result;
     std::optional<json> error;
+    std::vector<std::string> delivery_order;
     int terminal_count = 0;
 };
 
@@ -110,13 +111,16 @@ class TempDirectory {
 
 class FakeDownload {
   public:
+    enum class SinkProbePoint { Progress, Result, Error };
     using SessionProbe = std::function<void(tgcli::daemon::RequestSession&,
                                             tgcli::daemon::testing::RequestSessionProbePoint)>;
+    using SinkProbe = std::function<void(SinkProbePoint)>;
 
     explicit FakeDownload(
         std::shared_ptr<const tgcli::daemon::testing::DownloadFilesystemHooks> hooks = {},
-        tgcli::core::TdClientEventHooks event_hooks = {}, SessionProbe session_probe = {})
-        : session_probe_(std::move(session_probe)) {
+        tgcli::core::TdClientEventHooks event_hooks = {}, SessionProbe session_probe = {},
+        SinkProbe sink_probe = {})
+        : session_probe_(std::move(session_probe)), sink_probe_(std::move(sink_probe)) {
         auto runtime = std::make_unique<tgcli::test::ScriptedTdRuntime>();
         runtime_ = runtime.get();
         client_ = std::make_unique<tgcli::core::TdClient>(
@@ -135,12 +139,26 @@ class FakeDownload {
             Outcome outcome;
             tgcli::daemon::CallbackSink sink(
                 [](const json&) {},
-                [&](json value) { outcome.progress.push_back(std::move(value)); },
                 [&](json value) {
+                    if (sink_probe_) {
+                        sink_probe_(SinkProbePoint::Progress);
+                    }
+                    outcome.delivery_order.emplace_back("progress");
+                    outcome.progress.push_back(std::move(value));
+                },
+                [&](json value) {
+                    if (sink_probe_) {
+                        sink_probe_(SinkProbePoint::Result);
+                    }
+                    outcome.delivery_order.emplace_back("result");
                     ++outcome.terminal_count;
                     outcome.result = std::move(value);
                 },
                 [&](std::string code, std::string message, json details, int) {
+                    if (sink_probe_) {
+                        sink_probe_(SinkProbePoint::Error);
+                    }
+                    outcome.delivery_order.emplace_back("error");
                     ++outcome.terminal_count;
                     outcome.error = json{{"error",
                                           {{"code", std::move(code)},
@@ -297,6 +315,7 @@ class FakeDownload {
     std::unique_ptr<tgcli::core::TdClient> client_;
     std::unique_ptr<tgcli::daemon::DownloadCoordinator> coordinator_;
     SessionProbe session_probe_;
+    SinkProbe sink_probe_;
     std::mutex session_pointer_mutex_;
     tgcli::daemon::RequestSession* session_pointer_ = nullptr;
     std::size_t sent_count_ = 1;
@@ -676,6 +695,108 @@ TEST_CASE("download claim acknowledges a sequenced update before its ordered cal
     CHECK((*outcome.error)["error"]["code"] == "INTERNAL");
     CHECK_FALSE(outcome.result);
     CHECK_FALSE(std::filesystem::exists(temporary.root() / "result.bin"));
+}
+
+TEST_CASE("download final ordered drain never invokes the transport sink",
+          "[download][commands][race]") {
+    constexpr std::size_t kQueuedAdvisories = 4'096;
+    const TempDirectory temporary;
+    temporary.write("source.bin", "payload");
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::size_t observed_events = 0;
+    std::size_t sink_callbacks = 0;
+    bool final_drain_window = false;
+    bool queued_advisories_delivered = false;
+    bool sink_entered_during_final_drain = false;
+    bool release_sink = false;
+    bool publication_claimed = false;
+
+    tgcli::core::TdClientEventHooks event_hooks;
+    event_hooks.after_observed = [&](auto) {
+        {
+            const std::lock_guard lock(mutex);
+            ++observed_events;
+        }
+        cv.notify_all();
+    };
+    auto hooks = std::make_shared<tgcli::daemon::testing::DownloadFilesystemHooks>();
+    hooks->random_hex = [] { return std::string(32, 'a'); };
+    FakeDownload* fake_pointer = nullptr;
+    hooks->observe = [&](tgcli::daemon::DownloadFilesystemStage stage) {
+        if (stage == tgcli::daemon::DownloadFilesystemStage::BeforePublish) {
+            std::size_t delivery_target = 0;
+            {
+                const std::lock_guard lock(mutex);
+                final_drain_window = true;
+                delivery_target = observed_events + kQueuedAdvisories + 1;
+            }
+            for (std::size_t index = 0; index < kQueuedAdvisories; ++index) {
+                auto advisory = file(static_cast<std::int64_t>(index + 1), false);
+                advisory.size = static_cast<std::int64_t>(kQueuedAdvisories);
+                advisory.expected_size = static_cast<std::int64_t>(kQueuedAdvisories);
+                fake_pointer->push_file(std::move(advisory));
+            }
+            auto sentinel = file(0, false);
+            sentinel.id = 8;
+            fake_pointer->push_file(std::move(sentinel));
+            std::unique_lock lock(mutex);
+            queued_advisories_delivered =
+                cv.wait_for(lock, 10s, [&] { return observed_events >= delivery_target; });
+        } else if (stage == tgcli::daemon::DownloadFilesystemStage::PublicationClaimed) {
+            {
+                const std::lock_guard lock(mutex);
+                final_drain_window = false;
+                publication_claimed = true;
+            }
+            cv.notify_all();
+        }
+    };
+    const auto sink_probe = [&](FakeDownload::SinkProbePoint) {
+        std::unique_lock lock(mutex);
+        ++sink_callbacks;
+        if (final_drain_window) {
+            sink_entered_during_final_drain = true;
+            cv.notify_all();
+            cv.wait_for(lock, 10s, [&] { return release_sink; });
+        }
+    };
+    FakeDownload fake(hooks, std::move(event_hooks), {}, sink_probe);
+    fake_pointer = &fake;
+    auto invocation = request(temporary);
+    invocation.context.timeout_seconds = 30.0;
+    auto pending = fake.dispatch(std::move(invocation));
+    fake.respond_me();
+    fake.respond_chat();
+    fake.respond(tgcli::core::TdFunctionKind::GetDownloadMessage, message());
+    fake.respond(tgcli::core::TdFunctionKind::DownloadFile,
+                 file(7, true, (temporary.root() / "source.bin").string()));
+
+    bool claim_completed_without_sink_release = false;
+    {
+        std::unique_lock lock(mutex);
+        const bool reached = cv.wait_for(
+            lock, 10s, [&] { return publication_claimed || sink_entered_during_final_drain; });
+        claim_completed_without_sink_release =
+            reached && publication_claimed && !sink_entered_during_final_drain;
+        release_sink = true;
+        cv.notify_all();
+    }
+    const auto outcome = pending.get();
+    CHECK(queued_advisories_delivered);
+    CHECK(claim_completed_without_sink_release);
+    CHECK_FALSE(sink_entered_during_final_drain);
+    CHECK(publication_claimed);
+    REQUIRE(outcome.result);
+    CHECK_FALSE(outcome.error);
+    CHECK(sink_callbacks == outcome.delivery_order.size());
+    REQUIRE_FALSE(outcome.progress.empty());
+    CHECK(outcome.progress.back()["downloaded_bytes"] == 7);
+    CHECK(outcome.progress.back()["total_bytes"] == 7);
+    REQUIRE(outcome.delivery_order.size() >= 2);
+    CHECK(outcome.delivery_order[outcome.delivery_order.size() - 2] == "progress");
+    CHECK(outcome.delivery_order.back() == "result");
+    CHECK(outcome.terminal_count == 1);
 }
 
 TEST_CASE("download publication claim orders auth shutdown disconnect and deadline",
