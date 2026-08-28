@@ -24,6 +24,7 @@ add_executable(tgcli_unit_tests
     m6_write_policy_test.cpp
     m6_td_boundary_test.cpp
     m6_td_runtime_conversion_test.cpp
+    m7_foundation_schema_test.cpp
     login_commands_test.cpp
     lock_order_test.cpp
     logout_commands_test.cpp
@@ -56,6 +57,8 @@ add_executable(tgcli_unit_tests
     dispatch_test.cpp
     request_session_test.cpp
     ready_read_test.cpp
+    raw_audit_contract_test.cpp
+    raw_contract_test.cpp
     read_domain_test.cpp
     read_commands_test.cpp
     read_td_runtime_conversion_test.cpp
@@ -180,6 +183,25 @@ add_test(
 set_tests_properties(
     schema-asset-generator
     PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+add_test(
+    NAME schema-m7-foundation-generator
+    COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_m7_foundation_assets.py")
+set_tests_properties(
+    schema-m7-foundation-generator
+    PROPERTIES ENVIRONMENT
+        "PYTHONDONTWRITEBYTECODE=1;TGCLI_TEST_TDLIB_SOURCE=${TGCLI_TDLIB_SOURCE}")
+add_test(
+    NAME command-registry-completion-assets
+    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs")
+add_test(
+    NAME raw-policy-source-contract
+    COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_raw_policy.py")
+set_tests_properties(
+    raw-policy-source-contract
+    PROPERTIES ENVIRONMENT
+        "PYTHONDONTWRITEBYTECODE=1;TGCLI_TEST_TDLIB_SOURCE=${TGCLI_TDLIB_SOURCE}")
 add_test(
     NAME dependency-lock-offline
     COMMAND "${Python3_EXECUTABLE}"

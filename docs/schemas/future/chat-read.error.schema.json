@@ -1,0 +1,613 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli chat read error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "USAGE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "argument",
+                "reason"
+              ],
+              "properties": {
+                "argument": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "missing_argument",
+                    "invalid_argument",
+                    "mutually_exclusive",
+                    "unknown_command",
+                    "unsupported_mode",
+                    "invalid_cursor",
+                    "cursor_scope_mismatch",
+                    "unsupported_chat_type"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "NOT_AUTHED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "state": {
+                  "enum": [
+                    "unknown",
+                    "wait_tdlib_parameters",
+                    "wait_phone_number",
+                    "wait_premium_purchase",
+                    "wait_email_address",
+                    "wait_email_code",
+                    "wait_code",
+                    "wait_other_device_confirmation",
+                    "wait_registration",
+                    "wait_password",
+                    "ready",
+                    "logging_out",
+                    "closing",
+                    "closed"
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "not_ready",
+                    "authorization_lost",
+                    "login_required"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "BOT_UNSUPPORTED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chat_members"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "chat_info",
+                    "chat_members"
+                  ]
+                },
+                "tdlib_code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "chat_info",
+                    "chat_members"
+                  ]
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "chat_info",
+                    "chat_members"
+                  ]
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "enum": [
+                        "unknown",
+                        "wait_tdlib_parameters",
+                        "wait_phone_number",
+                        "wait_premium_purchase",
+                        "wait_email_address",
+                        "wait_email_code",
+                        "wait_code",
+                        "wait_other_device_confirmation",
+                        "wait_registration",
+                        "wait_password",
+                        "ready",
+                        "logging_out",
+                        "closing",
+                        "closed"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "enum": [
+                    "chat_info",
+                    "chat_members"
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response",
+                    "source_changed"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "PAGINATION_INVALID"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chat_members"
+                },
+                "reason": {
+                  "enum": [
+                    "invalid_cursor",
+                    "scope_changed",
+                    "source_changed",
+                    "marker_not_advancing",
+                    "page_invalid"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "NOT_FOUND"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "selector"
+                  ],
+                  "properties": {
+                    "selector": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "selector",
+                    "scope"
+                  ],
+                  "properties": {
+                    "selector": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "const": "local_materialized"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AMBIGUOUS"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "selector",
+                "scope",
+                "candidates",
+                "truncated"
+              ],
+              "properties": {
+                "selector": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "active_dialogs",
+                    "local_materialized"
+                  ]
+                },
+                "candidates": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 20,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "title",
+                      "type",
+                      "is_bot",
+                      "usernames"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991,
+                        "not": {
+                          "const": 0
+                        }
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "enum": [
+                          "private",
+                          "basic_group",
+                          "supergroup",
+                          "channel"
+                        ]
+                      },
+                      "is_bot": {
+                        "type": "boolean"
+                      },
+                      "usernames": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 100,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  }
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "resolve"
+                },
+                "tdlib_code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "resolve"
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "resolve"
+                },
+                "reason": {
+                  "const": "internal_error"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

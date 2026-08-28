@@ -1,0 +1,866 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli chats error",
+  "$defs": {
+    "int53_nonzero": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "not": {
+        "const": 0
+      }
+    },
+    "positive_int53": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "sender": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "user"
+            },
+            "id": {
+              "$ref": "#/$defs/positive_int53"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "chat"
+            },
+            "id": {
+              "$ref": "#/$defs/int53_nonzero"
+            }
+          }
+        }
+      ]
+    },
+    "topic": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "forum"
+            },
+            "id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "thread",
+                "direct",
+                "saved"
+              ]
+            },
+            "id": {
+              "$ref": "#/$defs/positive_int53"
+            }
+          }
+        }
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "chat_id",
+        "date",
+        "sender",
+        "is_outgoing",
+        "topic",
+        "type",
+        "text"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/int53_nonzero"
+        },
+        "chat_id": {
+          "$ref": "#/$defs/int53_nonzero"
+        },
+        "date": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sender": {
+          "$ref": "#/$defs/sender"
+        },
+        "is_outgoing": {
+          "type": "boolean"
+        },
+        "topic": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/topic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "enum": [
+            "text",
+            "photo",
+            "video",
+            "doc",
+            "voice",
+            "other"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "USAGE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "argument",
+                "reason"
+              ],
+              "properties": {
+                "argument": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "missing_argument",
+                    "invalid_argument",
+                    "mutually_exclusive",
+                    "unknown_command",
+                    "unsupported_mode",
+                    "invalid_cursor",
+                    "cursor_scope_mismatch"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "NOT_AUTHED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "state": {
+                  "enum": [
+                    "unknown",
+                    "wait_tdlib_parameters",
+                    "wait_phone_number",
+                    "wait_premium_purchase",
+                    "wait_email_address",
+                    "wait_email_code",
+                    "wait_code",
+                    "wait_other_device_confirmation",
+                    "wait_registration",
+                    "wait_password",
+                    "ready",
+                    "logging_out",
+                    "closing",
+                    "closed"
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "not_ready",
+                    "authorization_lost",
+                    "login_required"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "ACCOUNT_NOT_FOUND"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "ACCOUNT_MISMATCH"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "requested_account",
+                "daemon_account"
+              ],
+              "properties": {
+                "requested_account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "daemon_account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIG_INVALID"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "enum": [
+                    "path_invalid",
+                    "wrong_owner",
+                    "wrong_type",
+                    "wrong_mode",
+                    "wrong_link_count",
+                    "too_large",
+                    "parse_error",
+                    "type_error",
+                    "invalid_default",
+                    "conflicting_credentials",
+                    "io_error",
+                    "sync_error"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "BOT_UNSUPPORTED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chats"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chats"
+                },
+                "tdlib_code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chats"
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chats"
+                },
+                "reason": {
+                  "enum": [
+                    "internal_error",
+                    "malformed_tdlib_response"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DAEMON_SHUTDOWN"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "const": "daemon_shutdown"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "PROTOCOL_ANSWER_INVALID"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request_id",
+                "reason"
+              ],
+              "properties": {
+                "request_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709552000
+                },
+                "reason": {
+                  "enum": [
+                    "future_sequence",
+                    "nonce_mismatch",
+                    "generation_mismatch",
+                    "malformed",
+                    "unknown_request"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chats"
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "enum": [
+                        "unknown",
+                        "wait_tdlib_parameters",
+                        "wait_phone_number",
+                        "wait_premium_purchase",
+                        "wait_email_address",
+                        "wait_email_code",
+                        "wait_code",
+                        "wait_other_device_confirmation",
+                        "wait_registration",
+                        "wait_password",
+                        "ready",
+                        "logging_out",
+                        "closing",
+                        "closed"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "NOT_FOUND"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "folder_id"
+              ],
+              "properties": {
+                "folder_id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "PAGINATION_INVALID"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "chats"
+                },
+                "reason": {
+                  "const": "non_advancing_upstream"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "REMOVAL_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "invocation_id",
+                "stage",
+                "completed_stages",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "invocation_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                },
+                "stage": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_UNAVAILABLE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "mutation_state",
+                "completed_stages"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "mutation_state": {
+                  "enum": [
+                    "none",
+                    "possible",
+                    "confirmed"
+                  ]
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 0,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

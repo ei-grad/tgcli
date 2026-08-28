@@ -73,6 +73,9 @@
     "chat unpin": {
       "error": "m3-write.error.schema.json"
     },
+    "chats": {
+      "error": "chats.error.schema.json"
+    },
     "contact add": {
       "error": "contact.error.schema.json"
     },
@@ -102,6 +105,9 @@
     },
     "doctor": {
       "error": "meta.error.schema.json"
+    },
+    "fetch": {
+      "error": "fetch.error.schema.json"
     },
     "folder add-chat": {
       "error": "folder.error.schema.json"
@@ -142,6 +148,12 @@
     "msg forward": {
       "error": "m3-write.error.schema.json"
     },
+    "msg get": {
+      "error": "msg-get.error.schema.json"
+    },
+    "msg link": {
+      "error": "msg-link.error.schema.json"
+    },
     "msg pin": {
       "error": "m3-write.error.schema.json"
     },
@@ -150,6 +162,9 @@
     },
     "msg unpin": {
       "error": "m3-write.error.schema.json"
+    },
+    "read": {
+      "error": "read.error.schema.json"
     },
     "resolve": {
       "error": "resolve.error.schema.json"
@@ -192,6 +207,9 @@
     },
     "topic reopen": {
       "error": "topic.error.schema.json"
+    },
+    "unread": {
+      "error": "unread.error.schema.json"
     },
     "version": {
       "error": "meta.error.schema.json"

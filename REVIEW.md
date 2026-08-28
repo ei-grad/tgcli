@@ -84,6 +84,23 @@ performs a Telegram-side write without a grant, a destructive action without
 confirmation, or a secret reaching argv/disk/logs. Fail-closed behavior must
 be demonstrated by tests, not argued in prose.
 
+Raw is always security-sensitive and audit-schema-changing. Its review owns
+the complete pin-derived Function inventory/policy bijection, every admitted
+row and compiled body-validator variant, request and response sensitivity,
+duplicate/unknown-field/numeric/int64/bytes/double canonical hash vectors,
+secret-chat provenance, tier monotonicity, wipe paths, audit-v3 crash cuts and
+the parser/descriptor/audit/schema/catalog activation order. A global default
+deny can be reviewed as a dormant decision; it is not evidence that a denied
+row is safe to admit later.
+
+Download review covers source and destination parent/final symlinks, stable
+descriptor identity and count, Linux/macOS exclusive rename, publish versus
+deadline/auth races, cleanup failure precedence and the explicit named-temp
+orphan crash limitation. Search review covers cleaner byte-equality for both
+the query and untrusted cursor offsets plus page/marker/raw-order progress.
+Completion review proves registry/generated/checked-in/package/runtime byte
+equality and that future registry rows are not runtime-active.
+
 ## 7. Changing the spec (DESIGN.md, docs/schemas/)
 
 Two classes of spec change, with different processes:
@@ -120,3 +137,13 @@ well:
 - unexplained golden-file regeneration;
 - secrets accepted via argv, or written to disk/logs;
 - out-of-scope changes bundled with the reviewed change.
+- raw JSON accepted from argv, a second raw parse/`from_json`, unknown fields
+  accepted at a typed boundary, a caller-selected or lowered raw tier, an
+  unknown/unclassified function fallback, a raw request/response body or TD
+  message in audit/error/log output, name-only secret-chat proof, or raw
+  handler/catalog activation before audit-v3 recovery;
+- download publication that follows a symlink, overwrites an existing leaf,
+  omits stable source revalidation/exclusive rename, or claims automatic
+  cleanup of crash-orphaned named temps;
+- completion bytes not derived from the canonical public registry, or a future
+  registry row becoming invocable before its atomic handler activation.

@@ -285,10 +285,12 @@ int report_usage(std::string_view message, const nlohmann::json& argument,
 }
 
 int report_unsupported_mode(std::string_view argument) {
+    const auto message = argument == "--full" ? "--full is reserved through v1"
+                                              : std::string(argument) + " is reserved until M7";
     const nlohmann::json rendered{
         {"error",
          {{"code", "USAGE"},
-          {"message", std::string(argument) + " is reserved until M7"},
+          {"message", message},
           {"details", {{"argument", argument}, {"reason", "unsupported_mode"}}}}}};
     std::fputs((rendered.dump() + "\n").c_str(), stderr);
     return tgcli::kUsage;
@@ -330,9 +332,8 @@ std::optional<int> handle_client_local_or_reserved_command(
     const std::vector<std::string>& command, const CLI::Option& account, const CLI::Option& full,
     const CLI::Option& allow_write, const CLI::Option& yes, const CLI::Option& dry_run,
     const CLI::Option& timeout, double timeout_seconds, const CLI::Option& cursor,
-    const CLI::Option& idempotency_key, const CLI::Option& no_color,
-    const std::vector<std::string>& schema_target, bool schema_all, bool schema_help,
-    bool verbose) {
+    const CLI::Option& idempotency_key, const std::vector<std::string>& schema_target,
+    bool schema_all, bool schema_help, bool verbose) {
     if (command == std::vector<std::string>{"schema"}) {
         if (timeout.count() != 0 &&
             !tgcli::request_deadline(timeout_seconds, tgcli::DeadlineDefault::Default60)) {
@@ -345,9 +346,6 @@ std::optional<int> handle_client_local_or_reserved_command(
     }
     if (full.count() != 0) {
         return report_unsupported_mode("--full");
-    }
-    if (no_color.count() != 0) {
-        return report_usage("unknown command or argument", nullptr, "unknown_command");
     }
     if (command == std::vector<std::string>{"raw"}) {
         return report_unsupported_mode("raw");
@@ -1735,7 +1733,7 @@ int run(int argc, char** argv) {
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
     app.add_flag("--json", json_output, "machine-readable JSON output");
-    CLI::Option* full_option = app.add_flag("--full", full, "reserved until M7");
+    CLI::Option* full_option = app.add_flag("--full", full, "reserved through v1");
     app.add_flag("-v,--verbose", verbose, "show tgcli diagnostics on stderr");
     CLI::Option* allow_write_option =
         app.add_flag("--allow-write", allow_write, "grant writes for this invocation");
@@ -1747,8 +1745,7 @@ int run(int argc, char** argv) {
                                                          "deduplicate an M3/M4 write invocation");
     app.add_flag("--no-daemon", no_daemon,
                  "run in-process without the daemon (debugging escape hatch)");
-    CLI::Option* no_color_option = app.add_flag("--no-color", no_color, "disable colored output");
-    no_color_option->group("");
+    app.add_flag("--no-color", no_color, "disable colored output")->group("");
     CLI::Option* timeout_option =
         app.add_option("--timeout", timeout_seconds, "per-command deadline in seconds");
     saved.cursor_option =
@@ -2185,8 +2182,7 @@ int run(int argc, char** argv) {
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
             command, *account_option, *full_option, *allow_write_option, *yes_option,
             *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
-            *idempotency_key_option, *no_color_option, schema_target, schema_all, schema_help,
-            verbose);
+            *idempotency_key_option, schema_target, schema_all, schema_help, verbose);
         pre_routing_exit) {
         return *pre_routing_exit;
     }

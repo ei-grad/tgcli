@@ -108,8 +108,31 @@ authoritative implementation status and roadmap (work milestones top-down).
   via argv or environment and never written to disk by the tool. Bot login is
   `login --bot` and obtains its token only from `bot_token_cmd` or a no-echo
   challenge; legacy `--bot-token` is consumed only for redacted rejection.
-- `raw` and `--full` remain rejected reserved syntax through M6; M7 activates
-  them with its explicit schema delta.
+- `raw` remains rejected until its selected-B parser, exhaustive pin policy,
+  audit-v3 recovery, handler and catalogs activate atomically. It is stdin-only
+  (`raw -`): argv JSON is always rejected. `--full` remains rejected throughout
+  v1 and is post-1.0 only.
+- Raw parsing is duplicate-rejecting and converts once. Classifier, TD-aware
+  canonical hash serializer and future dispatch retain the same typed Function
+  object; a second parse/`from_json` is forbidden. The complete pinned function
+  inventory and policy are exact tl/generated-header bijections with committed
+  count/digests and deny unknown drift. The dormant seed is all-denied and
+  unreviewed; an activation check fails until every row has concrete review
+  evidence. A body validator can only retain/raise tier or deny, and
+  unknown/null/unmatched nested variants deny.
+- Raw request/response bodies, TD messages, credentials and curated preflight
+  output never enter audit, errors, diagnostics or logs. Request/response
+  staging is wiped on every terminal path. Dormant hash-only audit-v3 schemas,
+  validator/scanner/recovery and no-resend crash cuts must land before any raw
+  registration.
+- Download source and destination paths use no-follow descriptor walks, stable
+  source identity and exclusive no-replace publication. Normal failures clean
+  and fsync the temp directory; v1 deliberately does not sweep a named 0600
+  temp left by a process crash.
+- Public shell completion bytes are generated only from the checked-in command
+  registry and must equal checked-in/package/runtime bytes. Scripts never run
+  tgcli or inspect config/network. No v1 output contains ANSI, so `--no-color`
+  and nonempty `NO_COLOR` are byte-preserving no-ops.
 
 ## Build & dev
 
@@ -117,7 +140,7 @@ authoritative implementation status and roadmap (work milestones top-down).
 - Dev loop uses a prebuilt tdlib (`-DTGCLI_SYSTEM_TDLIB=ON`) plus ccache —
   never rebuild tdlib from scratch per checkout. The prefix must be produced
   by `scripts/build-tdlib.sh` at the pinned revision (distro tdlib packages
-  lack the JSON-conversion headers `raw`/`--full` need).
+  lack the JSON-conversion headers selected-B raw activation needs).
 - Sanitizers must pass in CI: ASan/UBSan over the full suite; TSan over the
   fake-boundary unit/contract suite only (tdlib is uninstrumented —
   full-program TSan would need a TSan-built tdlib).

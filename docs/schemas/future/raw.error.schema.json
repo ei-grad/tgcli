@@ -1,0 +1,443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli raw error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "USAGE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "argument",
+                "reason"
+              ],
+              "properties": {
+                "argument": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "missing_argument",
+                    "invalid_argument",
+                    "mutually_exclusive",
+                    "unknown_command",
+                    "unsupported_mode"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "NOT_AUTHED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "state",
+                "reason"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "state": {
+                  "enum": [
+                    "unknown",
+                    "wait_tdlib_parameters",
+                    "wait_phone_number",
+                    "wait_premium_purchase",
+                    "wait_email_address",
+                    "wait_email_code",
+                    "wait_code",
+                    "wait_other_device_confirmation",
+                    "wait_registration",
+                    "wait_password",
+                    "ready",
+                    "logging_out",
+                    "closing",
+                    "closed"
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    "not_ready",
+                    "authorization_lost",
+                    "login_required"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "DENIED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "function",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "raw"
+                },
+                "function": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "reason": {
+                  "enum": [
+                    "function_denied",
+                    "principal_unsupported",
+                    "secret_chat_unsupported",
+                    "sensitive_input_unsupported",
+                    "write_grant_required"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "CONFIRMATION_REQUIRED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "action",
+                "target"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "action": {
+                  "const": "raw"
+                },
+                "target": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "function",
+                    "request_sha256"
+                  ],
+                  "properties": {
+                    "function": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "request_sha256": {
+                      "type": "string",
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "RATE_LIMITED"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "function",
+                "tdlib_code",
+                "retry_after"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "raw"
+                },
+                "function": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tdlib_code": {
+                  "const": 429
+                },
+                "retry_after": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TDLIB_ERROR"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "function",
+                "tdlib_code"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "raw"
+                },
+                "function": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tdlib_code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "TIMEOUT"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "state"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "raw"
+                },
+                "state": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "enum": [
+                        "unknown",
+                        "wait_tdlib_parameters",
+                        "wait_phone_number",
+                        "wait_premium_purchase",
+                        "wait_email_address",
+                        "wait_email_code",
+                        "wait_code",
+                        "wait_other_device_confirmation",
+                        "wait_registration",
+                        "wait_password",
+                        "ready",
+                        "logging_out",
+                        "closing",
+                        "closed"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "AUDIT_INCOMPLETE"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "account",
+                "path",
+                "mutation_state",
+                "completed_stages"
+              ],
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "mutation_state": {
+                  "const": "possible"
+                },
+                "completed_stages": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 2,
+                  "uniqueItems": true,
+                  "items": {
+                    "enum": [
+                      "raw_dispatch_started",
+                      "raw_response_received"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "const": "INTERNAL"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operation",
+                "reason"
+              ],
+              "properties": {
+                "operation": {
+                  "const": "raw"
+                },
+                "reason": {
+                  "enum": [
+                    "unexpected_response",
+                    "result_too_large",
+                    "canonicalization_failed",
+                    "policy_table_invalid"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

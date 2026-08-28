@@ -15,7 +15,7 @@ before the milestone is closed.
 - [x] CMake project (≥3.24) with presets: debug, release, release-static
 - [x] Pin tdlib source revision; FetchContent build + `-DTGCLI_SYSTEM_TDLIB=ON` option
 - [x] `scripts/build-tdlib.sh`: prebuilt pinned-tdlib prefix exporting the
-      JSON-conversion headers (dev loop + `raw`/`--full` dependency)
+      JSON-conversion headers required by selected-B raw activation
 - [x] Vendor deps via FetchContent: CLI11, nlohmann/json, fmt, tomlplusplus, Catch2
 - [x] `TdClient` core: ClientManager thread, request/response correlation, update bus
 - [x] Daemon skeleton: `tgcli daemon run`, unix socket ($XDG_RUNTIME_DIR/tgcli/<name>.sock;
@@ -96,7 +96,8 @@ before the milestone is closed.
       manifest entries and strict Draft 2020-12 schemas for every exact M1
       success/error/detail/audit shape, uint64 request IDs, audit checkpoint
       arrays and `none|possible|confirmed` mutation state while preserving M0
-      objects; keep `raw`/`--full` rejected until M7.
+      objects; keep raw rejected until atomic M7 activation and `--full`
+      rejected throughout v1.
 - [ ] **M1.7 fake-boundary acceptance:** drive all 13 auth states and the closed
       exact `(function, code, raw message)` credential table; first-query/all-
       parameter bootstrap in response-first and update-first orders, repeated
@@ -150,10 +151,18 @@ before the milestone is closed.
 - [ ] Output layer: equivalent human/JSON rendering, exact result/error shapes,
       stderr discipline, and self-contained untrusted cursors without a MAC or
       daemon state; reject bad scope and non-advancing upstream markers
-- [ ] Add strict Draft 2020-12 result schemas and manifest entries for `chats`,
-      `read`, `search`, `unread`, `fetch`, `resolve`, `chat info`, and `chat
-      members`; validate actual result data and keep `history` schema-less as
-      the canonical `read` alias; `read` adds no error-catalog mapping
+- [x] Keep strict Draft 2020-12 result schemas and manifest entries for the
+      active `chats`, `read`, `msg get`, `msg link`, `unread`, `fetch`, and
+      `resolve` commands; keep `history` schema-less as the canonical `read`
+      alias, and add exact command-local error schemas/catalog mappings for
+      active chats/unread/read/msg-get/msg-link/fetch
+- [x] Freeze and materialize uncataloged future result/error schemas plus exact
+      cleaner, pagination, source, identity and sender contracts for `search`,
+      `chat info`, and `chat members`; preserve user/chat member senders and
+      keep every path unreachable until its handler and catalog activation
+- [ ] Implement and atomically activate `search`, `chat info`, and `chat
+      members` from those dormant assets, including typed TD factories,
+      converters, authorization/source rows, coordinators and catalog entries
 - [x] Freeze the `read`/`history` contract: closed ASCII timestamp/topic
       grammars, exact before/until and signed-int32 since-anchor branches,
       explicit-operand precedence over resolver context, Saved ownership, live
@@ -177,11 +186,8 @@ before the milestone is closed.
       reads, malformed-response integrity precedence, exact link call/result,
       non-empty UTF-8 link validation, both result schemas and result-manifest
       entries, equivalent exact human goldens, real-dispatch recovery ordering,
-      dispatcher/fake/native coverage, and no new TestDC skip; defer both error
-      schemas and error-catalog mappings to the existing M7 schema task
-- [ ] `tgcli search`: per-chat/global server search, exact filter mappings,
-      exhaustive sender/text post-filtering, full upstream cursors, and no
-      secret/local-search merge
+      dispatcher/fake/native coverage, exact command-local error schemas and
+      error-catalog mappings, and no new TestDC skip
 - [x] `tgcli saved tags|search`: user-account-only reaction-tag discovery plus
       tag-only/tag+text search; canonical emoji/custom selector round-trip,
       label/count/order output, account/scope/filter-bound cursor pagination,
@@ -194,9 +200,6 @@ before the milestone is closed.
       prefix plus one live-fill transition, exact progress and phase-aware timeout
       details, strict result schema/runtime invariants, recovery ordering, and the
       public-TDLib `tdlib_idle` limitation without false EOF/completeness claims
-- [ ] `tgcli chat info`, `tgcli chat members`: type-specific info sources,
-      user/chat senders, exact filters, and empty-probe pagination independent
-      of approximate member totals
 - [x] Landed Saved test-DC flow: after auth smoke, run `tgcli saved tags`,
       validate the unpaginated tag-list result, and retain the exact sorted
       test-DC skip artifact contract
@@ -306,8 +309,14 @@ before the milestone is closed.
 
 ## M4 — Files & media
 
-- [ ] `tgcli download` with progress frames (stderr bar / NDJSON); transfers
-      unlimited by default, `--timeout` opt-in
+- [x] Freeze the dormant `download` source/destination/progress/crash contract:
+      curated media constructors, observer-before-send, advisory progress,
+      descriptor-walked stable source identity, same-directory 0600 temp,
+      exclusive no-replace Linux/macOS publication, cleanup precedence, exact
+      schemas and explicit named-temp orphan non-guarantee
+- [ ] Implement and atomically activate `tgcli download` with stderr progress,
+      unlimited default, opt-in timeout, curated descriptor/observer path and
+      result/error catalog mappings; raw `downloadFile` remains denied
 - [x] Add the dormant two-pass file snapshot/spool foundation: exact
       no-follow frozen-locator replay and post-pass entry/FD revalidation,
       strict source errors, pass-1 full identity/digest, winner-only
@@ -433,9 +442,23 @@ before the milestone is closed.
 
 ## M7 — Polish & release
 
-- [ ] `tgcli raw` passthrough (td_api_json), read-only allowlist, auth-type
-      refusal + audit redaction
-- [ ] Implement local `tgcli schema <command-token>... [--all]`: exact
+- [x] Freeze selected raw Option B: stdin-only grammar, parse-once typed TD
+      canonicalization/hash/wipe contract, Ready/principal ordering, table-owned
+      Read/Write/Destructive policy, no idempotency, closed live/dry schemas,
+      and audit-v3 no-body/no-resend recovery and activation order
+- [x] Add pin-derived exhaustive 1001-function inventory/policy foundations for
+      clean TDLib a17f87c4: exact tl/header bijection, committed count/digests,
+      an explicit unreviewed deny-all dormant seed, principal/admission/body-
+      validator and request/response sensitivity metadata, plus an activation
+      validator that fails while any row remains unreviewed; count is drift
+      evidence, not a timeless constant
+- [x] Add dormant duplicate-rejecting raw parsing, typed canonical value/hash
+      vectors and audit-v3 schema/validator/scanner/recovery foundations; no TD
+      raw send, parser registration, dispatcher admission or catalog mapping
+- [ ] Implement typed body validators and independently review every admitted
+      policy row, then atomically activate raw parser/handler/dispatcher/audit/
+      result+error catalogs; unknown/null/unmatched variants remain denied
+- [x] Implement local `tgcli schema <command-token>... [--all]`: exact
       result/item fallback, fixed result/item/error aggregation, history alias,
       embedded byte-authoritative catalogs, separate non-stream error manifest,
       including the deferred exact `msg get`/`msg link` error schemas and
@@ -452,7 +475,11 @@ before the milestone is closed.
       fail-closed identity/status handling, no-op header regeneration,
       dependent rebuilds, schema and reviewed absent/clean/dirty human
       goldens, and release-provenance consistency tests
-- [ ] Shell completions (bash/zsh/fish), man pages
+- [x] Add the deterministic selected-B public-command registry generator and
+      checked-in byte-stable bash/zsh/fish completion assets; retain future
+      activation bits so assets cannot expose unimplemented handlers
+- [ ] Activate `completion bash|zsh|fish` as a client-local meta-command and
+      package byte-identical assets; add man pages
 - [ ] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
       schemas out of command catalogs unless a later reviewed mapping explicitly
       adds them, and byte-preserve semantic markers only for explicitly
@@ -467,6 +494,7 @@ before the milestone is closed.
 
 ## Post-1.0 ideas
 
+- [ ] Decide and version `--full`; v1 rejects it for every command
 - [ ] Account/profile/privacy commands (not hidden M6 requirements)
 - [ ] MCP server mode (`tgcli mcp` over stdio)
 - [ ] Offline search: client-side filtering over prefetched local history

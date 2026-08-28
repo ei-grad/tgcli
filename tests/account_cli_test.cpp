@@ -528,6 +528,7 @@ TEST_CASE("reserved raw and full modes fail before routing or persistent side ef
          {"--allow-write", "--yes", "--dry-run", "-v", "raw", "{}"},
          "raw",
          true},
+        {"raw with no-color", {"--no-color", "raw", "-"}, "raw", true},
         {"full with destructive globals",
          {"--full", "--allow-write", "--yes", "--dry-run", "-v", "logout"},
          "--full",
@@ -542,7 +543,9 @@ TEST_CASE("reserved raw and full modes fail before routing or persistent side ef
             const nlohmann::json expected{
                 {"error",
                  {{"code", "USAGE"},
-                  {"message", std::string(test_case.argument) + " is reserved until M7"},
+                  {"message", test_case.argument == std::string_view("--full")
+                                  ? "--full is reserved through v1"
+                                  : std::string(test_case.argument) + " is reserved until M7"},
                   {"details",
                    {{"argument", test_case.argument}, {"reason", "unsupported_mode"}}}}}};
             CHECK(outcome.err == expected.dump() + "\n");

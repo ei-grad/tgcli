@@ -90,9 +90,11 @@ single static binary with ~instant startup.
   operations that account for 95% of invocations. Administrative and rare
   operations live under nouns: `tgcli chat …`, `tgcli msg …`, `tgcli folder …`,
   discoverable via `tgcli <noun> --help`.
-- **TTY-adaptive**: human tables/colors on a TTY; `--json` (or non-TTY
+- **TTY-adaptive**: human tables on a TTY; `--json` (or non-TTY
   auto-detection is *not* used — output format never silently changes) for
-  machines. `NO_COLOR` and `--no-color` respected.
+  machines. No v1 renderer emits ANSI. `--no-color` and a nonempty `NO_COLOR`
+  are accepted byte-preserving no-ops for commands, help, schemas and shell
+  completion output.
 - **stdout is data, stderr is commentary.** Progress, warnings, and
   diagnostics never contaminate stdout in either mode.
 - **No command requires a TTY except interactive `login`**; every prompt has a
@@ -109,7 +111,7 @@ Global flags:
 ```
 --account <name>       account selection (default from config / TGCLI_ACCOUNT)
 --json                 machine output (plain JSON / NDJSON for streams)
---full                 M7: include underlying td_api object under a raw key
+--full                 reserved and rejected through v1; post-1.0 only
 --allow-write          per-call write grant; §6 covers env/config grants and
                        the deny override
 --dry-run              resolve and validate, print the plan without a
@@ -121,7 +123,7 @@ Global flags:
 --idempotency-key <k>  idempotent M3/M4 writes and exact replay (§4.5.7)
 --verbose / -v         diagnostics to stderr
 --no-daemon            debugging: run in-process without the daemon (§10)
---no-color
+--no-color             accepted v1 byte-preserving no-op; output has no ANSI
 ```
 
 ### Everyday commands (flat)
@@ -171,7 +173,7 @@ tgcli wait-for [--chat <c>] [--from <user>] [--regex <re>]
               --after requires --chat (message ids are ordered per chat;
               exit 2 without it)
 
-tgcli raw '<td_api request JSON>' [--timeout S]   M7 full-API escape hatch (§4.2)
+tgcli raw - [--timeout S]                         M7 stdin-only policy-classified escape hatch (§4.2)
 ```
 
 ### Grouped commands (long tail)
@@ -404,19 +406,137 @@ difference.
 
 ### 4.2 `raw` escape hatch
 
-`raw` and `--full` are reserved syntax through M6. Before M7, invoking `raw`
-or passing `--full` to any M0–M6 command is `USAGE` with reason
-`unsupported_mode`; M1 curated results therefore have no optional `raw` key.
-M7 activates both together and publishes the corresponding schema delta.
+`raw` remains reserved and rejected with `USAGE/unsupported_mode` until its
+parser, policy, audit-v3 recovery, handler and result/error catalog mappings
+activate atomically. `--full` does not activate with it: `--full` remains
+reserved and rejected throughout v1 and is a post-1.0 contract decision.
 
-Direct passthrough to the td_api schema (`@type`-keyed JSON, the same
-convention as td_json_client): guarantees full API coverage before a dedicated
-subcommand exists. `raw` passes through the same write gate (§6): request
-types outside a known-read-only allowlist count as writes and require a
-write grant. Auth-flow request types (`setAuthenticationPhoneNumber`,
-`checkAuthenticationPassword`, …) are refused outright — they would put
-secrets on argv and into the audit log; authentication goes through `login`
-challenges only. Audited `raw` records redact known secret-bearing fields.
+The selected v1 raw policy is **Option B**, a table-classified Read/Write/
+Destructive escape hatch. Its only grammar is:
+
+```text
+tgcli raw - [--timeout S]
+```
+
+The JSON request is read only from stdin. Any positional JSON or positional
+value other than the literal `-` is rejected before account, session, Ready or
+audit work. Physical stdin, including whitespace, and the canonical typed
+request are each bounded at 1,048,576 bytes. The canonical public TD response
+is bounded at 16,777,216 bytes; an oversized response becomes
+`INTERNAL/result_too_large` before any partial stdout frame.
+
+One duplicate-rejecting parser builds an AST and processes numeric tokens once
+without a second JSON parse. It requires one top-level object and one top-level
+string `@type`, rejects
+duplicate keys at every depth, unknown generated fields at every typed object
+boundary, and top-level `@extra` or `@client_id`. Generated missing/default/
+null rules apply exactly. User keys inside a typed `jsonValueObject` remain
+data rather than transport metadata. The AST is converted exactly once into
+one owned typed Function value. Classification, canonical hashing and future
+native dispatch all retain that same object; a second parse or second
+`from_json` is forbidden.
+
+Canonical serialization is TD-schema-aware: Bool is a JSON boolean; int32 and
+int53 are exact JSON integers with int53 restricted to
+`[-9007199254740991,9007199254740991]`; int64 is a canonical signed-decimal
+JSON string over the complete signed domain; bytes are padded RFC 4648 base64;
+strings are exact valid UTF-8; finite doubles use RFC 8785 shortest round-trip
+spelling and NaN/Inf are rejected. Objects serialize `@type` followed by
+generated declaration order, vectors preserve order, and omitted/default
+fields serialize as their typed values. Accepted source spellings that convert
+to one typed value therefore hash identically.
+
+The request digest is:
+
+```text
+SHA256("tgcli.raw.request.v1\0" || pinned_td_sha_ascii || "\0" ||
+       function_name_ascii || "\0" || effective_tier_ascii || "\0" ||
+       uint64_be(canonical_request_bytes) || canonical_request)
+```
+
+The response digest uses domain `tgcli.raw.response.v1\0`, the function name,
+the uint64 big-endian canonical response length and canonical response bytes.
+`request_bytes` and `response_bytes` count only canonical typed JSON, excluding
+the hash domain, protocol envelope and LF. Raw stdin, AST string/byte storage,
+canonical request storage and typed request string/byte fields are wiped after
+ownership transfer or on rejection. Response staging is wiped after bounded
+frame serialization.
+
+Two checked-in pin-owned assets govern classification:
+
+```text
+docs/raw/td-functions.a17f87c4cff7b90b278d12b91ba0614383aaee82.json
+docs/raw/raw-policy.a17f87c4cff7b90b278d12b91ba0614383aaee82.json
+```
+
+The inventory is derived from the complete pinned function set: at the current
+pin both `td_api.tl` and generated `td_api.h` contain exactly 1001 functions.
+The invariant is equality with both complete sources; 1001 and a committed
+digest are drift evidence, not a timeless API constant. Each inventory row is
+`name,constructor_id,result_type,fields_sha256`. Policy is an exact name
+bijection and records principal (`user|bot|both`), admission
+(`read|write|destructive|denied`), body validator (`none|deny|<compiled typed
+symbol>`), request and response sensitivity, review decision and reason. The
+initial dormant bootstrap is explicitly `activation_ready:false`: every row is
+denied with `body_validator:"deny"` and `reviewed:false`. This is drift and
+deny-fallback evidence, not a completed Option-B row review. Dormant validation
+fails on pin/source/count/bijection/digest mismatch; the separate activation
+validator additionally requires every row reviewed with concrete row reasoning
+and every named compiled symbol present. Unknown functions and unknown table
+versions are denied.
+
+A typed body validator may preserve or raise a row's tier, never lower it.
+Null, unknown or unmatched nested variants deny. Functions that change
+authorization, TD parameters, lifecycle or logging, accept authentication,
+credential, payment or proxy secrets, or can expose secret-chat/private data
+without preprovable provenance are denied whole. Generic chat selectors need
+an exact compiled validator that walks every direct and nested selector and
+uses curated same-generation `getChat` preflights; Secret, Unknown, error or
+stale generation denies. Raw `getChat` itself and file-id-only `downloadFile`
+are denied because executing them cannot first prove non-secret provenance.
+Curated download is a separate M4 path. No function is admitted on its name
+alone.
+
+Admission order is local parse/table lookup, one admission-relative Default60
+absolute deadline, generation-scoped Ready, one correlated `getMe`, principal
+check, typed validators and curated preflights, then dry-run or authority/
+confirmation/audit/dispatch. No stage retries across generation replacement.
+Write requires the normal write grant. Destructive requires the grant and
+confirmation target `raw <function> sha256:<request-hash>`. The caller cannot
+choose or lower tier, and raw never accepts an idempotency key. Dry-run executes
+through principal/body validation but performs no authority, confirmation,
+audit or dispatch.
+
+A correlated response is either typed `td_api::error` or a non-null object
+compatible with the policy row's declared result type. Null, Update, unknown
+constructor or wrong result type is `INTERNAL/unexpected_response`. Code 429 is
+`RATE_LIMITED`; other TD errors are `TDLIB_ERROR`. TD error messages and raw
+request/response bodies never enter stdout errors, stderr, logs or audit. After
+durable dispatch a TD error conservatively records mutation `possible`; typed
+success records `confirmed`.
+
+Option B uses a separate dormant audit schema version 3 rather than widening
+v2 `StoredTerminal`. Beyond the common schema/version/record/invocation
+bookkeeping, intent retains only function, tier, pin, request hash and request
+bytes. Legal checkpoints are `raw_dispatch_started` and
+`raw_response_received`; both bind one dispatch token and client generation,
+and response data retains only result/error kind, response type, nullable TD
+code, response hash and response bytes. Outcome stores a result digest or
+closed error summary, never a body. Recovery never resends: intent without
+dispatch closes `none`; dispatch without response is `AUDIT_INCOMPLETE` with
+mutation `possible` and stops inspecting mutation; a proven response without
+outcome repairs the corresponding confirmed/possible digest outcome; any
+function/hash/generation/token/stage contradiction fails closed. These dormant
+schemas, validators, scanner and recovery rules must be present before raw is
+registered.
+
+Live success in human and JSON modes is the same compact canonical TD object
+plus LF. The strict result schema is a one-of between that live object (one
+string `@type`, no `@extra` or `@client_id`) and the exact auth-bound dry-run
+plan containing `operation:"raw"`, function, `write|destructive` tier, pinned
+TD SHA, request SHA-256 and request bytes. Structured errors are closed and
+never contain a body, TD message, credential, selector preflight result or
+internal query identifier.
 
 ### 4.3 Saved Messages namespace
 
@@ -1086,7 +1206,13 @@ only from tdlib link/invite metadata, never from a username inference.
 
 Without `--chat`, search is global; `--global` is an explicit equivalent and
 is mutually exclusive with `--chat`. Query bytes are exact, valid UTF-8 and
-non-empty. Per-chat search uses `searchChatMessages`; global search uses
+non-empty. Before the first TD call, tgcli applies the pinned
+`clean_input_string` algorithm to a copy and accepts only byte-identical,
+nonempty output. This rejects controls, CR removal, the pinned length cleanup
+and every other source normalization before normalized args, cursor or TD work.
+Every global continuation `next_offset` decoded from an untrusted cursor is
+subject to the same equality/nonempty check. Per-chat search uses
+`searchChatMessages`; global search uses
 `searchMessages(chat_list=null)`, covering Main and Archive but not secret
 chats. Results are `{"items":[<MessageSummary>],"next":<cursor|null>}`.
 
@@ -1097,15 +1223,26 @@ filter followed by an exact content-class check for `messageText` or
 `--from` is an exact client-side `message.sender_id` filter after server
 search.
 
-When global sender/text post-filtering is active, the scanner consumes whole
-upstream pages until it has `-n` matches, tdlib reports explicit continuation
-exhaustion, or the deadline wins. Each request asks for no more than the
-current remaining item count, so no matched tail is hidden outside the cursor.
-The cursor carries the complete `next_offset`/`next_from_message_id`, resolved
-sender, scope, exact query, content filter and page size. A repeated marker is
-`PAGINATION_INVALID`. Per-chat order is message id descending; global order is
-tdlib `(date, chat_id, message_id)` descending. Search never calls local
-history APIs.
+The scanner fills `-n` for both scopes, including text postfiltering, until it
+has enough matches, upstream exhaustion or deadline. Global `--from` remains a
+postfilter. Before postfiltering every response must be the exact expected
+FoundChatMessages/FoundMessages, have `total_count == -1` or
+`0..INT32_MAX`, contain no more than the requested limit (at most 100), contain
+no null or malformed summaries, match the resolved scope/filter, and introduce
+no duplicate `(chat_id,message_id)` in the invocation. Per-chat raw ids are
+strictly decreasing. Global raw `(date,chat_id,message_id)` keys are strictly
+lexicographically decreasing, including across cursor invocations.
+
+Each request asks for `min(100, remaining result slots)`. A per-chat first-page
+marker of zero may return a positive continuation. A continuation accepts only
+zero exhaustion or `0 < next < input`; a positive next must also be below the
+last raw message id in that page. Equality/increase is
+`PAGINATION_INVALID/marker_not_advancing`. A global marker is opaque but must
+be clean, nonempty and different from its input, and an invocation rejects any
+repeated/cyclic offset. The cursor carries the exact query, resolved sender,
+scope, filter, page size and upstream state plus `last_raw_message_id` for chat
+scope or `last_raw_order:{date,chat_id,message_id}` for global scope; the
+inactive raw-order field is null. Search never calls local history APIs.
 
 #### `unread`
 
@@ -1163,7 +1300,13 @@ The type-specific sources are closed:
 | basic group | `basicGroupFullInfo.description` | `basicGroup.member_count` | false | null |
 | supergroup/channel | `supergroupFullInfo.description` | `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
 
-List/unread fields come from `chat`; active usernames retain tdlib order.
+List/unread fields come from the already observed resolver `chat`; active
+usernames retain tdlib order and no second `getChat` is sent. Private branches
+use exact `getUserFullInfo`, basic groups use exact `getBasicGroup` plus
+`getBasicGroupFullInfo`, and supergroups/channels use the observed supergroup
+plus exact `getSupergroupFullInfo`. Every returned type/id and nested optional
+is validated before any result field is published. Secret targets fail
+`USAGE/unsupported_chat_type`; authenticated bots are allowed.
 
 Private and secret targets are unsupported for `chat members`. Basic groups
 use `basicGroupFullInfo.members` and local filtering/pagination. Supergroups
@@ -1198,6 +1341,12 @@ bot status comes from the user type. For a chat sender, display name is `chat.ti
 usernames come from chat-type metadata, and `is_bot` is false. `tag` is the
 creator/administrator custom title when present and the empty string otherwise;
 `joined_at` comes from tdlib's joined-chat date.
+
+The chat-sender branch is normative: pinned `chatMember` permits other chats
+as Left/Banned senders in supergroups and channels. tgcli enriches user senders
+through exact `getUser` and chat senders through exact `getChat`, preserves
+input order, and validates the whole page atomically. It never rejects a
+structurally valid chat sender merely because it is not a user.
 
 #### `fetch`
 
@@ -6599,6 +6748,141 @@ a contact,
 folder, topic, admin, invite-link or optimize mutation, and the spec/generator
 checks themselves require no network.
 
+### 4.10 Dormant M2/M4/M7 freeze foundations
+
+This section materializes byte-reviewable foundations without activating an
+unimplemented public path. Future search, chat-info, chat-members, download and
+raw assets remain uncataloged and unreachable until their parser, handler,
+dispatcher and result/error mappings activate together. Existing commands keep
+their current behavior.
+
+#### 4.10.1 Curated download
+
+`download` accepts exactly the primary animation, audio, document, photo,
+sticker, video, video-note and voice-note media constructors. Album, paid
+media, webpage, expired and other unsupported media produce exact
+`PRECONDITION_FAILED` reasons `album_unsupported`, `paid_media_unsupported`,
+`web_page_unsupported`, `expired_media`, or `unsupported_media`. A supported
+constructor with null/malformed/nonpositive file id is
+`INTERNAL/malformed_tdlib_response`.
+
+The generation observer is installed before `downloadFile(file_id,16,0,0,
+false)`. This curated operation never shares a raw `downloadFile` descriptor
+and never calls TDLib's global cancel-download operation. Wrong-file updates
+are ignored. Negative/out-of-int53 progress fields are INTERNAL; duplicate or
+regressing `downloaded_size` is not printed. For each strictly increasing
+advisory observation, `total_bytes` is `file.size` when positive, otherwise
+positive `expected_size`, otherwise null. Once downloaded size exceeds the
+displayed total, total is null for that and later records; it is neither
+clamped nor an integrity error. No final progress record is fabricated.
+
+Destination precedence is explicit `-O`, then `TGCLI_MEDIA_DIR`, then the
+frozen client working directory. No tilde expansion occurs. Each parent is
+walked descriptor-relative with no symlink traversal. An existing final leaf
+of any type, including a symlink, is `OUTPUT_EXISTS`; a symlink or invalid
+parent is `OUTPUT_UNAVAILABLE/invalid_path`. The same-directory temporary name
+is `.<leaf>.tgcli-download.<32-lowercase-random-hex>.tmp`, created
+`O_CREAT|O_EXCL|O_NOFOLLOW` mode 0600.
+
+The TD local source path must be absolute with no empty, dot or dot-dot
+component. Starting at `/`, every parent is opened directory/no-follow and the
+leaf read-only/no-follow. The leaf must be regular, current-uid owned and no
+larger than int53. Before copying, tgcli records device, inode, file type/mode,
+size, mtime seconds/nanoseconds and ctime seconds/nanoseconds. After copying it
+re-fstats the same descriptor and requires byte-identical metadata plus copied
+count equal to both stable sizes. When TD `file.size` is positive it must also
+equal the stable copied count; `expected_size` is never integrity proof.
+
+Commit order is copy, source revalidation, temp fsync, serialized deadline/
+cancellation arbitration, existing exclusive no-replace rename
+(`renameat2(RENAME_NOREPLACE)` on Linux or `renameatx_np(RENAME_EXCL)` on
+macOS), final-directory fsync, then Result. After exclusive rename succeeds,
+deadline/cancellation loses and sync/terminal complete. Rename `EEXIST` is
+OUTPUT_EXISTS; other rename failure is `write_failed`. A normal pre-rename
+failure unlinks the temp and fsyncs its directory; cleanup failure replaces the
+filesystem error with `cleanup_failed` without exposing the temp name.
+
+Crash guarantees are deliberately limited. A crash after temp creation and
+before rename can leave a named 0600 temp, and v1 never enumerates or sweeps
+such orphans. After rename but before directory fsync, final persistence after
+reboot is unknown and success was not promised. After directory fsync the final
+exists; a retry is OUTPUT_EXISTS. Result `bytes` is the authoritative stable
+copy count, independent of advisory progress.
+
+#### 4.10.2 Canonical public registry and completions
+
+One deterministic checked-in registry specifies the selected-B final command
+tree and whether each path is currently active or future. Runtime CLI and
+dispatcher activation may consume only active rows; changing a future row to
+active is one atomic handler/dispatcher/schema/catalog change. No generator or
+completion asset makes a future row invocable.
+
+`completion bash|zsh|fish` is client-local static output and is a non-DTO meta
+exception like `schema`: it reads no config, socket, account, cwd or network and
+has no result/error schema. Bash, zsh and fish bytes are generated solely from
+the registry, checked in as `completions/tgcli.bash`, `completions/_tgcli` and
+`completions/tgcli.fish`, and must be byte-identical across generator output,
+runtime output and packaged files. Assets use LF only, contain no timestamp,
+version, cwd or environment-derived byte, have exactly one final LF, and never
+execute tgcli. Raw completion suggests literal `-` and only its accepted flags;
+`--full`, `--bot-token`, raw cursor and raw idempotency are absent.
+
+Top-level final rows are `account`, `chat`, `chats`, `completion`, `contact`,
+`daemon`, `doctor`, `download`, `fetch`, `folder`, `history`, `listen`, `login`,
+`logout`, `me`, `msg`, `raw`, `read`, `resolve`, `saved`, `schema`, `search`,
+`send`, `session`, `storage`, `topic`, `unread`, `version`, and `wait-for`.
+Child rows are the exact command surface in §4; aliases remain explicit registry
+rows rather than inferred completion text.
+
+`--no-color` and nonempty `NO_COLOR` remain byte-preserving no-ops for these
+assets and every v1 renderer because v1 emits no ANSI.
+
+#### 4.10.3 Dormant schemas and catalog activation
+
+The strict self-contained future schemas are frozen under
+`docs/schemas/future/`: `search.result.schema.json`,
+`chat-info.result.schema.json`, `chat-members.result.schema.json`,
+`download.result.schema.json`, `raw.result.schema.json`, and family errors
+`search.error.schema.json`, `chat-read.error.schema.json`,
+`download.error.schema.json`, `raw.error.schema.json`. The same directory holds
+the dormant persistence-only `raw-audit-intent.v3.schema.json`,
+`raw-audit-checkpoint.v3.schema.json` and `raw-audit-outcome.v3.schema.json`.
+All twelve assets are validated as Draft 2020-12 now but remain absent from all
+three command catalogs, embedded lookup bytes and packages. Command schemas
+activate only with the corresponding handler; raw audit-v3 assets remain
+persistence-only and never become command catalog entries.
+
+Search result is exactly items (at most 100 exact shared MessageSummary) and
+nonempty cursor-or-null. Chat-info has exactly the 16 fields in §4.4 and a
+strict private/basic/supergroup/channel one-of. Chat-members has at most 200
+strict rows, preserves the user/chat sender one-of, closed status enum, exact
+tag and nullable timestamp. Download result has exact chat/message int53,
+positive int32 file id, closed media type, absolute path and `0..INT53_MAX`
+bytes. Raw result is the live/dry one-of in §4.2.
+
+Search errors close usage/auth/bot/resolver/rate/TD/timeout/internal/resource
+and pagination reasons `invalid_cursor`, `scope_changed`, `source_changed`,
+`marker_not_advancing`, `page_invalid`. Chat-read errors are restricted to
+`chat_info|chat_members` and preserve contextual resolver, unsupported-type,
+pagination/source-change and common lifecycle shapes. Download errors include
+the closed precondition reasons above, OUTPUT_EXISTS `{operation,path}`, and
+OUTPUT_UNAVAILABLE reasons `invalid_path`, `open_failed`, `write_failed`,
+`sync_failed`, `source_changed`, `cleanup_failed`. Raw errors close denied,
+confirmation, rate/TD/timeout/audit and internal reasons without request body,
+response body, TD message, credential or private preflight output.
+
+Already-active `chats`, `unread`, `read`, `msg get`, `msg link`, and `fetch`
+have exact command-local error schemas and non-stream error-catalog mappings.
+Each schema constrains its own operation and contextual detail shapes; sharing a
+file must never let one command validate another command's operation. `history`
+continues to canonicalize to `read` and has no catalog key. Stream error
+authority remains solely `stream-manifest.json`.
+
+Saved contract naming is exact: tags are not Premium-only; search is
+Premium-only; the command is `saved search`, internal operation is
+`saved_search`, and cursor operation is `saved.search`. `saved attach` maps the
+existing M3 write error and `saved.error.schema.json` remains only tags/search.
+
 ## 5. Output contract
 
 **No envelopes.** In `--json` mode a successful command prints the result
@@ -6624,8 +6908,8 @@ Failures print a single error object to **stderr** and set the exit code:
 ```
 
 - Result schemas are **curated and stable** per command (documented in
-  `docs/schemas/`), not raw td_api dumps; `--full` adds the underlying td_api
-  object under a `raw` key. They use JSON Schema Draft 2020-12 and are listed
+  `docs/schemas/`), not raw td_api dumps. v1 rejects `--full`; a raw key in a
+  curated result is a post-1.0 contract decision. Schemas use JSON Schema Draft 2020-12 and are listed
   by command in the result-only `docs/schemas/manifest.json`. The pre-freeze
   baseline is self-contained (no `$id`, external references, or `format`) and
   rejects undeclared properties at every object boundary. Commands without a
@@ -7506,12 +7790,12 @@ Layer responsibilities:
 
 tgcli uses tdlib's **native typed C++ interface** (`td::td_api`) for all
 implemented commands — compile-time schema safety — and tdlib's JSON
-conversion layer (`td_api_json`) for the `raw` command and `--full` dumps.
+conversion layer (`td_api_json`) for the selected-B `raw` parser/typed conversion.
 That conversion layer is generated tdlib-internal code, not part of the
 installed public interface, so tgcli supports exactly one tdlib provenance:
 the pinned source revision — built via FetchContent, or preinstalled into a
 prefix by `scripts/build-tdlib.sh`, which exports the extra headers
-`raw`/`--full` need (§13). Arbitrary distro tdlib packages are not
+raw needs (§13). Arbitrary distro tdlib packages are not
 supported.
 
 The huge `td_api.h` header is confined to daemon-side implementation
@@ -8542,8 +8826,9 @@ What makes tgcli specifically LLM-agent-friendly:
 - `listen --json --count N --timeout S` gives bounded streaming reads that
   exit 0 on planned expiry.
 - `--idempotency-key` provides the bounded retry semantics in §4.5.7.
-- Once M7 activates `raw`, it guarantees no capability cliff: anything td_api
-  can do is reachable.
+- Once M7 activates `raw`, every pinned function has an explicit policy row;
+  denied rows fail closed instead of falling through to an unclassified
+  capability.
 - Stable curated schemas under `docs/schemas/`, also dumpable at runtime via
   `tgcli schema <command>` — no repo checkout needed inside a sandbox.
 - **Schema/runtime boundary.** Ordinary Draft 2020-12 validity is always
@@ -8565,7 +8850,7 @@ What makes tgcli specifically LLM-agent-friendly:
 - **tdlib**: pinned source revision (tdlib tags rarely; pin a commit hash),
   built via FetchContent by default; `-DTGCLI_SYSTEM_TDLIB=ON` accepts a
   prefix produced by `scripts/build-tdlib.sh` from the same pin — it exports
-  the JSON-conversion headers `raw`/`--full` need; arbitrary distro tdlib
+  the JSON-conversion headers raw needs; arbitrary distro tdlib
   packages are not supported. ccache strongly advised; CI caches the tdlib
   build keyed by the pinned hash. Bumping the pin is a
   contract-change-class PR (REVIEW.md §7): td_api churn can move the typed

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli raw result",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "@type"
+      ],
+      "properties": {
+        "@type": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*$"
+        },
+        "@extra": false,
+        "@client_id": false
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run",
+        "plan"
+      ],
+      "properties": {
+        "dry_run": {
+          "const": true
+        },
+        "plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "function",
+            "tier",
+            "tdlib_sha",
+            "request_sha256",
+            "request_bytes"
+          ],
+          "properties": {
+            "operation": {
+              "const": "raw"
+            },
+            "function": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9]*$"
+            },
+            "tier": {
+              "enum": [
+                "write",
+                "destructive"
+              ]
+            },
+            "tdlib_sha": {
+              "const": "a17f87c4cff7b90b278d12b91ba0614383aaee82"
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "request_bytes": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 1048576
+            }
+          }
+        }
+      }
+    }
+  ]
+}

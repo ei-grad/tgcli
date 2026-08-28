@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli dormant raw audit v3 outcome",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "invocation_id",
+        "mutation_state",
+        "terminal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "record_type": {
+          "const": "raw_outcome"
+        },
+        "invocation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "mutation_state": {
+          "const": "confirmed"
+        },
+        "terminal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "response_type",
+            "response_sha256",
+            "response_bytes"
+          ],
+          "properties": {
+            "kind": {
+              "const": "result_digest"
+            },
+            "response_type": {
+              "allOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$"
+                },
+                {
+                  "not": {
+                    "const": "error"
+                  }
+                }
+              ]
+            },
+            "response_sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "response_bytes": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 16777216
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "record_type",
+        "invocation_id",
+        "mutation_state",
+        "terminal"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 3
+        },
+        "record_type": {
+          "const": "raw_outcome"
+        },
+        "invocation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "mutation_state": {
+          "const": "possible"
+        },
+        "terminal": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "td_error_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error_summary"
+                },
+                "code": {
+                  "const": "RATE_LIMITED"
+                },
+                "td_error_code": {
+                  "const": 429
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "td_error_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error_summary"
+                },
+                "code": {
+                  "const": "TDLIB_ERROR"
+                },
+                "td_error_code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "code",
+                "td_error_code"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "error_summary"
+                },
+                "code": {
+                  "const": "INTERNAL"
+                },
+                "td_error_code": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tgcli dormant raw audit v3 intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_type",
+    "invocation_id",
+    "function",
+    "tier",
+    "tdlib_sha",
+    "request_sha256",
+    "request_bytes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "record_type": {
+      "const": "raw_intent"
+    },
+    "invocation_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "function": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$"
+    },
+    "tier": {
+      "enum": [
+        "write",
+        "destructive"
+      ]
+    },
+    "tdlib_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "request_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "request_bytes": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 1048576
+    }
+  }
+}
