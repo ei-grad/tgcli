@@ -25,6 +25,9 @@
     "chat demote": {
       "error": "chat-admin.error.schema.json"
     },
+    "chat info": {
+      "error": "chat-read.error.schema.json"
+    },
     "chat invite-link": {
       "error": "chat-admin.error.schema.json"
     },
@@ -39,6 +42,9 @@
     },
     "chat mark-read": {
       "error": "m3-write.error.schema.json"
+    },
+    "chat members": {
+      "error": "chat-read.error.schema.json"
     },
     "chat mute": {
       "error": "m3-write.error.schema.json"
@@ -177,6 +183,9 @@
     },
     "saved tags": {
       "error": "saved.error.schema.json"
+    },
+    "search": {
+      "error": "search.error.schema.json"
     },
     "send": {
       "error": "m3-write.error.schema.json"

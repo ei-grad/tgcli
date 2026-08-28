@@ -35,6 +35,9 @@ CURRENT_M2_ERRORS = {
     "msg link": "msg-link.error.schema.json",
     "read": "read.error.schema.json",
     "unread": "unread.error.schema.json",
+    "search": "search.error.schema.json",
+    "chat info": "chat-read.error.schema.json",
+    "chat members": "chat-read.error.schema.json",
 }
 
 
@@ -71,6 +74,14 @@ class M7FoundationAssetTest(unittest.TestCase):
         selected = {
             SCHEMAS / "error-manifest.json",
             *(SCHEMAS / filename for filename in CURRENT_M2_ERRORS.values()),
+            *(
+                SCHEMAS / filename
+                for filename in (
+                    "search.result.schema.json",
+                    "chat-info.result.schema.json",
+                    "chat-members.result.schema.json",
+                )
+            ),
             *(SCHEMAS / "future" / filename for filename in FUTURE_FILES),
         }
         expected = {
@@ -102,12 +113,21 @@ class M7FoundationAssetTest(unittest.TestCase):
             cataloged_commands.update(document["commands"])
             for contract in document["commands"].values():
                 cataloged_files.update(contract.values())
-        self.assertTrue(FUTURE_FILES.isdisjoint(cataloged_files))
-        self.assertTrue(
-            {"search", "chat info", "chat members", "download", "raw"}.isdisjoint(
-                cataloged_commands
+        materialized = {
+            "search.result.schema.json",
+            "search.error.schema.json",
+            "chat-info.result.schema.json",
+            "chat-members.result.schema.json",
+            "chat-read.error.schema.json",
+        }
+        self.assertTrue((FUTURE_FILES - materialized).isdisjoint(cataloged_files))
+        self.assertTrue({"download", "raw"}.isdisjoint(cataloged_commands))
+        self.assertTrue({"search", "chat info", "chat members"} <= cataloged_commands)
+        for filename in materialized:
+            self.assertEqual(
+                (SCHEMAS / filename).read_bytes(),
+                (SCHEMAS / "future" / filename).read_bytes(),
             )
-        )
         for filename in FUTURE_FILES:
             schema = json.loads(
                 (SCHEMAS / "future" / filename).read_text(encoding="utf-8")
@@ -158,7 +178,12 @@ class M7FoundationAssetTest(unittest.TestCase):
             ),
             "supergroupMembersFilterAdministrators = SupergroupMembersFilter;",
             "supergroupMembersFilterBots = SupergroupMembersFilter;",
+            "supergroupMembersFilterRecent = SupergroupMembersFilter;",
             "supergroupMembersFilterSearch query:string = SupergroupMembersFilter;",
+            "getUserFullInfo user_id:int53 = UserFullInfo;",
+            "getBasicGroup basic_group_id:int53 = BasicGroup;",
+            "getBasicGroupFullInfo basic_group_id:int53 = BasicGroupFullInfo;",
+            "getSupergroupFullInfo supergroup_id:int53 = SupergroupFullInfo;",
             (
                 "file id:int32 size:int53 expected_size:int53 local:localFile "
                 "remote:remoteFile = File;"

@@ -17,6 +17,7 @@
 #include "daemon/context.hpp"
 #include "daemon/daemon_run.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/m2_read_domain.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/server.hpp"
@@ -620,6 +621,7 @@ struct ChildDaemonOptions {
     bool read_alias_fixture = false;
     bool message_write_fixture = false;
     bool m6_fixture = false;
+    bool m2_long_read_fixture = false;
     bool stream_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
@@ -1016,6 +1018,15 @@ class ChildProtocolDaemon {
             terminate.handler = normalized;
             terminate.session_operation = proto::SessionOperation::Terminate;
             dispatcher.register_command("session terminate", std::move(terminate));
+        }
+        if (options.m2_long_read_fixture) {
+            const auto normalized = [](const proto::Request& request,
+                                       daemon::RequestSession& session) {
+                session.result({{"command", request.command}, {"args", request.args}});
+            };
+            dispatcher.register_command("search", {daemon::Tier::Read, normalized});
+            dispatcher.register_command("chat info", {daemon::Tier::Read, normalized});
+            dispatcher.register_command("chat members", {daemon::Tier::Read, normalized});
         }
         if (options.stream_fixture) {
             dispatcher.register_command(
@@ -4125,6 +4136,133 @@ TEST_CASE("read parser exposes history and rejects closed grammar failures local
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
 }
 
+TEST_CASE("M2 long-read CLI emits exact first-page and cursor-only request frames",
+          "[cli][m2-long-read][parser][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "m2-read-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("search") != std::string::npos);
+    const auto chat_help = run_binary_captured({"chat", "--help"}, env, "m2-read-chat-help");
+    REQUIRE(chat_help.exit_code == kOk);
+    CHECK((chat_help.out + chat_help.err).find("info") != std::string::npos);
+    CHECK((chat_help.out + chat_help.err).find("members") != std::string::npos);
+
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.m2_long_read_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    const auto search = run_binary_captured({"--json", "search", "needle", "--chat", "-1001",
+                                             "--from", "@ada", "--type", "photo", "-n", "100"},
+                                            env, "m2-search-frame");
+    REQUIRE(search.exit_code == kOk);
+    CHECK(search.err.empty());
+    CHECK(json::parse(search.out) == json{{"command", json::array({"search"})},
+                                          {"args",
+                                           {{"chat", "-1001"},
+                                            {"cursor", nullptr},
+                                            {"from", "@ada"},
+                                            {"global", false},
+                                            {"limit", 100},
+                                            {"query", "needle"},
+                                            {"type", "photo"}}}});
+
+    const daemon::SearchCursor search_cursor{
+        .account = "main",
+        .user_id = 42,
+        .limit = 20,
+        .query = "needle",
+        .scope = daemon::SearchScope::Global,
+        .chat_id = std::nullopt,
+        .sender_user_id = std::nullopt,
+        .type = daemon::SearchType::Any,
+        .next_offset_message_id = std::nullopt,
+        .next_offset = "opaque",
+        .last_raw_message_id = std::nullopt,
+        .last_raw_order = daemon::SearchRawOrder{.date = 10, .chat_id = -1001, .message_id = 100}};
+    const auto search_next = run_binary_captured(
+        {"--json", "--cursor", daemon::encode_search_cursor(search_cursor), "search"}, env,
+        "m2-search-cursor-frame");
+    INFO(search_next.err);
+    REQUIRE(search_next.exit_code == kOk);
+    const auto search_next_result = json::parse(search_next.out);
+    CHECK(search_next_result["command"] == json::array({"search"}));
+    CHECK(search_next_result["args"]["cursor"] == daemon::encode_search_cursor(search_cursor));
+    for (const auto* field : {"chat", "from", "limit", "query", "type"}) {
+        CHECK(search_next_result["args"][field].is_null());
+    }
+    CHECK(search_next_result["args"]["global"] == false);
+
+    const auto info =
+        run_binary_captured({"--json", "chat", "info", "-1001"}, env, "m2-info-frame");
+    REQUIRE(info.exit_code == kOk);
+    CHECK(json::parse(info.out) ==
+          json{{"command", json::array({"chat", "info"})}, {"args", {{"chat", "-1001"}}}});
+
+    const auto members =
+        run_binary_captured({"--json", "chat", "members", "-1001", "--query", "Case", "-n", "200"},
+                            env, "m2-members-frame");
+    REQUIRE(members.exit_code == kOk);
+    CHECK(json::parse(members.out) == json{{"command", json::array({"chat", "members"})},
+                                           {"args",
+                                            {{"admins", false},
+                                             {"bots", false},
+                                             {"chat", "-1001"},
+                                             {"cursor", nullptr},
+                                             {"limit", 200},
+                                             {"query", "Case"}}}});
+
+    const daemon::MembersCursor members_cursor{.account = "main",
+                                               .user_id = 42,
+                                               .limit = 50,
+                                               .chat_id = -1001,
+                                               .chat_type = daemon::MembersChatType::Supergroup,
+                                               .source_id = 77,
+                                               .filter = daemon::MembersFilter::Recent,
+                                               .query = std::nullopt,
+                                               .offset = 50,
+                                               .source_count = std::nullopt};
+    const auto members_next = run_binary_captured(
+        {"--json", "--cursor", daemon::encode_members_cursor(members_cursor), "chat", "members"},
+        env, "m2-members-cursor-frame");
+    REQUIRE(members_next.exit_code == kOk);
+    const auto members_next_result = json::parse(members_next.out);
+    CHECK(members_next_result["args"] ==
+          json{{"admins", false},
+               {"bots", false},
+               {"chat", nullptr},
+               {"cursor", daemon::encode_members_cursor(members_cursor)},
+               {"limit", nullptr},
+               {"query", nullptr}});
+    CHECK(fixture.running());
+}
+
+TEST_CASE("M2 long-read CLI rejects normalization and grammar conflicts before routing",
+          "[cli][m2-long-read][parser][process]") {
+    const IsolatedEnv env;
+    const std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
+        {"m2-search-missing", {"search"}},
+        {"m2-search-scope", {"search", "q", "--chat", "1", "--global"}},
+        {"m2-search-type", {"search", "q", "--type", "other"}},
+        {"m2-search-dirty", {"search", "dirty\rquery"}},
+        {"m2-search-limit", {"search", "q", "-n", "101"}},
+        {"m2-members-filter", {"chat", "members", "1", "--admins", "--bots"}},
+        {"m2-members-dirty", {"chat", "members", "1", "--query", "dirty\rquery"}},
+        {"m2-members-limit", {"chat", "members", "1", "-n", "201"}},
+        {"m2-info-cursor", {"--cursor", "opaque", "chat", "info", "1"}},
+        {"m2-search-cursor-mixed", {"--cursor", "opaque", "search", "q"}},
+        {"m2-members-cursor-mixed", {"--cursor", "opaque", "chat", "members", "1"}},
+    };
+    for (const auto& [stem, arguments] : invalid) {
+        const auto outcome = run_binary_captured(arguments, env, stem);
+        INFO(stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        REQUIRE_FALSE(outcome.err.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
 TEST_CASE("history emits a canonical read frame schema result and cursor identity",
           "[cli][read][history][frame][schema][cursor]") {
     const IsolatedEnv env;
@@ -4622,7 +4760,13 @@ TEST_CASE("no-daemon config-admission timeout bytes retain M2 command attributio
                     std::tuple{std::vector<std::string>{"msg", "link"}, "config_admission",
                                "msg-link.error.schema.json"},
                     std::tuple{std::vector<std::string>{"fetch"}, "config_admission",
-                               "fetch.error.schema.json"}}) {
+                               "fetch.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"search"}, "config_admission",
+                               "search.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"chat", "info"}, "config_admission",
+                               "chat-read.error.schema.json"},
+                    std::tuple{std::vector<std::string>{"chat", "members"}, "config_admission",
+                               "chat-read.error.schema.json"}}) {
         proto::Request request("main");
         request.id = request_id++;
         request.command = command;

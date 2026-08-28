@@ -440,6 +440,12 @@ TEST_CASE("fetch retains removal before logout recovery without broadening read 
 
     CHECK(daemon::recovery_preflight_order("read").empty());
     CHECK(daemon::recovery_preflight_order("history").empty());
+    for (const auto* command : {"search", "chat info", "chat members"}) {
+        const auto read = daemon::recovery_preflight_order(command);
+        REQUIRE(read.size() == 2);
+        CHECK(read[0] == daemon::RecoveryPreflight::Removal);
+        CHECK(read[1] == daemon::RecoveryPreflight::Logout);
+    }
     const auto daemon_status = daemon::recovery_preflight_order("daemon status");
     REQUIRE(daemon_status.size() == 1);
     CHECK(daemon_status.front() == daemon::RecoveryPreflight::Removal);
@@ -639,6 +645,9 @@ TEST_CASE("dispatcher fallback is operation-specific for every descriptor family
         Entry{"logout", "logout"},
         Entry{"saved tags", "saved_tags"},
         Entry{"chats", "chats"},
+        Entry{"search", "search"},
+        Entry{"chat info", "chat_info"},
+        Entry{"chat members", "chat_members"},
         Entry{"fetch", "fetch"},
         Entry{"msg get", "msg_get"},
         Entry{"read", "read"},
@@ -695,6 +704,9 @@ TEST_CASE("dispatcher fallback is operation-specific for every descriptor family
         SchemaCase{"auth.error.schema.json", "login"},
         SchemaCase{"logout.error.schema.json", "logout"},
         SchemaCase{"saved.error.schema.json", "saved_tags"},
+        SchemaCase{"search.error.schema.json", "search"},
+        SchemaCase{"chat-read.error.schema.json", "chat_info"},
+        SchemaCase{"chat-read.error.schema.json", "chat_members"},
         SchemaCase{"resolve.error.schema.json", "resolve"},
         SchemaCase{"session.error.schema.json", "session_list"},
         SchemaCase{"stream.error.schema.json", "listen"},

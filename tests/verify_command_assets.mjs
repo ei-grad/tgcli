@@ -44,10 +44,10 @@ for (const command of registry.commands) {
 }
 const active = [...leaves.values()].filter((leaf) => leaf.activation === "active");
 const future = [...leaves.values()].filter((leaf) => leaf.activation === "future");
-if (leaves.size !== 82 || active.length !== 76 || future.length !== 6) {
+if (leaves.size !== 82 || active.length !== 79 || future.length !== 3) {
   throw new Error("command activation counts differ");
 }
-for (const future of ["chat info", "chat members", "completion", "download", "raw", "search"]) {
+for (const future of ["completion", "download", "raw"]) {
   if (leaves.get(future)?.activation !== "future") {
     throw new Error(`future command activation differs: ${future}`);
   }
@@ -121,8 +121,23 @@ for (const shellCase of [bashCase, zshCase]) {
     ["tgcli", "--json", "chat", "--account", "main", "se"],
     5 + (shellCase === zshCase ? 1 : 0),
   );
-  if (!group.includes("set-title") || group.includes("info") || group.includes("members")) {
+  if (
+    !group.includes("set-title") ||
+    (shellCase === bashCase && (group.includes("info") || group.includes("members"))) ||
+    (shellCase === zshCase && (!group.includes("info") || !group.includes("members")))
+  ) {
     throw new Error("active grouped child completion differs");
+  }
+  const info = shellCase(
+    ["tgcli", "chat", "i"],
+    2 + (shellCase === zshCase ? 1 : 0),
+  );
+  const members = shellCase(
+    ["tgcli", "chat", "m"],
+    2 + (shellCase === zshCase ? 1 : 0),
+  );
+  if (!info.includes("info") || !members.includes("members")) {
+    throw new Error("new M2 grouped completion differs");
   }
   const pending = shellCase(
     ["tgcli", "chat", "--account", ""],

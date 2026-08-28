@@ -364,7 +364,11 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::GetInternalLinkType:
     case TdFunctionKind::GetMessageLinkInfo:
     case TdFunctionKind::CheckChatInviteLink:
+    case TdFunctionKind::SearchChatMessages:
+    case TdFunctionKind::SearchMessages:
     case TdFunctionKind::GetUser:
+    case TdFunctionKind::GetUserFullInfo:
+    case TdFunctionKind::GetBasicGroup:
     case TdFunctionKind::GetBasicGroupFullInfo:
     case TdFunctionKind::GetSupergroup:
     case TdFunctionKind::GetSupergroupFullInfo:

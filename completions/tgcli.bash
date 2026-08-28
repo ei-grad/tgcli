@@ -16,9 +16,9 @@ _tgcli_normalize() {
         --account=*|--timeout=*|--cursor=*|--idempotency-key=*|--json|--allow-write|--yes|--dry-run|--verbose|-v|--no-daemon|--no-color|-*) ;;
         *)
           if [[ -z "$top" ]]; then
-            case "$token" in account|chat|chats|completion|contact|daemon|doctor|fetch|folder|history|listen|login|logout|me|msg|read|resolve|saved|schema|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
+            case "$token" in account|chat|chats|completion|contact|daemon|doctor|fetch|folder|history|listen|login|logout|me|msg|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
           elif [[ -z "$child" ]]; then
-            case "$top:$token" in account:add|account:list|account:remove|account:show|account:use|chat:archive|chat:ban|chat:demote|chat:invite-link|chat:join|chat:kick|chat:leave|chat:mark-read|chat:mute|chat:pin|chat:promote|chat:set-description|chat:set-permissions|chat:set-photo|chat:set-title|chat:unarchive|chat:unban|chat:unmute|chat:unpin|contact:add|contact:block|contact:list|contact:remove|contact:search|contact:unblock|daemon:restart|daemon:run|daemon:status|daemon:stop|folder:add-chat|folder:create|folder:delete|folder:edit|folder:list|folder:remove-chat|folder:show|msg:delete|msg:edit|msg:forward|msg:get|msg:link|msg:pin|msg:react|msg:unpin|saved:attach|saved:search|saved:tags|session:list|session:terminate|storage:optimize|storage:stats|topic:close|topic:create|topic:edit|topic:list|topic:reopen) child="$token" ;; esac
+            case "$top:$token" in account:add|account:list|account:remove|account:show|account:use|chat:archive|chat:ban|chat:demote|chat:info|chat:invite-link|chat:join|chat:kick|chat:leave|chat:mark-read|chat:members|chat:mute|chat:pin|chat:promote|chat:set-description|chat:set-permissions|chat:set-photo|chat:set-title|chat:unarchive|chat:unban|chat:unmute|chat:unpin|contact:add|contact:block|contact:list|contact:remove|contact:search|contact:unblock|daemon:restart|daemon:run|daemon:status|daemon:stop|folder:add-chat|folder:create|folder:delete|folder:edit|folder:list|folder:remove-chat|folder:show|msg:delete|msg:edit|msg:forward|msg:get|msg:link|msg:pin|msg:react|msg:unpin|saved:attach|saved:search|saved:tags|session:list|session:terminate|storage:optimize|storage:stats|topic:close|topic:create|topic:edit|topic:list|topic:reopen) child="$token" ;; esac
           fi
           ;;
       esac
@@ -46,11 +46,11 @@ _tgcli_complete() {
   top=${COMP_WORDS[1]-}
   candidates=''
   if (( COMP_CWORD == 1 )); then
-    candidates='account chat chats completion contact daemon doctor fetch folder history listen login logout me msg read resolve saved schema send session storage topic unread version wait-for'
+    candidates='account chat chats completion contact daemon doctor fetch folder history listen login logout me msg read resolve saved schema search send session storage topic unread version wait-for'
   elif (( COMP_CWORD == 2 )); then
     case "$top" in
       account) candidates='add list remove show use' ;;
-      chat) candidates='archive ban demote invite-link join kick leave mark-read mute pin promote set-description set-permissions set-photo set-title unarchive unban unmute unpin' ;;
+      chat) candidates='archive ban demote info invite-link join kick leave mark-read members mute pin promote set-description set-permissions set-photo set-title unarchive unban unmute unpin' ;;
       contact) candidates='add block list remove search unblock' ;;
       daemon) candidates='restart run status stop' ;;
       folder) candidates='add-chat create delete edit list remove-chat show' ;;
@@ -71,6 +71,7 @@ _tgcli_complete() {
       read) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color -n --before --since --until --topic --local' ;;
       resolve) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       schema) candidates='--json --verbose -v --no-daemon --no-color --all' ;;
+      search) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color --chat --global --from --type -n' ;;
       send) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --md --html --reply-to --topic --silent --schedule' ;;
       unread) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       version) candidates='--json --verbose -v --no-daemon --no-color' ;;
@@ -87,11 +88,13 @@ _tgcli_complete() {
       chat\ archive) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ ban) candidates='--account --json --allow-write --dry-run --yes --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ demote) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
+      chat\ info) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       chat\ invite-link) candidates='--account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color --revoke' ;;
       chat\ join) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ kick) candidates='--account --json --allow-write --dry-run --yes --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ leave) candidates='--account --json --allow-write --dry-run --yes --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ mark-read) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
+      chat\ members) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color --admins --bots --query -n' ;;
       chat\ mute) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --for' ;;
       chat\ pin) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       chat\ promote) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --rights' ;;
@@ -143,6 +146,7 @@ _tgcli_complete() {
       saved\ search) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color --tag -n' ;;
       saved\ tags) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       schema) candidates='--json --verbose -v --no-daemon --no-color --all' ;;
+      search) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color --chat --global --from --type -n' ;;
       send) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --md --html --reply-to --topic --silent --schedule' ;;
       session\ list) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       session\ terminate) candidates='--account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color' ;;

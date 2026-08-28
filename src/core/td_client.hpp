@@ -283,8 +283,20 @@ class TdClient {
     check_chat_invite_link(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                            std::string_view link, TdQueryLifetime lifetime = {},
                            const secure::WipeObserver& wipe_observer = {});
+    std::future<TdValue>
+    search_chat_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                         TdSearchChatMessagesRequest request);
+    std::future<TdValue>
+    search_messages(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    TdSearchMessagesRequest request);
     std::future<TdValue> get_user(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                                   std::int64_t user_id);
+    std::future<TdValue>
+    get_user_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                       std::int64_t user_id);
+    std::future<TdValue>
+    get_basic_group(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                    std::int64_t basic_group_id);
     std::future<TdValue>
     get_basic_group_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                               std::int64_t basic_group_id);
@@ -294,6 +306,10 @@ class TdClient {
     std::future<TdValue>
     get_supergroup_full_info(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                              std::int64_t supergroup_id);
+    std::future<TdValue>
+    get_supergroup_members(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                           std::int64_t supergroup_id, TdSupergroupMembersFilter filter,
+                           std::string query, std::int32_t offset, std::int32_t limit);
     std::future<TdValue>
     get_supergroup_members(const std::shared_ptr<const AuthStateSnapshot>& authorization,
                            std::int64_t supergroup_id, std::string query, std::int32_t offset,

@@ -346,9 +346,11 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                     {"account show", {{"result", "account-show.result.schema.json"}}},
                     {"account use", {{"result", "account-use.result.schema.json"}}},
                     {"chat archive", {{"result", "chat-archive.result.schema.json"}}},
+                    {"chat info", {{"result", "chat-info.result.schema.json"}}},
                     {"chat join", {{"result", "chat-join.result.schema.json"}}},
                     {"chat leave", {{"result", "chat-leave.result.schema.json"}}},
                     {"chat mark-read", {{"result", "chat-mark-read.result.schema.json"}}},
+                    {"chat members", {{"result", "chat-members.result.schema.json"}}},
                     {"chat mute", {{"result", "chat-mute.result.schema.json"}}},
                     {"chat pin", {{"result", "chat-pin.result.schema.json"}}},
                     {"chat unarchive", {{"result", "chat-unarchive.result.schema.json"}}},
@@ -376,6 +378,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                     {"saved attach", {{"result", "saved-attach.result.schema.json"}}},
                     {"saved search", {{"result", "saved-search.result.schema.json"}}},
                     {"saved tags", {{"result", "saved-tags.result.schema.json"}}},
+                    {"search", {{"result", "search.result.schema.json"}}},
                     {"send", {{"result", "send.result.schema.json"}}},
                     {"session list", {{"result", "session-list.result.schema.json"}}},
                     {"session terminate", {{"result", "session-terminate.result.schema.json"}}},
@@ -389,7 +392,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
             {"result", filename + ".result.schema.json"}};
     }
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 72);
+    CHECK(manifest["commands"].size() == 75);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {

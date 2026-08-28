@@ -433,7 +433,11 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetInternalLinkType:
     case core::TdFunctionKind::GetMessageLinkInfo:
     case core::TdFunctionKind::CheckChatInviteLink:
+    case core::TdFunctionKind::SearchChatMessages:
+    case core::TdFunctionKind::SearchMessages:
     case core::TdFunctionKind::GetUser:
+    case core::TdFunctionKind::GetUserFullInfo:
+    case core::TdFunctionKind::GetBasicGroup:
     case core::TdFunctionKind::GetBasicGroupFullInfo:
     case core::TdFunctionKind::GetSupergroup:
     case core::TdFunctionKind::GetSupergroupFullInfo:

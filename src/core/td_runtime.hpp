@@ -80,7 +80,11 @@ enum class TdFunctionKind {
     GetInternalLinkType,
     GetMessageLinkInfo,
     CheckChatInviteLink,
+    SearchChatMessages,
+    SearchMessages,
     GetUser,
+    GetUserFullInfo,
+    GetBasicGroup,
     GetBasicGroupFullInfo,
     GetSupergroup,
     GetSupergroupFullInfo,
@@ -230,8 +234,16 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "getMessageLinkInfo";
     case TdFunctionKind::CheckChatInviteLink:
         return "checkChatInviteLink";
+    case TdFunctionKind::SearchChatMessages:
+        return "searchChatMessages";
+    case TdFunctionKind::SearchMessages:
+        return "searchMessages";
     case TdFunctionKind::GetUser:
         return "getUser";
+    case TdFunctionKind::GetUserFullInfo:
+        return "getUserFullInfo";
+    case TdFunctionKind::GetBasicGroup:
+        return "getBasicGroup";
     case TdFunctionKind::GetBasicGroupFullInfo:
         return "getBasicGroupFullInfo";
     case TdFunctionKind::GetSupergroup:
@@ -1557,6 +1569,40 @@ struct TdMessages {
     bool operator==(const TdMessages&) const = default;
 };
 
+enum class TdSearchMessagesFilter { Any, Photo, Video, Document, Url, VoiceNote };
+
+struct TdSearchChatMessagesRequest {
+    std::int64_t chat_id = 0;
+    std::string query;
+    std::optional<std::int64_t> sender_user_id;
+    std::int64_t from_message_id = 0;
+    std::int32_t limit = 0;
+    TdSearchMessagesFilter filter = TdSearchMessagesFilter::Any;
+};
+
+struct TdSearchMessagesRequest {
+    std::string query;
+    std::string offset;
+    std::int32_t limit = 0;
+    TdSearchMessagesFilter filter = TdSearchMessagesFilter::Any;
+};
+
+struct TdFoundChatMessages {
+    std::int32_t total_count = 0;
+    std::vector<std::optional<TdMessageSummary>> messages;
+    std::int64_t next_from_message_id = 0;
+
+    bool operator==(const TdFoundChatMessages&) const = default;
+};
+
+struct TdFoundMessages {
+    std::int32_t total_count = 0;
+    std::vector<std::optional<TdMessageSummary>> messages;
+    std::string next_offset;
+
+    bool operator==(const TdFoundMessages&) const = default;
+};
+
 struct TdMessageThreadInfo {
     std::int64_t history_chat_id = 0;
     std::int64_t history_thread_id = 0;
@@ -1579,6 +1625,12 @@ struct TdSupergroup {
     bool is_forum = false;
 
     bool operator==(const TdSupergroup&) const = default;
+};
+
+struct TdUserFullInfo {
+    std::string description;
+
+    bool operator==(const TdUserFullInfo&) const = default;
 };
 
 struct TdBasicGroup {
@@ -1639,6 +1691,8 @@ struct TdChatMembers {
 
     bool operator==(const TdChatMembers&) const = default;
 };
+
+enum class TdSupergroupMembersFilter { Recent, Administrators, Bots, Search };
 
 struct TdMessageContent {
     TdMessageContentKind kind = TdMessageContentKind::Other;
@@ -1924,6 +1978,9 @@ struct TdChatInviteLinkInfo {
 };
 
 struct TdSupergroupFullInfo {
+    std::string description;
+    std::int32_t member_count = 0;
+    std::int64_t linked_chat_id = 0;
     std::int64_t direct_messages_chat_id = 0;
 
     bool operator==(const TdSupergroupFullInfo&) const = default;
@@ -2001,11 +2058,16 @@ class TdRuntime {
     virtual TdValue make_get_message_link_info(std::string url) = 0;
     virtual TdValue make_check_chat_invite_link(std::string_view link,
                                                 const secure::WipeObserver& wipe_observer = {}) = 0;
+    virtual TdValue make_search_chat_messages(TdSearchChatMessagesRequest request) = 0;
+    virtual TdValue make_search_messages(TdSearchMessagesRequest request) = 0;
     virtual TdValue make_get_user(std::int64_t user_id) = 0;
+    virtual TdValue make_get_user_full_info(std::int64_t user_id) = 0;
+    virtual TdValue make_get_basic_group(std::int64_t basic_group_id) = 0;
     virtual TdValue make_get_basic_group_full_info(std::int64_t basic_group_id) = 0;
     virtual TdValue make_get_supergroup(std::int64_t supergroup_id) = 0;
     virtual TdValue make_get_supergroup_full_info(std::int64_t supergroup_id) = 0;
-    virtual TdValue make_get_supergroup_members(std::int64_t supergroup_id, std::string query,
+    virtual TdValue make_get_supergroup_members(std::int64_t supergroup_id,
+                                                TdSupergroupMembersFilter filter, std::string query,
                                                 std::int32_t offset, std::int32_t limit) = 0;
     virtual TdValue make_create_private_chat(std::int64_t user_id, bool force) = 0;
     virtual TdValue make_get_message(std::int64_t chat_id, std::int64_t message_id) = 0;

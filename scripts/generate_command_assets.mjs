@@ -113,7 +113,7 @@ requireCondition(raw.positionals.join(" ") === "-", "raw positional differs");
 requireCondition(raw.completion_literals.join(" ") === "-", "raw completion literal differs");
 requireCondition(!raw.effectiveOptions.includes("--cursor"), "raw cursor leaked");
 requireCondition(!raw.effectiveOptions.includes("--idempotency-key"), "raw idempotency leaked");
-for (const future of ["completion", "download", "raw", "search", "chat info", "chat members"]) {
+for (const future of ["completion", "download", "raw"]) {
   requireCondition(leaves.find((leaf) => leaf.path === future)?.activation === "future", `future command activated: ${future}`);
 }
 

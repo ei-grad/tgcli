@@ -10,6 +10,7 @@
 #include "daemon/fetch_domain.hpp"
 #include "daemon/file_spool.hpp"
 #include "daemon/local_selector.hpp"
+#include "daemon/m2_read_domain.hpp"
 #include "daemon/m6_domain.hpp"
 #include "daemon/read_domain.hpp"
 #include "daemon/request_fingerprint.hpp"
@@ -609,6 +610,32 @@ struct FetchCliArguments {
     CLI::Option* all_option = nullptr;
 };
 
+struct M2LongReadCliArguments {
+    std::string search_query;
+    std::string search_chat;
+    std::string search_from;
+    std::string search_type = "any";
+    int search_limit = tgcli::daemon::kDefaultSearchLimit;
+    bool search_global = false;
+    CLI::Option* search_query_option = nullptr;
+    CLI::Option* search_chat_option = nullptr;
+    CLI::Option* search_from_option = nullptr;
+    CLI::Option* search_type_option = nullptr;
+    CLI::Option* search_limit_option = nullptr;
+    CLI::Option* search_global_option = nullptr;
+    std::string info_chat;
+    std::string members_chat;
+    std::string members_query;
+    int members_limit = tgcli::daemon::kDefaultMembersLimit;
+    bool members_admins = false;
+    bool members_bots = false;
+    CLI::Option* members_chat_option = nullptr;
+    CLI::Option* members_query_option = nullptr;
+    CLI::Option* members_limit_option = nullptr;
+    CLI::Option* members_admins_option = nullptr;
+    CLI::Option* members_bots_option = nullptr;
+};
+
 struct StreamCliArguments {
     std::vector<std::string> listen_chats;
     std::string listen_types;
@@ -835,7 +862,9 @@ std::optional<int> validate_saved_arguments(const std::vector<std::string>& comm
     }
     if (saved.cursor_option->count() != 0 && !is_saved_search(command) &&
         command != std::vector<std::string>{"chats"} &&
-        command != std::vector<std::string>{"read"}) {
+        command != std::vector<std::string>{"read"} &&
+        command != std::vector<std::string>{"search"} &&
+        command != std::vector<std::string>{"chat", "members"}) {
         return report_usage("--cursor is not supported for this command", "--cursor",
                             "unsupported_mode");
     }
@@ -1060,13 +1089,113 @@ std::optional<int> validate_m6_arguments(const std::vector<std::string>& command
 
 // Each command's closed CLI contract is validated before common request construction.
 // NOLINTBEGIN(readability-function-cognitive-complexity)
-std::optional<int>
-validate_command_arguments(const std::vector<std::string>& command, const SavedCliArguments& saved,
-                           const ChatsCliArguments& chats, const MessageCliArguments& messages,
-                           const SendCliArguments& send, const ChatCliArguments& chat,
-                           const ReadCliArguments& read, const FetchCliArguments& fetch,
-                           std::string_view resolve_selector, M6CliArguments& m6,
-                           std::string_view frozen_cwd) {
+std::optional<int> validate_m2_long_read_arguments(const std::vector<std::string>& command,
+                                                   const M2LongReadCliArguments& arguments,
+                                                   const SavedCliArguments& pagination) {
+    if (command == std::vector<std::string>{"search"}) {
+        const bool cursor = pagination.cursor_option->count() != 0;
+        if (cursor) {
+            if (arguments.search_query_option->count() != 0 ||
+                arguments.search_chat_option->count() != 0 ||
+                arguments.search_from_option->count() != 0 ||
+                arguments.search_type_option->count() != 0 ||
+                arguments.search_limit_option->count() != 0 ||
+                arguments.search_global_option->count() != 0) {
+                return report_usage("search cursor cannot be combined with first-page arguments",
+                                    "--cursor", "mutually_exclusive");
+            }
+            if (!tgcli::daemon::decode_search_cursor(pagination.cursor)) {
+                return report_usage("invalid search cursor", "--cursor", "invalid_cursor");
+            }
+            return std::nullopt;
+        }
+        if (arguments.search_query_option->count() == 0) {
+            return report_usage("search requires a query", "query", "missing_argument");
+        }
+        if (!tgcli::daemon::pinned_search_input(arguments.search_query)) {
+            return report_usage("search query is not in canonical TDLib form", "query");
+        }
+        if (arguments.search_chat_option->count() != 0 && arguments.search_global) {
+            return report_usage("--chat and --global are mutually exclusive", "--chat/--global",
+                                "mutually_exclusive");
+        }
+        if (arguments.search_chat_option->count() != 0 &&
+            !tgcli::daemon::valid_resolve_selector(arguments.search_chat)) {
+            return report_usage("search chat selector is invalid", "--chat");
+        }
+        if (arguments.search_from_option->count() != 0 &&
+            !tgcli::daemon::valid_resolve_selector(arguments.search_from)) {
+            return report_usage("search sender selector is invalid", "--from");
+        }
+        if (!tgcli::daemon::parse_search_type(arguments.search_type)) {
+            return report_usage("search type is invalid", "--type");
+        }
+        if (arguments.search_limit_option->count() != 0 &&
+            (arguments.search_limit < 1 ||
+             arguments.search_limit > tgcli::daemon::kMaximumSearchLimit)) {
+            return report_usage("search limit must be between 1 and 100", "-n");
+        }
+        return std::nullopt;
+    }
+    if (command == std::vector<std::string>{"chat", "info"}) {
+        if (pagination.cursor_option->count() != 0) {
+            return report_usage("chat info does not accept a cursor", "--cursor",
+                                "unsupported_mode");
+        }
+        return tgcli::daemon::valid_resolve_selector(arguments.info_chat)
+                   ? std::nullopt
+                   : std::optional<int>{report_usage("chat info selector is invalid", "chat")};
+    }
+    if (command != std::vector<std::string>{"chat", "members"}) {
+        return std::nullopt;
+    }
+    const bool cursor = pagination.cursor_option->count() != 0;
+    if (cursor) {
+        if (arguments.members_chat_option->count() != 0 ||
+            arguments.members_admins_option->count() != 0 ||
+            arguments.members_bots_option->count() != 0 ||
+            arguments.members_query_option->count() != 0 ||
+            arguments.members_limit_option->count() != 0) {
+            return report_usage("chat members cursor cannot be combined with first-page arguments",
+                                "--cursor", "mutually_exclusive");
+        }
+        if (!tgcli::daemon::decode_members_cursor(pagination.cursor)) {
+            return report_usage("invalid chat members cursor", "--cursor", "invalid_cursor");
+        }
+        return std::nullopt;
+    }
+    if (arguments.members_chat_option->count() == 0) {
+        return report_usage("chat members requires a chat selector", "chat", "missing_argument");
+    }
+    if (!tgcli::daemon::valid_resolve_selector(arguments.members_chat)) {
+        return report_usage("chat members selector is invalid", "chat");
+    }
+    const auto selected = static_cast<int>(arguments.members_admins) +
+                          static_cast<int>(arguments.members_bots) +
+                          static_cast<int>(arguments.members_query_option->count() != 0);
+    if (selected > 1) {
+        return report_usage("chat member filters are mutually exclusive", "filter",
+                            "mutually_exclusive");
+    }
+    if (arguments.members_query_option->count() != 0 &&
+        (arguments.members_query.size() > 256 ||
+         !tgcli::daemon::pinned_search_input(arguments.members_query))) {
+        return report_usage("chat members query is invalid", "--query");
+    }
+    if (arguments.members_limit_option->count() != 0 &&
+        (arguments.members_limit < 1 ||
+         arguments.members_limit > tgcli::daemon::kMaximumMembersLimit)) {
+        return report_usage("chat members limit must be between 1 and 200", "-n");
+    }
+    return std::nullopt;
+}
+
+std::optional<int> validate_command_arguments(
+    const std::vector<std::string>& command, const SavedCliArguments& saved,
+    const ChatsCliArguments& chats, const MessageCliArguments& messages,
+    const SendCliArguments& send, const ChatCliArguments& chat, const ReadCliArguments& read,
+    const FetchCliArguments& fetch, const M2LongReadCliArguments& m2_long_read,
+    std::string_view resolve_selector, M6CliArguments& m6, std::string_view frozen_cwd) {
     if (const auto m6_exit = validate_m6_arguments(command, m6, frozen_cwd); m6_exit) {
         return m6_exit;
     }
@@ -1075,6 +1204,10 @@ validate_command_arguments(const std::vector<std::string>& command, const SavedC
     }
     if (const auto chats_exit = validate_chats_arguments(command, chats, saved); chats_exit) {
         return chats_exit;
+    }
+    if (const auto long_read_exit = validate_m2_long_read_arguments(command, m2_long_read, saved);
+        long_read_exit) {
+        return long_read_exit;
     }
     if (command == std::vector<std::string>{"read"}) {
         const bool cursor = saved.cursor_option->count() != 0;
@@ -1414,6 +1547,39 @@ nlohmann::json read_request_args(const ReadCliArguments& read,
     };
 }
 
+nlohmann::json search_request_args(const M2LongReadCliArguments& arguments,
+                                   const SavedCliArguments& pagination) {
+    const bool cursor = pagination.cursor_option->count() != 0;
+    return {{"chat", !cursor && arguments.search_chat_option->count() != 0
+                         ? nlohmann::json(arguments.search_chat)
+                         : nlohmann::json(nullptr)},
+            {"cursor", cursor ? nlohmann::json(pagination.cursor) : nlohmann::json(nullptr)},
+            {"from", !cursor && arguments.search_from_option->count() != 0
+                         ? nlohmann::json(arguments.search_from)
+                         : nlohmann::json(nullptr)},
+            {"global", !cursor && arguments.search_global},
+            {"limit", !cursor && arguments.search_limit_option->count() != 0
+                          ? nlohmann::json(arguments.search_limit)
+                          : nlohmann::json(nullptr)},
+            {"query", !cursor ? nlohmann::json(arguments.search_query) : nlohmann::json(nullptr)},
+            {"type", !cursor ? nlohmann::json(arguments.search_type) : nlohmann::json(nullptr)}};
+}
+
+nlohmann::json members_request_args(const M2LongReadCliArguments& arguments,
+                                    const SavedCliArguments& pagination) {
+    const bool cursor = pagination.cursor_option->count() != 0;
+    return {{"admins", !cursor && arguments.members_admins},
+            {"bots", !cursor && arguments.members_bots},
+            {"chat", !cursor ? nlohmann::json(arguments.members_chat) : nlohmann::json(nullptr)},
+            {"cursor", cursor ? nlohmann::json(pagination.cursor) : nlohmann::json(nullptr)},
+            {"limit", !cursor && arguments.members_limit_option->count() != 0
+                          ? nlohmann::json(arguments.members_limit)
+                          : nlohmann::json(nullptr)},
+            {"query", !cursor && arguments.members_query_option->count() != 0
+                          ? nlohmann::json(arguments.members_query)
+                          : nlohmann::json(nullptr)}};
+}
+
 nlohmann::json m6_request_args(const std::vector<std::string>& command, const M6CliArguments& m6) {
     const auto operation = tgcli::proto::m6_operation_for_command(command);
     if (!operation) {
@@ -1501,7 +1667,9 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
                                     const MessageCliArguments& messages,
                                     const SendCliArguments& send, const ChatCliArguments& chat,
                                     const ReadCliArguments& read, const FetchCliArguments& fetch,
-                                    const StreamCliArguments& stream, const M6CliArguments& m6) {
+                                    const StreamCliArguments& stream,
+                                    const M2LongReadCliArguments& m2_long_read,
+                                    const M6CliArguments& m6) {
     if (tgcli::proto::m6_operation_for_command(command) ||
         command == std::vector<std::string>{"session", "list"} ||
         command == std::vector<std::string>{"session", "terminate"}) {
@@ -1518,6 +1686,15 @@ nlohmann::json command_request_args(const std::vector<std::string>& command, boo
     }
     if (command == std::vector<std::string>{"read"}) {
         return read_request_args(read, saved);
+    }
+    if (command == std::vector<std::string>{"search"}) {
+        return search_request_args(m2_long_read, saved);
+    }
+    if (command == std::vector<std::string>{"chat", "info"}) {
+        return {{"chat", m2_long_read.info_chat}};
+    }
+    if (command == std::vector<std::string>{"chat", "members"}) {
+        return members_request_args(m2_long_read, saved);
     }
     if (command == std::vector<std::string>{"fetch"}) {
         return {{"chat", fetch.chat},
@@ -1729,6 +1906,7 @@ int run(int argc, char** argv) {
     ReadCliArguments history;
     FetchCliArguments fetch;
     StreamCliArguments stream;
+    M2LongReadCliArguments m2_long_read;
     M6CliArguments m6;
     CLI::Option* account_option =
         app.add_option("--account", account, "account name (default from config / TGCLI_ACCOUNT)");
@@ -1806,6 +1984,20 @@ int run(int argc, char** argv) {
     CLI::App* history_cmd = app.add_subcommand("history", "alias for read");
     add_read_options(*history_cmd, history);
     app.add_subcommand("unread", "list chats with unread activity");
+    CLI::App* search_cmd = app.add_subcommand("search", "search messages");
+    m2_long_read.search_query_option =
+        search_cmd->add_option("query", m2_long_read.search_query, "search query");
+    m2_long_read.search_query_option->expected(0, 1);
+    m2_long_read.search_chat_option =
+        search_cmd->add_option("--chat", m2_long_read.search_chat, "chat selector");
+    m2_long_read.search_global_option =
+        search_cmd->add_flag("--global", m2_long_read.search_global, "search all chats");
+    m2_long_read.search_from_option =
+        search_cmd->add_option("--from", m2_long_read.search_from, "sender user selector");
+    m2_long_read.search_type_option = search_cmd->add_option("--type", m2_long_read.search_type,
+                                                             "any|text|photo|video|doc|link|voice");
+    m2_long_read.search_limit_option =
+        search_cmd->add_option("-n", m2_long_read.search_limit, "page size (1-100; default 20)");
     CLI::App* send_cmd = app.add_subcommand("send", "send a text message");
     send_cmd->add_option("chat", send.chat, "exact chat selector")->required();
     send_cmd->add_option("TEXT", send.text, "message text or - for stdin")->required();
@@ -1946,6 +2138,21 @@ int run(int argc, char** argv) {
     msg_unpin_cmd->add_option("id", messages.unpin_id)->required();
     CLI::App* chat_cmd = app.add_subcommand("chat", "chat mutations");
     chat_cmd->require_subcommand(1);
+    chat_cmd->add_subcommand("info", "show chat information")
+        ->add_option("chat", m2_long_read.info_chat)
+        ->required();
+    CLI::App* chat_members_cmd = chat_cmd->add_subcommand("members", "list chat members");
+    m2_long_read.members_chat_option =
+        chat_members_cmd->add_option("chat", m2_long_read.members_chat, "chat selector");
+    m2_long_read.members_chat_option->expected(0, 1);
+    m2_long_read.members_admins_option =
+        chat_members_cmd->add_flag("--admins", m2_long_read.members_admins, "administrators only");
+    m2_long_read.members_bots_option =
+        chat_members_cmd->add_flag("--bots", m2_long_read.members_bots, "bots only");
+    m2_long_read.members_query_option =
+        chat_members_cmd->add_option("--query", m2_long_read.members_query, "member query");
+    m2_long_read.members_limit_option = chat_members_cmd->add_option(
+        "-n", m2_long_read.members_limit, "page size (1-200; default 50)");
     chat_cmd->add_subcommand("mark-read", "mark a chat as read")
         ->add_option("chat", chat.mark_read)
         ->required();
@@ -2202,7 +2409,7 @@ int run(int argc, char** argv) {
     std::string frozen_cwd = captured_cwd ? std::move(*captured_cwd) : std::string{};
     if (const auto argument_exit =
             validate_command_arguments(command, saved, chats, messages, send, chat, *selected_read,
-                                       fetch, resolve_selector, m6, frozen_cwd);
+                                       fetch, m2_long_read, resolve_selector, m6, frozen_cwd);
         argument_exit) {
         return *argument_exit;
     }
@@ -2254,7 +2461,7 @@ int run(int argc, char** argv) {
 
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
-                             send, chat, *selected_read, fetch, stream, m6);
+                             send, chat, *selected_read, fetch, stream, m2_long_read, m6);
     auto request_context =
         make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd));
     if (idempotency_key_option->count() != 0) {

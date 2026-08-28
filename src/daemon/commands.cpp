@@ -6,6 +6,7 @@
 #include "daemon/fetch_commands.hpp"
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_commands.hpp"
+#include "daemon/m2_read_commands.hpp"
 #include "daemon/m6_commands.hpp"
 #include "daemon/message_commands.hpp"
 #include "daemon/read_commands.hpp"
@@ -53,7 +54,8 @@ json doctor_payload(const DaemonContext& context) {
 bool uses_account_removal_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
-           command == "chats" || command == "msg get" || command == "msg link" ||
+           command == "chats" || command == "search" || command == "chat info" ||
+           command == "chat members" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
            command == "listen" || command == "wait-for" || command == "msg delete" ||
            command == "msg forward" || command == "msg react" || command == "msg pin" ||
@@ -67,7 +69,8 @@ bool uses_account_removal_preflight(std::string_view command) {
 bool uses_logout_preflight(std::string_view command) {
     return command == "login" || command == "logout" || command == "me" || command == "doctor" ||
            command == "saved tags" || command == "saved search" || command == "resolve" ||
-           command == "chats" || command == "msg get" || command == "msg link" ||
+           command == "chats" || command == "search" || command == "chat info" ||
+           command == "chat members" || command == "msg get" || command == "msg link" ||
            command == "fetch" || command == "send" || command == "msg edit" ||
            command == "listen" || command == "wait-for" || command == "msg delete" ||
            command == "msg forward" || command == "msg react" || command == "msg pin" ||
@@ -152,6 +155,11 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.read != nullptr) {
         register_read_command(dispatcher, *context.read);
+    }
+    if (context.m2_read != nullptr) {
+        register_search_command(dispatcher, *context.m2_read);
+        register_chat_info_command(dispatcher, *context.m2_read);
+        register_chat_members_command(dispatcher, *context.m2_read);
     }
     if (context.fetch != nullptr) {
         register_fetch_command(dispatcher, *context.fetch);

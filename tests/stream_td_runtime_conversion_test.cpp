@@ -1,6 +1,8 @@
 #include "core/td_runtime_test_adapter.hpp"
 
+#include <array>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -387,4 +389,104 @@ TEST_CASE("M5 resolver read factories and responses match the pinned TDLib bound
     REQUIRE(converted.get_if<TdChatMembers>() != nullptr);
     CHECK(converted.get_if<TdChatMembers>()->members.front().status.kind ==
           TdChatMemberStatusKind::Banned);
+}
+
+TEST_CASE("M2 long read factories and responses match the pinned TDLib boundary",
+          "[m2-long-read][core][tdlib][td-runtime-factory][td-runtime-converter]") {
+    for (const auto filter : {TdSearchMessagesFilter::Any, TdSearchMessagesFilter::Photo,
+                              TdSearchMessagesFilter::Video, TdSearchMessagesFilter::Document,
+                              TdSearchMessagesFilter::Url, TdSearchMessagesFilter::VoiceNote}) {
+        const TdSearchChatMessagesRequest chat_request{.chat_id = -1001,
+                                                       .query = "needle",
+                                                       .sender_user_id = 42,
+                                                       .from_message_id = 123,
+                                                       .limit = 100,
+                                                       .filter = filter};
+        auto chat_search = detail::make_production_search_chat_messages_for_test(chat_request);
+        CHECK(detail::production_function_matches_for_test(chat_search,
+                                                           TdFunctionKind::SearchChatMessages));
+        CHECK(detail::production_search_chat_messages_matches_for_test(chat_search, chat_request));
+
+        const TdSearchMessagesRequest global_request{
+            .query = "needle", .offset = "opaque", .limit = 100, .filter = filter};
+        auto global_search = detail::make_production_search_messages_for_test(global_request);
+        CHECK(detail::production_function_matches_for_test(global_search,
+                                                           TdFunctionKind::SearchMessages));
+        CHECK(detail::production_search_messages_matches_for_test(global_search, global_request));
+    }
+
+    auto user_full = detail::make_production_get_user_full_info_for_test(42);
+    CHECK(detail::production_get_user_full_info_matches_for_test(user_full, 42));
+    auto basic = detail::make_production_get_basic_group_for_test(51);
+    CHECK(detail::production_get_basic_group_matches_for_test(basic, 51));
+
+    for (const auto filter :
+         {TdSupergroupMembersFilter::Recent, TdSupergroupMembersFilter::Administrators,
+          TdSupergroupMembersFilter::Bots, TdSupergroupMembersFilter::Search}) {
+        const std::string query = filter == TdSupergroupMembersFilter::Search ? "ada" : "";
+        auto members =
+            detail::make_production_get_supergroup_members_for_test(55, filter, query, 20, 100);
+        CHECK(detail::production_get_supergroup_members_matches_for_test(members, 55, filter, query,
+                                                                         20, 100));
+    }
+
+    auto found_chat = td_api::make_object<td_api::foundChatMessages>();
+    found_chat->total_count_ = -1;
+    found_chat->messages_.push_back(message(123));
+    found_chat->messages_.emplace_back(nullptr);
+    found_chat->next_from_message_id_ = 100;
+    NativeObjectPtr native_found_chat = std::move(found_chat);
+    auto converted = detail::convert_production_direct_response_for_test(
+        TdFunctionKind::SearchChatMessages, TdValue::from(std::move(native_found_chat)));
+    const auto* chat_page = converted.get_if<TdFoundChatMessages>();
+    REQUIRE(chat_page != nullptr);
+    CHECK(chat_page->total_count == -1);
+    REQUIRE(chat_page->messages.size() == 2);
+    CHECK(chat_page->messages.front()->id == 123);
+    CHECK_FALSE(chat_page->messages.back());
+    CHECK(chat_page->next_from_message_id == 100);
+
+    auto found_global = td_api::make_object<td_api::foundMessages>();
+    found_global->total_count_ = 1;
+    found_global->messages_.push_back(message(122, -1002));
+    found_global->next_offset_ = "opaque-2";
+    NativeObjectPtr native_found_global = std::move(found_global);
+    converted = detail::convert_production_direct_response_for_test(
+        TdFunctionKind::SearchMessages, TdValue::from(std::move(native_found_global)));
+    const auto* global_page = converted.get_if<TdFoundMessages>();
+    REQUIRE(global_page != nullptr);
+    CHECK(global_page->total_count == 1);
+    CHECK(global_page->messages.front()->chat_id == -1002);
+    CHECK(global_page->next_offset == "opaque-2");
+
+    auto full_info = td_api::make_object<td_api::userFullInfo>();
+    full_info->bio_ = td_api::make_object<td_api::formattedText>(
+        "biography", std::vector<td_api::object_ptr<td_api::textEntity>>{});
+    NativeObjectPtr native_user_full = std::move(full_info);
+    converted = detail::convert_production_direct_response_for_test(
+        TdFunctionKind::GetUserFullInfo, TdValue::from(std::move(native_user_full)));
+    REQUIRE(converted.get_if<TdUserFullInfo>() != nullptr);
+    CHECK(converted.get_if<TdUserFullInfo>()->description == "biography");
+
+    auto basic_group = td_api::make_object<td_api::basicGroup>();
+    basic_group->id_ = 51;
+    basic_group->member_count_ = 7;
+    NativeObjectPtr native_basic = std::move(basic_group);
+    converted = detail::convert_production_direct_response_for_test(
+        TdFunctionKind::GetBasicGroup, TdValue::from(std::move(native_basic)));
+    REQUIRE(converted.get_if<TdBasicGroup>() != nullptr);
+    CHECK(converted.get_if<TdBasicGroup>()->member_count == 7);
+
+    auto super_full = td_api::make_object<td_api::supergroupFullInfo>();
+    super_full->description_ = "project room";
+    super_full->member_count_ = 42;
+    super_full->linked_chat_id_ = -1002;
+    NativeObjectPtr native_super_full = std::move(super_full);
+    converted = detail::convert_production_direct_response_for_test(
+        TdFunctionKind::GetSupergroupFullInfo, TdValue::from(std::move(native_super_full)));
+    const auto* converted_super = converted.get_if<TdSupergroupFullInfo>();
+    REQUIRE(converted_super != nullptr);
+    CHECK(converted_super->description == "project room");
+    CHECK(converted_super->member_count == 42);
+    CHECK(converted_super->linked_chat_id == -1002);
 }

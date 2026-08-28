@@ -16,6 +16,7 @@
 #include "daemon/login_commands.hpp"
 #include "daemon/logout_audit.hpp"
 #include "daemon/logout_commands.hpp"
+#include "daemon/m2_read_commands.hpp"
 #include "daemon/m6_commands.hpp"
 #include "daemon/message_commands.hpp"
 #include "daemon/read_commands.hpp"
@@ -273,6 +274,7 @@ int run_daemon(const std::string& account) {
     ChatsCoordinator chats(td, account);
     MessageCoordinator messages(td, account);
     ReadCoordinator read(td, account);
+    M2ReadCoordinator m2_read(td, account);
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency,
@@ -293,6 +295,7 @@ int run_daemon(const std::string& account) {
     context.chats = &chats;
     context.messages = &messages;
     context.read = &read;
+    context.m2_read = &m2_read;
     context.fetch = &fetch;
     context.resolver = &resolver;
     context.writes = &writes;
@@ -468,6 +471,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     ChatsCoordinator chats(td, account);
     MessageCoordinator messages(td, account);
     ReadCoordinator read(td, account);
+    M2ReadCoordinator m2_read(td, account);
     FetchCoordinator fetch(td, account);
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency);
@@ -490,6 +494,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.chats = &chats;
     context.messages = &messages;
     context.read = &read;
+    context.m2_read = &m2_read;
     context.fetch = &fetch;
     context.resolver = &resolver;
     context.writes = &writes;

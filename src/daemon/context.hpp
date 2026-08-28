@@ -13,6 +13,7 @@ class SavedCoordinator;
 class ChatsCoordinator;
 class MessageCoordinator;
 class ReadCoordinator;
+class M2ReadCoordinator;
 class FetchCoordinator;
 class ResolveCoordinator;
 class IdempotencyFoundation;
@@ -37,6 +38,7 @@ struct DaemonContext {
     ChatsCoordinator* chats = nullptr;
     MessageCoordinator* messages = nullptr;
     ReadCoordinator* read = nullptr;
+    M2ReadCoordinator* m2_read = nullptr;
     FetchCoordinator* fetch = nullptr;
     ResolveCoordinator* resolver = nullptr;
     WriteCoordinator* writes = nullptr;

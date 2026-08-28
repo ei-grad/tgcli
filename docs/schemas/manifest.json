@@ -28,6 +28,9 @@
     "chat invite-link": {
       "result": "chat-invite-link.result.schema.json"
     },
+    "chat info": {
+      "result": "chat-info.result.schema.json"
+    },
     "chat join": {
       "result": "chat-join.result.schema.json"
     },
@@ -39,6 +42,9 @@
     },
     "chat mark-read": {
       "result": "chat-mark-read.result.schema.json"
+    },
+    "chat members": {
+      "result": "chat-members.result.schema.json"
     },
     "chat mute": {
       "result": "chat-mute.result.schema.json"
@@ -177,6 +183,9 @@
     },
     "saved tags": {
       "result": "saved-tags.result.schema.json"
+    },
+    "search": {
+      "result": "search.result.schema.json"
     },
     "send": {
       "result": "send.result.schema.json"

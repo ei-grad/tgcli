@@ -2420,7 +2420,10 @@ TdValue convert_response(NativeObjectPtr object, std::uint64_t client_generation
     case td_api::supergroupFullInfo::ID: {
         const auto& info = static_cast<const td_api::supergroupFullInfo&>(*object);
         return TdValue::from(
-            TdSupergroupFullInfo{.direct_messages_chat_id = info.direct_messages_chat_id_});
+            TdSupergroupFullInfo{.description = info.description_,
+                                 .member_count = info.member_count_,
+                                 .linked_chat_id = info.linked_chat_id_,
+                                 .direct_messages_chat_id = info.direct_messages_chat_id_});
     }
     case td_api::savedMessagesTags::ID: {
         auto& tags = static_cast<td_api::savedMessagesTags&>(*object);
@@ -2572,6 +2575,77 @@ TdValue convert_contacts_response(NativeObjectPtr& object) {
         TdUsers{.total_count = users.total_count_, .user_ids = std::move(users.user_ids_)});
 }
 
+std::optional<std::vector<std::optional<TdMessageSummary>>>
+convert_search_messages(const std::vector<td_api::object_ptr<td_api::message>>& messages) {
+    std::vector<std::optional<TdMessageSummary>> converted;
+    converted.reserve(messages.size());
+    for (const auto& message : messages) {
+        if (message == nullptr) {
+            converted.emplace_back(std::nullopt);
+            continue;
+        }
+        auto summary = convert_message(*message);
+        if (!valid_stream_message(*message, summary)) {
+            return std::nullopt;
+        }
+        converted.emplace_back(std::move(summary));
+    }
+    return converted;
+}
+
+TdValue convert_found_chat_messages_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::foundChatMessages::ID) {
+        return unexpected_direct_response(object);
+    }
+    const auto& found = static_cast<const td_api::foundChatMessages&>(*object);
+    auto messages = convert_search_messages(found.messages_);
+    if (found.total_count_ < -1 || found.next_from_message_id_ < 0 ||
+        found.next_from_message_id_ > kTdInt53Max || !messages) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(TdFoundChatMessages{.total_count = found.total_count_,
+                                             .messages = std::move(*messages),
+                                             .next_from_message_id = found.next_from_message_id_});
+}
+
+TdValue convert_found_messages_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::foundMessages::ID) {
+        return unexpected_direct_response(object);
+    }
+    const auto& found = static_cast<const td_api::foundMessages&>(*object);
+    auto messages = convert_search_messages(found.messages_);
+    if (found.total_count_ < -1 || !common::valid_utf8(found.next_offset_) || !messages) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(TdFoundMessages{.total_count = found.total_count_,
+                                         .messages = std::move(*messages),
+                                         .next_offset = found.next_offset_});
+}
+
+TdValue convert_user_full_info_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::userFullInfo::ID) {
+        return unexpected_direct_response(object);
+    }
+    const auto& info = static_cast<const td_api::userFullInfo&>(*object);
+    if (info.bio_ == nullptr || !common::valid_utf8(info.bio_->text_)) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(TdUserFullInfo{.description = info.bio_->text_});
+}
+
+TdValue convert_basic_group_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::basicGroup::ID) {
+        return unexpected_direct_response(object);
+    }
+    const auto converted = convert_basic_group(static_cast<const td_api::basicGroup&>(*object));
+    if (converted.id <= 0 || converted.id > kTdInt53Max || converted.member_count < 0 ||
+        converted.upgraded_to_supergroup_id < 0 ||
+        converted.upgraded_to_supergroup_id > kTdInt53Max) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(converted);
+}
+
 TdValue convert_basic_group_full_info_response(const NativeObjectPtr& object) {
     if (object->get_id() != td_api::basicGroupFullInfo::ID) {
         return unexpected_direct_response(object);
@@ -2604,6 +2678,23 @@ TdValue convert_supergroup_members_response(const NativeObjectPtr& object) {
     }
     return TdValue::from(
         TdChatMembers{.total_count = members.total_count_, .members = std::move(*converted)});
+}
+
+TdValue convert_supergroup_full_info_response(const NativeObjectPtr& object) {
+    if (object->get_id() != td_api::supergroupFullInfo::ID) {
+        return unexpected_direct_response(object);
+    }
+    const auto& info = static_cast<const td_api::supergroupFullInfo&>(*object);
+    if (!common::valid_utf8(info.description_) || info.member_count_ < 0 ||
+        (info.linked_chat_id_ != 0 && !valid_td_chat_id(info.linked_chat_id_)) ||
+        (info.direct_messages_chat_id_ != 0 && !valid_td_chat_id(info.direct_messages_chat_id_))) {
+        return unexpected_direct_response(object);
+    }
+    return TdValue::from(
+        TdSupergroupFullInfo{.description = info.description_,
+                             .member_count = info.member_count_,
+                             .linked_chat_id = info.linked_chat_id_,
+                             .direct_messages_chat_id = info.direct_messages_chat_id_});
 }
 
 std::optional<TdM6FolderIcon> convert_m6_folder_icon(const td_api::chatFolderIcon* icon) {
@@ -3190,8 +3281,18 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
     case TdFunctionKind::GetStorageStatistics:
     case TdFunctionKind::OptimizeStorage:
         return convert_m6_storage_response(object);
+    case TdFunctionKind::SearchChatMessages:
+        return convert_found_chat_messages_response(object);
+    case TdFunctionKind::SearchMessages:
+        return convert_found_messages_response(object);
+    case TdFunctionKind::GetUserFullInfo:
+        return convert_user_full_info_response(object);
+    case TdFunctionKind::GetBasicGroup:
+        return convert_basic_group_response(object);
     case TdFunctionKind::GetBasicGroupFullInfo:
         return convert_basic_group_full_info_response(object);
+    case TdFunctionKind::GetSupergroupFullInfo:
+        return convert_supergroup_full_info_response(object);
     case TdFunctionKind::GetSupergroupMembers:
         return convert_supergroup_members_response(object);
     case TdFunctionKind::GetMessage:
@@ -3381,8 +3482,16 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::getMessageLinkInfo::ID;
     case TdFunctionKind::CheckChatInviteLink:
         return function.get_id() == td_api::checkChatInviteLink::ID;
+    case TdFunctionKind::SearchChatMessages:
+        return function.get_id() == td_api::searchChatMessages::ID;
+    case TdFunctionKind::SearchMessages:
+        return function.get_id() == td_api::searchMessages::ID;
     case TdFunctionKind::GetUser:
         return function.get_id() == td_api::getUser::ID;
+    case TdFunctionKind::GetUserFullInfo:
+        return function.get_id() == td_api::getUserFullInfo::ID;
+    case TdFunctionKind::GetBasicGroup:
+        return function.get_id() == td_api::getBasicGroup::ID;
     case TdFunctionKind::GetBasicGroupFullInfo:
         return function.get_id() == td_api::getBasicGroupFullInfo::ID;
     case TdFunctionKind::GetSupergroup:
@@ -4619,10 +4728,96 @@ class ProductionTdRuntime final : public TdRuntime {
                                            });
     }
 
+    static td_api::object_ptr<td_api::SearchMessagesFilter>
+    make_search_filter(TdSearchMessagesFilter filter) {
+        switch (filter) {
+        case TdSearchMessagesFilter::Any:
+            return nullptr;
+        case TdSearchMessagesFilter::Photo:
+            return td_api::make_object<td_api::searchMessagesFilterPhoto>();
+        case TdSearchMessagesFilter::Video:
+            return td_api::make_object<td_api::searchMessagesFilterVideo>();
+        case TdSearchMessagesFilter::Document:
+            return td_api::make_object<td_api::searchMessagesFilterDocument>();
+        case TdSearchMessagesFilter::Url:
+            return td_api::make_object<td_api::searchMessagesFilterUrl>();
+        case TdSearchMessagesFilter::VoiceNote:
+            return td_api::make_object<td_api::searchMessagesFilterVoiceNote>();
+        }
+        return nullptr;
+    }
+
+    static std::string_view search_filter_name(TdSearchMessagesFilter filter) {
+        switch (filter) {
+        case TdSearchMessagesFilter::Any:
+            return "any";
+        case TdSearchMessagesFilter::Photo:
+            return "photo";
+        case TdSearchMessagesFilter::Video:
+            return "video";
+        case TdSearchMessagesFilter::Document:
+            return "doc";
+        case TdSearchMessagesFilter::Url:
+            return "link";
+        case TdSearchMessagesFilter::VoiceNote:
+            return "voice";
+        }
+        return "unknown";
+    }
+
+    TdValue make_search_chat_messages(TdSearchChatMessagesRequest request) override {
+        td_api::object_ptr<td_api::MessageSender> sender;
+        if (request.sender_user_id) {
+            sender = td_api::make_object<td_api::messageSenderUser>(*request.sender_user_id);
+        }
+        const auto filter_name = std::string(search_filter_name(request.filter));
+        NativeFunctionPtr native = td_api::make_object<td_api::searchChatMessages>(
+            request.chat_id, nullptr, request.query, std::move(sender), request.from_message_id, 0,
+            request.limit, make_search_filter(request.filter));
+        std::vector<TdFunctionField> fields{{"chat_id", request.chat_id},
+                                            {"query", std::move(request.query)},
+                                            {"from_message_id", request.from_message_id},
+                                            {"offset", std::int64_t{0}},
+                                            {"limit", static_cast<std::int64_t>(request.limit)},
+                                            {"filter", filter_name}};
+        if (request.sender_user_id) {
+            fields.emplace_back("sender_user_id", *request.sender_user_id);
+        }
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::SearchChatMessages, std::move(fields)});
+    }
+
+    TdValue make_search_messages(TdSearchMessagesRequest request) override {
+        const auto filter_name = std::string(search_filter_name(request.filter));
+        NativeFunctionPtr native = td_api::make_object<td_api::searchMessages>(
+            nullptr, request.query, request.offset, request.limit,
+            make_search_filter(request.filter), nullptr, 0, 0);
+        return TdValue::function(
+            std::move(native), TdFunctionData{TdFunctionKind::SearchMessages,
+                                              {{"query", std::move(request.query)},
+                                               {"next_offset", std::move(request.offset)},
+                                               {"limit", static_cast<std::int64_t>(request.limit)},
+                                               {"filter", filter_name}}});
+    }
+
     TdValue make_get_user(std::int64_t user_id) override {
         NativeFunctionPtr native = td_api::make_object<td_api::getUser>(user_id);
         return TdValue::function(std::move(native),
                                  TdFunctionData{TdFunctionKind::GetUser, {{"user_id", user_id}}});
+    }
+
+    TdValue make_get_user_full_info(std::int64_t user_id) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getUserFullInfo>(user_id);
+        return TdValue::function(std::move(native), TdFunctionData{TdFunctionKind::GetUserFullInfo,
+                                                                   {{"user_id", user_id}}});
+    }
+
+    TdValue make_get_basic_group(std::int64_t basic_group_id) override {
+        NativeFunctionPtr native = td_api::make_object<td_api::getBasicGroup>(basic_group_id);
+        return TdValue::function(
+            std::move(native),
+            TdFunctionData{TdFunctionKind::GetBasicGroup, {{"basic_group_id", basic_group_id}}});
     }
 
     TdValue make_get_basic_group_full_info(std::int64_t basic_group_id) override {
@@ -4648,15 +4843,35 @@ class ProductionTdRuntime final : public TdRuntime {
                                                 {{"supergroup_id", supergroup_id}}});
     }
 
-    TdValue make_get_supergroup_members(std::int64_t supergroup_id, std::string query,
+    TdValue make_get_supergroup_members(std::int64_t supergroup_id,
+                                        TdSupergroupMembersFilter filter, std::string query,
                                         std::int32_t offset, std::int32_t limit) override {
+        td_api::object_ptr<td_api::SupergroupMembersFilter> native_filter;
+        std::string filter_name;
+        switch (filter) {
+        case TdSupergroupMembersFilter::Recent:
+            native_filter = td_api::make_object<td_api::supergroupMembersFilterRecent>();
+            filter_name = "recent";
+            break;
+        case TdSupergroupMembersFilter::Administrators:
+            native_filter = td_api::make_object<td_api::supergroupMembersFilterAdministrators>();
+            filter_name = "administrators";
+            break;
+        case TdSupergroupMembersFilter::Bots:
+            native_filter = td_api::make_object<td_api::supergroupMembersFilterBots>();
+            filter_name = "bots";
+            break;
+        case TdSupergroupMembersFilter::Search:
+            native_filter = td_api::make_object<td_api::supergroupMembersFilterSearch>(query);
+            filter_name = "search";
+            break;
+        }
         NativeFunctionPtr native = td_api::make_object<td_api::getSupergroupMembers>(
-            supergroup_id, td_api::make_object<td_api::supergroupMembersFilterSearch>(query),
-            offset, limit);
+            supergroup_id, std::move(native_filter), offset, limit);
         return TdValue::function(std::move(native),
                                  TdFunctionData{TdFunctionKind::GetSupergroupMembers,
                                                 {{"supergroup_id", supergroup_id},
-                                                 {"filter", std::string{"search"}},
+                                                 {"filter", std::move(filter_name)},
                                                  {"query", std::move(query)},
                                                  {"offset", static_cast<std::int64_t>(offset)},
                                                  {"limit", static_cast<std::int64_t>(limit)}}});
@@ -4908,11 +5123,41 @@ TdValue make_production_get_basic_group_full_info_for_test(std::int64_t basic_gr
     return runtime.make_get_basic_group_full_info(basic_group_id);
 }
 
+TdValue make_production_search_chat_messages_for_test(TdSearchChatMessagesRequest request) {
+    ProductionTdRuntime runtime;
+    return runtime.make_search_chat_messages(std::move(request));
+}
+
+TdValue make_production_search_messages_for_test(TdSearchMessagesRequest request) {
+    ProductionTdRuntime runtime;
+    return runtime.make_search_messages(std::move(request));
+}
+
+TdValue make_production_get_user_full_info_for_test(std::int64_t user_id) {
+    ProductionTdRuntime runtime;
+    return runtime.make_get_user_full_info(user_id);
+}
+
+TdValue make_production_get_basic_group_for_test(std::int64_t basic_group_id) {
+    ProductionTdRuntime runtime;
+    return runtime.make_get_basic_group(basic_group_id);
+}
+
 TdValue make_production_get_supergroup_members_for_test(std::int64_t supergroup_id,
                                                         std::string query, std::int32_t offset,
                                                         std::int32_t limit) {
     ProductionTdRuntime runtime;
-    return runtime.make_get_supergroup_members(supergroup_id, std::move(query), offset, limit);
+    return runtime.make_get_supergroup_members(supergroup_id, TdSupergroupMembersFilter::Search,
+                                               std::move(query), offset, limit);
+}
+
+TdValue make_production_get_supergroup_members_for_test(std::int64_t supergroup_id,
+                                                        TdSupergroupMembersFilter filter,
+                                                        std::string query, std::int32_t offset,
+                                                        std::int32_t limit) {
+    ProductionTdRuntime runtime;
+    return runtime.make_get_supergroup_members(supergroup_id, filter, std::move(query), offset,
+                                               limit);
 }
 
 TdValue make_production_get_internal_link_type_for_test(std::string_view link, bool sensitive,
@@ -5235,6 +5480,82 @@ bool production_get_message_matches_for_test(const TdValue& function, std::int64
     return request.chat_id_ == chat_id && request.message_id_ == message_id;
 }
 
+bool search_filter_matches(const td_api::SearchMessagesFilter* filter,
+                           TdSearchMessagesFilter expected) {
+    if (expected == TdSearchMessagesFilter::Any) {
+        return filter == nullptr;
+    }
+    if (filter == nullptr) {
+        return false;
+    }
+    switch (expected) {
+    case TdSearchMessagesFilter::Any:
+        return false;
+    case TdSearchMessagesFilter::Photo:
+        return filter->get_id() == td_api::searchMessagesFilterPhoto::ID;
+    case TdSearchMessagesFilter::Video:
+        return filter->get_id() == td_api::searchMessagesFilterVideo::ID;
+    case TdSearchMessagesFilter::Document:
+        return filter->get_id() == td_api::searchMessagesFilterDocument::ID;
+    case TdSearchMessagesFilter::Url:
+        return filter->get_id() == td_api::searchMessagesFilterUrl::ID;
+    case TdSearchMessagesFilter::VoiceNote:
+        return filter->get_id() == td_api::searchMessagesFilterVoiceNote::ID;
+    }
+    return false;
+}
+
+bool production_search_chat_messages_matches_for_test(const TdValue& function,
+                                                      const TdSearchChatMessagesRequest& expected) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::searchChatMessages::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::searchChatMessages&>(**native);
+    const auto* sender = request.sender_id_.get();
+    const bool sender_matches =
+        expected.sender_user_id
+            ? sender != nullptr && sender->get_id() == td_api::messageSenderUser::ID &&
+                  static_cast<const td_api::messageSenderUser&>(*sender).user_id_ ==
+                      *expected.sender_user_id
+            : sender == nullptr;
+    return request.chat_id_ == expected.chat_id && request.topic_id_ == nullptr &&
+           request.query_ == expected.query && sender_matches &&
+           request.from_message_id_ == expected.from_message_id && request.offset_ == 0 &&
+           request.limit_ == expected.limit &&
+           search_filter_matches(request.filter_.get(), expected.filter);
+}
+
+bool production_search_messages_matches_for_test(const TdValue& function,
+                                                 const TdSearchMessagesRequest& expected) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr ||
+        (*native)->get_id() != td_api::searchMessages::ID) {
+        return false;
+    }
+    const auto& request = static_cast<const td_api::searchMessages&>(**native);
+    return request.chat_list_ == nullptr && request.query_ == expected.query &&
+           request.offset_ == expected.offset && request.limit_ == expected.limit &&
+           search_filter_matches(request.filter_.get(), expected.filter) &&
+           request.chat_type_filter_ == nullptr && request.min_date_ == 0 && request.max_date_ == 0;
+}
+
+bool production_get_user_full_info_matches_for_test(const TdValue& function, std::int64_t user_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    return native != nullptr && *native != nullptr &&
+           (*native)->get_id() == td_api::getUserFullInfo::ID &&
+           static_cast<const td_api::getUserFullInfo&>(**native).user_id_ == user_id;
+}
+
+bool production_get_basic_group_matches_for_test(const TdValue& function,
+                                                 std::int64_t basic_group_id) {
+    const auto* native = function.get_if<NativeFunctionPtr>();
+    return native != nullptr && *native != nullptr &&
+           (*native)->get_id() == td_api::getBasicGroup::ID &&
+           static_cast<const td_api::getBasicGroup&>(**native).basic_group_id_ == basic_group_id;
+}
+
 bool production_get_basic_group_full_info_matches_for_test(const TdValue& function,
                                                            std::int64_t basic_group_id) {
     const auto* native = function.get_if<NativeFunctionPtr>();
@@ -5248,6 +5569,7 @@ bool production_get_basic_group_full_info_matches_for_test(const TdValue& functi
 
 bool production_get_supergroup_members_matches_for_test(const TdValue& function,
                                                         std::int64_t supergroup_id,
+                                                        TdSupergroupMembersFilter filter,
                                                         std::string_view query, std::int32_t offset,
                                                         std::int32_t limit) {
     const auto* native = function.get_if<NativeFunctionPtr>();
@@ -5256,11 +5578,31 @@ bool production_get_supergroup_members_matches_for_test(const TdValue& function,
         return false;
     }
     const auto& request = static_cast<const td_api::getSupergroupMembers&>(**native);
-    return request.supergroup_id_ == supergroup_id && request.offset_ == offset &&
-           request.limit_ == limit && request.filter_ != nullptr &&
-           request.filter_->get_id() == td_api::supergroupMembersFilterSearch::ID &&
-           static_cast<const td_api::supergroupMembersFilterSearch&>(*request.filter_).query_ ==
-               query;
+    if (request.supergroup_id_ != supergroup_id || request.offset_ != offset ||
+        request.limit_ != limit || request.filter_ == nullptr) {
+        return false;
+    }
+    switch (filter) {
+    case TdSupergroupMembersFilter::Recent:
+        return request.filter_->get_id() == td_api::supergroupMembersFilterRecent::ID;
+    case TdSupergroupMembersFilter::Administrators:
+        return request.filter_->get_id() == td_api::supergroupMembersFilterAdministrators::ID;
+    case TdSupergroupMembersFilter::Bots:
+        return request.filter_->get_id() == td_api::supergroupMembersFilterBots::ID;
+    case TdSupergroupMembersFilter::Search:
+        return request.filter_->get_id() == td_api::supergroupMembersFilterSearch::ID &&
+               static_cast<const td_api::supergroupMembersFilterSearch&>(*request.filter_).query_ ==
+                   query;
+    }
+    return false;
+}
+
+bool production_get_supergroup_members_matches_for_test(const TdValue& function,
+                                                        std::int64_t supergroup_id,
+                                                        std::string_view query, std::int32_t offset,
+                                                        std::int32_t limit) {
+    return production_get_supergroup_members_matches_for_test(
+        function, supergroup_id, TdSupergroupMembersFilter::Search, query, offset, limit);
 }
 
 bool production_get_message_properties_matches_for_test(const TdValue& function,

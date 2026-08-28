@@ -6869,11 +6869,11 @@ checks themselves require no network.
 
 ### 4.10 Dormant M2/M4/M7 freeze foundations
 
-This section materializes byte-reviewable foundations without activating an
-unimplemented public path. Future search, chat-info, chat-members, download and
-raw assets remain uncataloged and unreachable until their parser, handler,
-dispatcher and result/error mappings activate together. Existing commands keep
-their current behavior.
+This section materializes byte-reviewable foundations before each command's
+atomic activation. Search, chat-info and chat-members are now active through
+their parser, handler, dispatcher and result/error mappings. Download and raw
+assets remain uncataloged and unreachable. Existing commands keep their
+current behavior.
 
 #### 4.10.1 Curated download
 
@@ -7014,10 +7014,12 @@ The strict self-contained future schemas are frozen under
 `download.error.schema.json`, `raw.error.schema.json`. The same directory holds
 the dormant persistence-only `raw-audit-intent.v3.schema.json`,
 `raw-audit-checkpoint.v3.schema.json` and `raw-audit-outcome.v3.schema.json`.
-All twelve assets are validated as Draft 2020-12 now but remain absent from all
-three command catalogs, embedded lookup bytes and packages. Command schemas
-activate only with the corresponding handler; raw audit-v3 assets remain
-persistence-only and never become command catalog entries.
+All twelve assets remain validated as Draft 2020-12 golden sources. The five
+search/chat-read assets are materialized byte-identically at the schema root,
+cataloged, embedded and packaged with their active handlers. Download and raw
+command assets remain absent from all three command catalogs, embedded lookup
+bytes and packages; raw audit-v3 assets remain persistence-only and never
+become command catalog entries.
 
 Search result is exactly items (at most 100 exact shared MessageSummary) and
 nonempty cursor-or-null. Chat-info has exactly the 16 fields in §4.4 and a
@@ -7503,11 +7505,13 @@ and `next` is exactly null. `msg-link.result.schema.json` has exactly
 `link` is a string with `minLength:1` and no pattern, and `is_public` is
 boolean. Human output renders the same fields and matches the exact goldens
 above. Actual JSON data is validated against these strict schemas.
-The active `chats`, `unread`, `read`, `msg get`, `msg link`, and `fetch`
+The active `chats`, `unread`, `read`, `msg get`, `msg link`, `search`,
+`chat info`, `chat members`, and `fetch`
 commands have exact command-local error schemas and non-stream error-manifest
 mappings. `history` canonicalizes to `read` and therefore has no separate key.
-Future `search`, `chat info`, and `chat members` schemas remain uncataloged
-until their handlers activate atomically.
+The search and chat-read golden schemas remain under `future/` as deterministic
+generator inputs and are required to match their active root copies byte for
+byte.
 
 M2 fake-boundary contract coverage must include:
 

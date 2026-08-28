@@ -18,7 +18,15 @@ TdValue make_production_m6_function_for_test(TdM6Request request);
 TdValue convert_production_m6_response_for_test(TdFunctionKind function, TdValue object);
 TdValue make_production_terminate_session_for_test(std::int64_t session_id);
 TdValue make_production_get_basic_group_full_info_for_test(std::int64_t basic_group_id);
+TdValue make_production_search_chat_messages_for_test(TdSearchChatMessagesRequest request);
+TdValue make_production_search_messages_for_test(TdSearchMessagesRequest request);
+TdValue make_production_get_user_full_info_for_test(std::int64_t user_id);
+TdValue make_production_get_basic_group_for_test(std::int64_t basic_group_id);
 TdValue make_production_get_supergroup_members_for_test(std::int64_t supergroup_id,
+                                                        std::string query, std::int32_t offset,
+                                                        std::int32_t limit);
+TdValue make_production_get_supergroup_members_for_test(std::int64_t supergroup_id,
+                                                        TdSupergroupMembersFilter filter,
                                                         std::string query, std::int32_t offset,
                                                         std::int32_t limit);
 TdValue
@@ -108,6 +116,18 @@ bool production_get_message_matches_for_test(const TdValue& function, std::int64
                                              std::int64_t message_id);
 bool production_get_basic_group_full_info_matches_for_test(const TdValue& function,
                                                            std::int64_t basic_group_id);
+bool production_search_chat_messages_matches_for_test(const TdValue& function,
+                                                      const TdSearchChatMessagesRequest& expected);
+bool production_search_messages_matches_for_test(const TdValue& function,
+                                                 const TdSearchMessagesRequest& expected);
+bool production_get_user_full_info_matches_for_test(const TdValue& function, std::int64_t user_id);
+bool production_get_basic_group_matches_for_test(const TdValue& function,
+                                                 std::int64_t basic_group_id);
+bool production_get_supergroup_members_matches_for_test(const TdValue& function,
+                                                        std::int64_t supergroup_id,
+                                                        TdSupergroupMembersFilter filter,
+                                                        std::string_view query, std::int32_t offset,
+                                                        std::int32_t limit);
 bool production_get_supergroup_members_matches_for_test(const TdValue& function,
                                                         std::int64_t supergroup_id,
                                                         std::string_view query, std::int32_t offset,

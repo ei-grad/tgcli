@@ -404,6 +404,9 @@ for (const [command, filename] of [
   ["msg get", "msg-get.error.schema.json"],
   ["msg link", "msg-link.error.schema.json"],
   ["fetch", "fetch.error.schema.json"],
+  ["search", "search.error.schema.json"],
+  ["chat info", "chat-read.error.schema.json"],
+  ["chat members", "chat-read.error.schema.json"],
 ]) {
   errorManifest.commands[command] = { error: filename };
 }
@@ -772,3 +775,13 @@ write(
   },
   futureDirectory,
 );
+
+for (const filename of [
+  "search.result.schema.json",
+  "search.error.schema.json",
+  "chat-info.result.schema.json",
+  "chat-members.result.schema.json",
+  "chat-read.error.schema.json",
+]) {
+  fs.copyFileSync(path.join(futureDirectory, filename), path.join(directory, filename));
+}

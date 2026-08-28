@@ -138,25 +138,18 @@ core::TdValue ScriptedTdRuntime::make_m6_function(core::TdM6Request request) {
             } else if constexpr (std::is_same_v<Request, core::TdM6SetChatPhotoRequest>) {
                 return {{"chat_id", input.chat_id}, {"delete", !input.local_path.has_value()}};
             } else if constexpr (std::is_same_v<Request, core::TdM6SetChatDescriptionRequest>) {
-                return {{"chat_id", input.chat_id},
-                        {"description", std::move(input.description)}};
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdM6CreateChatInviteLinkRequest>) {
+                return {{"chat_id", input.chat_id}, {"description", std::move(input.description)}};
+            } else if constexpr (std::is_same_v<Request, core::TdM6CreateChatInviteLinkRequest> ||
+                                 std::is_same_v<Request, core::TdM6SetChatPermissionsRequest>) {
                 return {{"chat_id", input.chat_id}};
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdM6RevokeChatInviteLinkRequest>) {
+            } else if constexpr (std::is_same_v<Request, core::TdM6RevokeChatInviteLinkRequest>) {
                 return {{"chat_id", input.chat_id},
                         {"invite_link", core::TdRedactedValue::InviteLink}};
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdM6SetChatMemberStatusRequest>) {
+            } else if constexpr (std::is_same_v<Request, core::TdM6SetChatMemberStatusRequest>) {
                 return {{"chat_id", input.chat_id},
                         {"user_id", input.user_id},
                         {"status", static_cast<std::int64_t>(input.status.kind)}};
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdM6SetChatPermissionsRequest>) {
-                return {{"chat_id", input.chat_id}};
-            } else if constexpr (std::is_same_v<Request,
-                                                core::TdM6GetStorageStatisticsRequest>) {
+            } else if constexpr (std::is_same_v<Request, core::TdM6GetStorageStatisticsRequest>) {
                 return {{"chat_limit", static_cast<std::int64_t>(input.chat_limit)}};
             } else {
                 static_assert(std::is_same_v<Request, core::TdM6OptimizeStorageRequest>);
@@ -166,14 +159,12 @@ core::TdValue ScriptedTdRuntime::make_m6_function(core::TdM6Request request) {
                         {"immunity_delay", static_cast<std::int64_t>(input.immunity_delay)},
                         {"chat_ids", std::move(input.chat_ids)},
                         {"exclude_chat_ids", std::move(input.exclude_chat_ids)},
-                        {"return_deleted_file_statistics",
-                         input.return_deleted_file_statistics},
+                        {"return_deleted_file_statistics", input.return_deleted_file_statistics},
                         {"chat_limit", static_cast<std::int64_t>(input.chat_limit)}};
             }
         },
         std::move(request));
-    return core::TdValue::scripted_function(
-        core::TdFunctionData{kind, std::move(fields)});
+    return core::TdValue::scripted_function(core::TdFunctionData{kind, std::move(fields)});
 }
 
 core::TdValue ScriptedTdRuntime::make_set_tdlib_parameters(core::TdlibParameters parameters) {
@@ -382,6 +373,38 @@ std::string chat_list_name(core::TdChatListKind list) {
     return "unknown";
 }
 
+std::string search_filter_name(core::TdSearchMessagesFilter filter) {
+    switch (filter) {
+    case core::TdSearchMessagesFilter::Any:
+        return "any";
+    case core::TdSearchMessagesFilter::Photo:
+        return "photo";
+    case core::TdSearchMessagesFilter::Video:
+        return "video";
+    case core::TdSearchMessagesFilter::Document:
+        return "doc";
+    case core::TdSearchMessagesFilter::Url:
+        return "link";
+    case core::TdSearchMessagesFilter::VoiceNote:
+        return "voice";
+    }
+    return "unknown";
+}
+
+std::string member_filter_name(core::TdSupergroupMembersFilter filter) {
+    switch (filter) {
+    case core::TdSupergroupMembersFilter::Recent:
+        return "recent";
+    case core::TdSupergroupMembersFilter::Administrators:
+        return "administrators";
+    case core::TdSupergroupMembersFilter::Bots:
+        return "bots";
+    case core::TdSupergroupMembersFilter::Search:
+        return "search";
+    }
+    return "unknown";
+}
+
 } // namespace
 
 core::TdValue ScriptedTdRuntime::make_get_chats(core::TdChatList list, std::int32_t limit) {
@@ -441,10 +464,50 @@ ScriptedTdRuntime::make_check_chat_invite_link(std::string_view link,
         core::TdFunctionKind::CheckChatInviteLink, {{"link", core::TdRedactedValue::InviteLink}}});
 }
 
+core::TdValue
+ScriptedTdRuntime::make_search_chat_messages(core::TdSearchChatMessagesRequest request) {
+    before_make(core::TdFunctionKind::SearchChatMessages);
+    std::vector<core::TdFunctionField> fields{
+        {"chat_id", request.chat_id},
+        {"query", std::move(request.query)},
+        {"from_message_id", request.from_message_id},
+        {"offset", std::int64_t{0}},
+        {"limit", static_cast<std::int64_t>(request.limit)},
+        {"filter", search_filter_name(request.filter)},
+    };
+    if (request.sender_user_id) {
+        fields.emplace_back("sender_user_id", *request.sender_user_id);
+    }
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::SearchChatMessages, std::move(fields)});
+}
+
+core::TdValue ScriptedTdRuntime::make_search_messages(core::TdSearchMessagesRequest request) {
+    before_make(core::TdFunctionKind::SearchMessages);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::SearchMessages,
+                             {{"query", std::move(request.query)},
+                              {"next_offset", std::move(request.offset)},
+                              {"limit", static_cast<std::int64_t>(request.limit)},
+                              {"filter", search_filter_name(request.filter)}}});
+}
+
 core::TdValue ScriptedTdRuntime::make_get_user(std::int64_t user_id) {
     before_make(core::TdFunctionKind::GetUser);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::GetUser, {{"user_id", user_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_user_full_info(std::int64_t user_id) {
+    before_make(core::TdFunctionKind::GetUserFullInfo);
+    return core::TdValue::scripted_function(
+        core::TdFunctionData{core::TdFunctionKind::GetUserFullInfo, {{"user_id", user_id}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_basic_group(std::int64_t basic_group_id) {
+    before_make(core::TdFunctionKind::GetBasicGroup);
+    return core::TdValue::scripted_function(core::TdFunctionData{
+        core::TdFunctionKind::GetBasicGroup, {{"basic_group_id", basic_group_id}}});
 }
 
 core::TdValue ScriptedTdRuntime::make_get_basic_group_full_info(std::int64_t basic_group_id) {
@@ -466,16 +529,24 @@ core::TdValue ScriptedTdRuntime::make_get_supergroup_full_info(std::int64_t supe
 }
 
 core::TdValue ScriptedTdRuntime::make_get_supergroup_members(std::int64_t supergroup_id,
+                                                             core::TdSupergroupMembersFilter filter,
                                                              std::string query, std::int32_t offset,
                                                              std::int32_t limit) {
     before_make(core::TdFunctionKind::GetSupergroupMembers);
     return core::TdValue::scripted_function(
         core::TdFunctionData{core::TdFunctionKind::GetSupergroupMembers,
                              {{"supergroup_id", supergroup_id},
-                              {"filter", std::string{"search"}},
+                              {"filter", member_filter_name(filter)},
                               {"query", std::move(query)},
                               {"offset", static_cast<std::int64_t>(offset)},
                               {"limit", static_cast<std::int64_t>(limit)}}});
+}
+
+core::TdValue ScriptedTdRuntime::make_get_supergroup_members(std::int64_t supergroup_id,
+                                                             std::string query, std::int32_t offset,
+                                                             std::int32_t limit) {
+    return make_get_supergroup_members(supergroup_id, core::TdSupergroupMembersFilter::Search,
+                                       std::move(query), offset, limit);
 }
 
 core::TdValue ScriptedTdRuntime::make_create_private_chat(std::int64_t user_id, bool force) {

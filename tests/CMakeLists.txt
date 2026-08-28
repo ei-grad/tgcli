@@ -25,6 +25,8 @@ add_executable(tgcli_unit_tests
     m6_td_boundary_test.cpp
     m6_td_runtime_conversion_test.cpp
     m7_foundation_schema_test.cpp
+    m2_read_domain_test.cpp
+    m2_read_commands_test.cpp
     login_commands_test.cpp
     lock_order_test.cpp
     logout_commands_test.cpp

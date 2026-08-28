@@ -1227,6 +1227,9 @@ TEST_CASE("production converter preserves resolver chat and link metadata",
         full->direct_messages_chat_id_ = -8;
         auto converted_full = convert_response(std::move(full));
         CHECK(*converted_full.get_if<TdSupergroupFullInfo>() ==
-              TdSupergroupFullInfo{.direct_messages_chat_id = -8});
+              TdSupergroupFullInfo{.description = {},
+                                   .member_count = 0,
+                                   .linked_chat_id = 0,
+                                   .direct_messages_chat_id = -8});
     }
 }

@@ -134,7 +134,7 @@ before the milestone is closed.
       username `NOT_FOUND` normalization; the finalized `ResolverConsumer`
       must provide the no-send local link classification required by `read
       --local`, never route it through terminal resolve/`getInternalLinkType`
-- [ ] Shared M2 DTOs and parsing: lossless `TopicRef`, `MessageSummary`,
+- [x] Shared M2 DTOs and parsing: lossless `TopicRef`, `MessageSummary`,
       `ChatIdentity`/`ChatSummary`, member/user/chat sender variants, int53
       boundaries, inclusive rounded timestamps, command-specific limits, and
       neutral/native top-level message/messages/message-link/thread-info conversion;
@@ -148,7 +148,7 @@ before the milestone is closed.
       `ReadyReadStatus::Cancelled` from target reads, and reuse one absolute
       deadline; expose cached-or-exact local Saved chat materialization for the
       read topic-ownership check
-- [ ] Output layer: equivalent human/JSON rendering, exact result/error shapes,
+- [x] Output layer: equivalent human/JSON rendering, exact result/error shapes,
       stderr discipline, and self-contained untrusted cursors without a MAC or
       daemon state; reject bad scope and non-advancing upstream markers
 - [x] Keep strict Draft 2020-12 result schemas and manifest entries for the
@@ -160,7 +160,7 @@ before the milestone is closed.
       cleaner, pagination, source, identity and sender contracts for `search`,
       `chat info`, and `chat members`; preserve user/chat member senders and
       keep every path unreachable until its handler and catalog activation
-- [ ] Implement and atomically activate `search`, `chat info`, and `chat
+- [x] Implement and atomically activate `search`, `chat info`, and `chat
       members` from those dormant assets, including typed TD factories,
       converters, authorization/source rows, coordinators and catalog entries
 - [x] Freeze the `read`/`history` contract: closed ASCII timestamp/topic

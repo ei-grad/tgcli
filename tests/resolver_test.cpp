@@ -763,7 +763,10 @@ TEST_CASE("direct-message links return the final direct chat id",
                                     .tdlib_type_id = 1});
     fake.respond(tgcli::core::TdFunctionKind::SearchPublicChat, channel_chat(-1001, 55, "Project"));
     fake.respond(tgcli::core::TdFunctionKind::GetSupergroupFullInfo,
-                 tgcli::core::TdSupergroupFullInfo{.direct_messages_chat_id = -2002});
+                 tgcli::core::TdSupergroupFullInfo{.description = {},
+                                                   .member_count = 0,
+                                                   .linked_chat_id = 0,
+                                                   .direct_messages_chat_id = -2002});
     fake.respond(tgcli::core::TdFunctionKind::GetChat, basic_chat(-2002, "Project discussions"));
     const auto outcome = pending.get();
     REQUIRE(outcome.result);
