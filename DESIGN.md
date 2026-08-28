@@ -1269,6 +1269,17 @@ no duplicate `(chat_id,message_id)` in the invocation. Per-chat raw ids are
 strictly decreasing. Global raw `(date,chat_id,message_id)` keys are strictly
 lexicographically decreasing, including across cursor invocations.
 
+One search invocation scans at most 4,096 raw message items and retains at
+most 1,048,576 cumulative bytes across unique opaque global cursor markers.
+The current cursor input marker is included in that byte charge. Each page is
+capacity-checked before any raw item is inserted, and each clean, advancing,
+previously unseen marker is capacity-checked before insertion or byte
+addition. Limit+1 is atomically `RESOURCE_LIMIT` with exact details
+`{"operation":"search","resource":"raw_scanned_items","limit":4096}` or
+`{"operation":"search","resource":"cursor_marker_bytes","limit":1048576}`;
+no partial result is emitted. Duplicate/cyclic marker classification still
+precedes a byte charge because a seen marker is never inserted.
+
 Each request asks for `min(100, remaining result slots)`. A per-chat first-page
 marker of zero may return a positive continuation. A continuation accepts only
 zero exhaustion or `0 < next < input`; a positive next must also be below the
@@ -1296,8 +1307,10 @@ The version-1 search cursor is exactly:
 ```
 
 For `scope:"chat"`, `chat_id`, positive `next_offset_message_id`, and nonzero
-`last_raw_message_id` are required while `next_offset` and `last_raw_order`
-are null. For `scope:"global"`, `chat_id`, `next_offset_message_id`, and
+`last_raw_message_id` are required, with the strict relation
+`0 < next_offset_message_id < last_raw_message_id`, while `next_offset` and
+`last_raw_order` are null. For `scope:"global"`, `chat_id`,
+`next_offset_message_id`, and
 `last_raw_message_id` are null; clean nonempty `next_offset` and
 `last_raw_order:{date:int32_nonnegative,chat_id:nonzero_int53,message_id:nonzero_int53}`
 are required. `sender_user_id` is null or the resolved positive user id.
@@ -1361,7 +1374,8 @@ The type-specific sources are closed:
 |---|---|---|---|---|
 | private | `userFullInfo.bio.text` | null | false | null |
 | basic group | `basicGroupFullInfo.description` | required non-null `basicGroup.member_count` | false | null |
-| supergroup/channel | `supergroupFullInfo.description` | required non-null nonnegative `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
+| supergroup | `supergroupFullInfo.description` | required non-null nonnegative `supergroupFullInfo.member_count` | `supergroup.is_forum` | full-info zero becomes null |
+| channel | `supergroupFullInfo.description` | required non-null nonnegative `supergroupFullInfo.member_count` | false | full-info zero becomes null |
 
 List/unread fields come from the already observed resolver `chat`; active
 usernames retain tdlib order and no second `getChat` is sent. Private branches
@@ -1370,16 +1384,22 @@ use exact `getUserFullInfo`, basic groups use exact `getBasicGroup` plus
 plus exact `getSupergroupFullInfo`. Every returned type/id and nested optional
 is validated before any result field is published. Secret targets fail
 `USAGE/unsupported_chat_type`; authenticated bots are allowed.
+An observed channel with `supergroup.is_forum:true` is a malformed TDLib
+response and fails atomically as `INTERNAL/malformed_tdlib_response` before
+`getSupergroupFullInfo` or result publication.
 
 Private and secret targets are unsupported for `chat members`. Basic groups
 use `basicGroupFullInfo.members` and local filtering/pagination. Supergroups
 and channels use `getSupergroupMembers` with Recent by default,
 Administrators for `--admins`, Bots for `--bots`, and Search for `--query`;
 the three filters are mutually exclusive. A supergroup cursor contains the
-tdlib offset. Every non-empty tdlib page keeps a continuation cursor and an
-empty probe alone sets `next` to null; approximate `total_count` never proves
-exhaustion. A basic-group cursor uses the exact vector offset and vector length
-for exhaustion.
+tdlib offset. Exactly one raw `getSupergroupMembers` page is read per command
+invocation. An empty page returns `next:null`; every nonempty page returns
+immediately with a continuation cursor whose offset advances by the raw page
+length, including a short page or a page filtered to zero output rows. There
+is no internal empty probe, and approximate `total_count` never proves
+exhaustion. A continuation that receives an empty page proves exhaustion. A
+basic-group cursor uses the exact vector offset and vector length for exhaustion.
 
 For the basic-group vector, `--admins` retains exactly `creator` and
 `administrator` statuses. `--bots` retains only user senders whose exact
@@ -1431,11 +1451,25 @@ supergroup/channel cursors require it null. `query` is nonempty only with
 `offset` is a nonnegative int32 index into the fully validated,
 identity-enriched and filtered vector. For `supergroup` and `channel`, `offset`
 is the raw TD `getSupergroupMembers` offset advanced by the raw returned page
-length, not by the number of enriched or emitted rows; the single empty probe
-at the next raw offset remains the only exhaustion proof. Account, current
+length, not by the number of enriched or emitted rows; a continuation
+invocation's single empty page at the next raw offset is the only exhaustion
+proof. Account, current
 user, chat id/type, limit, filter/query, source identity/count relation and
 canonical re-encoding are all validated before any member RPC. A live type or
 backing-id change is `source_changed`.
+
+A cursor query for `filter:"search"` is 1..256 bytes, valid UTF-8, and
+byte-identical after the pinned cleaner. Those bounds are enforced again while
+decoding the untrusted cursor before any RPC.
+
+Member page validation is owner-aware. Creator status permits either
+`is_member` value; administrator/member require true; left/banned require
+false. Restricted is valid only for a supergroup owner. Basic groups reject
+chat senders. Supergroup/channel chat senders are valid only with left or
+banned status, and identity enrichment must resolve the referenced sender to
+a supergroup or channel. The entire raw page passes status/sender structural
+validation before any identity hydration or output; referenced chat kind is a
+second atomic validation after hydration.
 
 The result is `{"items":[<MemberSummary>],"next":<cursor|null>}`.
 `MemberSummary` is:

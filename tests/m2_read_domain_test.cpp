@@ -23,6 +23,14 @@ TEST_CASE("M2 search cursor is canonical and scope-bound", "[m2-long-read][curso
     REQUIRE(daemon::decode_search_cursor(chat_token) == chat);
     CHECK_FALSE(daemon::decode_search_cursor(chat_token + "A"));
 
+    chat.next_offset_message_id = 0;
+    CHECK_FALSE(daemon::decode_search_cursor(daemon::encode_search_cursor(chat)));
+    chat.next_offset_message_id = 91;
+    CHECK_FALSE(daemon::decode_search_cursor(daemon::encode_search_cursor(chat)));
+    chat.next_offset_message_id = 92;
+    CHECK_FALSE(daemon::decode_search_cursor(daemon::encode_search_cursor(chat)));
+    chat.next_offset_message_id = 90;
+
     daemon::SearchCursor global{
         .account = "primary",
         .user_id = 10,
@@ -72,6 +80,15 @@ TEST_CASE("M2 members cursor keeps type-specific offsets and source count",
                                      .source_count = std::nullopt};
     const auto supergroup_token = daemon::encode_members_cursor(supergroup);
     REQUIRE(daemon::decode_members_cursor(supergroup_token) == supergroup);
+
+    supergroup.query = "";
+    CHECK_FALSE(daemon::decode_members_cursor(daemon::encode_members_cursor(supergroup)));
+    supergroup.query = "q";
+    REQUIRE(daemon::decode_members_cursor(daemon::encode_members_cursor(supergroup)) == supergroup);
+    supergroup.query = std::string(256, 'q');
+    REQUIRE(daemon::decode_members_cursor(daemon::encode_members_cursor(supergroup)) == supergroup);
+    supergroup.query = std::string(257, 'q');
+    CHECK_FALSE(daemon::decode_members_cursor(daemon::encode_members_cursor(supergroup)));
 
     basic.source_count.reset();
     CHECK_FALSE(daemon::decode_members_cursor(daemon::encode_members_cursor(basic)));

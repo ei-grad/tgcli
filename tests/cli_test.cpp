@@ -4192,6 +4192,20 @@ TEST_CASE("M2 long-read CLI emits exact first-page and cursor-only request frame
     }
     CHECK(search_next_result["args"]["global"] == false);
 
+    auto chat_search_cursor = search_cursor;
+    chat_search_cursor.scope = daemon::SearchScope::Chat;
+    chat_search_cursor.chat_id = -1001;
+    chat_search_cursor.next_offset_message_id = 99;
+    chat_search_cursor.next_offset.reset();
+    chat_search_cursor.last_raw_message_id = 100;
+    chat_search_cursor.last_raw_order.reset();
+    const auto chat_search_next = run_binary_captured(
+        {"--json", "--cursor", daemon::encode_search_cursor(chat_search_cursor), "search"}, env,
+        "m2-search-chat-cursor-frame");
+    REQUIRE(chat_search_next.exit_code == kOk);
+    CHECK(json::parse(chat_search_next.out)["args"]["cursor"] ==
+          daemon::encode_search_cursor(chat_search_cursor));
+
     const auto info =
         run_binary_captured({"--json", "chat", "info", "-1001"}, env, "m2-info-frame");
     REQUIRE(info.exit_code == kOk);
@@ -4233,12 +4247,44 @@ TEST_CASE("M2 long-read CLI emits exact first-page and cursor-only request frame
                {"cursor", daemon::encode_members_cursor(members_cursor)},
                {"limit", nullptr},
                {"query", nullptr}});
+
+    auto query_cursor = members_cursor;
+    query_cursor.filter = daemon::MembersFilter::Query;
+    query_cursor.query = std::string(256, 'q');
+    const auto query_next = run_binary_captured(
+        {"--json", "--cursor", daemon::encode_members_cursor(query_cursor), "chat", "members"}, env,
+        "m2-members-query-cursor-frame");
+    REQUIRE(query_next.exit_code == kOk);
+    CHECK(json::parse(query_next.out)["args"]["cursor"] ==
+          daemon::encode_members_cursor(query_cursor));
     CHECK(fixture.running());
 }
 
 TEST_CASE("M2 long-read CLI rejects normalization and grammar conflicts before routing",
           "[cli][m2-long-read][parser][process]") {
     const IsolatedEnv env;
+    const daemon::SearchCursor invalid_search{.account = "main",
+                                              .user_id = 42,
+                                              .limit = 20,
+                                              .query = "needle",
+                                              .scope = daemon::SearchScope::Chat,
+                                              .chat_id = -1001,
+                                              .sender_user_id = std::nullopt,
+                                              .type = daemon::SearchType::Any,
+                                              .next_offset_message_id = 100,
+                                              .next_offset = std::nullopt,
+                                              .last_raw_message_id = 100,
+                                              .last_raw_order = std::nullopt};
+    const daemon::MembersCursor invalid_members{.account = "main",
+                                                .user_id = 42,
+                                                .limit = 50,
+                                                .chat_id = -1001,
+                                                .chat_type = daemon::MembersChatType::Supergroup,
+                                                .source_id = 77,
+                                                .filter = daemon::MembersFilter::Query,
+                                                .query = std::string(257, 'q'),
+                                                .offset = 1,
+                                                .source_count = std::nullopt};
     const std::vector<std::pair<std::string, std::vector<std::string>>> invalid{
         {"m2-search-missing", {"search"}},
         {"m2-search-scope", {"search", "q", "--chat", "1", "--global"}},
@@ -4251,6 +4297,10 @@ TEST_CASE("M2 long-read CLI rejects normalization and grammar conflicts before r
         {"m2-info-cursor", {"--cursor", "opaque", "chat", "info", "1"}},
         {"m2-search-cursor-mixed", {"--cursor", "opaque", "search", "q"}},
         {"m2-members-cursor-mixed", {"--cursor", "opaque", "chat", "members", "1"}},
+        {"m2-search-cursor-relation",
+         {"--cursor", daemon::encode_search_cursor(invalid_search), "search"}},
+        {"m2-members-cursor-query",
+         {"--cursor", daemon::encode_members_cursor(invalid_members), "chat", "members"}},
     };
     for (const auto& [stem, arguments] : invalid) {
         const auto outcome = run_binary_captured(arguments, env, stem);

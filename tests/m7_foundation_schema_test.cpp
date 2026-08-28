@@ -226,6 +226,16 @@ TEST_CASE("future family error schemas reject cross-operation and secret-bearing
     wrong_search["error"]["details"]["operation"] = "chat_members";
     CHECK_FALSE(
         tgcli::test::matches_json_schema("future/search.error.schema.json").match(wrong_search));
+    for (const auto* filename : {"search.error.schema.json", "future/search.error.schema.json"}) {
+        for (const auto* resource : {"raw_scanned_items", "cursor_marker_bytes"}) {
+            const auto capacity = terminal(
+                "RESOURCE_LIMIT", {{"operation", "search"}, {"resource", resource}, {"limit", 1}});
+            CHECK_THAT(capacity, tgcli::test::matches_json_schema(filename));
+        }
+        const auto stale_capacity = terminal(
+            "RESOURCE_LIMIT", {{"operation", "search"}, {"resource", "items"}, {"limit", 1}});
+        CHECK_FALSE(tgcli::test::matches_json_schema(filename).match(stale_capacity));
+    }
 
     for (const auto* filename :
          {"future/search.error.schema.json", "future/chat-read.error.schema.json",

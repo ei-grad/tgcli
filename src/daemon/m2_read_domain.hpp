@@ -2,6 +2,7 @@
 
 #include "core/td_runtime.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -13,6 +14,8 @@ inline constexpr std::int32_t kDefaultSearchLimit = 20;
 inline constexpr std::int32_t kMaximumSearchLimit = 100;
 inline constexpr std::int32_t kDefaultMembersLimit = 50;
 inline constexpr std::int32_t kMaximumMembersLimit = 200;
+inline constexpr std::size_t kMaximumSearchRawScannedItems = 4'096;
+inline constexpr std::size_t kMaximumSearchCursorMarkerBytes = 1'048'576;
 
 enum class SearchScope { Chat, Global };
 enum class SearchType { Any, Text, Photo, Video, Document, Link, Voice };

@@ -428,6 +428,7 @@ std::optional<SearchCursor> decode_search_cursor(std::string_view token) {
         (chat_scope == cursor.last_raw_message_id.has_value()) &&
         (chat_scope != cursor.next_offset.has_value()) &&
         (chat_scope != cursor.last_raw_order.has_value()) &&
+        (!chat_scope || *cursor.next_offset_message_id < *cursor.last_raw_message_id) &&
         (chat_scope || (cursor.next_offset && pinned_search_input(*cursor.next_offset)));
     if (!shape_valid || encode_search_cursor(cursor) != token) {
         return std::nullopt;
@@ -506,11 +507,12 @@ std::optional<MembersCursor> decode_members_cursor(std::string_view token) {
     }
     const bool is_basic = cursor.chat_type == MembersChatType::BasicGroup;
     const bool query_filter = cursor.filter == MembersFilter::Query;
-    const bool shape_valid = cursor.operation == "chat_members" && !cursor.account.empty() &&
-                             (is_basic == cursor.source_count.has_value()) &&
-                             (!cursor.source_count || cursor.offset <= *cursor.source_count) &&
-                             (query_filter == cursor.query.has_value()) &&
-                             (!cursor.query || pinned_search_input(*cursor.query));
+    const bool shape_valid =
+        cursor.operation == "chat_members" && !cursor.account.empty() &&
+        (is_basic == cursor.source_count.has_value()) &&
+        (!cursor.source_count || cursor.offset <= *cursor.source_count) &&
+        (query_filter == cursor.query.has_value()) &&
+        (!cursor.query || (cursor.query->size() <= 256 && pinned_search_input(*cursor.query)));
     if (!shape_valid || encode_members_cursor(cursor) != token) {
         return std::nullopt;
     }

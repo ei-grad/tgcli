@@ -111,6 +111,34 @@ void pagination(RequestSession& session, std::string_view operation, std::string
                   {{"operation", operation}, {"reason", reason}}, kGeneric);
 }
 
+void resource_limit(RequestSession& session, std::string_view resource, std::size_t limit) {
+    session.error("RESOURCE_LIMIT", "search resource limit exceeded",
+                  {{"operation", "search"}, {"resource", resource}, {"limit", limit}}, kGeneric);
+}
+
+class SearchInvocationBudget {
+  public:
+    bool charge_raw_items(std::size_t count) {
+        if (count > kMaximumSearchRawScannedItems - raw_scanned_items_) {
+            return false;
+        }
+        raw_scanned_items_ += count;
+        return true;
+    }
+
+    bool charge_marker(std::size_t bytes) {
+        if (bytes > kMaximumSearchCursorMarkerBytes - cursor_marker_bytes_) {
+            return false;
+        }
+        cursor_marker_bytes_ += bytes;
+        return true;
+    }
+
+  private:
+    std::size_t raw_scanned_items_ = 0;
+    std::size_t cursor_marker_bytes_ = 0;
+};
+
 bool final_stop(core::TdClient& client, std::string_view operation, RequestSession& session) {
     if (session.cancellation_requested()) {
         return true;
@@ -427,7 +455,7 @@ std::optional<std::string_view> member_status(const core::TdChatMemberStatus& st
     return std::nullopt;
 }
 
-bool valid_member_structure(const core::TdChatMember& member) {
+bool valid_member_structure(const core::TdChatMember& member, MembersChatType owner) {
     const auto status = member_status(member.status);
     if (!status || member.status.unsupported_tdlib_type_id || member.inviter_user_id < 0 ||
         member.inviter_user_id > core::kTdInt53Max || member.joined_chat_date < 0 ||
@@ -436,6 +464,7 @@ bool valid_member_structure(const core::TdChatMember& member) {
     }
     switch (member.status.kind) {
     case core::TdChatMemberStatusKind::Creator:
+        break;
     case core::TdChatMemberStatusKind::Administrator:
     case core::TdChatMemberStatusKind::Member:
         if (!member.status.is_member) {
@@ -449,14 +478,20 @@ bool valid_member_structure(const core::TdChatMember& member) {
         }
         break;
     case core::TdChatMemberStatusKind::Restricted:
+        if (owner != MembersChatType::Supergroup) {
+            return false;
+        }
         break;
     case core::TdChatMemberStatusKind::Unknown:
         return false;
     }
-    return member.member.kind == core::TdMessageSenderKind::User
-               ? member.member.id > 0 && member.member.id <= core::kTdInt53Max
-               : member.member.kind == core::TdMessageSenderKind::Chat &&
-                     core::valid_td_chat_id(member.member.id);
+    if (member.member.kind == core::TdMessageSenderKind::User) {
+        return member.member.id > 0 && member.member.id <= core::kTdInt53Max;
+    }
+    return member.member.kind == core::TdMessageSenderKind::Chat &&
+           owner != MembersChatType::BasicGroup && core::valid_td_chat_id(member.member.id) &&
+           (member.status.kind == core::TdChatMemberStatusKind::Left ||
+            member.status.kind == core::TdChatMemberStatusKind::Banned);
 }
 
 bool valid_user(const core::TdUserSummary& user, std::int64_t expected_id) {
@@ -531,7 +566,8 @@ enrich_chat_member(ResolverConsumer& resolver, core::TdClient& client, std::stri
         }
         return std::nullopt;
     }
-    if (identity.identity->usernames.size() > 100) {
+    if ((chat->kind != core::TdChatKind::Supergroup && chat->kind != core::TdChatKind::Channel) ||
+        identity.identity->usernames.size() > 100) {
         return std::nullopt;
     }
     return MemberRow{.sender = member.member,
@@ -545,10 +581,11 @@ enrich_chat_member(ResolverConsumer& resolver, core::TdClient& client, std::stri
 
 std::optional<MemberRow> enrich_member(ResolverConsumer& resolver, core::TdClient& client,
                                        std::string_view account, const core::TdChatMember& member,
-                                       RequestSession& session) {
+                                       MembersChatType owner, RequestSession& session) {
     const auto status = member_status(member.status);
     const auto joined = timestamp(member.joined_chat_date);
-    if (!valid_member_structure(member) || !status || (member.joined_chat_date != 0 && !joined)) {
+    if (!valid_member_structure(member, owner) || !status ||
+        (member.joined_chat_date != 0 && !joined)) {
         return std::nullopt;
     }
     if (member.member.kind == core::TdMessageSenderKind::User) {
@@ -592,18 +629,19 @@ bool selected_member(const MemberRow& member, MembersFilter filter,
 
 std::optional<std::vector<MemberRow>>
 enrich_members(ResolverConsumer& resolver, core::TdClient& client, std::string_view account,
-               const std::vector<core::TdChatMember>& source, RequestSession& session) {
+               const std::vector<core::TdChatMember>& source, MembersChatType owner,
+               RequestSession& session) {
     std::vector<MemberRow> rows;
     rows.reserve(source.size());
     std::unordered_set<MemberKey, MemberKeyHash> seen;
     for (const auto& member : source) {
         const MemberKey key{.kind = member.member.kind, .id = member.member.id};
-        if (!valid_member_structure(member) || !seen.insert(key).second) {
+        if (!valid_member_structure(member, owner) || !seen.insert(key).second) {
             return std::nullopt;
         }
     }
     for (const auto& member : source) {
-        const auto row = enrich_member(resolver, client, account, member, session);
+        const auto row = enrich_member(resolver, client, account, member, owner, session);
         if (!row) {
             return std::nullopt;
         }
@@ -734,13 +772,21 @@ void M2ReadCoordinator::search(const proto::Request& request, RequestSession& se
     std::vector<MessageSummary> items;
     std::set<std::pair<std::int64_t, std::int64_t>> seen_messages;
     std::set<std::string> seen_offsets;
-    std::int64_t chat_marker = state->cursor ? *state->cursor->next_offset_message_id : 0;
-    std::string global_offset = state->cursor ? *state->cursor->next_offset : "";
+    std::int64_t chat_marker = state->cursor && state->cursor->next_offset_message_id
+                                   ? *state->cursor->next_offset_message_id
+                                   : 0;
+    std::string global_offset =
+        state->cursor && state->cursor->next_offset ? *state->cursor->next_offset : std::string{};
     std::optional<std::int64_t> last_chat_id =
         state->cursor ? state->cursor->last_raw_message_id : std::nullopt;
     std::optional<SearchRawOrder> last_global =
         state->cursor ? state->cursor->last_raw_order : std::nullopt;
+    SearchInvocationBudget budget;
     if (!global_offset.empty()) {
+        if (!budget.charge_marker(global_offset.size())) {
+            resource_limit(session, "cursor_marker_bytes", kMaximumSearchCursorMarkerBytes);
+            return;
+        }
         seen_offsets.insert(global_offset);
     }
 
@@ -799,6 +845,10 @@ void M2ReadCoordinator::search(const proto::Request& request, RequestSession& se
         if (raw_messages == nullptr || total_count < -1 ||
             raw_messages->size() > static_cast<std::size_t>(request_limit)) {
             internal(session, "search");
+            return;
+        }
+        if (!budget.charge_raw_items(raw_messages->size())) {
+            resource_limit(session, "raw_scanned_items", kMaximumSearchRawScannedItems);
             return;
         }
 
@@ -864,11 +914,15 @@ void M2ReadCoordinator::search(const proto::Request& request, RequestSession& se
                 pagination(session, "search", "page_invalid");
                 return;
             }
-            if (next_global_offset == global_offset ||
-                !seen_offsets.insert(next_global_offset).second) {
+            if (next_global_offset == global_offset || seen_offsets.contains(next_global_offset)) {
                 pagination(session, "search", "marker_not_advancing");
                 return;
             }
+            if (!budget.charge_marker(next_global_offset.size())) {
+                resource_limit(session, "cursor_marker_bytes", kMaximumSearchCursorMarkerBytes);
+                return;
+            }
+            seen_offsets.insert(next_global_offset);
         }
         items.insert(items.end(), page_items.begin(), page_items.end());
         last_chat_id = page_last_chat;
@@ -1020,7 +1074,9 @@ void M2ReadCoordinator::chat_info(const proto::Request& request, RequestSession&
         if (!target->observed_supergroup ||
             target->observed_supergroup->id != target->observed_chat->related_id ||
             target->observed_supergroup->is_channel !=
-                (target->observed_chat->kind == core::TdChatKind::Channel)) {
+                (target->observed_chat->kind == core::TdChatKind::Channel) ||
+            (target->observed_chat->kind == core::TdChatKind::Channel &&
+             target->observed_supergroup->is_forum)) {
             internal(session, "chat_info");
             return;
         }
@@ -1118,7 +1174,8 @@ void M2ReadCoordinator::chat_members(const proto::Request& request, RequestSessi
             internal(session, "chat_members");
             return;
         }
-        auto rows = enrich_members(resolver, client_.get(), account_, full->members, session);
+        auto rows = enrich_members(resolver, client_.get(), account_, full->members,
+                                   MembersChatType::BasicGroup, session);
         if (!rows) {
             if (!session.has_terminal() && !session.cancellation_requested()) {
                 internal(session, "chat_members");
@@ -1163,75 +1220,70 @@ void M2ReadCoordinator::chat_members(const proto::Request& request, RequestSessi
         return;
     }
 
-    std::vector<MemberRow> items;
     auto offset = state->cursor ? state->cursor->offset : 0;
+    const auto response = target_read(resolver, client_.get(), account_, "chat_members", session,
+                                      [&](const auto& current) {
+                                          return client_.get().get_supergroup_members(
+                                              current, source_id, *td_members_filter(state->filter),
+                                              state->query.value_or(""), offset, state->limit);
+                                      });
+    if (!response) {
+        return;
+    }
+    if (const auto* error = response->value.get_if<core::TdError>()) {
+        td_error(session, "chat_members", *error);
+        return;
+    }
+    const auto* page = response->value.get_if<core::TdChatMembers>();
+    if (page == nullptr || page->total_count < 0 ||
+        static_cast<std::size_t>(page->total_count) < page->members.size() ||
+        page->members.size() > static_cast<std::size_t>(state->limit)) {
+        internal(session, "chat_members");
+        return;
+    }
+    if (page->members.empty()) {
+        if (!final_stop(client_.get(), "chat_members", session)) {
+            session.result(members_result({}, std::nullopt));
+        }
+        return;
+    }
     std::unordered_set<MemberKey, MemberKeyHash> seen;
-    for (;;) {
-        const auto request_limit = state->limit - static_cast<std::int32_t>(items.size());
-        const auto response = target_read(
-            resolver, client_.get(), account_, "chat_members", session, [&](const auto& current) {
-                return client_.get().get_supergroup_members(
-                    current, source_id, *td_members_filter(state->filter),
-                    state->query.value_or(""), offset, request_limit);
-            });
-        if (!response) {
+    for (const auto& member : page->members) {
+        const MemberKey key{.kind = member.member.kind, .id = member.member.id};
+        if (!seen.insert(key).second) {
+            pagination(session, "chat_members", "page_invalid");
             return;
         }
-        if (const auto* error = response->value.get_if<core::TdError>()) {
-            td_error(session, "chat_members", *error);
-            return;
-        }
-        const auto* page = response->value.get_if<core::TdChatMembers>();
-        if (page == nullptr || page->total_count < 0 ||
-            (page->total_count >= 0 &&
-             static_cast<std::size_t>(page->total_count) < page->members.size()) ||
-            page->members.size() > static_cast<std::size_t>(request_limit)) {
+    }
+    auto rows =
+        enrich_members(resolver, client_.get(), account_, page->members, *chat_type, session);
+    if (!rows) {
+        if (!session.has_terminal() && !session.cancellation_requested()) {
             internal(session, "chat_members");
-            return;
         }
-        if (page->members.empty()) {
-            if (!final_stop(client_.get(), "chat_members", session)) {
-                session.result(members_result(items, std::nullopt));
-            }
-            return;
-        }
-        for (const auto& member : page->members) {
-            const MemberKey key{.kind = member.member.kind, .id = member.member.id};
-            if (!seen.insert(key).second) {
-                pagination(session, "chat_members", "page_invalid");
-                return;
-            }
-        }
-        auto rows = enrich_members(resolver, client_.get(), account_, page->members, session);
-        if (!rows) {
-            if (!session.has_terminal() && !session.cancellation_requested()) {
-                internal(session, "chat_members");
-            }
-            return;
-        }
-        items.insert(items.end(), rows->begin(), rows->end());
-        if (page->members.size() >
-            static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max() - offset)) {
-            pagination(session, "chat_members", "marker_not_advancing");
-            return;
-        }
-        offset += static_cast<std::int32_t>(page->members.size());
-        if (static_cast<std::int32_t>(items.size()) == state->limit) {
-            const auto next = encode_members_cursor({.account = account_,
-                                                     .user_id = principal->id,
-                                                     .limit = state->limit,
-                                                     .chat_id = target->chat.id,
-                                                     .chat_type = *chat_type,
-                                                     .source_id = source_id,
-                                                     .filter = state->filter,
-                                                     .query = state->query,
-                                                     .offset = offset,
-                                                     .source_count = std::nullopt});
-            if (!final_stop(client_.get(), "chat_members", session)) {
-                session.result(members_result(items, next));
-            }
-            return;
-        }
+        return;
+    }
+    std::erase_if(*rows, [&](const MemberRow& row) {
+        return !selected_member(row, state->filter, state->query);
+    });
+    if (page->members.size() >
+        static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max() - offset)) {
+        pagination(session, "chat_members", "marker_not_advancing");
+        return;
+    }
+    offset += static_cast<std::int32_t>(page->members.size());
+    const auto next = encode_members_cursor({.account = account_,
+                                             .user_id = principal->id,
+                                             .limit = state->limit,
+                                             .chat_id = target->chat.id,
+                                             .chat_type = *chat_type,
+                                             .source_id = source_id,
+                                             .filter = state->filter,
+                                             .query = state->query,
+                                             .offset = offset,
+                                             .source_count = std::nullopt});
+    if (!final_stop(client_.get(), "chat_members", session)) {
+        session.result(members_result(*rows, next));
     }
 }
 

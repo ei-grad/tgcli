@@ -600,7 +600,7 @@ write(
       "RESOURCE_LIMIT",
       object({
         operation: { const: "search" },
-        resource: { enum: ["items", "bytes", "item_bytes"] },
+        resource: { enum: ["raw_scanned_items", "cursor_marker_bytes"] },
         limit: { type: "integer", minimum: 1 },
       }),
     ),

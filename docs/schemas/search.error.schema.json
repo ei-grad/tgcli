@@ -1018,9 +1018,8 @@
                 },
                 "resource": {
                   "enum": [
-                    "items",
-                    "bytes",
-                    "item_bytes"
+                    "raw_scanned_items",
+                    "cursor_marker_bytes"
                   ]
                 },
                 "limit": {
