@@ -447,6 +447,9 @@ LoginFunctionSetup login_setup(core::TdFunctionKind function) {
     case core::TdFunctionKind::GetDownloadMessage:
     case core::TdFunctionKind::DownloadFile:
     case core::TdFunctionKind::GetSuggestedFileName:
+    case core::TdFunctionKind::RawRead:
+    case core::TdFunctionKind::RawWrite:
+    case core::TdFunctionKind::RawDestructive:
     case core::TdFunctionKind::GetMessageProperties:
     case core::TdFunctionKind::GetMessageAvailableReactions:
     case core::TdFunctionKind::ParseTextEntities:

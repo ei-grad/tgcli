@@ -80,6 +80,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::GetMessageProperties:
     case TdFunctionKind::GetMessageAvailableReactions:
     case TdFunctionKind::ParseTextEntities:
+    case TdFunctionKind::RawRead:
         return {DescriptorKind::Read, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::SendMessage:
     case TdFunctionKind::ForwardMessages:
@@ -107,6 +108,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::SetChatDescription:
     case TdFunctionKind::SetChatMemberStatus:
     case TdFunctionKind::SetChatPermissions:
+    case TdFunctionKind::RawWrite:
         return {DescriptorKind::Write, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::DeleteMessages:
     case TdFunctionKind::LeaveChat:
@@ -116,6 +118,7 @@ FunctionPolicy policy_for(TdFunctionKind function) {
     case TdFunctionKind::RevokeChatInviteLink:
     case TdFunctionKind::OptimizeStorage:
     case TdFunctionKind::LogOut:
+    case TdFunctionKind::RawDestructive:
         return {DescriptorKind::Destructive, AuthState::Ready, TdOwnerKind::Request};
     case TdFunctionKind::Close:
         return {DescriptorKind::Lifecycle, AuthState::Unknown, TdOwnerKind::Lifecycle};

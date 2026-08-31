@@ -407,6 +407,7 @@ for (const [command, filename] of [
   ["search", "search.error.schema.json"],
   ["chat info", "chat-read.error.schema.json"],
   ["chat members", "chat-read.error.schema.json"],
+  ["raw", "raw.error.schema.json"],
 ]) {
   errorManifest.commands[command] = { error: filename };
 }
@@ -551,11 +552,13 @@ const rawDry = object({
     request_bytes: { type: "integer", minimum: 2, maximum: 1048576 },
   }),
 });
-write(
-  "raw.result.schema.json",
-  { $schema: dialect, title: "tgcli raw result", oneOf: [rawLive, rawDry] },
-  futureDirectory,
-);
+const rawResultDocument = {
+  $schema: dialect,
+  title: "tgcli raw result",
+  oneOf: [rawLive, rawDry],
+};
+write("raw.result.schema.json", rawResultDocument, futureDirectory);
+write("raw.result.schema.json", rawResultDocument);
 
 const futureErrorDocument = (title, branches) => ({
   $schema: dialect,
@@ -640,9 +643,7 @@ write(
   ]),
   futureDirectory,
 );
-write(
-  "raw.error.schema.json",
-  futureErrorDocument("tgcli raw error", [
+const rawErrorDocument = futureErrorDocument("tgcli raw error", [
     usage(["missing_argument", "invalid_argument", "mutually_exclusive", "unknown_command", "unsupported_mode"]),
     notAuthed,
     ...commonTransport("raw", { includeBot: false }),
@@ -663,10 +664,10 @@ write(
       }),
       { const: "raw request outcome is unconfirmed" },
     ),
-    error("INTERNAL", object({ operation: { const: "raw" }, reason: { enum: ["unexpected_response", "result_too_large", "canonicalization_failed", "policy_table_invalid"] } })),
-  ]),
-  futureDirectory,
-);
+    error("INTERNAL", object({ operation: { const: "raw" }, reason: { enum: ["unexpected_response", "result_too_large", "canonicalization_failed", "policy_table_invalid", "internal_error"] } })),
+  ]);
+write("raw.error.schema.json", rawErrorDocument, futureDirectory);
+write("raw.error.schema.json", rawErrorDocument);
 
 const invocationId = { type: "string", pattern: "^[0-9a-f]{32}$" };
 const tdlibSha = { type: "string", pattern: "^[0-9a-f]{40}$" };
@@ -686,7 +687,7 @@ write(
   "raw-audit-intent.v3.schema.json",
   {
     $schema: dialect,
-    title: "tgcli dormant raw audit v3 intent",
+    title: "tgcli raw audit v3 intent",
     ...object({
       ...auditCommon("raw_intent"),
       function: responseType,
@@ -713,17 +714,52 @@ const responseData = (kind) =>
     response_sha256: hash,
     response_bytes: { type: "integer", minimum: 2, maximum: 16777216 },
   });
+const malformedResponseProperties = {
+  dispatch_token: invocationId,
+  generation: uint64String,
+  kind: { const: "malformed" },
+  response_type: nullable({ allOf: [responseType, { not: { const: "error" } }] }),
+  td_error_code: { type: "null" },
+  response_sha256: nullable(hash),
+  response_bytes: nullable({ type: "integer", minimum: 2, maximum: 16777216 }),
+};
+const malformedResponseData = object(
+  malformedResponseProperties,
+  Object.keys(malformedResponseProperties),
+  {
+    allOf: [
+      {
+        if: { properties: { response_sha256: { type: "null" } }, required: ["response_sha256"] },
+        then: { properties: { response_bytes: { type: "null" } } },
+        else: { properties: { response_bytes: { type: "integer" } } },
+      },
+      {
+        if: { properties: { response_type: { type: "null" } }, required: ["response_type"] },
+        then: { properties: { response_sha256: { type: "null" }, response_bytes: { type: "null" } } },
+      },
+    ],
+  },
+);
+const oversizedResponseData = object({
+  dispatch_token: invocationId,
+  generation: uint64String,
+  kind: { const: "result_too_large" },
+  response_type: { allOf: [responseType, { not: { const: "error" } }] },
+  td_error_code: { type: "null" },
+  response_sha256: { type: "null" },
+  response_bytes: { type: "null" },
+});
 const rawCheckpoint = (stage, data) =>
   object({ ...auditCommon("raw_checkpoint"), stage: { const: stage }, data });
 write(
   "raw-audit-checkpoint.v3.schema.json",
   {
     $schema: dialect,
-    title: "tgcli dormant raw audit v3 checkpoint",
+    title: "tgcli raw audit v3 checkpoint",
     oneOf: [
       rawCheckpoint("raw_dispatch_started", dispatchData),
       rawCheckpoint("raw_response_received", {
-        oneOf: [responseData("result"), responseData("error")],
+        oneOf: [responseData("result"), responseData("error"), malformedResponseData, oversizedResponseData],
       }),
     ],
   },
@@ -753,14 +789,25 @@ const errorTerminal = {
       code: { const: "RAW_OUTCOME_UNCONFIRMED" },
       td_error_code: { type: "null" },
     }),
+    object({
+      kind: { const: "error_summary" },
+      code: { const: "INTERNAL" },
+      reason: { enum: ["unexpected_response", "result_too_large"] },
+      td_error_code: { type: "null" },
+    }),
   ],
 };
 write(
   "raw-audit-outcome.v3.schema.json",
   {
     $schema: dialect,
-    title: "tgcli dormant raw audit v3 outcome",
+    title: "tgcli raw audit v3 outcome",
     oneOf: [
+      object({
+        ...auditCommon("raw_outcome"),
+        mutation_state: { const: "none" },
+        terminal: { type: "null" },
+      }),
       object({
         ...auditCommon("raw_outcome"),
         mutation_state: { const: "confirmed" },

@@ -3,6 +3,7 @@
 #include "common/sha256.hpp"
 #include "common/utf8.hpp"
 #include "daemon/dispatch.hpp"
+#include "daemon/rate_limit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -422,11 +423,13 @@ int base64_value(unsigned char character) {
     return -1;
 }
 
-std::optional<std::string> decode_base64(std::string_view input) {
+std::optional<secure::SensitiveString> decode_base64(std::string_view input,
+                                                     const secure::WipeObserver& observer) {
     if (input.size() % 4 != 0) {
         return std::nullopt;
     }
     std::string output;
+    const secure::StringWiper output_wiper(output, observer, "raw_decoded_bytes_rejected");
     output.reserve(input.size() / 4 * 3);
     for (std::size_t offset = 0; offset < input.size(); offset += 4) {
         const bool final = offset + 4 == input.size();
@@ -451,14 +454,19 @@ std::optional<std::string> decode_base64(std::string_view input) {
             output.push_back(static_cast<char>(((third & 0x03) << 6) | fourth));
         }
     }
-    return output;
+    return secure::SensitiveString(std::move(output), observer, "raw_decoded_bytes_staging");
 }
 
-void append_base64_json_string(std::string_view input, std::string& output) {
+template <typename Output> void append_base64_json_string(std::string_view input, Output& output) {
     constexpr std::string_view alphabet =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     output.push_back('"');
     for (std::size_t offset = 0; offset < input.size(); offset += 3) {
+        if constexpr (requires { output.oversized(); }) {
+            if (output.oversized()) {
+                return;
+            }
+        }
         const auto first = static_cast<unsigned char>(input[offset]);
         const bool has_second = offset + 1 < input.size();
         const bool has_third = offset + 2 < input.size();
@@ -483,10 +491,15 @@ bool ascii_identifier(std::string_view text) {
            });
 }
 
-void append_json_string(std::string_view input, std::string& output) {
+template <typename Output> void append_json_string(std::string_view input, Output& output) {
     constexpr std::string_view digits = "0123456789abcdef";
     output.push_back('"');
     for (const char character : input) {
+        if constexpr (requires { output.oversized(); }) {
+            if (output.oversized()) {
+                return;
+            }
+        }
         const auto byte = static_cast<unsigned char>(character);
         if (character == '"' || character == '\\') {
             output.push_back('\\');
@@ -676,14 +689,58 @@ class StringWipeGuard final {
     std::string_view stage_;
 };
 
-bool append_native_object(const td::td_api::Object& value, std::string& output);
+class CanonicalBuffer final {
+  public:
+    CanonicalBuffer(std::string& output, std::size_t limit) : output_(&output), limit_(limit) {}
 
-void append_native_begin(std::string_view type, std::string& output) {
+    void push_back(char value) {
+        append(std::string_view(&value, 1));
+    }
+
+    CanonicalBuffer& operator+=(std::string_view value) {
+        append(value);
+        return *this;
+    }
+
+    CanonicalBuffer& operator+=(const std::string& value) {
+        append(value);
+        return *this;
+    }
+
+    CanonicalBuffer& operator+=(const char* value) {
+        append(value);
+        return *this;
+    }
+
+    [[nodiscard]] bool oversized() const noexcept {
+        return oversized_;
+    }
+
+  private:
+    void append(std::string_view value) {
+        if (oversized_) {
+            return;
+        }
+        const auto maximum_staging = limit_ + 1;
+        const auto available = maximum_staging - output_->size();
+        const auto count = std::min(available, value.size());
+        output_->append(value.data(), count);
+        oversized_ = count != value.size() || output_->size() > limit_;
+    }
+
+    std::string* output_;
+    std::size_t limit_;
+    bool oversized_ = false;
+};
+
+bool append_native_object(const td::td_api::Object& value, CanonicalBuffer& output);
+
+void append_native_begin(std::string_view type, CanonicalBuffer& output) {
     output += "{\"@type\":";
     append_json_string(type, output);
 }
 
-bool append_native_value(bool value, std::string_view type, std::string& output) {
+bool append_native_value(bool value, std::string_view type, CanonicalBuffer& output) {
     if (type != "Bool") {
         return false;
     }
@@ -691,7 +748,7 @@ bool append_native_value(bool value, std::string_view type, std::string& output)
     return true;
 }
 
-bool append_native_value(std::int32_t value, std::string_view type, std::string& output) {
+bool append_native_value(std::int32_t value, std::string_view type, CanonicalBuffer& output) {
     if (type != "int32") {
         return false;
     }
@@ -699,7 +756,7 @@ bool append_native_value(std::int32_t value, std::string_view type, std::string&
     return true;
 }
 
-bool append_native_value(std::int64_t value, std::string_view type, std::string& output) {
+bool append_native_value(std::int64_t value, std::string_view type, CanonicalBuffer& output) {
     if (type == "int53") {
         if (value < -kMaximumInt53 || value > kMaximumInt53) {
             return false;
@@ -714,7 +771,7 @@ bool append_native_value(std::int64_t value, std::string_view type, std::string&
     return true;
 }
 
-bool append_native_value(double value, std::string_view type, std::string& output) {
+bool append_native_value(double value, std::string_view type, CanonicalBuffer& output) {
     if (type != "double") {
         return false;
     }
@@ -726,7 +783,7 @@ bool append_native_value(double value, std::string_view type, std::string& outpu
     return true;
 }
 
-bool append_native_value(const std::string& value, std::string_view type, std::string& output) {
+bool append_native_value(const std::string& value, std::string_view type, CanonicalBuffer& output) {
     if (type == "bytes") {
         append_base64_json_string(value, output);
         return true;
@@ -741,7 +798,7 @@ bool append_native_value(const std::string& value, std::string_view type, std::s
 template <typename Value>
 // NOLINTNEXTLINE(misc-no-recursion): TD object_ptr fields form an ownership tree.
 bool append_native_value(const td::td_api::object_ptr<Value>& value, std::string_view type,
-                         std::string& output) {
+                         CanonicalBuffer& output) {
     if (value == nullptr) {
         output += "null";
         return true;
@@ -762,7 +819,7 @@ bool append_native_value(const td::td_api::object_ptr<Value>& value, std::string
 template <typename Value>
 // NOLINTNEXTLINE(misc-no-recursion): TD vectors recurse only through owned elements.
 bool append_native_value(const std::vector<Value>& values, std::string_view type,
-                         std::string& output) {
+                         CanonicalBuffer& output) {
     const auto element_type = vector_element(type);
     if (!element_type) {
         return false;
@@ -784,11 +841,11 @@ bool append_native_value(const std::vector<Value>& values, std::string_view type
 template <typename Value>
 // NOLINTNEXTLINE(misc-no-recursion): generated fields recursively serialize owned TD values.
 bool append_native_field(std::string_view name, const Value& value, std::string_view type,
-                         std::string& output) {
+                         CanonicalBuffer& output) {
     output.push_back(',');
     append_json_string(name, output);
     output.push_back(':');
-    return append_native_value(value, type, output);
+    return !output.oversized() && append_native_value(value, type, output) && !output.oversized();
 }
 
 #include "daemon/raw_td_canonical.generated.inc"
@@ -899,16 +956,17 @@ Error convert_primitive(const Value* value, std::string_view type, std::string& 
         if (!defaulted && value->kind != ValueKind::String) {
             return Error::InvalidFieldType;
         }
-        std::optional<std::string> decoded = std::string{};
+        std::optional<secure::SensitiveString> decoded;
         if (!defaulted) {
-            decoded = decode_base64(std::get<secure::SensitiveString>(value->storage).view());
+            decoded = decode_base64(std::get<secure::SensitiveString>(value->storage).view(),
+                                    arena.observer());
         }
-        if (!decoded) {
+        if (!defaulted && !decoded) {
             return Error::InvalidBase64;
         }
-        append_base64_json_string(*decoded, canonical);
-        converted = json_string(arena, encode_base64(*decoded));
-        secure::wipe(*decoded, arena.observer(), "raw_decoded_bytes_staging");
+        const auto decoded_view = defaulted ? std::string_view{} : decoded->view();
+        append_base64_json_string(decoded_view, canonical);
+        converted = json_string(arena, encode_base64(decoded_view));
         return Error::InvalidJson;
     }
     return Error::InvalidPolicyMetadata;
@@ -1153,6 +1211,41 @@ const td::td_api::Function& TypedFunction::native() const noexcept {
     return *implementation_->native;
 }
 
+std::optional<core::TdValue> TypedFunction::release_for_dispatch(Tier effective_tier) {
+    if (implementation_ == nullptr || implementation_->native == nullptr) {
+        return std::nullopt;
+    }
+    core::TdFunctionKind kind = core::TdFunctionKind::RawRead;
+    switch (effective_tier) {
+    case Tier::Read:
+        kind = core::TdFunctionKind::RawRead;
+        break;
+    case Tier::Write:
+        kind = core::TdFunctionKind::RawWrite;
+        break;
+    case Tier::Destructive:
+        kind = core::TdFunctionKind::RawDestructive;
+        break;
+    }
+    const auto observer = implementation_->wipe_observer;
+    const core::TdRawFunctionWiper request_wiper =
+        [observer](core::TdRawFunctionPtr& value) noexcept {
+            if (value != nullptr) {
+                wipe_native_function(*value, observer);
+            }
+        };
+    auto result = core::TdValue::sensitive_function(std::move(implementation_->native),
+                                                    core::TdFunctionData{kind}, request_wiper);
+    result.set_raw_request_wiper(request_wiper);
+    result.set_raw_response_wiper([observer](core::TdRawObjectPtr& value) noexcept {
+        if (value != nullptr) {
+            wipe_native_object(*value, observer);
+        }
+    });
+    implementation_->canonical = secure::SensitiveString{};
+    return result;
+}
+
 BodyPolicyOutcome apply_body_policy_decision(AdmissionTier static_tier,
                                              BodyPolicyDecision decision) noexcept {
     switch (static_tier) {
@@ -1202,6 +1295,22 @@ std::optional<RawPolicyMetadata> policy_metadata(const TypedFunction& function) 
                              .reviewed = policy->reviewed};
 }
 
+std::optional<std::string_view> declared_result_type(std::string_view function_name) noexcept {
+    const auto* constructor = constructor_by_name(function_name);
+    if (constructor == nullptr || constructor->kind != RawTdConstructorKind::Function) {
+        return std::nullopt;
+    }
+    return constructor->result_type;
+}
+
+bool response_type_matches_result(std::string_view function_name,
+                                  std::string_view response_type) noexcept {
+    const auto declared = declared_result_type(function_name);
+    const auto* response = constructor_by_name(response_type);
+    return declared && response != nullptr && response->kind == RawTdConstructorKind::Object &&
+           response->result_type == *declared;
+}
+
 BodyPolicyOutcome evaluate_body_policy(const TypedFunction& function) noexcept {
     const auto* policy = policy_by_function(function.name(), function.native().get_id());
     if (policy == nullptr || !policy->reviewed || policy->sensitive_input ||
@@ -1218,6 +1327,38 @@ BodyPolicyOutcome evaluate_body_policy(const TypedFunction& function) noexcept {
         return {};
     }
     return outcome;
+}
+
+bool policy_activation_ready() noexcept {
+    constexpr std::string_view accepted =
+        "4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce";
+    if (!kRawPolicyActivationReady || kRawPolicySha256 != accepted || kRawPolicies.size() != 1001) {
+        return false;
+    }
+    std::size_t read = 0;
+    std::size_t write = 0;
+    std::size_t destructive = 0;
+    std::size_t denied_count = 0;
+    for (const auto& row : kRawPolicies) {
+        if (!row.reviewed) {
+            return false;
+        }
+        switch (row.admission) {
+        case AdmissionTier::Read:
+            ++read;
+            break;
+        case AdmissionTier::Write:
+            ++write;
+            break;
+        case AdmissionTier::Destructive:
+            ++destructive;
+            break;
+        case AdmissionTier::Denied:
+            ++denied_count;
+            break;
+        }
+    }
+    return read == 29 && write == 19 && destructive == 6 && denied_count == 947;
 }
 
 std::variant<Digest, Failure> TypedFunction::request_digest(std::string_view tdlib_sha,
@@ -1292,8 +1433,9 @@ std::variant<TypedFunction, Failure> parse(std::string&& input,
     }
     std::string native_canonical;
     native_canonical.reserve(canonical.size());
-    const bool native_matches =
-        append_native_function(*native, native_canonical) && native_canonical == canonical;
+    CanonicalBuffer native_output(native_canonical, kMaximumRequestBytes);
+    const bool native_matches = append_native_function(*native, native_output) &&
+                                !native_output.oversized() && native_canonical == canonical;
     secure::wipe(native_canonical, wipe_observer, "raw_native_canonical_proof");
     if (!native_matches) {
         wipe_native_function(*native, wipe_observer);
@@ -1309,34 +1451,86 @@ std::variant<TypedFunction, Failure> parse(std::string&& input,
 std::variant<Digest, Failure> response_digest(const TypedFunction& function,
                                               td::tl_object_ptr<td::td_api::Object> response,
                                               const secure::WipeObserver& wipe_observer) {
+    auto materialized = materialize_response(function, std::move(response), wipe_observer);
+    if (const auto* failure = std::get_if<Failure>(&materialized)) {
+        return *failure;
+    }
+    return std::get<MaterializedResponse>(std::move(materialized)).digest;
+}
+
+std::variant<MaterializedResponse, Failure>
+materialize_response(const TypedFunction& function, core::TdRawObjectPtr response,
+                     const secure::WipeObserver& wipe_observer) {
+    auto classified = classify_response(function, std::move(response), wipe_observer);
+    if (auto* materialized = std::get_if<MaterializedResponse>(&classified)) {
+        return std::move(*materialized);
+    }
+    if (std::holds_alternative<MalformedResponse>(classified)) {
+        return Failure{Error::UnexpectedResponseType};
+    }
+    if (std::holds_alternative<OversizedResponse>(classified)) {
+        return Failure{Error::CanonicalTooLarge};
+    }
+    return std::get<Failure>(classified);
+}
+
+ClassifiedResponse classify_response(const TypedFunction& function, core::TdRawObjectPtr response,
+                                     const secure::WipeObserver& wipe_observer) {
     const NativeObjectWipeGuard native_guard(response.get(), wipe_observer);
-    if (!ascii_identifier(function.name()) || !ascii_identifier(function.result_type()) ||
-        function.identity() == nullptr) {
+    if (!ascii_identifier(function.name()) || !ascii_identifier(function.result_type())) {
         return Failure{Error::InvalidPolicyMetadata};
     }
     if (response == nullptr) {
-        return Failure{Error::UnexpectedResponseType};
+        return MalformedResponse{};
     }
     const auto* response_constructor = constructor_by_id(response->get_id());
     if (response_constructor == nullptr ||
         response_constructor->kind != RawTdConstructorKind::Object) {
-        return Failure{Error::UnexpectedResponseType};
+        return MalformedResponse{};
     }
     const std::string_view expected_type = response->get_id() == td::td_api::error::ID
                                                ? std::string_view("Error")
                                                : function.result_type();
-    if (response_constructor->result_type != expected_type) {
-        return Failure{Error::UnexpectedResponseType};
-    }
     std::string canonical;
     const StringWipeGuard canonical_guard(canonical, wipe_observer, "raw_response_canonical");
-    if (!append_native_object(*response, canonical)) {
-        return Failure{Error::UnexpectedResponseType};
+    CanonicalBuffer canonical_output(canonical, kMaximumResponseBytes);
+    const bool canonicalized = append_native_object(*response, canonical_output);
+    if (canonical_output.oversized()) {
+        if (response_constructor->result_type == expected_type &&
+            response->get_id() != td::td_api::error::ID) {
+            return OversizedResponse{.response_type = std::string(response_constructor->name)};
+        }
+        return MalformedResponse{.response_type =
+                                     response->get_id() == td::td_api::error::ID
+                                         ? std::nullopt
+                                         : std::optional<std::string>(response_constructor->name),
+                                 .digest = std::nullopt};
     }
-    if (canonical.size() > kMaximumResponseBytes) {
-        return Failure{Error::CanonicalTooLarge};
+    if (!canonicalized) {
+        return MalformedResponse{.response_type = std::string(response_constructor->name),
+                                 .digest = std::nullopt};
     }
-    return hash_response(function.name(), canonical);
+    if (response_constructor->result_type != expected_type) {
+        return MalformedResponse{.response_type = std::string(response_constructor->name),
+                                 .digest = hash_response(function.name(), canonical)};
+    }
+    std::optional<std::int32_t> td_error_code;
+    std::optional<std::int32_t> retry_after;
+    if (response->get_id() == td::td_api::error::ID) {
+        const auto& error = static_cast<const td::td_api::error&>(*response);
+        td_error_code = error.code_;
+        if (error.code_ == 429) {
+            retry_after = parse_retry_after_seconds(error.message_);
+        }
+    }
+    auto digest = hash_response(function.name(), canonical);
+    return MaterializedResponse{.digest = std::move(digest),
+                                .canonical =
+                                    secure::SensitiveString(std::move(canonical), wipe_observer,
+                                                            "raw_response_canonical_result"),
+                                .response_type = std::string(response_constructor->name),
+                                .td_error_code = td_error_code,
+                                .retry_after = retry_after};
 }
 
 } // namespace tgcli::daemon::raw

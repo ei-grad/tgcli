@@ -172,6 +172,9 @@
     "msg unpin": {
       "result": "msg-unpin.result.schema.json"
     },
+    "raw": {
+      "result": "raw.result.schema.json"
+    },
     "read": {
       "result": "read.result.schema.json"
     },

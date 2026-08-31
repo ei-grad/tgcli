@@ -27,6 +27,26 @@ namespace {
 constexpr auto kCloseTimeout = std::chrono::seconds(30);
 constexpr auto kReceiveTimeout = std::chrono::milliseconds(100);
 
+bool raw_function_kind(TdFunctionKind function) noexcept {
+    return function == TdFunctionKind::RawRead || function == TdFunctionKind::RawWrite ||
+           function == TdFunctionKind::RawDestructive;
+}
+
+std::optional<TdFunctionKind> raw_function_for_tier(DescriptorKind tier) noexcept {
+    switch (tier) {
+    case DescriptorKind::Read:
+        return TdFunctionKind::RawRead;
+    case DescriptorKind::Write:
+        return TdFunctionKind::RawWrite;
+    case DescriptorKind::Destructive:
+        return TdFunctionKind::RawDestructive;
+    case DescriptorKind::AuthBootstrap:
+    case DescriptorKind::Lifecycle:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 std::future<TdValue> failed_future(const std::string& message) {
     std::promise<TdValue> promise;
     auto future = promise.get_future();
@@ -199,7 +219,14 @@ class TdClient::Impl {
     }
 
     std::future<TdValue> send(TdSendDescriptor descriptor, TdValue request,
-                              TdQueryLifetime lifetime = {}) {
+                              TdQueryLifetime lifetime = {}, bool raw_path = false) {
+        const auto function = request.function_data();
+        if (function) {
+            const auto kind = function->kind();
+            if (kind && raw_function_kind(*kind) && !raw_path) {
+                return failed_future(TdAuthorizationFailure::FunctionDenied);
+            }
+        }
         std::shared_ptr<Generation> generation;
         {
             const std::lock_guard<std::mutex> lock(state_mutex_);
@@ -707,6 +734,13 @@ class TdClient::Impl {
                 }
                 auto value = std::move(resources->request.value());
                 resources->request.reset();
+                const auto& function_data = value.function_data();
+                if (const auto failure = authorization_failure_locked(
+                        generation, descriptor, function_data ? &*function_data : nullptr)) {
+                    resources->release_locks_and_owner();
+                    resources->lifetime.reset();
+                    return failed_future(*failure);
+                }
                 auto submission =
                     submit_admitted_locked(generation, descriptor, value, resources->lifetime);
                 resources->release_locks_and_owner();
@@ -724,6 +758,17 @@ class TdClient::Impl {
             admitted && rejection ? rejection
                                   : std::optional{TdAuthorizationFailure::GenerationClosed};
         return TdPreparedWrite(std::move(state));
+    }
+
+    TdPreparedWrite prepare_raw(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                DescriptorKind tier, TdValue request) {
+        const auto expected = raw_function_for_tier(tier);
+        const auto& function = request.function_data();
+        if (!expected || !function || function->kind() != expected ||
+            !request.raw_response_wiper()) {
+            return {};
+        }
+        return prepare_write(authorization, *expected, tier, std::move(request));
     }
 
     TdPreparedWrite
@@ -2132,6 +2177,11 @@ TdClient::~TdClient() = default;
 
 std::future<TdValue> TdClient::send(TdSendDescriptor descriptor, TdValue request) {
     return impl_->send(std::move(descriptor), std::move(request));
+}
+
+TdPreparedWrite TdClient::prepare_raw(const std::shared_ptr<const AuthStateSnapshot>& authorization,
+                                      DescriptorKind tier, TdValue request) {
+    return impl_->prepare_raw(authorization, tier, std::move(request));
 }
 
 std::future<TdValue> TdClient::send(TdSendDescriptor descriptor, TdlibParameters parameters) {

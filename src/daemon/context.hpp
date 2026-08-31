@@ -21,6 +21,7 @@ class IdempotencyFoundation;
 class WriteCoordinator;
 class StreamCoordinator;
 class M6Coordinator;
+class RawCoordinator;
 
 // Everything M0 command handlers need. Grows with the milestones (config,
 // resolver, safety state); td_api types never appear here — handlers that
@@ -46,6 +47,7 @@ struct DaemonContext {
     WriteCoordinator* writes = nullptr;
     StreamCoordinator* streams = nullptr;
     M6Coordinator* m6 = nullptr;
+    RawCoordinator* raw = nullptr;
     std::shared_ptr<IdempotencyFoundation> idempotency;
     std::function<std::string()> auth_state = [] { return "unknown"; };
     // Wired by the daemon entrypoint; asks the server to shut down

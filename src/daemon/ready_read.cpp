@@ -128,6 +128,28 @@ class ReadyReadSession::Impl {
         }
     }
 
+    ReadyReadResult read_exact(const ReadyReadStart& start,
+                               const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
+        if (!snapshot || deadline_expired(session_.deadline(), now_())) {
+            return empty_result(snapshot ? ReadyReadStatus::TimedOut : ReadyReadStatus::Failed);
+        }
+        if (!session_.reserve_direct_in_flight()) {
+            return empty_result(ReadyReadStatus::Cancelled);
+        }
+        if (deadline_expired(session_.deadline(), now_())) {
+            session_.settle_in_flight();
+            return empty_result(ReadyReadStatus::TimedOut);
+        }
+        auto response = start(snapshot);
+        auto waited = wait_response(response, *snapshot);
+        session_.settle_in_flight();
+        if (waited.status == WaitStatus::ReadyAdvanced) {
+            return {
+                ReadyReadStatus::AuthorizationLost, {}, std::nullopt, std::move(waited.snapshot)};
+        }
+        return external_result(std::move(waited));
+    }
+
   private:
     static ReadyReadResult external_result(WaitResult waited) {
         switch (waited.status) {
@@ -337,6 +359,12 @@ ReadyReadSession::first_non_ready_after(const core::AuthStateSnapshot& snapshot)
 ReadyReadResult ReadyReadSession::read(const ReadyReadStart& start,
                                        std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
     return impl_->read(start, snapshot);
+}
+
+ReadyReadResult
+ReadyReadSession::read_exact(const ReadyReadStart& start,
+                             const std::shared_ptr<const core::AuthStateSnapshot>& snapshot) {
+    return impl_->read_exact(start, snapshot);
 }
 
 } // namespace tgcli::daemon

@@ -60,13 +60,13 @@ for (const command of registry.commands) {
 }
 const active = [...leaves.values()].filter((leaf) => leaf.activation === "active");
 const future = [...leaves.values()].filter((leaf) => leaf.activation === "future");
-if (leaves.size !== 82 || active.length !== 81 || future.length !== 1) {
+if (leaves.size !== 82 || active.length !== 82 || future.length !== 0) {
   throw new Error("command activation counts differ");
 }
 if (leaves.get("completion")?.activation !== "active") {
   throw new Error("completion activation differs");
 }
-if (leaves.get("raw")?.activation !== "future") {
+if (leaves.get("raw")?.activation !== "active") {
   throw new Error("raw activation differs");
 }
 const raw = leaves.get("raw");

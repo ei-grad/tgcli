@@ -108,12 +108,12 @@ authoritative implementation status and roadmap (work milestones top-down).
   via argv or environment and never written to disk by the tool. Bot login is
   `login --bot` and obtains its token only from `bot_token_cmd` or a no-echo
   challenge; legacy `--bot-token` is consumed only for redacted rejection.
-- `raw` remains rejected until its selected-B parser, exhaustive pin policy,
-  audit-v3 recovery, handler and catalogs activate atomically. It is stdin-only
-  (`raw -`): argv JSON is always rejected. `--full` remains rejected throughout
-  v1 and is post-1.0 only.
+- `raw` is the atomically activated selected-B parser, exhaustive pin policy,
+  audit-v3 recovery, handler and catalog surface. It is stdin-only (`raw -`):
+  argv JSON is always rejected. `--full` remains rejected throughout v1 and is
+  post-1.0 only.
 - Raw parsing is duplicate-rejecting and converts once. Classifier, TD-aware
-  canonical hash serializer and future dispatch retain the same actual owned
+  canonical hash serializer and dispatch retain the same actual owned
   `td_api::Function`; a second parse/`from_json` is forbidden. The complete
   pinned function inventory, 3118-constructor type graph and policy are exact
   tl/generated-header bijections with committed count/digests and deny unknown
@@ -130,13 +130,24 @@ authoritative implementation status and roadmap (work milestones top-down).
   947 are frozen whole-function denies under the single honest
   `denied_not_in_v1_allowlist` category. Generated typed preflight planners
   collect every direct and nested chat selector. Indirect-result dialog
-  functions are denied whole. It remains activation-blocked on independent
-  policy acceptance. A body validator can only retain/raise tier or deny, and
+  functions are denied whole. The independently accepted runtime digest is
+  `sha256:4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce`;
+  runtime activation fails closed on digest/count/review/table drift. A body
+  validator can only retain/raise tier or deny, and
   unknown/null/unmatched nested variants deny.
+- Raw request ownership ends at the pinned TDLib rvalue boundary. Physical
+  stdin, AST/canonical staging and recursively reachable native request
+  strings/bytes are wiped on every path while tgcli still owns them. The
+  production transfer guard proves one move of the same Function and wipes it
+  if TDLib does not consume the rvalue. After successful consumption tgcli
+  retains no alias and makes no zeroization claim for TDLib allocator, queue or
+  actor memory. Tests must distinguish this accepted residual from the strict
+  recursive wipe retained for every tgcli-owned response exit.
 - Raw request/response bodies, TD messages, credentials and curated preflight
-  output never enter audit, errors, diagnostics or logs. Request/response
-  staging is wiped on every terminal path. Dormant hash-only audit-v3 schemas,
-  validator/scanner/recovery and no-resend crash cuts must land before any raw
+  output never enter audit, errors, diagnostics or logs. Request staging is
+  wiped on every pre-transfer terminal path; response staging is wiped on every
+  tgcli-owned terminal path. Hash-only audit-v3 schemas,
+  validator/scanner/recovery and no-resend crash cuts are installed before raw
   registration.
 - Download source and destination paths use no-follow descriptor walks, stable
   source identity and exclusive no-replace publication. Normal failures clean

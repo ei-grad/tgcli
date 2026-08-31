@@ -63,6 +63,8 @@
 #include <variant>
 #include <vector>
 
+#include <td/telegram/td_api.h>
+
 #if defined(__APPLE__)
 #include <libproc.h>
 #endif
@@ -652,6 +654,7 @@ struct ChildDaemonOptions {
     bool m6_fixture = false;
     bool m2_long_read_fixture = false;
     bool download_fixture = false;
+    bool raw_fixture = false;
     bool stream_fixture = false;
     bool report_ready_before_endpoints = false;
     int protocol_version = proto::kProtocolVersion + 1;
@@ -1092,6 +1095,27 @@ class ChildProtocolDaemon {
                                                            : json(nullptr)}});
                      },
                  .deadline_default = DeadlineDefault::Unlimited});
+        }
+        if (options.raw_fixture) {
+            dispatcher.register_command(
+                "raw",
+                {.tier = daemon::Tier::Read,
+                 .handler =
+                     [](const proto::Request& request, daemon::RequestSession& session) {
+                         if (request.command != std::vector<std::string>{"raw"} ||
+                             !exact_json_fields(request.args, {"input"}) ||
+                             !request.args["input"].is_string() || request.context.media_dir ||
+                             request.context.idempotency_key) {
+                             session.error("INTERNAL", "raw fixture frame mismatch",
+                                           {{"operation", "raw"}, {"reason", "internal_error"}},
+                                           kGeneric);
+                             return;
+                         }
+                         session.raw_result(tgcli::secure::SensitiveString(
+                             std::string_view{R"({"@type":"text","text":"clean"})"}));
+                     },
+                 .config_admission = true,
+                 .dynamic_raw_policy = true});
         }
         if (options.stream_fixture) {
             dispatcher.register_command(
@@ -4480,6 +4504,78 @@ TEST_CASE("M2 long-read CLI rejects normalization and grammar conflicts before r
     CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
 }
 
+TEST_CASE("raw CLI is stdin-only and emits canonical TD JSON identically in both modes",
+          "[cli][raw][parser][frame][process]") {
+    const IsolatedEnv env;
+    const auto root_help = run_binary_captured({"--help"}, env, "raw-root-help");
+    REQUIRE(root_help.exit_code == kOk);
+    CHECK((root_help.out + root_help.err).find("raw") != std::string::npos);
+    const auto command_help = run_binary_captured({"raw", "--help"}, env, "raw-help");
+    REQUIRE(command_help.exit_code == kOk);
+    CHECK((command_help.out + command_help.err).find("literal -") != std::string::npos);
+
+    for (const auto& [stem, arguments] :
+         std::vector<std::pair<std::string, std::vector<std::string>>>{
+             {"raw-missing", {"raw"}},
+             {"raw-argv-json", {"raw", R"({"@type":"cleanFileName"})"}},
+             {"raw-extra", {"raw", "-", "extra"}}}) {
+        const auto outcome = run_binary_captured(arguments, env, stem, "{}");
+        INFO(stem);
+        CHECK(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err)["error"]["code"] == "USAGE");
+    }
+    {
+        const ScopedEnvironmentVariable invalid_account("TGCLI_ACCOUNT", "bad.name");
+        const auto argv_json = run_binary_captured({"raw", R"({"@type":"cleanFileName"})"}, env,
+                                                   "raw-argv-before-account", "{}");
+        REQUIRE(argv_json.exit_code == kUsage);
+        CHECK(json::parse(argv_json.err)["error"]["details"]["reason"] == "invalid_argument");
+    }
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+
+    configure_main_account();
+    const ChildProtocolDaemon fixture({.raw_fixture = true,
+                                       .protocol_version = proto::kProtocolVersion,
+                                       .binary_version = kVersion});
+    constexpr std::string_view request = R"({"@type":"cleanFileName","file_name":"a"})";
+    const auto machine = run_binary_captured({"--json", "raw", "--timeout", "2", "-"}, env,
+                                             "raw-json", std::string(request));
+    INFO(machine.err);
+    REQUIRE(machine.exit_code == kOk);
+    CHECK(machine.out == R"({"@type":"text","text":"clean"})"
+                         "\n");
+    CHECK(machine.err.empty());
+    const auto human =
+        run_binary_captured({"--no-color", "raw", "-"}, env, "raw-human", std::string(request));
+    REQUIRE(human.exit_code == kOk);
+    CHECK(human.out == machine.out);
+    CHECK(human.err.empty());
+    CHECK(fixture.running());
+}
+
+TEST_CASE("raw CLI rejects forbidden globals and physical stdin over the exact limit",
+          "[cli][raw][parser][bounds][process]") {
+    const IsolatedEnv env;
+    for (const auto& [stem, arguments] :
+         std::vector<std::pair<std::string, std::vector<std::string>>>{
+             {"raw-cursor", {"--cursor", "opaque", "raw", "-"}},
+             {"raw-idempotency", {"--idempotency-key", "key", "raw", "-"}}}) {
+        const auto outcome = run_binary_captured(arguments, env, stem, "{}");
+        INFO(stem);
+        REQUIRE(outcome.exit_code == kUsage);
+        CHECK(outcome.out.empty());
+        CHECK(json::parse(outcome.err)["error"]["details"]["reason"] == "unsupported_mode");
+    }
+    const auto oversized =
+        run_binary_captured({"raw", "-"}, env, "raw-over-limit", std::string(1024 * 1024 + 1, 'x'));
+    REQUIRE(oversized.exit_code == kUsage);
+    CHECK(oversized.out.empty());
+    CHECK(json::parse(oversized.err)["error"]["details"] ==
+          json{{"argument", "-"}, {"reason", "invalid_argument"}});
+    CHECK_FALSE(std::filesystem::exists(env.root() + "/tgcli"));
+}
+
 TEST_CASE("history emits a canonical read frame schema result and cursor identity",
           "[cli][read][history][frame][schema][cursor]") {
     const IsolatedEnv env;
@@ -5030,6 +5126,69 @@ TEST_CASE("no-daemon version: JSON on stdout, silence on stderr, exit 0", "[cli]
         CHECK(data["commit"] == kBuildCommit);
     }
     CHECK_THAT(data, test::matches_json_schema("version.result.schema.json"));
+}
+
+TEST_CASE("raw no-daemon uses the production coordinator and canonical result transport",
+          "[cli][raw][no-daemon][fake-boundary][schema]") {
+    const IsolatedEnv env;
+    configure_main_account();
+    std::vector<std::string> wiped_stages;
+    const tgcli::secure::WipeObserver wipe_observer = [&wiped_stages](std::string_view stage,
+                                                                      const char*, std::size_t) {
+        wiped_stages.emplace_back(stage);
+    };
+    auto runtime = std::make_unique<test::ScriptedTdRuntime>();
+    auto* scripted = runtime.get();
+    core::TdClient client(std::move(runtime));
+    REQUIRE(scripted->wait_for_sent(1));
+    const auto td_client = scripted->clients().front();
+    scripted->push_response(td_client, 1, {}, core::AuthStateData{core::AuthState::Ready});
+    const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (client.auth_state()->auth_sequence != 1 &&
+           std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(client.auth_state()->auth_sequence == 1);
+
+    cli::RunOptions options;
+    options.account = "main";
+    options.json = true;
+    options.no_daemon = true;
+    options.in_process_td_client = &client;
+    proto::Request request("main", wipe_observer);
+    request.id = 1;
+    request.command = {"raw"};
+    request.args = {{"input", R"({"@type":"cleanFileName","file_name":"a"})"}};
+    request.context.json = true;
+    request.context.cwd = "/";
+    auto pending =
+        std::async(std::launch::async, [&] { return run_request_captured(request, options, env); });
+
+    REQUIRE(scripted->wait_for_sent(2));
+    auto sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::GetMe);
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(core::TdUserSummary{.id = 42,
+                                                                    .first_name = "Ada",
+                                                                    .last_name = "",
+                                                                    .usernames = {"ada"},
+                                                                    .phone_number = "12025550123",
+                                                                    .is_bot = false}));
+    REQUIRE(scripted->wait_for_sent(3));
+    sent = scripted->sent_functions();
+    REQUIRE(sent.back().function.kind() == core::TdFunctionKind::RawRead);
+    td::td_api::object_ptr<td::td_api::Object> response =
+        td::td_api::make_object<td::td_api::text>("clean");
+    scripted->push_response(td_client, sent.back().query_id,
+                            core::TdValue::from(std::move(response)));
+
+    const auto outcome = pending.get();
+    CHECK(outcome.exit_code == kOk);
+    CHECK(outcome.err.empty());
+    CHECK(outcome.out == R"({"@type":"text","text":"clean"})"
+                         "\n");
+    CHECK_THAT(json::parse(outcome.out), test::matches_json_schema("raw.result.schema.json"));
+    CHECK(std::ranges::find(wiped_stages, "in_process_serialized_frame") != wiped_stages.end());
 }
 
 TEST_CASE("public client rejects route and frame disagreement before surface mutation",

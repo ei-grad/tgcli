@@ -665,6 +665,60 @@ const json& M6DestructivePlan::value() const {
     return value_;
 }
 
+RawDestructivePlan::RawDestructivePlan(std::string account, std::string function,
+                                       std::string request_sha256)
+    : account_(std::move(account)), function_(std::move(function)),
+      request_sha256_(std::move(request_sha256)) {}
+
+const std::string& RawDestructivePlan::account() const {
+    return account_;
+}
+
+const std::string& RawDestructivePlan::function() const {
+    return function_;
+}
+
+const std::string& RawDestructivePlan::request_sha256() const {
+    return request_sha256_;
+}
+
+std::optional<RawDestructivePlan> make_raw_destructive_plan(std::string account,
+                                                            std::string function,
+                                                            std::string request_sha256,
+                                                            std::string& error) {
+    const json value{{"operation", "raw"},
+                     {"account", account},
+                     {"function", function},
+                     {"request_sha256", request_sha256}};
+    return parse_raw_destructive_plan(value, error);
+}
+
+std::optional<RawDestructivePlan> parse_raw_destructive_plan(const json& value,
+                                                             std::string& error) {
+    if (!exact_fields(value, {"operation", "account", "function", "request_sha256"}) ||
+        value["operation"] != "raw" || !value["account"].is_string() ||
+        !paths::valid_account_name(value["account"].get_ref<const std::string&>()) ||
+        !value["function"].is_string() || !valid_sha256(value["request_sha256"])) {
+        error = "raw destructive plan must match its exact target contract";
+        return std::nullopt;
+    }
+    const auto& function = value["function"].get_ref<const std::string&>();
+    const auto ascii_letter = [](char character) {
+        return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
+    };
+    const auto ascii_identifier = [ascii_letter](char character) {
+        return ascii_letter(character) || (character >= '0' && character <= '9');
+    };
+    if (function.empty() || function.size() > 128 || !ascii_letter(function.front()) ||
+        !std::ranges::all_of(function.substr(1), ascii_identifier)) {
+        error = "raw destructive plan function is invalid";
+        return std::nullopt;
+    }
+    error.clear();
+    return RawDestructivePlan(value["account"].get<std::string>(), function,
+                              value["request_sha256"].get<std::string>());
+}
+
 std::optional<M6DestructivePlan> parse_m6_destructive_plan(const json& value, std::string& error) {
     if (!value.is_object() || !value.contains("operation") || !value["operation"].is_string() ||
         !value.contains("account") || !value["account"].is_string() ||
@@ -765,6 +819,13 @@ std::optional<DestructivePlan> parse_destructive_plan(const json& value, std::st
         }
         return std::nullopt;
     }
+    if (*operation == "raw") {
+        auto plan = parse_raw_destructive_plan(value, error);
+        if (plan) {
+            return DestructivePlan{std::move(*plan)};
+        }
+        return std::nullopt;
+    }
     error = "destructive plan operation is unknown";
     return std::nullopt;
 }
@@ -808,6 +869,13 @@ json serialize(const ChatLeavePlan& plan) {
 
 json serialize(const M6DestructivePlan& plan) {
     return plan.value();
+}
+
+json serialize(const RawDestructivePlan& plan) {
+    return {{"operation", "raw"},
+            {"account", plan.account()},
+            {"function", plan.function()},
+            {"request_sha256", plan.request_sha256()}};
 }
 
 json serialize(const DestructivePlan& plan) {

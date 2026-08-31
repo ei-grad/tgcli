@@ -214,10 +214,11 @@ class TdClient {
     TdClient(TdClient&&) = delete;
     TdClient& operator=(TdClient&&) = delete;
 
-    // Thread-safe. Native request/response objects stay inside TdValue so
-    // generated TDLib types remain daemon-implementation details. Once
-    // close begins, a valid request returns a ready future that throws
-    // std::runtime_error instead of entering the request registry.
+    // Thread-safe. Native requests stay inside TdValue until the admitted
+    // production send moves them once into TDLib; returned native responses
+    // re-enter TdValue. Generated TDLib types remain daemon-implementation
+    // details. Once close begins, a valid request returns a ready future that
+    // throws std::runtime_error instead of entering the request registry.
     std::future<TdValue> send(TdSendDescriptor descriptor, TdValue request);
     std::future<TdValue> send(TdSendDescriptor descriptor, TdlibParameters parameters);
 
@@ -455,10 +456,14 @@ class TdClient {
         const std::shared_ptr<const AuthStateSnapshot>& authorization,
         std::function<TdLifecycleClaimStatus(std::chrono::steady_clock::time_point)> claim);
     bool restart_generation(const std::shared_ptr<const AuthStateSnapshot>& authorization);
+    [[nodiscard]] TdPreparedWrite
+    prepare_raw(const std::shared_ptr<const AuthStateSnapshot>& authorization, DescriptorKind tier,
+                TdValue request);
 
     friend class AuthBootstrap;
     friend class tgcli::daemon::LoginCoordinator;
     friend class tgcli::daemon::LogoutLifecycle;
+    friend class tgcli::daemon::RawCoordinator;
 
     class Impl;
     std::unique_ptr<Impl> impl_;

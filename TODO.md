@@ -443,9 +443,10 @@ before the milestone is closed.
 ## M7 — Polish & release
 
 - [x] Freeze selected raw Option B: stdin-only grammar, parse-once typed TD
-      canonicalization/hash/wipe contract, Ready/principal ordering, table-owned
-      Read/Write/Destructive policy, no idempotency, closed live/dry schemas,
-      and audit-v3 no-body/no-resend recovery and activation order
+      canonicalization/hash/pre-transfer wipe and explicit TDLib ownership
+      boundary, Ready/principal ordering, table-owned Read/Write/Destructive
+      policy, no idempotency, closed live/dry schemas, and audit-v3
+      no-body/no-resend recovery and activation order
 - [x] Add pin-derived exhaustive 1001-function inventory/policy foundations for
       clean TDLib a17f87c4: exact tl/header bijection, committed count/digests,
       an exhaustive reviewed dormant candidate with 54 admitted typed rows and
@@ -459,9 +460,13 @@ before the milestone is closed.
       native `td_api::Function` holder, declared-result response validation,
       and audit-v3 schema/validator/scanner/recovery foundations; no TD raw
       send, parser registration, dispatcher admission or catalog mapping
-- [ ] Independently accept the exhaustive raw candidate, then atomically
+- [x] Independently accept the exhaustive raw candidate, then atomically
       activate raw parser/handler/dispatcher/audit/result+error catalogs;
       unknown/null/unmatched variants remain denied
+- [x] Freeze and prove raw request ownership Option 1: recursively wipe every
+      tgcli-owned request exit, move the sole native Function once into pinned
+      TDLib with no retained alias, make no post-transfer TDLib-memory
+      zeroization claim, and retain recursive wipe for returned native responses
 - [x] Implement local `tgcli schema <command-token>... [--all]`: exact
       result/item fallback, fixed result/item/error aggregation, history alias,
       embedded byte-authoritative catalogs, separate non-stream error manifest,

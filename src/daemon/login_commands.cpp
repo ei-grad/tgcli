@@ -396,6 +396,9 @@ std::string_view auth_function_name(TdFunctionKind function) {
     case TdFunctionKind::JoinChat:
     case TdFunctionKind::JoinChatByInviteLink:
     case TdFunctionKind::LeaveChat:
+    case TdFunctionKind::RawRead:
+    case TdFunctionKind::RawWrite:
+    case TdFunctionKind::RawDestructive:
         return "other";
     }
     return "other";

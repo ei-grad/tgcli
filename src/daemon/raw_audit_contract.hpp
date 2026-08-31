@@ -13,6 +13,8 @@ enum class RecoveryAction {
     EmitUnconfirmed,
     RepairConfirmedResult,
     RepairPossibleError,
+    RepairPossibleInternal,
+    RepairPossibleTooLarge,
     Complete,
     FailClosed,
 };

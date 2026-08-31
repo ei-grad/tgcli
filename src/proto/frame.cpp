@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -26,9 +27,9 @@ bool invite_request(const std::vector<std::string>& command, const nlohmann::jso
     }
 }
 
-void wipe_invite_request_args(const std::vector<std::string>& command, nlohmann::json& args,
-                              const secure::WipeObserver& observer,
-                              std::string_view stage) noexcept {
+void wipe_sensitive_request_args(const std::vector<std::string>& command, nlohmann::json& args,
+                                 const secure::WipeObserver& observer,
+                                 std::string_view stage) noexcept {
     try {
         if (invite_request(command, args)) {
             secure::wipe(args["target"].get_ref<std::string&>(), observer, stage);
@@ -37,6 +38,11 @@ void wipe_invite_request_args(const std::vector<std::string>& command, nlohmann:
         if (command == std::vector<std::string>{"chat", "invite-link"} && args.is_object() &&
             args.contains("revoke") && args["revoke"].is_string()) {
             secure::wipe(args["revoke"].get_ref<std::string&>(), observer, stage);
+            return;
+        }
+        if (command == std::vector<std::string>{"raw"} && args.is_object() &&
+            args.contains("input") && args["input"].is_string()) {
+            secure::wipe(args["input"].get_ref<std::string&>(), observer, stage);
         }
     } catch (...) {
         return;
@@ -66,7 +72,7 @@ struct RequestFacts {
     secure::WipeObserver wipe_observer;
 
     ~RequestFacts() {
-        wipe_invite_request_args(command, args, wipe_observer, "request_facts_args");
+        wipe_sensitive_request_args(command, args, wipe_observer, "request_facts_args");
     }
 
     RequestFacts(const RequestFacts&) = delete;
@@ -173,7 +179,8 @@ bool validate_destructive_details(const json& details, std::string& error) {
                  (action == "msg_delete" && std::holds_alternative<MsgDeletePlan>(*plan)) ||
                  (action == "chat_leave" && std::holds_alternative<ChatLeavePlan>(*plan)) ||
                  (std::holds_alternative<M6DestructivePlan>(*plan) &&
-                  action == std::get<M6DestructivePlan>(*plan).action()));
+                  action == std::get<M6DestructivePlan>(*plan).action()) ||
+                 (action == "raw" && std::holds_alternative<RawDestructivePlan>(*plan)));
     if (!matches) {
         error = "challenge: invalid destructive_confirmation target";
     }
@@ -348,6 +355,10 @@ struct FrameWriter {
 
     json operator()(const Result& f) const {
         return {{"type", "result"}, {"id", f.id}, {"data", f.data}};
+    }
+
+    json operator()(const RawResult& /*unused*/) const {
+        throw std::logic_error("raw results use the canonical frame serializer");
     }
 
     json operator()(const Item& f) const {
@@ -684,6 +695,19 @@ class Parser {
 
 Answer::Answer() = default;
 
+RawResult::RawResult(std::uint64_t id_value, std::string canonical,
+                     secure::WipeObserver wipe_observer)
+    : id_(id_value),
+      canonical_(std::move(canonical), std::move(wipe_observer), "raw_result_canonical") {}
+
+std::uint64_t RawResult::id() const noexcept {
+    return id_;
+}
+
+std::string_view RawResult::canonical() const noexcept {
+    return canonical_.view();
+}
+
 Request::Request(std::string account_value, secure::WipeObserver wipe_observer)
     : account(std::move(account_value)), wipe_observer_(std::move(wipe_observer)) {
     if (!paths::valid_account_name(account)) {
@@ -692,12 +716,12 @@ Request::Request(std::string account_value, secure::WipeObserver wipe_observer)
 }
 
 Request::~Request() {
-    wipe_invite_request_args(command, args, wipe_observer_, "request_args");
+    wipe_sensitive_request_args(command, args, wipe_observer_, "request_args");
 }
 
 Request& Request::operator=(const Request& other) {
     if (this != &other) {
-        wipe_invite_request_args(command, args, wipe_observer_, "request_args");
+        wipe_sensitive_request_args(command, args, wipe_observer_, "request_args");
         id = other.id;
         account = other.account;
         command = other.command;
@@ -715,12 +739,12 @@ Request::Request(Request&& other) noexcept
       args(std::move(other.args)), context(std::move(other.context)),
       source_bytes_(other.source_bytes_), admitted_facts_(std::move(other.admitted_facts_)),
       wipe_observer_(std::move(other.wipe_observer_)) {
-    wipe_invite_request_args(command, other.args, wipe_observer_, "request_args_move_source");
+    wipe_sensitive_request_args(command, other.args, wipe_observer_, "request_args_move_source");
 }
 
 Request& Request::operator=(Request&& other) noexcept {
     if (this != &other) {
-        wipe_invite_request_args(command, args, wipe_observer_, "request_args");
+        wipe_sensitive_request_args(command, args, wipe_observer_, "request_args");
         id = other.id;
         account = std::move(other.account);
         command = std::move(other.command);
@@ -729,7 +753,8 @@ Request& Request::operator=(Request&& other) noexcept {
         source_bytes_ = other.source_bytes_;
         admitted_facts_ = std::move(other.admitted_facts_);
         wipe_observer_ = std::move(other.wipe_observer_);
-        wipe_invite_request_args(command, other.args, wipe_observer_, "request_args_move_source");
+        wipe_sensitive_request_args(command, other.args, wipe_observer_,
+                                    "request_args_move_source");
     }
     return *this;
 }
@@ -890,6 +915,13 @@ bool validate_answer_payload(const json& payload, std::string& error) {
 }
 
 std::string serialize(const Frame& frame, const secure::WipeObserver& wipe_observer) {
+    if (const auto* raw = std::get_if<RawResult>(&frame)) {
+        std::string serialized =
+            R"({"type":"raw_result","id":)" + std::to_string(raw->id()) + R"(,"data":)";
+        serialized.append(raw->canonical());
+        serialized.push_back('}');
+        return serialized;
+    }
     auto document = std::visit(FrameWriter{true}, frame);
     const secure::JsonWiper document_wiper(document, wipe_observer, "serialized_json");
     return document.dump();
@@ -935,6 +967,39 @@ std::optional<Frame> parse(std::string line, std::string& error,
                            const secure::WipeObserver& wipe_observer,
                            std::optional<Answer>* invalid_answer) {
     const secure::StringWiper line_wiper(line, wipe_observer, "parsed_line");
+    constexpr std::string_view raw_prefix = R"({"type":"raw_result","id":)";
+    constexpr std::string_view raw_separator = ",\"data\":";
+    if (line.starts_with(raw_prefix)) {
+        const auto separator = line.find(raw_separator, raw_prefix.size());
+        if (separator == std::string::npos || line.size() <= separator + raw_separator.size() + 1 ||
+            line.back() != '}') {
+            error = "raw_result: malformed canonical frame";
+            return std::nullopt;
+        }
+        std::uint64_t id = 0;
+        auto* const id_begin = line.data() + raw_prefix.size();
+        auto* const id_end = line.data() + separator;
+        const auto [parsed_end, status] = std::from_chars(id_begin, id_end, id);
+        if (status != std::errc{} || parsed_end != id_end || id == 0 ||
+            (id_end - id_begin > 1 && *id_begin == '0')) {
+            error = "raw_result: invalid id";
+            return std::nullopt;
+        }
+        const auto canonical_begin = separator + raw_separator.size();
+        std::string canonical = line.substr(canonical_begin, line.size() - canonical_begin - 1);
+        auto value = json::parse(canonical, nullptr, false);
+        const bool valid = value.is_object() && value.contains("@type") &&
+                           value["@type"].is_string() && !value.contains("@extra") &&
+                           !value.contains("@client_id");
+        secure::wipe(value, wipe_observer, "raw_result_parsed_json");
+        if (!valid) {
+            secure::wipe(canonical, wipe_observer, "raw_result_invalid_canonical");
+            error = "raw_result: invalid canonical TD object";
+            return std::nullopt;
+        }
+        error.clear();
+        return RawResult{id, std::move(canonical), wipe_observer};
+    }
     auto doc = json::parse(line, /*cb=*/nullptr, /*allow_exceptions=*/false);
     if (doc.is_discarded()) {
         error = "invalid JSON";

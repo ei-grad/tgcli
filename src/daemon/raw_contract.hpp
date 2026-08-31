@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/secure_wipe.hpp"
+#include "core/td_runtime.hpp"
 
 #include <array>
 #include <cstddef>
@@ -59,6 +60,26 @@ struct Digest {
     std::uint64_t bytes = 0;
 };
 
+struct MaterializedResponse {
+    Digest digest;
+    secure::SensitiveString canonical;
+    std::string response_type;
+    std::optional<std::int32_t> td_error_code;
+    std::optional<std::int32_t> retry_after;
+};
+
+struct MalformedResponse {
+    std::optional<std::string> response_type;
+    std::optional<Digest> digest;
+};
+
+struct OversizedResponse {
+    std::string response_type;
+};
+
+using ClassifiedResponse =
+    std::variant<MaterializedResponse, MalformedResponse, OversizedResponse, Failure>;
+
 enum class BodyPolicyDecision { Deny, Preserve, RaiseWrite, RaiseDestructive };
 enum class AdmissionTier { Denied, Read, Write, Destructive };
 enum class RawPrincipal { User, Bot, Both };
@@ -99,6 +120,7 @@ class TypedFunction final {
     [[nodiscard]] std::string_view canonical() const noexcept;
     [[nodiscard]] const void* identity() const noexcept;
     [[nodiscard]] const td::td_api::Function& native() const noexcept;
+    [[nodiscard]] std::optional<core::TdValue> release_for_dispatch(Tier effective_tier);
     [[nodiscard]] std::variant<Digest, Failure>
     request_digest(std::string_view tdlib_sha, std::string_view effective_tier) const;
 
@@ -119,12 +141,25 @@ parse(std::string&& input, const secure::WipeObserver& wipe_observer = {});
 response_digest(const TypedFunction& function, td::tl_object_ptr<td::td_api::Object> response,
                 const secure::WipeObserver& wipe_observer = {});
 
+[[nodiscard]] std::variant<MaterializedResponse, Failure>
+materialize_response(const TypedFunction& function, core::TdRawObjectPtr response,
+                     const secure::WipeObserver& wipe_observer = {});
+
+[[nodiscard]] ClassifiedResponse classify_response(const TypedFunction& function,
+                                                   core::TdRawObjectPtr response,
+                                                   const secure::WipeObserver& wipe_observer = {});
+
 [[nodiscard]] BodyPolicyOutcome apply_body_policy_decision(AdmissionTier static_tier,
                                                            BodyPolicyDecision decision) noexcept;
 
 [[nodiscard]] std::optional<RawPolicyMetadata>
 policy_metadata(const TypedFunction& function) noexcept;
+[[nodiscard]] std::optional<std::string_view>
+declared_result_type(std::string_view function_name) noexcept;
+[[nodiscard]] bool response_type_matches_result(std::string_view function_name,
+                                                std::string_view response_type) noexcept;
 
 [[nodiscard]] BodyPolicyOutcome evaluate_body_policy(const TypedFunction& function) noexcept;
+[[nodiscard]] bool policy_activation_ready() noexcept;
 
 } // namespace tgcli::daemon::raw

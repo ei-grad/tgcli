@@ -130,8 +130,31 @@ class M6DestructivePlan final {
                                                                       std::string& error);
 };
 
-using DestructivePlan =
-    std::variant<LogoutPlan, AccountRemovePlan, MsgDeletePlan, ChatLeavePlan, M6DestructivePlan>;
+class RawDestructivePlan final {
+  public:
+    [[nodiscard]] const std::string& account() const;
+    [[nodiscard]] const std::string& function() const;
+    [[nodiscard]] const std::string& request_sha256() const;
+
+    friend bool operator==(const RawDestructivePlan&, const RawDestructivePlan&) = default;
+
+  private:
+    RawDestructivePlan(std::string account, std::string function, std::string request_sha256);
+
+    std::string account_;
+    std::string function_;
+    std::string request_sha256_;
+
+    friend std::optional<RawDestructivePlan> make_raw_destructive_plan(std::string account,
+                                                                       std::string function,
+                                                                       std::string request_sha256,
+                                                                       std::string& error);
+    friend std::optional<RawDestructivePlan> parse_raw_destructive_plan(const nlohmann::json& value,
+                                                                        std::string& error);
+};
+
+using DestructivePlan = std::variant<LogoutPlan, AccountRemovePlan, MsgDeletePlan, ChatLeavePlan,
+                                     M6DestructivePlan, RawDestructivePlan>;
 
 std::optional<LogoutPlan> make_logout_plan(std::string account, std::string& error);
 std::optional<AccountRemovePlan> make_account_remove_plan(AccountRemovePlanInput input,
@@ -144,6 +167,12 @@ std::optional<MsgDeletePlan> parse_msg_delete_plan(const nlohmann::json& value, 
 std::optional<ChatLeavePlan> parse_chat_leave_plan(const nlohmann::json& value, std::string& error);
 std::optional<M6DestructivePlan> parse_m6_destructive_plan(const nlohmann::json& value,
                                                            std::string& error);
+std::optional<RawDestructivePlan> make_raw_destructive_plan(std::string account,
+                                                            std::string function,
+                                                            std::string request_sha256,
+                                                            std::string& error);
+std::optional<RawDestructivePlan> parse_raw_destructive_plan(const nlohmann::json& value,
+                                                             std::string& error);
 std::optional<DestructivePlan> parse_destructive_plan(const nlohmann::json& value,
                                                       std::string& error);
 
@@ -152,6 +181,7 @@ nlohmann::json serialize(const AccountRemovePlan& plan);
 nlohmann::json serialize(const MsgDeletePlan& plan);
 nlohmann::json serialize(const ChatLeavePlan& plan);
 nlohmann::json serialize(const M6DestructivePlan& plan);
+nlohmann::json serialize(const RawDestructivePlan& plan);
 nlohmann::json serialize(const DestructivePlan& plan);
 
 bool valid_config_snapshot_identity(std::string_view identity, bool allow_missing = true);

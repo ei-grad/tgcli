@@ -10,6 +10,7 @@
 #include "daemon/m2_read_commands.hpp"
 #include "daemon/m6_commands.hpp"
 #include "daemon/message_commands.hpp"
+#include "daemon/raw_commands.hpp"
 #include "daemon/read_commands.hpp"
 #include "daemon/request_session.hpp"
 #include "daemon/resolver.hpp"
@@ -64,7 +65,7 @@ bool uses_account_removal_preflight(std::string_view command) {
            command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
            command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
            command == "chat join" || command == "chat leave" || command == "daemon status" ||
-           command == "daemon stop" || command == "daemon restart";
+           command == "daemon stop" || command == "daemon restart" || command == "raw";
 }
 
 bool uses_logout_preflight(std::string_view command) {
@@ -78,7 +79,7 @@ bool uses_logout_preflight(std::string_view command) {
            command == "msg pin" || command == "msg unpin" || command == "chat mark-read" ||
            command == "chat mute" || command == "chat unmute" || command == "chat pin" ||
            command == "chat unpin" || command == "chat archive" || command == "chat unarchive" ||
-           command == "chat join" || command == "chat leave";
+           command == "chat join" || command == "chat leave" || command == "raw";
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): fixed recovery-order matrix.
@@ -179,6 +180,9 @@ void register_commands(Dispatcher& dispatcher, const DaemonContext& context) {
     }
     if (context.streams != nullptr) {
         register_stream_commands(dispatcher, *context.streams);
+    }
+    if (context.raw != nullptr) {
+        register_raw_command(dispatcher, *context.raw);
     }
     configure_request_preflight(dispatcher, context);
     dispatcher.register_command(

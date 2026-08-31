@@ -277,6 +277,8 @@ add_library(tgcli_daemon STATIC
     src/daemon/read_commands.cpp
     src/daemon/rate_limit.cpp
     src/daemon/raw_audit_contract.cpp
+    src/daemon/raw_audit_log.cpp
+    src/daemon/raw_commands.cpp
     src/daemon/raw_contract.cpp
     src/daemon/message_commands.cpp
     src/daemon/chats_commands.cpp

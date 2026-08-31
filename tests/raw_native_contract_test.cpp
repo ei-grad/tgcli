@@ -1,3 +1,4 @@
+#include "core/td_runtime_test_adapter.hpp"
 #include "daemon/dispatch.hpp"
 #include "daemon/raw_contract.hpp"
 
@@ -47,7 +48,7 @@ Digest digest(TypedFunction& function,
 
 } // namespace
 
-TEST_CASE("dormant raw parser retains one pinned native Function identity",
+TEST_CASE("raw parser retains one pinned native Function identity",
           "[raw][foundation][canonical]") {
     auto parsed = success(R"({"x":"AAEC/w==","@type":"testCallBytes"})");
     const void* identity = parsed.identity();
@@ -85,7 +86,7 @@ TEST_CASE("dormant raw parser retains one pinned native Function identity",
     }
 }
 
-TEST_CASE("dormant raw policy owns tier principal and non-secret chat preflight",
+TEST_CASE("raw policy owns tier principal and non-secret chat preflight",
           "[raw][foundation][policy][preflight]") {
     auto local = success(R"({"@type":"cleanFileName","file_name":"a/b"})");
     const auto local_policy = tgcli::daemon::raw::policy_metadata(local);
@@ -194,7 +195,7 @@ TEST_CASE("dormant raw policy owns tier principal and non-secret chat preflight"
     CHECK_FALSE(tgcli::daemon::raw::evaluate_body_policy(circular).effective_tier);
 }
 
-TEST_CASE("dormant raw body policy decisions preserve or raise static tiers",
+TEST_CASE("raw body policy decisions preserve or raise static tiers",
           "[raw][foundation][policy][tier]") {
     using Case = std::tuple<AdmissionTier, BodyPolicyDecision, std::optional<Tier>>;
     const std::array cases{
@@ -231,7 +232,7 @@ TEST_CASE("dormant raw body policy decisions preserve or raise static tiers",
     CHECK_FALSE(invalid_decision.effective_tier);
 }
 
-TEST_CASE("dormant raw graph rejects duplicate unknown reserved and malformed input",
+TEST_CASE("raw graph rejects duplicate unknown reserved and malformed input",
           "[raw][foundation][parse]") {
     CHECK(failure(R"({"@type":"testCallEmpty","@type":"testCallEmpty"})").error ==
           Error::DuplicateField);
@@ -257,7 +258,7 @@ TEST_CASE("dormant raw graph rejects duplicate unknown reserved and malformed in
             .error == Error::UnknownField);
 }
 
-TEST_CASE("dormant raw graph materializes TD defaults concrete and abstract variants",
+TEST_CASE("raw graph materializes TD defaults concrete and abstract variants",
           "[raw][foundation][canonical][defaults]") {
     auto missing = success(R"({"@type":"testSquareInt"})");
     auto explicit_null = success(R"({"@type":"testSquareInt","x":null})");
@@ -288,7 +289,7 @@ TEST_CASE("dormant raw graph materializes TD defaults concrete and abstract vari
             .error == Error::InvalidFieldType);
 }
 
-TEST_CASE("dormant raw generated types enforce numeric bytes depth and size bounds",
+TEST_CASE("raw generated types enforce numeric bytes depth and size bounds",
           "[raw][foundation][bounds]") {
     CHECK(failure(R"({"@type":"testSquareInt","x":-2147483649})").error == Error::InvalidInteger);
     CHECK(failure(R"({"@type":"getMessage","chat_id":9007199254740992})").error ==
@@ -326,7 +327,7 @@ TEST_CASE("dormant raw generated types enforce numeric bytes depth and size boun
     CHECK(expanded_failure.error == Error::CanonicalTooLarge);
 }
 
-TEST_CASE("dormant raw canonical doubles follow RFC 8785 thresholds",
+TEST_CASE("raw canonical doubles follow RFC 8785 thresholds",
           "[raw][foundation][canonical][double]") {
     CHECK(success(R"({"@type":"testProxy","timeout":-0})")
               .canonical()
@@ -345,13 +346,17 @@ TEST_CASE("dormant raw canonical doubles follow RFC 8785 thresholds",
               .ends_with(R"("timeout":333333333.3333333})"));
 }
 
-TEST_CASE("dormant raw response hashing validates the declared TD result type",
+TEST_CASE("raw response hashing validates the declared TD result type",
           "[raw][foundation][response]") {
     auto function = success(R"({"@type":"testCallString","x":""})");
     std::vector<std::string> wiped_stages;
+    std::size_t maximum_response_staging = 0;
     const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
         CHECK(std::string_view(bytes, size) == std::string(size, '\0'));
         wiped_stages.emplace_back(stage);
+        if (stage == "raw_response_canonical") {
+            maximum_response_staging = std::max(maximum_response_staging, size);
+        }
     };
 
     auto empty_response = td::td_api::make_object<td::td_api::testString>("x");
@@ -395,11 +400,12 @@ TEST_CASE("dormant raw response hashing validates the declared TD result type",
         tgcli::daemon::raw::response_digest(function, std::move(error_response), observer);
     CHECK(std::holds_alternative<Digest>(td_error));
     CHECK(error_response == nullptr);
-    CHECK(std::ranges::count(wiped_stages, "raw_response_canonical") == 4);
+    CHECK(std::ranges::count(wiped_stages, "raw_response_canonical") == 5);
     CHECK(std::ranges::count(wiped_stages, "raw_native_string_or_bytes") >= 5);
+    CHECK(maximum_response_staging == tgcli::daemon::raw::kMaximumResponseBytes + 1);
 }
 
-TEST_CASE("dormant raw owners wipe physical AST conversion and canonical buffers",
+TEST_CASE("raw owners wipe physical AST conversion and canonical buffers",
           "[raw][foundation][wipe]") {
     std::vector<std::string> stages;
     const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
@@ -427,4 +433,75 @@ TEST_CASE("dormant raw owners wipe physical AST conversion and canonical buffers
     CHECK(std::ranges::find(stages, "raw_native_string_or_bytes") != stages.end());
     CHECK(std::ranges::find(stages, "raw_canonical") != stages.end());
     CHECK(std::ranges::find(stages, "raw_response_canonical") != stages.end());
+}
+
+TEST_CASE("production raw request ownership wipes before transfer and moves exactly once",
+          "[core][tdlib][raw][ownership][wipe]") {
+    SECTION("unconsumed production transfer remains tgcli-owned and wipes") {
+        std::vector<std::string> stages;
+        const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
+            CHECK(std::string_view(bytes, size) == std::string(size, '\0'));
+            stages.emplace_back(stage);
+        };
+        auto parsed =
+            tgcli::daemon::raw::parse(R"({"@type":"testCallBytes","x":"AAEC/w=="})", observer);
+        REQUIRE(std::holds_alternative<TypedFunction>(parsed));
+        auto& function = std::get<TypedFunction>(parsed);
+        auto request = function.release_for_dispatch(Tier::Read);
+        REQUIRE(request);
+        stages.clear();
+        CHECK(tgcli::core::detail::production_reject_raw_function_transfer_for_test(*request));
+        CHECK(std::ranges::find(stages, "raw_native_string_or_bytes") != stages.end());
+    }
+
+    SECTION("successful production-equivalent consumer receives the sole native identity") {
+        auto function = success(R"({"@type":"testCallBytes","x":"AAEC/w=="})");
+        const auto* identity = function.identity();
+        auto request = function.release_for_dispatch(Tier::Read);
+        REQUIRE(request);
+        const auto evidence =
+            tgcli::core::detail::production_consume_raw_function_for_test(*request);
+        CHECK(evidence.source_released);
+        CHECK(evidence.exact_identity);
+        CHECK(evidence.transfer_consumed);
+        CHECK(function.identity() == nullptr);
+        CHECK(identity != nullptr);
+    }
+}
+
+TEST_CASE("raw rejected base64 wipes a decoded valid prefix", "[raw][foundation][bytes][wipe]") {
+    std::vector<std::size_t> rejected_sizes;
+    const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
+        if (stage == "raw_decoded_bytes_rejected") {
+            CHECK(std::string_view(bytes, size) == std::string(size, '\0'));
+            rejected_sizes.push_back(size);
+        }
+    };
+    auto parsed =
+        tgcli::daemon::raw::parse(R"({"@type":"testCallBytes","x":"AAEC!!!!"})", observer);
+    REQUIRE(std::holds_alternative<Failure>(parsed));
+    CHECK(std::get<Failure>(parsed).error == Error::InvalidBase64);
+    CHECK(std::ranges::find(rejected_sizes, 3) != rejected_sizes.end());
+}
+
+TEST_CASE("production retired raw response registry invokes the exact recursive wiper",
+          "[core][tdlib][raw][wipe][lifecycle]") {
+    auto response = td::td_api::make_object<td::td_api::text>("late secret");
+    const auto* identity = response.get();
+    bool invoked = false;
+    bool same_identity = false;
+    bool text_wiped = false;
+    const bool consumed = tgcli::core::detail::production_retired_raw_response_wipes_for_test(
+        std::move(response), [&](tgcli::core::TdRawObjectPtr& value) {
+            invoked = true;
+            same_identity = value.get() == identity;
+            auto& typed = static_cast<td::td_api::text&>(*value);
+            std::ranges::fill(typed.text_, '\0');
+            text_wiped =
+                std::ranges::all_of(typed.text_, [](char character) { return character == '\0'; });
+        });
+    CHECK(consumed);
+    CHECK(invoked);
+    CHECK(same_identity);
+    CHECK(text_wiped);
 }

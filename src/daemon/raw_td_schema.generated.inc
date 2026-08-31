@@ -1,5 +1,7 @@
 // Generated from pinned td_api.tl. Do not edit.
 inline constexpr std::string_view kRawTdGraphSha256 = "c8937fab296da09ca04874ed6b1eb23af40b5232008a77c52b4a8645b4ab5153";
+inline constexpr std::string_view kRawPolicySha256 = "4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce";
+inline constexpr bool kRawPolicyActivationReady = true;
 inline constexpr std::array<RawTdFieldSpec, 6785> kRawTdFields{
     RawTdFieldSpec{"id", "int32"},
     RawTdFieldSpec{"built_in_accent_color_id", "int32"},

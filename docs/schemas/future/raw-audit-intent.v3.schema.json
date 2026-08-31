@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tgcli dormant raw audit v3 intent",
+  "title": "tgcli raw audit v3 intent",
   "type": "object",
   "additionalProperties": false,
   "required": [

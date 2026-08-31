@@ -120,7 +120,7 @@ TEST_CASE("future M2 and M4 result schemas are strict and remain independently v
                     .match(overflow_bytes));
 }
 
-TEST_CASE("future raw result schema separates live TD objects from exact dry-run plans",
+TEST_CASE("raw result schema separates live TD objects from exact dry-run plans",
           "[schema][m7-foundation][raw]") {
     const json live{{"@type", "ok"}, {"value", true}};
     CHECK_THAT(live, tgcli::test::matches_json_schema("future/raw.result.schema.json"));
@@ -143,7 +143,7 @@ TEST_CASE("future raw result schema separates live TD objects from exact dry-run
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw.result.schema.json").match(lowered));
 }
 
-TEST_CASE("dormant raw audit v3 schemas retain hashes and reject request or response bodies",
+TEST_CASE("raw audit v3 schemas retain hashes and reject request or response bodies",
           "[schema][m7-foundation][raw][audit-v3]") {
     constexpr std::string_view invocation = "00112233445566778899aabbccddeeff";
     constexpr std::string_view token = "ffeeddccbbaa99887766554433221100";
@@ -190,6 +190,26 @@ TEST_CASE("dormant raw audit v3 schemas retain hashes and reject request or resp
     leaked_response["data"]["response"] = {{"@type", "ok"}};
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-checkpoint.v3.schema.json")
                     .match(leaked_response));
+    auto malformed_response = response;
+    malformed_response["data"] = {{"dispatch_token", token},  {"generation", "7"},
+                                  {"kind", "malformed"},      {"response_type", "updateNewChat"},
+                                  {"td_error_code", nullptr}, {"response_sha256", hash},
+                                  {"response_bytes", 32}};
+    CHECK_THAT(malformed_response,
+               tgcli::test::matches_json_schema("future/raw-audit-checkpoint.v3.schema.json"));
+    malformed_response["data"]["response_sha256"] = nullptr;
+    CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-checkpoint.v3.schema.json")
+                    .match(malformed_response));
+    auto oversized_response = response;
+    oversized_response["data"] = {{"dispatch_token", token},    {"generation", "7"},
+                                  {"kind", "result_too_large"}, {"response_type", "ok"},
+                                  {"td_error_code", nullptr},   {"response_sha256", nullptr},
+                                  {"response_bytes", nullptr}};
+    CHECK_THAT(oversized_response,
+               tgcli::test::matches_json_schema("future/raw-audit-checkpoint.v3.schema.json"));
+    oversized_response["data"]["response_bytes"] = 16'777'216;
+    CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-checkpoint.v3.schema.json")
+                    .match(oversized_response));
 
     const json outcome{{"schema_version", 3},
                        {"record_type", "raw_outcome"},
@@ -202,6 +222,17 @@ TEST_CASE("dormant raw audit v3 schemas retain hashes and reject request or resp
                          {"response_bytes", 32}}}};
     CHECK_THAT(outcome,
                tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json"));
+    const json none_outcome{{"schema_version", 3},
+                            {"record_type", "raw_outcome"},
+                            {"invocation_id", invocation},
+                            {"mutation_state", "none"},
+                            {"terminal", nullptr}};
+    CHECK_THAT(none_outcome,
+               tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json"));
+    auto nonnull_none = none_outcome;
+    nonnull_none["terminal"] = json::object();
+    CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json")
+                    .match(nonnull_none));
     auto unconfirmed = outcome;
     unconfirmed["mutation_state"] = "possible";
     unconfirmed["terminal"] = {
@@ -212,6 +243,16 @@ TEST_CASE("dormant raw audit v3 schemas retain hashes and reject request or resp
     internal_surrogate["terminal"]["code"] = "INTERNAL";
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json")
                     .match(internal_surrogate));
+    auto malformed_outcome = unconfirmed;
+    malformed_outcome["terminal"] = {{"kind", "error_summary"},
+                                     {"code", "INTERNAL"},
+                                     {"reason", "unexpected_response"},
+                                     {"td_error_code", nullptr}};
+    CHECK_THAT(malformed_outcome,
+               tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json"));
+    malformed_outcome["terminal"]["reason"] = "result_too_large";
+    CHECK_THAT(malformed_outcome,
+               tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json"));
     auto leaked_terminal = outcome;
     leaked_terminal["terminal"]["body"] = {{"@type", "ok"}};
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw-audit-outcome.v3.schema.json")

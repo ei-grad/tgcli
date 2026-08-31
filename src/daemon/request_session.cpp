@@ -962,6 +962,10 @@ DeliveryOutcome RequestSession::emit_result(nlohmann::json data) {
     }
 }
 
+DeliveryOutcome RequestSession::emit_raw_result(secure::SensitiveString canonical) {
+    return transport_->raw_result(std::move(canonical));
+}
+
 DeliveryOutcome RequestSession::emit_error(std::string code, std::string message,
                                            nlohmann::json details, int exit_code) {
     try {

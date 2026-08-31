@@ -64,6 +64,8 @@ add_executable(tgcli_unit_tests
     request_session_test.cpp
     ready_read_test.cpp
     raw_audit_contract_test.cpp
+    raw_audit_log_test.cpp
+    raw_commands_test.cpp
     raw_contract_test.cpp
     raw_native_contract_test.cpp
     read_domain_test.cpp

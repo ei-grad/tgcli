@@ -17,7 +17,7 @@ _tgcli_normalize() {
         --account=*|--timeout=*|--cursor=*|--idempotency-key=*|--json|--allow-write|--yes|--dry-run|--verbose|-v|--no-daemon|--no-color|-*) ;;
         *)
           if [[ -z "$top" ]]; then
-            case "$token" in account|chat|chats|completion|contact|daemon|doctor|download|fetch|folder|history|listen|login|logout|me|msg|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
+            case "$token" in account|chat|chats|completion|contact|daemon|doctor|download|fetch|folder|history|listen|login|logout|me|msg|raw|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
           elif [[ -z "$child" ]]; then
             case "$top:$token" in account:add|account:list|account:remove|account:show|account:use|chat:archive|chat:ban|chat:demote|chat:info|chat:invite-link|chat:join|chat:kick|chat:leave|chat:mark-read|chat:members|chat:mute|chat:pin|chat:promote|chat:set-description|chat:set-permissions|chat:set-photo|chat:set-title|chat:unarchive|chat:unban|chat:unmute|chat:unpin|contact:add|contact:block|contact:list|contact:remove|contact:search|contact:unblock|daemon:restart|daemon:run|daemon:status|daemon:stop|folder:add-chat|folder:create|folder:delete|folder:edit|folder:list|folder:remove-chat|folder:show|msg:delete|msg:edit|msg:forward|msg:get|msg:link|msg:pin|msg:react|msg:unpin|saved:attach|saved:search|saved:tags|session:list|session:terminate|storage:optimize|storage:stats|topic:close|topic:create|topic:edit|topic:list|topic:reopen) child="$token" ;; esac
           fi
@@ -47,7 +47,7 @@ _tgcli_complete() {
   top=${COMP_WORDS[1]-}
   candidates=''
   if (( COMP_CWORD == 1 )); then
-    candidates='account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg read resolve saved schema search send session storage topic unread version wait-for'
+    candidates='account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg raw read resolve saved schema search send session storage topic unread version wait-for'
   elif (( COMP_CWORD == 2 )); then
     case "$top" in
       account) candidates='add list remove show use' ;;
@@ -70,6 +70,7 @@ _tgcli_complete() {
       login) candidates='--account --json --timeout --verbose -v --no-daemon --no-color --qr --bot' ;;
       logout) candidates='--account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color' ;;
       me) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
+      raw) candidates='- --account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color' ;;
       read) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color -n --before --since --until --topic --local' ;;
       resolve) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       schema) candidates='--json --verbose -v --no-daemon --no-color --all' ;;
@@ -143,6 +144,7 @@ _tgcli_complete() {
       msg\ pin) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
       msg\ react) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --remove --big' ;;
       msg\ unpin) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color' ;;
+      raw) candidates='- --account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color' ;;
       read) candidates='--account --json --timeout --cursor --verbose -v --no-daemon --no-color -n --before --since --until --topic --local' ;;
       resolve) candidates='--account --json --timeout --verbose -v --no-daemon --no-color' ;;
       saved\ attach) candidates='--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --caption' ;;
@@ -192,7 +194,7 @@ _tgcli_zsh_normalize() {
         --account=*|--timeout=*|--cursor=*|--idempotency-key=*|--json|--allow-write|--yes|--dry-run|--verbose|-v|--no-daemon|--no-color|-*) ;;
         *)
           if [[ -z "$top" ]]; then
-            case "$token" in account|chat|chats|completion|contact|daemon|doctor|download|fetch|folder|history|listen|login|logout|me|msg|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
+            case "$token" in account|chat|chats|completion|contact|daemon|doctor|download|fetch|folder|history|listen|login|logout|me|msg|raw|read|resolve|saved|schema|search|send|session|storage|topic|unread|version|wait-for) top="$token" ;; esac
           elif [[ -z "$child" ]]; then
             case "$top:$token" in account:add|account:list|account:remove|account:show|account:use|chat:archive|chat:ban|chat:demote|chat:info|chat:invite-link|chat:join|chat:kick|chat:leave|chat:mark-read|chat:members|chat:mute|chat:pin|chat:promote|chat:set-description|chat:set-permissions|chat:set-photo|chat:set-title|chat:unarchive|chat:unban|chat:unmute|chat:unpin|contact:add|contact:block|contact:list|contact:remove|contact:search|contact:unblock|daemon:restart|daemon:run|daemon:status|daemon:stop|folder:add-chat|folder:create|folder:delete|folder:edit|folder:list|folder:remove-chat|folder:show|msg:delete|msg:edit|msg:forward|msg:get|msg:link|msg:pin|msg:react|msg:unpin|saved:attach|saved:search|saved:tags|session:list|session:terminate|storage:optimize|storage:stats|topic:close|topic:create|topic:edit|topic:list|topic:reopen) child="$token" ;; esac
           fi
@@ -219,7 +221,7 @@ _tgcli_zsh_normalize
 local -a candidates
 local key
 if (( CURRENT == 2 )); then
-  candidates=('account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for')
+  candidates=('account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'raw' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for')
 elif (( CURRENT == 3 )); then
   case "$words[2]" in
       account) candidates=('add' 'list' 'remove' 'show' 'use') ;;
@@ -238,6 +240,7 @@ elif (( CURRENT == 3 )); then
       logout) candidates=('--account' '--json' '--allow-write' '--dry-run' '--yes' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       me) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       msg) candidates=('delete' 'edit' 'forward' 'get' 'link' 'pin' 'react' 'unpin') ;;
+      raw) candidates=('-' '--account' '--json' '--allow-write' '--dry-run' '--yes' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       read) candidates=('--account' '--json' '--timeout' '--cursor' '--verbose' '-v' '--no-daemon' '--no-color' '-n' '--before' '--since' '--until' '--topic' '--local') ;;
       resolve) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       saved) candidates=('attach' 'search' 'tags') ;;
@@ -315,6 +318,7 @@ else
       msg\ pin) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       msg\ react) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color' '--remove' '--big') ;;
       msg\ unpin) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color') ;;
+      raw) candidates=('-' '--account' '--json' '--allow-write' '--dry-run' '--yes' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       read) candidates=('--account' '--json' '--timeout' '--cursor' '--verbose' '-v' '--no-daemon' '--no-color' '-n' '--before' '--since' '--until' '--topic' '--local') ;;
       resolve) candidates=('--account' '--json' '--timeout' '--verbose' '-v' '--no-daemon' '--no-color') ;;
       saved\ attach) candidates=('--account' '--json' '--allow-write' '--dry-run' '--timeout' '--idempotency-key' '--verbose' '-v' '--no-daemon' '--no-color' '--caption') ;;
@@ -357,7 +361,7 @@ function __tgcli_state
         case '*'
           if test -z "$top"
             switch $token
-              case 'account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for'
+              case 'account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'raw' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for'
                 set top $token
             end
           else if test -z "$child"
@@ -372,7 +376,7 @@ function __tgcli_state
   end
   echo "$top|$child|$pending"
 end
-complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''||0'\''' -a 'account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg read resolve saved schema search send session storage topic unread version wait-for'
+complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''||0'\''' -a 'account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg raw read resolve saved schema search send session storage topic unread version wait-for'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''account||0'\''' -a 'add list remove show use'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''chat||0'\''' -a 'archive ban demote info invite-link join kick leave mark-read members mute pin promote set-description set-permissions set-photo set-title unarchive unban unmute unpin'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''contact||0'\''' -a 'add block list remove search unblock'
@@ -444,6 +448,7 @@ complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|link|
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|pin|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|react|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --remove --big'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|unpin|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color'
+complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''raw||0'\''' -a '- --account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''read||0'\''' -a '--account --json --timeout --cursor --verbose -v --no-daemon --no-color -n --before --since --until --topic --local'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''resolve||0'\''' -a '--account --json --timeout --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''saved|attach|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --caption'

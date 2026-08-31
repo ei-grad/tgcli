@@ -228,6 +228,21 @@ class ConnectionSink final : public ResponseSink {
         notify_terminal(visible);
         return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
     }
+    DeliveryOutcome emit_raw_result(secure::SensitiveString canonical) override {
+        bool visible = false;
+        try {
+            visible = connection_->send(proto::RawResult{request_id_, std::string(canonical.view()),
+                                                         canonical.wipe_observer()});
+        } catch (...) {
+            abort();
+            return DeliveryOutcome::Disconnected;
+        }
+        if (!visible) {
+            connection_->shutdown();
+        }
+        notify_terminal(visible);
+        return visible ? DeliveryOutcome::Complete : DeliveryOutcome::Disconnected;
+    }
     DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
                                int exit_code) override {
         bool visible = false;

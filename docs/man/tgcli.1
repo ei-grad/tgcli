@@ -9,6 +9,14 @@ tgcli \- Telegram command-line client
 .B tgcli
 uses a per-account daemon for Telegram operations. Client-local metadata commands
 do not read account configuration or contact the daemon.
+.SH RAW SUBSET
+.B tgcli raw -
+reads one JSON request from standard input and invokes only the function subset
+admitted by the pinned reviewed policy. The current policy admits 54 typed
+functions and denies the other 947 whole. Raw is not access to the full TDLib
+API. Write-tier functions require the normal write grant; destructive functions
+also require confirmation. Request and response bodies are never stored in the
+raw audit log.
 .SH SHELL COMPLETION
 .B tgcli completion bash
 prints the byte-stable Bash 3.2-compatible completion asset.

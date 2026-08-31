@@ -16,7 +16,7 @@ function __tgcli_state
         case '*'
           if test -z "$top"
             switch $token
-              case 'account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for'
+              case 'account' 'chat' 'chats' 'completion' 'contact' 'daemon' 'doctor' 'download' 'fetch' 'folder' 'history' 'listen' 'login' 'logout' 'me' 'msg' 'raw' 'read' 'resolve' 'saved' 'schema' 'search' 'send' 'session' 'storage' 'topic' 'unread' 'version' 'wait-for'
                 set top $token
             end
           else if test -z "$child"
@@ -31,7 +31,7 @@ function __tgcli_state
   end
   echo "$top|$child|$pending"
 end
-complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''||0'\''' -a 'account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg read resolve saved schema search send session storage topic unread version wait-for'
+complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''||0'\''' -a 'account chat chats completion contact daemon doctor download fetch folder history listen login logout me msg raw read resolve saved schema search send session storage topic unread version wait-for'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''account||0'\''' -a 'add list remove show use'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''chat||0'\''' -a 'archive ban demote info invite-link join kick leave mark-read members mute pin promote set-description set-permissions set-photo set-title unarchive unban unmute unpin'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''contact||0'\''' -a 'add block list remove search unblock'
@@ -103,6 +103,7 @@ complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|link|
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|pin|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|react|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --remove --big'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''msg|unpin|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color'
+complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''raw||0'\''' -a '- --account --json --allow-write --dry-run --yes --timeout --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''read||0'\''' -a '--account --json --timeout --cursor --verbose -v --no-daemon --no-color -n --before --since --until --topic --local'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''resolve||0'\''' -a '--account --json --timeout --verbose -v --no-daemon --no-color'
 complete -c tgcli -f -n 'test (__tgcli_state (commandline -opc)) = '\''saved|attach|0'\''' -a '--account --json --allow-write --dry-run --timeout --idempotency-key --verbose -v --no-daemon --no-color --caption'

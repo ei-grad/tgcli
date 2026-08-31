@@ -492,7 +492,7 @@ TEST_CASE("real CLI validates idempotency keys before routing or persistent side
     }
 }
 
-TEST_CASE("reserved raw and full modes fail before routing or persistent side effects",
+TEST_CASE("reserved full mode fails before routing or persistent side effects",
           "[cli][process][unsupported-mode][safety]") {
     const ProcessEnvironment environment;
     ProcessEnvironment::set_account(std::optional<std::string>{"bad.name"});
@@ -504,12 +504,6 @@ TEST_CASE("reserved raw and full modes fail before routing or persistent side ef
         bool json_output;
     };
     const std::vector<UnsupportedCase> cases{
-        {"raw without payload", {"raw"}, "raw", false},
-        {"raw with payload", {"raw", "{}"}, "raw", true},
-        {"raw payload containing full", {"raw", R"({"value":"--full"})"}, "raw", true},
-        {"raw with arbitrary remainder", {"raw", "{}", "extra", "--bogus"}, "raw", true},
-        {"raw short help", {"raw", "-h"}, "raw", true},
-        {"raw long help", {"raw", "--help"}, "raw", true},
         {"full without command", {"--full"}, "--full", true},
         {"full explicit false", {"--full=false", "version"}, "--full", true},
         {"full short help", {"--full", "-h"}, "--full", true},
@@ -524,11 +518,6 @@ TEST_CASE("reserved raw and full modes fail before routing or persistent side ef
         {"full daemon", {"daemon", "run", "--full"}, "--full", true},
         {"full account", {"account", "add", "work", "--full"}, "--full", true},
         {"full auth", {"login", "--full"}, "--full", true},
-        {"raw with destructive globals",
-         {"--allow-write", "--yes", "--dry-run", "-v", "raw", "{}"},
-         "raw",
-         true},
-        {"raw with no-color", {"--no-color", "raw", "-"}, "raw", true},
         {"full with destructive globals",
          {"--full", "--allow-write", "--yes", "--dry-run", "-v", "logout"},
          "--full",
@@ -543,9 +532,7 @@ TEST_CASE("reserved raw and full modes fail before routing or persistent side ef
             const nlohmann::json expected{
                 {"error",
                  {{"code", "USAGE"},
-                  {"message", test_case.argument == std::string_view("--full")
-                                  ? "--full is reserved through v1"
-                                  : std::string(test_case.argument) + " is reserved until M7"},
+                  {"message", "--full is reserved through v1"},
                   {"details",
                    {{"argument", test_case.argument}, {"reason", "unsupported_mode"}}}}}};
             CHECK(outcome.err == expected.dump() + "\n");

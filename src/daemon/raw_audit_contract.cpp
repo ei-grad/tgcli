@@ -1,5 +1,7 @@
 #include "daemon/raw_audit_contract.hpp"
 
+#include "daemon/raw_contract.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -98,9 +100,29 @@ bool valid_response_data(const json& value) {
     if (!exact_fields(value, {"dispatch_token", "generation", "kind", "response_type",
                               "td_error_code", "response_sha256", "response_bytes"}) ||
         !hex(value["dispatch_token"], 32) || !canonical_uint64(value["generation"]) ||
-        !value["kind"].is_string() || !ascii_identifier(value["response_type"]) ||
-        !hash(value["response_sha256"]) ||
-        !bounded_unsigned(value["response_bytes"], 2, kMaximumResponseBytes)) {
+        !value["kind"].is_string()) {
+        return false;
+    }
+    if (value["kind"] == "malformed") {
+        const bool null_type = value["response_type"].is_null();
+        const bool valid_type =
+            ascii_identifier(value["response_type"]) && value["response_type"] != "error";
+        const bool null_digest =
+            value["response_sha256"].is_null() && value["response_bytes"].is_null();
+        const bool valid_digest =
+            hash(value["response_sha256"]) &&
+            bounded_unsigned(value["response_bytes"], 2, kMaximumResponseBytes);
+        return value["td_error_code"].is_null() && (null_type || valid_type) &&
+               (null_digest || valid_digest) && (!null_type || null_digest);
+    }
+    if (value["kind"] == "result_too_large") {
+        return ascii_identifier(value["response_type"]) && value["response_type"] != "error" &&
+               value["td_error_code"].is_null() && value["response_sha256"].is_null() &&
+               value["response_bytes"].is_null();
+    }
+    if (!hash(value["response_sha256"]) ||
+        !bounded_unsigned(value["response_bytes"], 2, kMaximumResponseBytes) ||
+        !ascii_identifier(value["response_type"])) {
         return false;
     }
     if (value["kind"] == "result") {
@@ -120,12 +142,19 @@ bool valid_result_terminal(const json& value) {
 }
 
 bool valid_error_terminal(const json& value) {
-    if (!exact_fields(value, {"kind", "code", "td_error_code"}) ||
+    if (!value.is_object() || !value.contains("kind") || !value.contains("code") ||
         value["kind"] != "error_summary" || !value["code"].is_string()) {
         return false;
     }
     const auto& code = value["code"].get_ref<const std::string&>();
-    if (code != "RATE_LIMITED" && code != "TDLIB_ERROR" && code != "RAW_OUTCOME_UNCONFIRMED") {
+    if (code == "INTERNAL") {
+        return exact_fields(value, {"kind", "code", "reason", "td_error_code"}) &&
+               (value["reason"] == "unexpected_response" ||
+                value["reason"] == "result_too_large") &&
+               value["td_error_code"].is_null();
+    }
+    if (!exact_fields(value, {"kind", "code", "td_error_code"}) ||
+        (code != "RATE_LIMITED" && code != "TDLIB_ERROR" && code != "RAW_OUTCOME_UNCONFIRMED")) {
         return false;
     }
     if (code == "RAW_OUTCOME_UNCONFIRMED") {
@@ -150,6 +179,15 @@ bool response_matches_dispatch(const json& dispatch, const json& response) {
            dispatch["data"]["generation"] == response["data"]["generation"];
 }
 
+bool response_matches_intent(const json& intent, const json& response) {
+    const auto& data = response["data"];
+    if (data["kind"] != "result" && data["kind"] != "result_too_large") {
+        return true;
+    }
+    return response_type_matches_result(intent["function"].get_ref<const std::string&>(),
+                                        data["response_type"].get_ref<const std::string&>());
+}
+
 bool outcome_matches_response(const json& response, const json& outcome) {
     const auto& data = response["data"];
     const auto& terminal = outcome["terminal"];
@@ -158,6 +196,20 @@ bool outcome_matches_response(const json& response, const json& outcome) {
                terminal["response_type"] == data["response_type"] &&
                terminal["response_sha256"] == data["response_sha256"] &&
                terminal["response_bytes"] == data["response_bytes"];
+    }
+    if (data["kind"] == "malformed") {
+        return outcome["mutation_state"] == "possible" &&
+               terminal == json{{"kind", "error_summary"},
+                                {"code", "INTERNAL"},
+                                {"reason", "unexpected_response"},
+                                {"td_error_code", nullptr}};
+    }
+    if (data["kind"] == "result_too_large") {
+        return outcome["mutation_state"] == "possible" &&
+               terminal == json{{"kind", "error_summary"},
+                                {"code", "INTERNAL"},
+                                {"reason", "result_too_large"},
+                                {"td_error_code", nullptr}};
     }
     if (outcome["mutation_state"] != "possible" || terminal["kind"] != "error_summary") {
         return false;
@@ -195,7 +247,8 @@ bool consume_checkpoint(const json& record, Invocation& invocation) {
         return true;
     }
     if (invocation.dispatch == nullptr || invocation.response != nullptr ||
-        !response_matches_dispatch(*invocation.dispatch, record)) {
+        !response_matches_dispatch(*invocation.dispatch, record) ||
+        !response_matches_intent(*invocation.intent, record)) {
         return reject(invocation);
     }
     invocation.response = &record;
@@ -203,8 +256,17 @@ bool consume_checkpoint(const json& record, Invocation& invocation) {
 }
 
 bool consume_outcome(const json& record, Invocation& invocation) {
-    if (!valid_outcome(record) || invocation.intent == nullptr || invocation.dispatch == nullptr ||
-        invocation.outcome != nullptr) {
+    if (!valid_outcome(record) || invocation.intent == nullptr || invocation.outcome != nullptr) {
+        return reject(invocation);
+    }
+    const bool none_without_dispatch =
+        record["mutation_state"] == "none" && record["terminal"].is_null() &&
+        invocation.dispatch == nullptr && invocation.response == nullptr;
+    if (none_without_dispatch) {
+        invocation.outcome = &record;
+        return true;
+    }
+    if (invocation.dispatch == nullptr) {
         return reject(invocation);
     }
     const bool unconfirmed_without_response =
@@ -249,9 +311,15 @@ RecoveryAction recovery_action(const Invocation& invocation) {
         return RecoveryAction::Complete;
     }
     if (invocation.response != nullptr) {
-        return (*invocation.response)["data"]["kind"] == "result"
-                   ? RecoveryAction::RepairConfirmedResult
-                   : RecoveryAction::RepairPossibleError;
+        const auto& kind = (*invocation.response)["data"]["kind"];
+        if (kind == "result") {
+            return RecoveryAction::RepairConfirmedResult;
+        }
+        if (kind == "malformed") {
+            return RecoveryAction::RepairPossibleInternal;
+        }
+        return kind == "result_too_large" ? RecoveryAction::RepairPossibleTooLarge
+                                          : RecoveryAction::RepairPossibleError;
     }
     return invocation.dispatch != nullptr ? RecoveryAction::EmitUnconfirmed
                                           : RecoveryAction::NoMutation;
@@ -284,6 +352,9 @@ bool valid_outcome(const nlohmann::json& value) {
                               "terminal"}) ||
         !valid_common(value, "raw_outcome") || !value["mutation_state"].is_string()) {
         return false;
+    }
+    if (value["mutation_state"] == "none") {
+        return value["terminal"].is_null();
     }
     if (value["mutation_state"] == "confirmed") {
         return valid_result_terminal(value["terminal"]);

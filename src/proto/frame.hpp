@@ -126,6 +126,26 @@ struct Result {
     nlohmann::json data;
 };
 
+class RawResult final {
+  public:
+    RawResult(std::uint64_t id_value, std::string canonical,
+              secure::WipeObserver wipe_observer = {});
+    ~RawResult() = default;
+    RawResult(const RawResult&) = delete;
+    RawResult& operator=(const RawResult&) = delete;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    RawResult(RawResult&&) = default;
+    // NOLINTNEXTLINE(cppcoreguidelines-noexcept-move-operations,performance-noexcept-move-constructor)
+    RawResult& operator=(RawResult&&) = default;
+
+    [[nodiscard]] std::uint64_t id() const noexcept;
+    [[nodiscard]] std::string_view canonical() const noexcept;
+
+  private:
+    std::uint64_t id_ = 0;
+    secure::SensitiveString canonical_;
+};
+
 // One element of a streamed response (NDJSON on the client's stdout).
 struct Item {
     std::uint64_t id = 0;
@@ -174,7 +194,8 @@ struct Answer {
     secure::WipeObserver wipe_observer_;
 };
 
-using Frame = std::variant<Hello, Request, Result, Item, Progress, Error, Challenge, Answer>;
+using Frame =
+    std::variant<Hello, Request, Result, RawResult, Item, Progress, Error, Challenge, Answer>;
 
 // Canonically samples an in-process Request using the same compact JSON bytes
 // admitted by the socket reader. The returned copy owns the immutable sample.

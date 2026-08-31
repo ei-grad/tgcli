@@ -116,7 +116,7 @@
         {"name": "unpin", "activation": "active", "option_set": "write", "options": [], "positionals": ["chat", "id"]}
       ]
     },
-    {"name": "raw", "activation": "future", "option_set": "raw", "options": [], "positionals": ["-"], "completion_literals": ["-"]},
+    {"name": "raw", "activation": "active", "option_set": "raw", "options": [], "positionals": ["-"], "completion_literals": ["-"]},
     {"name": "read", "activation": "active", "option_set": "read_cursor", "options": ["-n", "--before", "--since", "--until", "--topic", "--local"], "positionals": ["chat?"]},
     {"name": "resolve", "activation": "active", "option_set": "read", "options": [], "positionals": ["selector"]},
     {

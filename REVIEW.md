@@ -86,9 +86,12 @@ be demonstrated by tests, not argued in prose.
 
 Raw is always security-sensitive and audit-schema-changing. Its review owns
 the complete pin-derived Function inventory, constructor/type graph and policy
-bijections, one-native-Function ownership, generated default/null/abstract
-variant handling, owned declared-result response validation and recursive wipe
-on every exit, callable body-validator descriptor bijection/runtime lookup,
+bijections, one-native-Function ownership, recursive request wipe on every
+tgcli-owned pre-transfer exit, the exact one-move/no-retained-alias TDLib
+boundary and its explicit post-transfer memory residual, generated
+default/null/abstract variant handling, owned declared-result response
+validation and recursive response wipe on every tgcli-owned exit, callable
+body-validator descriptor bijection/runtime lookup,
 the exhaustive static-tier by `Deny|Preserve|RaiseWrite|RaiseDestructive`
 monotonic matrix, every admitted row and compiled body-validator variant,
 request and response sensitivity, duplicate/unknown-field/numeric/int64/bytes
@@ -146,6 +149,10 @@ well:
   unknown/unclassified function fallback, a raw request/response body or TD
   message in audit/error/log output, name-only secret-chat proof, or raw
   handler/catalog activation before audit-v3 recovery;
+- a raw native request alias retained after TDLib consumes the rvalue, an
+  unconsumed production transfer that bypasses recursive request wiping, or a
+  claim that tgcli zeroizes request memory already owned by uninstrumented
+  TDLib;
 - a raw policy claim without a pin-derived exact 1001-row bijection, positive
   principal evidence, concrete whole-function rationale, compiled callable
   resolution, or typed preflight extraction of every direct/nested chat

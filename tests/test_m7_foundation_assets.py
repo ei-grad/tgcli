@@ -81,6 +81,8 @@ class M7FoundationAssetTest(unittest.TestCase):
                     "search.result.schema.json",
                     "chat-info.result.schema.json",
                     "chat-members.result.schema.json",
+                    "raw.result.schema.json",
+                    "raw.error.schema.json",
                 )
             ),
             *(SCHEMAS / "future" / filename for filename in FUTURE_FILES),
@@ -102,7 +104,9 @@ class M7FoundationAssetTest(unittest.TestCase):
             }
         self.assertEqual(actual, expected)
 
-    def test_future_assets_are_complete_strict_and_uncataloged(self) -> None:
+    def test_future_assets_are_complete_strict_and_materialized_atomically(
+        self,
+    ) -> None:
         self.assertEqual(
             {candidate.name for candidate in (SCHEMAS / "future").iterdir()},
             FUTURE_FILES,
@@ -122,11 +126,13 @@ class M7FoundationAssetTest(unittest.TestCase):
             "chat-read.error.schema.json",
             "download.result.schema.json",
             "download.error.schema.json",
+            "raw.result.schema.json",
+            "raw.error.schema.json",
         }
         self.assertTrue((FUTURE_FILES - materialized).isdisjoint(cataloged_files))
-        self.assertNotIn("raw", cataloged_commands)
         self.assertTrue(
-            {"search", "chat info", "chat members", "download"} <= cataloged_commands
+            {"search", "chat info", "chat members", "download", "raw"}
+            <= cataloged_commands
         )
         for filename in materialized:
             self.assertEqual(
@@ -323,6 +329,58 @@ class M7FoundationAssetTest(unittest.TestCase):
             self.assertIn(contract, design)
         self.assertNotIn(
             "Offset is a nonnegative int32 and is the raw source offset", design
+        )
+
+    def test_raw_option_b_uses_the_explicit_tdlib_ownership_boundary(self) -> None:
+        design = " ".join(
+            (REPOSITORY / "DESIGN.md").read_text(encoding="utf-8").split()
+        )
+        for contract in (
+            "wiped on every exit while tgcli owns them",
+            "moves the sole native `object_ptr<td_api::Function>` exactly once into pinned TDLib",
+            "tgcli retains no alias and makes no post-transfer zeroization claim",
+            "Credential, authentication, payment, proxy-secret, logging, lifecycle",
+            "Returned native responses cross back into tgcli ownership",
+        ):
+            self.assertIn(contract, design)
+        self.assertNotIn(
+            "wiped by the pin-generated visitor after ownership transfer", design
+        )
+
+        claude = " ".join(
+            (REPOSITORY / "CLAUDE.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn(
+            "Raw request ownership ends at the pinned TDLib rvalue boundary", claude
+        )
+        self.assertIn("makes no zeroization claim for TDLib allocator", claude)
+
+        review = " ".join(
+            (REPOSITORY / "REVIEW.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn("one-move/no-retained-alias TDLib boundary", review)
+        self.assertIn("request memory already owned by uninstrumented TDLib", review)
+
+        runtime = (REPOSITORY / "src" / "core" / "td_runtime.cpp").read_text(
+            encoding="utf-8"
+        )
+        for source_contract in (
+            "class ProductionFunctionTransfer final",
+            "manager_->send(client_id, query_id, transfer.argument())",
+            "if (!transfer.consumed())",
+            "function.raw_request_wiper()",
+        ):
+            self.assertIn(source_contract, runtime)
+
+        client_header = (TDLIB_SOURCE / "td" / "telegram" / "Client.h").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            client_header.count(
+                "void send(ClientId client_id, RequestId request_id, "
+                "td_api::object_ptr<td_api::Function> &&request);"
+            ),
+            1,
         )
 
 

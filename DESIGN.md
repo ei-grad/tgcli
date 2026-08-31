@@ -406,10 +406,10 @@ difference.
 
 ### 4.2 `raw` escape hatch
 
-`raw` remains reserved and rejected with `USAGE/unsupported_mode` until its
-parser, policy, audit-v3 recovery, handler and result/error catalog mappings
-activate atomically. `--full` does not activate with it: `--full` remains
-reserved and rejected throughout v1 and is a post-1.0 contract decision.
+`raw` is active as one atomic parser, policy, audit-v3 recovery, handler and
+result/error catalog surface. `--full` did not activate with it: `--full`
+remains reserved and rejected throughout v1 and is a post-1.0 contract
+decision.
 
 The selected v1 raw policy is **Option B**, a table-classified Read/Write/
 Destructive escape hatch. Its only grammar is:
@@ -457,14 +457,27 @@ SHA256("tgcli.raw.request.v1\0" || pinned_td_sha_ascii || "\0" ||
 The response digest uses domain `tgcli.raw.response.v1\0`, the function name,
 the uint64 big-endian canonical response length and canonical response bytes.
 `request_bytes` and `response_bytes` count only canonical typed JSON, excluding
-the hash domain, protocol envelope and LF. Raw stdin, AST string/byte storage,
-canonical request storage and every recursively reachable native typed request
-string/byte field are wiped by the pin-generated visitor after ownership
-transfer or on rejection. Response hashing consumes one owned
-`object_ptr<td_api::Object>`; an RAII guard recursively wipes every native
-response string/byte field and canonical response staging on null, metadata,
-type, canonicalization, oversize, TD-error and success exits before releasing
-the object. No caller retains an unwiped response alias.
+the hash domain, protocol envelope and LF. Physical stdin, duplicate-aware AST
+string/byte storage, canonical request storage and every recursively reachable
+native typed request string/byte field are wiped on every exit while tgcli owns
+them, including rejection before production submission and a submission
+boundary that does not consume the rvalue. At dispatch tgcli moves the sole
+native `object_ptr<td_api::Function>` exactly once into pinned TDLib. After a
+successful rvalue transfer TDLib exclusively owns that object and any
+serialization, queue or actor copies; tgcli retains no alias and makes no
+post-transfer zeroization claim for TDLib-owned memory.
+
+This ownership boundary deliberately leaves non-credential request text and
+identifiers in opaque TDLib allocator or actor memory until TDLib destroys or
+overwrites them; operating-system swap and core-dump policy can preserve that
+memory further. Credential, authentication, payment, proxy-secret, logging,
+lifecycle and every other explicitly secret-bearing function remain denied
+whole, so this residual does not relax the reviewed raw allowlist. Returned
+native responses cross back into tgcli ownership: response hashing consumes one
+owned `object_ptr<td_api::Object>`, and an RAII guard recursively wipes every
+native response string/byte field and canonical response staging on null,
+metadata, type, canonicalization, oversize, TD-error and success exits before
+releasing the object. No caller retains an unwiped response alias.
 
 Two checked-in pin-owned assets govern classification:
 
@@ -514,13 +527,13 @@ whole: pinned TDLib may return or render a secondary dialog independently of
 the input `chat_id`, so one direct-chat preflight does not prove every result
 target non-secret.
 
-The candidate remains `activation_ready:false` with the sole exact blocker
-`independent_policy_acceptance`; `unfinished_functions` is empty. Row reasoning
-and compiled mechanics are complete, but raw is not publicly accepted or
-reachable. Dormant validation fails on
-pin/source/count/bijection/digest/evidence mismatch. Activation additionally
-requires the blocker to be removed and `activation_ready:true` in the
-independently accepted asset. The generated symbol table contains exact sorted
+The independently accepted policy has digest
+`sha256:4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce`,
+`activation_ready:true`, no activation blockers and an empty
+`unfinished_functions` set. Runtime activation fails closed unless that exact
+digest, the 1001-row count, the 29/19/6/947 tier distribution, complete review
+state and generated table invariants all match. Validation also fails on
+pin/source/count/bijection/digest/evidence mismatch. The generated symbol table contains exact sorted
 unique `{name,nonnull typed_validator_fn,nonnull typed_preflight_fn}` rows and
 the generated 1001-row runtime policy table references those same symbols.
 Missing implementations are compile failures; unknown functions, symbols,
@@ -588,9 +601,8 @@ before dispatch or after a proven response. `AUDIT_INCOMPLETE` is reserved for
 unreadable/schema-invalid records and ordering/token/generation/identity
 contradictions, including inability to inspect or repair. A proven response
 without outcome repairs the corresponding confirmed/possible digest outcome.
-These dormant
-schemas, validators, scanner and recovery rules must be present before raw is
-registered.
+These schemas, validators, scanner and recovery rules are installed before the
+raw route is registered.
 
 Live success in human and JSON modes is the same compact canonical TD object
 plus LF. The strict result schema is a one-of between that live object (one
@@ -7083,9 +7095,8 @@ the registry, checked in as `completions/tgcli.bash`, `completions/_tgcli` and
 `completions/tgcli.fish`, and must be byte-identical across generator output,
 runtime output and packaged files. Assets use LF only, contain no timestamp,
 version, cwd or environment-derived byte, have exactly one final LF, and never
-execute tgcli. Assets contain active registry rows only, so dormant raw is
-absent. Atomic raw activation will make its row active and regenerate the
-assets to suggest literal `-` and only its accepted flags; `--full`,
+execute tgcli. Assets contain active registry rows only. The active raw row
+suggests literal `-` and only its accepted flags; `--full`,
 `--bot-token`, raw cursor and raw idempotency remain absent.
 
 `docs/release/command-assets.json` is the generated authoritative mapping from
@@ -7116,20 +7127,19 @@ assets and every v1 renderer because v1 emits no ANSI.
 
 #### 4.10.3 Schemas and catalog activation
 
-The strict self-contained future schemas are frozen under
+The strict self-contained golden schemas are frozen under
 `docs/schemas/future/`: `search.result.schema.json`,
 `chat-info.result.schema.json`, `chat-members.result.schema.json`,
 `download.result.schema.json`, `raw.result.schema.json`, and family errors
 `search.error.schema.json`, `chat-read.error.schema.json`,
 `download.error.schema.json`, `raw.error.schema.json`. The same directory holds
-the dormant persistence-only `raw-audit-intent.v3.schema.json`,
+the persistence-only `raw-audit-intent.v3.schema.json`,
 `raw-audit-checkpoint.v3.schema.json` and `raw-audit-outcome.v3.schema.json`.
 All twelve assets remain validated as Draft 2020-12 golden sources. The five
-search/chat-read assets and two download assets are materialized byte-identically
-at the schema root, cataloged, embedded and packaged with their active handlers.
-Raw command assets remain absent from all three command catalogs, embedded
-lookup bytes and packages; raw audit-v3 assets remain persistence-only and never
-become command catalog entries.
+search/chat-read assets, two download assets and raw result/error assets are
+materialized byte-identically at the schema root, cataloged, embedded and
+packaged with their active handlers. Raw audit-v3 assets remain persistence-only
+and never become command catalog entries.
 
 Search result is exactly items (at most 100 exact shared MessageSummary) and
 nonempty cursor-or-null. Chat-info has exactly the 16 fields in §4.4 and a

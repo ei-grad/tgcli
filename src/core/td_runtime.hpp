@@ -16,10 +16,26 @@
 #include <variant>
 #include <vector>
 
+namespace td::td_api {
+class Function;
+class Object;
+} // namespace td::td_api
+namespace td::tl {
+template <class Type> class unique_ptr;
+} // namespace td::tl
+
+namespace tgcli::daemon {
+class RawCoordinator;
+}
+
 namespace tgcli::core {
 
 class TdClient;
 using TdEventClock = std::chrono::steady_clock;
+using TdRawFunctionPtr = td::tl::unique_ptr<td::td_api::Function>;
+using TdRawObjectPtr = td::tl::unique_ptr<td::td_api::Object>;
+using TdRawFunctionWiper = std::function<void(TdRawFunctionPtr&)>;
+using TdRawResponseWiper = std::function<void(TdRawObjectPtr&)>;
 
 enum class TdFunctionKind {
     GetAuthorizationState,
@@ -94,6 +110,9 @@ enum class TdFunctionKind {
     GetDownloadMessage,
     DownloadFile,
     GetSuggestedFileName,
+    RawRead,
+    RawWrite,
+    RawDestructive,
     GetMessageProperties,
     GetMessageAvailableReactions,
     ParseTextEntities,
@@ -264,6 +283,12 @@ constexpr std::string_view td_function_name(TdFunctionKind function) {
         return "downloadFile";
     case TdFunctionKind::GetSuggestedFileName:
         return "getSuggestedFileName";
+    case TdFunctionKind::RawRead:
+        return "rawRead";
+    case TdFunctionKind::RawWrite:
+        return "rawWrite";
+    case TdFunctionKind::RawDestructive:
+        return "rawDestructive";
     case TdFunctionKind::GetMessageProperties:
         return "getMessageProperties";
     case TdFunctionKind::GetMessageAvailableReactions:
@@ -432,6 +457,22 @@ class TdValue {
         return function_;
     }
 
+    void set_raw_request_wiper(TdRawFunctionWiper wiper) {
+        raw_request_wiper_ = std::move(wiper);
+    }
+
+    [[nodiscard]] const TdRawFunctionWiper& raw_request_wiper() const noexcept {
+        return raw_request_wiper_;
+    }
+
+    void set_raw_response_wiper(TdRawResponseWiper wiper) {
+        raw_response_wiper_ = std::move(wiper);
+    }
+
+    [[nodiscard]] const TdRawResponseWiper& raw_response_wiper() const noexcept {
+        return raw_response_wiper_;
+    }
+
     void set_receive_event_metadata(std::uint64_t sequence, TdEventClock::time_point observed_at) {
         receive_event_sequence_ = sequence;
         receive_observed_at_ = observed_at;
@@ -479,6 +520,8 @@ class TdValue {
 
     std::unique_ptr<ValueBase> value_;
     std::optional<TdFunctionData> function_;
+    TdRawFunctionWiper raw_request_wiper_;
+    TdRawResponseWiper raw_response_wiper_;
     std::uint64_t receive_event_sequence_ = 0;
     std::optional<TdEventClock::time_point> receive_observed_at_;
 };

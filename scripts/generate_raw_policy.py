@@ -13,6 +13,9 @@ from typing import NoReturn
 
 PINNED_TDLIB_SHA = "a17f87c4cff7b90b278d12b91ba0614383aaee82"
 PINNED_FUNCTION_COUNT = 1001
+ACCEPTED_POLICY_SHA256 = (
+    "sha256:4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce"
+)
 SCHEMA_VERSION = 1
 FUNCTION_MARKER = "---functions---"
 TL_FUNCTION = re.compile(
@@ -675,6 +678,8 @@ def generated_graph_include(
     output = [
         "// Generated from pinned td_api.tl. Do not edit.",
         f"inline constexpr std::string_view kRawTdGraphSha256 = {cpp_string(str(graph['graph_sha256']).removeprefix('sha256:'))};",
+        f"inline constexpr std::string_view kRawPolicySha256 = {cpp_string(str(policy['policy_sha256']).removeprefix('sha256:'))};",
+        f"inline constexpr bool kRawPolicyActivationReady = {'true' if policy['activation_ready'] else 'false'};",
         f"inline constexpr std::array<RawTdFieldSpec, {len(field_rows)}> kRawTdFields{{",
         *field_rows,
         "};",
@@ -820,7 +825,7 @@ def generated_canonical_include(graph: dict[str, object]) -> bytes:
 
     output = [
         "// Generated from pinned td_api.tl. Do not edit.",
-        "bool append_native_object(const td::td_api::Object& value, std::string& output) {",
+        "bool append_native_object(const td::td_api::Object& value, CanonicalBuffer& output) {",
         "    switch (value.get_id()) {",
         *cases("object"),
         "    default:",
@@ -828,7 +833,7 @@ def generated_canonical_include(graph: dict[str, object]) -> bytes:
         "    }",
         "}",
         "",
-        "bool append_native_function(const td::td_api::Function& value, std::string& output) {",
+        "bool append_native_function(const td::td_api::Function& value, CanonicalBuffer& output) {",
         "    switch (value.get_id()) {",
         *cases("function"),
         "    default:",
@@ -996,20 +1001,22 @@ def candidate_policy(
                 "review_reason": reason,
             }
         )
+    policy_digest = rows_digest(rows)
+    accepted = not unfinished_functions and policy_digest == ACCEPTED_POLICY_SHA256
     return {
         "schema_version": SCHEMA_VERSION,
         "tdlib_sha": PINNED_TDLIB_SHA,
-        "activation_ready": False,
+        "activation_ready": accepted,
         "activation_blockers": [
             "independent_policy_acceptance",
             "unfinished_function_reviews",
         ]
         if unfinished_functions
-        else ["independent_policy_acceptance"],
+        else ([] if accepted else ["independent_policy_acceptance"]),
         "unfinished_functions": unfinished_functions,
         "function_count": len(rows),
         "inventory_sha256": inventory["functions_sha256"],
-        "policy_sha256": rows_digest(rows),
+        "policy_sha256": policy_digest,
         "functions": rows,
     }
 

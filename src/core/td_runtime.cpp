@@ -255,6 +255,11 @@ namespace {
 using NativeFunctionPtr = td_api::object_ptr<td_api::Function>;
 using NativeObjectPtr = td_api::object_ptr<td_api::Object>;
 
+bool raw_function_kind(TdFunctionKind kind) noexcept {
+    return kind == TdFunctionKind::RawRead || kind == TdFunctionKind::RawWrite ||
+           kind == TdFunctionKind::RawDestructive;
+}
+
 void wipe_get_internal_link_type(NativeFunctionPtr& native,
                                  const secure::WipeObserver& wipe_observer) noexcept {
     if (native != nullptr && native->get_id() == td_api::getInternalLinkType::ID) {
@@ -3519,12 +3524,19 @@ TdValue convert_response_for(TdFunctionKind function, NativeObjectPtr object,
             return TdValue::from(TdM6Response{TdM6Ok{}});
         }
         return m6_conversion_error(object);
+    case TdFunctionKind::RawRead:
+    case TdFunctionKind::RawWrite:
+    case TdFunctionKind::RawDestructive:
+        return unexpected_direct_response(object);
     default:
         return convert_response(std::move(object));
     }
 }
 
 bool native_function_matches(const td_api::Function& function, TdFunctionKind kind) {
+    if (raw_function_kind(kind)) {
+        return true;
+    }
     switch (kind) {
     case TdFunctionKind::GetAuthorizationState:
         return function.get_id() == td_api::getAuthorizationState::ID;
@@ -3708,6 +3720,10 @@ bool native_function_matches(const td_api::Function& function, TdFunctionKind ki
         return function.get_id() == td_api::logOut::ID;
     case TdFunctionKind::Close:
         return function.get_id() == td_api::close::ID;
+    case TdFunctionKind::RawRead:
+    case TdFunctionKind::RawWrite:
+    case TdFunctionKind::RawDestructive:
+        return true;
     }
     return false;
 }
@@ -4359,6 +4375,89 @@ std::optional<AuthStateData> extract_auth_state(const td_api::Object& object,
     }
     return std::nullopt;
 }
+
+struct ProductionResponseFunction {
+    TdFunctionKind kind;
+    TdRawResponseWiper raw_wiper;
+};
+
+using ProductionResponseFunctionMap =
+    std::unordered_map<std::int32_t, std::unordered_map<std::uint64_t, ProductionResponseFunction>>;
+
+std::optional<ProductionResponseFunction>
+take_response_function(ProductionResponseFunctionMap& functions, std::int32_t client_id,
+                       std::uint64_t query_id) {
+    const auto clients = functions.find(client_id);
+    if (clients == functions.end()) {
+        return std::nullopt;
+    }
+    const auto query = clients->second.find(query_id);
+    if (query == clients->second.end()) {
+        return std::nullopt;
+    }
+    auto result = std::move(query->second);
+    clients->second.erase(query);
+    if (clients->second.empty()) {
+        functions.erase(clients);
+    }
+    return result;
+}
+
+void retire_raw_response_functions(ProductionResponseFunctionMap& active,
+                                   ProductionResponseFunctionMap& retired, std::int32_t client_id) {
+    const auto client = active.find(client_id);
+    if (client == active.end()) {
+        return;
+    }
+    auto& destination = retired[client_id];
+    for (auto& [query_id, function] : client->second) {
+        if (raw_function_kind(function.kind) && function.raw_wiper) {
+            destination.insert_or_assign(query_id, std::move(function));
+        }
+    }
+    active.erase(client);
+    if (destination.empty()) {
+        retired.erase(client_id);
+    }
+}
+
+bool wipe_raw_response(std::optional<ProductionResponseFunction>& function,
+                       NativeObjectPtr& response) {
+    if (!function || !raw_function_kind(function->kind) || !function->raw_wiper) {
+        return false;
+    }
+    function->raw_wiper(response);
+    return true;
+}
+
+class ProductionFunctionTransfer final {
+  public:
+    ProductionFunctionTransfer(NativeFunctionPtr& source, TdRawFunctionWiper wiper) noexcept
+        : value_(std::move(source)), wiper_(std::move(wiper)) {}
+
+    ~ProductionFunctionTransfer() {
+        if (value_ != nullptr && wiper_) {
+            wiper_(value_);
+        }
+    }
+
+    ProductionFunctionTransfer(const ProductionFunctionTransfer&) = delete;
+    ProductionFunctionTransfer& operator=(const ProductionFunctionTransfer&) = delete;
+    ProductionFunctionTransfer(ProductionFunctionTransfer&&) = delete;
+    ProductionFunctionTransfer& operator=(ProductionFunctionTransfer&&) = delete;
+
+    [[nodiscard]] NativeFunctionPtr&& argument() noexcept {
+        return std::move(value_);
+    }
+
+    [[nodiscard]] bool consumed() const noexcept {
+        return value_ == nullptr;
+    }
+
+  private:
+    NativeFunctionPtr value_;
+    TdRawFunctionWiper wiper_;
+};
 
 class ProductionTdRuntime final : public TdRuntime {
   public:
@@ -5178,17 +5277,28 @@ class ProductionTdRuntime final : public TdRuntime {
         if (!function_kind || !native_function_matches(**native_function, *function_kind)) {
             throw std::invalid_argument("TdClient native function does not match its descriptor");
         }
+        const bool is_raw = raw_function_kind(*function_kind);
+        if (is_raw && (!function.raw_request_wiper() || !function.raw_response_wiper())) {
+            throw std::invalid_argument("raw TdClient request is missing an ownership wiper");
+        }
+        auto request_wiper = is_raw ? function.raw_request_wiper() : TdRawFunctionWiper{};
         const bool is_authorization_state_query =
             (*native_function)->get_id() == td_api::getAuthorizationState::ID;
         {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
-            response_functions_[client_id].insert_or_assign(query_id, *function_kind);
+            response_functions_[client_id].insert_or_assign(
+                query_id,
+                ProductionResponseFunction{*function_kind, function.raw_response_wiper()});
             if (is_authorization_state_query) {
                 authorization_queries_[client_id].insert(query_id);
             }
         }
+        ProductionFunctionTransfer transfer(*native_function, std::move(request_wiper));
         try {
-            manager_->send(client_id, query_id, std::move(*native_function));
+            manager_->send(client_id, query_id, transfer.argument());
+            if (!transfer.consumed()) {
+                throw std::runtime_error("TDLib did not consume the native request");
+            }
         } catch (...) {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
             const auto functions = response_functions_.find(client_id);
@@ -5216,33 +5326,32 @@ class ProductionTdRuntime final : public TdRuntime {
         }
 
         std::uint64_t generation = 0;
+        bool known_generation = false;
         bool authorization_state_response = false;
-        std::optional<TdFunctionKind> response_function;
+        std::optional<ProductionResponseFunction> response_function;
         {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
             const auto it = generations_.find(response.client_id);
             if (it == generations_.end()) {
-                return std::nullopt;
-            }
-            generation = it->second;
-            const auto functions = response_functions_.find(response.client_id);
-            if (functions != response_functions_.end()) {
-                const auto function = functions->second.find(response.request_id);
-                if (function != functions->second.end()) {
-                    response_function = function->second;
-                    functions->second.erase(function);
-                }
-                if (functions->second.empty()) {
-                    response_functions_.erase(functions);
-                }
-            }
-            const auto queries = authorization_queries_.find(response.client_id);
-            if (queries != authorization_queries_.end()) {
-                authorization_state_response = queries->second.erase(response.request_id) != 0;
-                if (queries->second.empty()) {
-                    authorization_queries_.erase(queries);
+                response_function = take_response_function(retired_response_functions_,
+                                                           response.client_id, response.request_id);
+            } else {
+                known_generation = true;
+                generation = it->second;
+                response_function = take_response_function(response_functions_, response.client_id,
+                                                           response.request_id);
+                const auto queries = authorization_queries_.find(response.client_id);
+                if (queries != authorization_queries_.end()) {
+                    authorization_state_response = queries->second.erase(response.request_id) != 0;
+                    if (queries->second.empty()) {
+                        authorization_queries_.erase(queries);
+                    }
                 }
             }
+        }
+        if (!known_generation) {
+            static_cast<void>(wipe_raw_response(response_function, response.object));
+            return std::nullopt;
         }
 
         auto authorization_state =
@@ -5251,32 +5360,78 @@ class ProductionTdRuntime final : public TdRuntime {
             const std::lock_guard<std::mutex> lock(generations_mutex_);
             generations_.erase(response.client_id);
             authorization_queries_.erase(response.client_id);
-            response_functions_.erase(response.client_id);
+            retire_raw_response_functions(response_functions_, retired_response_functions_,
+                                          response.client_id);
         }
-        return TdRuntimeEvent{.client_id = response.client_id,
-                              .client_generation = generation,
-                              .query_id = response.request_id,
-                              .object =
-                                  response_function
-                                      ? convert_response_for(*response_function,
-                                                             std::move(response.object), generation)
-                                      : convert_response(std::move(response.object), generation),
-                              .authorization_state = std::move(authorization_state)};
+        return TdRuntimeEvent{
+            .client_id = response.client_id,
+            .client_generation = generation,
+            .query_id = response.request_id,
+            .object = response_function
+                          ? convert_registered_response(*response_function,
+                                                        std::move(response.object), generation)
+                          : convert_response(std::move(response.object), generation),
+            .authorization_state = std::move(authorization_state)};
     }
 
   private:
+    static TdValue convert_registered_response(const ProductionResponseFunction& function,
+                                               NativeObjectPtr object, std::uint64_t generation) {
+        if (!raw_function_kind(function.kind)) {
+            return convert_response_for(function.kind, std::move(object), generation);
+        }
+        auto value = TdValue::sensitive_function(std::move(object), TdFunctionData{function.kind},
+                                                 function.raw_wiper);
+        return value;
+    }
+
     std::unique_ptr<td::ClientManager> manager_;
     std::shared_ptr<TdLogSink> log_sink_;
     std::mutex generations_mutex_;
     std::unordered_map<std::int32_t, std::uint64_t> generations_;
     std::unordered_map<std::int32_t, std::unordered_set<std::uint64_t>> authorization_queries_;
-    std::unordered_map<std::int32_t, std::unordered_map<std::uint64_t, TdFunctionKind>>
-        response_functions_;
+    ProductionResponseFunctionMap response_functions_;
+    ProductionResponseFunctionMap retired_response_functions_;
 };
 
 } // namespace
 
 namespace detail {
+
+TdRawTransferEvidence production_consume_raw_function_for_test(TdValue& function) {
+    auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr || !function.raw_request_wiper()) {
+        return {};
+    }
+    const auto* identity = native->get();
+    ProductionFunctionTransfer transfer(*native, function.raw_request_wiper());
+    NativeFunctionPtr tdlib_owned = transfer.argument();
+    return {.source_released = *native == nullptr,
+            .exact_identity = tdlib_owned.get() == identity,
+            .transfer_consumed = transfer.consumed()};
+}
+
+bool production_reject_raw_function_transfer_for_test(TdValue& function) {
+    auto* native = function.get_if<NativeFunctionPtr>();
+    if (native == nullptr || *native == nullptr || !function.raw_request_wiper()) {
+        return false;
+    }
+    const ProductionFunctionTransfer transfer(*native, function.raw_request_wiper());
+    return *native == nullptr && !transfer.consumed();
+}
+
+bool production_retired_raw_response_wipes_for_test(TdRawObjectPtr response,
+                                                    TdRawResponseWiper wiper) {
+    constexpr std::int32_t client_id = 7;
+    constexpr std::uint64_t query_id = 11;
+    ProductionResponseFunctionMap active;
+    ProductionResponseFunctionMap retired;
+    active[client_id].emplace(
+        query_id, ProductionResponseFunction{TdFunctionKind::RawRead, std::move(wiper)});
+    retire_raw_response_functions(active, retired, client_id);
+    auto function = take_response_function(retired, client_id, query_id);
+    return active.empty() && wipe_raw_response(function, response) && retired.empty();
+}
 
 TdValue convert_production_response_for_test(TdValue object) {
     auto* native = object.get_if<NativeObjectPtr>();

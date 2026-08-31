@@ -209,6 +209,7 @@ class RequestSession final : public ResponseSink {
     DeliveryOutcome emit_item(nlohmann::json data) override;
     void emit_progress(nlohmann::json data) override;
     DeliveryOutcome emit_result(nlohmann::json data) override;
+    DeliveryOutcome emit_raw_result(secure::SensitiveString canonical) override;
     DeliveryOutcome emit_error(std::string code, std::string message, nlohmann::json details,
                                int exit_code) override;
     ChallengeReply emit_challenge(nlohmann::json data) override;

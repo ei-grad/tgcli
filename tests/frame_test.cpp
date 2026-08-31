@@ -204,6 +204,49 @@ TEST_CASE("raw request dialects stay disjoint at the v3 parser", "[proto][protoc
     CHECK(error.empty());
 }
 
+TEST_CASE("raw result frames preserve canonical TD bytes and wipe every transport owner",
+          "[proto][raw][canonical][wipe]") {
+    std::vector<std::string> stages;
+    const tgcli::secure::WipeObserver observer =
+        [&stages](std::string_view stage, const char*, std::size_t) { stages.emplace_back(stage); };
+    constexpr std::string_view canonical = R"({"@type":"text","text":"z","entities":[]})";
+    {
+        const Frame frame = RawResult{7, std::string(canonical), observer};
+        const auto encoded = serialize(frame, observer);
+        CHECK(encoded ==
+              R"({"type":"raw_result","id":7,"data":{"@type":"text","text":"z","entities":[]}})");
+        std::string error;
+        auto parsed = parse(encoded, error, observer);
+        REQUIRE(parsed);
+        const auto* raw = std::get_if<RawResult>(&*parsed);
+        REQUIRE(raw != nullptr);
+        CHECK(raw->id() == 7);
+        CHECK(raw->canonical() == canonical);
+        CHECK(serialize(*parsed, observer) == encoded);
+    }
+    CHECK(std::ranges::find(stages, "parsed_line") != stages.end());
+    CHECK(std::ranges::find(stages, "raw_result_canonical") != stages.end());
+}
+
+TEST_CASE("raw result canonical envelope rejects malformed ids metadata and frame overflow",
+          "[proto][raw][bounds]") {
+    std::string error;
+    for (const auto& line : {
+             R"({"type":"raw_result","id":0,"data":{"@type":"ok"}})",
+             R"({"type":"raw_result","id":01,"data":{"@type":"ok"}})",
+             R"({"type":"raw_result","id":1,"data":{"@type":"ok","@extra":1}})",
+             R"({"type":"raw_result","id":1,"data":{"@type":"ok","@client_id":1}})",
+             R"({"type":"raw_result","id":1,"data":null})",
+         }) {
+        CHECK_FALSE(parse(std::string(line), error));
+    }
+    std::string canonical = R"({"@type":"text","text":")";
+    canonical.append(tgcli::proto::kMaximumSerializedFrameBytes, 'x');
+    canonical += R"("})";
+    const Frame oversized = RawResult{1, std::move(canonical)};
+    CHECK_FALSE(serialize_bounded(oversized, error));
+}
+
 TEST_CASE("request account is mandatory and uses the canonical account-name grammar",
           "[proto][account][mutation]") {
     STATIC_REQUIRE_FALSE(std::is_default_constructible_v<Request>);

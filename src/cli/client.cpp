@@ -189,6 +189,18 @@ class FrameRenderer {
         return daemon::DeliveryOutcome::Complete;
     }
 
+    daemon::DeliveryOutcome on_raw_result(std::string_view canonical) {
+        const auto written = std::fwrite(canonical.data(), 1, canonical.size(), stdout);
+        if (written != canonical.size() || std::fputc('\n', stdout) == EOF ||
+            std::fflush(stdout) != 0) {
+            on_transport_failure();
+            return daemon::DeliveryOutcome::Disconnected;
+        }
+        exit_code_ = kOk;
+        done_ = true;
+        return daemon::DeliveryOutcome::Complete;
+    }
+
     void on_error(const std::string& code, const std::string& message, const json& details,
                   int exit_code) {
         print_error(code, message, details);
@@ -241,8 +253,9 @@ class FrameRenderer {
 class InProcessSink final : public daemon::ResponseSink {
   public:
     InProcessSink(FrameRenderer& renderer, ChallengePrompt& prompt, bool tty,
-                  std::uint64_t request_id)
-        : renderer_(renderer), prompt_(prompt), tty_(tty), request_id_(request_id) {}
+                  std::uint64_t request_id, secure::WipeObserver wipe_observer)
+        : renderer_(renderer), prompt_(prompt), tty_(tty), request_id_(request_id),
+          wipe_observer_(std::move(wipe_observer)) {}
 
   private:
     daemon::DeliveryOutcome emit_item(json data) override {
@@ -262,6 +275,14 @@ class InProcessSink final : public daemon::ResponseSink {
             return daemon::DeliveryOutcome::Disconnected;
         }
         return renderer_.on_result(data);
+    }
+    daemon::DeliveryOutcome emit_raw_result(secure::SensitiveString canonical) override {
+        proto::Frame frame =
+            proto::RawResult{request_id_, std::string(canonical.view()), canonical.wipe_observer()};
+        if (!admit(frame)) {
+            return daemon::DeliveryOutcome::Disconnected;
+        }
+        return renderer_.on_raw_result(std::get<proto::RawResult>(frame).canonical());
     }
     daemon::DeliveryOutcome emit_error(std::string code, std::string message, json details,
                                        int exit_code) override {
@@ -317,7 +338,10 @@ class InProcessSink final : public daemon::ResponseSink {
             return false;
         }
         std::string error;
-        if (proto::serialize_bounded(frame, error)) {
+        auto serialized = proto::serialize_bounded(frame, error, wipe_observer_);
+        if (serialized) {
+            const secure::StringWiper serialized_wiper(*serialized, wipe_observer_,
+                                                       "in_process_serialized_frame");
             return true;
         }
         transport_failed_ = true;
@@ -329,6 +353,7 @@ class InProcessSink final : public daemon::ResponseSink {
     ChallengePrompt& prompt_;
     bool tty_;
     std::uint64_t request_id_;
+    secure::WipeObserver wipe_observer_;
     bool transport_failed_ = false;
 };
 
@@ -1217,6 +1242,8 @@ int exchange(int fd, proto::FrameReader& reader, const proto::Request& request,
                     renderer.on_progress(f.data);
                 } else if constexpr (std::is_same_v<T, proto::Result>) {
                     delivery = renderer.on_result(f.data);
+                } else if constexpr (std::is_same_v<T, proto::RawResult>) {
+                    delivery = renderer.on_raw_result(f.canonical());
                 } else if constexpr (std::is_same_v<T, proto::Error>) {
                     renderer.on_error(f.code, f.message, f.details, f.exit_code);
                 } else if constexpr (std::is_same_v<T, proto::Challenge>) {
@@ -1236,7 +1263,7 @@ int run_in_process(const proto::Request& request, const RunOptions& options,
                    ChallengePrompt& prompt) {
     FrameRenderer renderer(command_key(request.command), options.json,
                            options.stream_output_writer);
-    InProcessSink sink(renderer, prompt, request.context.tty, request.id);
+    InProcessSink sink(renderer, prompt, request.context.tty, request.id, request.wipe_observer());
     std::string error;
     if (!daemon::run_no_daemon(request, sink, options.account, error, options.in_process_dispatcher,
                                options.in_process_td_client, options.in_process_request_wall_clock,
@@ -1400,7 +1427,7 @@ int run_config_global(const proto::Request& request, const RunOptions& options,
     daemon::register_account_commands(dispatcher, context);
 
     FrameRenderer renderer(command_key(request.command), options.json);
-    InProcessSink sink(renderer, prompt, request.context.tty, request.id);
+    InProcessSink sink(renderer, prompt, request.context.tty, request.id, request.wipe_observer());
     try {
         daemon::RequestSession session(request, sink);
         if (request.command == std::vector<std::string>{"account", "show"}) {
@@ -1461,7 +1488,7 @@ int run_logout_dry_run(const proto::Request& request, const RunOptions& options)
 int run_local_account_removal(const proto::Request& request, const RunOptions& options,
                               ChallengePrompt& prompt) {
     FrameRenderer renderer(command_key(request.command), options.json);
-    InProcessSink sink(renderer, prompt, request.context.tty, request.id);
+    InProcessSink sink(renderer, prompt, request.context.tty, request.id, request.wipe_observer());
     std::string error;
     if (!daemon::run_account_removal_local(request, sink, options.account, error)) {
         print_error("GENERIC", error, json::object());

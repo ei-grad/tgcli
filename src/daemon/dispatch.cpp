@@ -44,7 +44,7 @@ struct DispatcherOperationIdentity {
     std::string_view operation;
 };
 
-constexpr std::array<DispatcherOperationIdentity, 30> kDispatcherOperationIdentities{{
+constexpr std::array<DispatcherOperationIdentity, 31> kDispatcherOperationIdentities{{
     {"version", "version"},
     {"doctor", "doctor"},
     {"daemon status", "status"},
@@ -70,6 +70,7 @@ constexpr std::array<DispatcherOperationIdentity, 30> kDispatcherOperationIdenti
     {"msg get", "msg_get"},
     {"msg link", "msg_link"},
     {"read", "read"},
+    {"raw", "raw"},
     {"resolve", "resolve"},
     {"session list", "session_list"},
     {"session terminate", "session_terminate"},
@@ -258,6 +259,16 @@ DeliveryOutcome ResponseSink::result(nlohmann::json data) {
     return emit_result(std::move(data));
 }
 
+DeliveryOutcome ResponseSink::raw_result(secure::SensitiveString canonical) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (terminal_ || !claim_public_terminal()) {
+        return DeliveryOutcome::Suppressed;
+    }
+    before_direct_terminal_bit();
+    terminal_ = true;
+    return emit_raw_result(std::move(canonical));
+}
+
 DeliveryOutcome ResponseSink::error(std::string code, std::string message, nlohmann::json details,
                                     int exit_code) {
     const std::lock_guard<std::mutex> lock(mutex_);
@@ -360,6 +371,9 @@ void ResponseSink::abort_transport() noexcept {
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): one closed descriptor policy gate.
 void Dispatcher::register_command(const std::string& path, CommandDescriptor descriptor) {
+    if (descriptor.dynamic_raw_policy != (path == "raw")) {
+        throw std::invalid_argument("raw command descriptor is missing its dynamic policy gate");
+    }
     if ((descriptor.deadline_default == DeadlineDefault::Unlimited) !=
         allows_unlimited_default(path)) {
         throw std::invalid_argument("unlimited deadline policy does not match its command");
@@ -463,7 +477,8 @@ void Dispatcher::dispatch(RequestSession& session) const {
                                 it->second.m1_destructive_kernel;
     const bool active_write = publicly_active_m3(it->second.m3_operation) ||
                               it->second.m6_operation.has_value() ||
-                              it->second.session_operation == proto::SessionOperation::Terminate;
+                              it->second.session_operation == proto::SessionOperation::Terminate ||
+                              it->second.dynamic_raw_policy;
     if (it->second.tier != Tier::Read && !m1_destructive && !active_write) {
         session.error("DENIED", "write-tier commands are not implemented yet (fail-closed gate)",
                       nlohmann::json::object(), kDenied);

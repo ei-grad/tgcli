@@ -76,6 +76,7 @@ class ResponseSink {
     DeliveryOutcome item(nlohmann::json data);
     void progress(nlohmann::json data);
     DeliveryOutcome result(nlohmann::json data);
+    DeliveryOutcome raw_result(secure::SensitiveString canonical);
     DeliveryOutcome error(std::string code, std::string message, nlohmann::json details,
                           int exit_code);
     std::optional<nlohmann::json> challenge(nlohmann::json data);
@@ -87,6 +88,13 @@ class ResponseSink {
     virtual DeliveryOutcome emit_item(nlohmann::json data) = 0;
     virtual void emit_progress(nlohmann::json data) = 0;
     virtual DeliveryOutcome emit_result(nlohmann::json data) = 0;
+    virtual DeliveryOutcome emit_raw_result(secure::SensitiveString canonical) {
+        auto data = nlohmann::json::parse(canonical.view(), nullptr, false);
+        if (data.is_discarded()) {
+            return DeliveryOutcome::Disconnected;
+        }
+        return emit_result(std::move(data));
+    }
     virtual DeliveryOutcome emit_error(std::string code, std::string message,
                                        nlohmann::json details, int exit_code) = 0;
     virtual ChallengeReply emit_challenge(nlohmann::json data) = 0;
@@ -172,6 +180,7 @@ struct CommandDescriptor {
     std::optional<proto::M6Operation> m6_operation = std::nullopt;
     std::optional<proto::SessionOperation> session_operation = std::nullopt;
     bool config_admission = false;
+    bool dynamic_raw_policy = false;
 };
 
 // The daemon-side dispatch table and the single safety chokepoint (DESIGN.md

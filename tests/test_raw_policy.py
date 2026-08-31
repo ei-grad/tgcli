@@ -76,17 +76,17 @@ class RawPolicyTest(unittest.TestCase):
             len(raw_policy.COMPILED_VALIDATORS),
         )
 
-    def test_dormant_candidate_is_exhaustive_reviewed_and_not_accepted(self) -> None:
+    def test_accepted_candidate_is_exhaustive_reviewed_and_activation_ready(
+        self,
+    ) -> None:
         policy = raw_policy.load_json(
             REPOSITORY
             / "docs"
             / "raw"
             / f"raw-policy.{raw_policy.PINNED_TDLIB_SHA}.json"
         )
-        self.assertFalse(policy["activation_ready"])
-        self.assertEqual(
-            policy["activation_blockers"], ["independent_policy_acceptance"]
-        )
+        self.assertTrue(policy["activation_ready"])
+        self.assertEqual(policy["activation_blockers"], [])
         self.assertEqual(policy["unfinished_functions"], [])
         self.assertEqual(policy["function_count"], 1001)
         admission = {}
@@ -122,9 +122,8 @@ class RawPolicyTest(unittest.TestCase):
             },
         )
 
-    def test_activation_validator_rejects_the_dormant_seed(self) -> None:
-        with self.assertRaisesRegex(raw_policy.PolicyError, "not activation-ready"):
-            raw_policy.validate_assets(TDLIB_SOURCE, REPOSITORY, activation=True)
+    def test_activation_validator_accepts_only_the_locked_reviewed_policy(self) -> None:
+        raw_policy.validate_assets(TDLIB_SOURCE, REPOSITORY, activation=True)
 
     def test_unreviewed_admission_and_asset_drift_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

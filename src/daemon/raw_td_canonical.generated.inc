@@ -1,5 +1,5 @@
 // Generated from pinned td_api.tl. Do not edit.
-bool append_native_object(const td::td_api::Object& value, std::string& output) {
+bool append_native_object(const td::td_api::Object& value, CanonicalBuffer& output) {
     switch (value.get_id()) {
 case td::td_api::accentColor::ID: {
     const auto& typed = static_cast<const td::td_api::accentColor&>(value);
@@ -26300,7 +26300,7 @@ case td::td_api::webPageInstantView::ID: {
     }
 }
 
-bool append_native_function(const td::td_api::Function& value, std::string& output) {
+bool append_native_function(const td::td_api::Function& value, CanonicalBuffer& output) {
     switch (value.get_id()) {
 case td::td_api::acceptCall::ID: {
     const auto& typed = static_cast<const td::td_api::acceptCall&>(value);

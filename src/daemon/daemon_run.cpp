@@ -20,6 +20,7 @@
 #include "daemon/m2_read_commands.hpp"
 #include "daemon/m6_commands.hpp"
 #include "daemon/message_commands.hpp"
+#include "daemon/raw_commands.hpp"
 #include "daemon/read_commands.hpp"
 #include "daemon/removal_journal.hpp"
 #include "daemon/removal_recovery.hpp"
@@ -282,6 +283,7 @@ int run_daemon(const std::string& account) {
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency,
                             stop_server);
     M6Coordinator m6(td, account, idempotency);
+    RawCoordinator raw(td, account, account_paths.state_dir, environment.uid);
     StreamCoordinator streams(td, stream_service, account, StreamActivityMode::TrackedDaemon);
 
     DaemonContext context;
@@ -303,6 +305,7 @@ int run_daemon(const std::string& account) {
     context.resolver = &resolver;
     context.writes = &writes;
     context.m6 = &m6;
+    context.raw = &raw;
     context.streams = &streams;
     context.idempotency = idempotency;
     context.auth_state = [&td] {
@@ -480,6 +483,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     ResolveCoordinator resolver(td, account);
     WriteCoordinator writes(td, account, config_store.path(), environment.uid, idempotency);
     M6Coordinator m6(td, account, idempotency);
+    RawCoordinator raw(td, account, account_paths.state_dir, environment.uid);
     std::unique_ptr<StreamCoordinator> streams;
     if (stream_service_override != nullptr) {
         streams = std::make_unique<StreamCoordinator>(td, *stream_service_override, account,
@@ -504,6 +508,7 @@ bool run_no_daemon(const proto::Request& request, ResponseSink& sink, const std:
     context.resolver = &resolver;
     context.writes = &writes;
     context.m6 = &m6;
+    context.raw = &raw;
     context.streams = streams.get();
     context.idempotency = idempotency;
     context.auth_state = [&td] {

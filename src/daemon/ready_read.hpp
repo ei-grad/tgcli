@@ -46,6 +46,8 @@ class ReadyReadSession {
     first_non_ready_after(const core::AuthStateSnapshot& snapshot) const;
     ReadyReadResult read(const ReadyReadStart& start,
                          std::shared_ptr<const core::AuthStateSnapshot>& snapshot);
+    ReadyReadResult read_exact(const ReadyReadStart& start,
+                               const std::shared_ptr<const core::AuthStateSnapshot>& snapshot);
 
   private:
     class Impl;

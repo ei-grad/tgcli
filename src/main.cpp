@@ -289,14 +289,12 @@ int report_usage(std::string_view message, const nlohmann::json& argument,
     return tgcli::kUsage;
 }
 
-int report_unsupported_mode(std::string_view argument) {
-    const auto message = argument == "--full" ? "--full is reserved through v1"
-                                              : std::string(argument) + " is reserved until M7";
+int report_reserved_full() {
     const nlohmann::json rendered{
         {"error",
          {{"code", "USAGE"},
-          {"message", message},
-          {"details", {{"argument", argument}, {"reason", "unsupported_mode"}}}}}};
+          {"message", "--full is reserved through v1"},
+          {"details", {{"argument", "--full"}, {"reason", "unsupported_mode"}}}}}};
     std::fputs((rendered.dump() + "\n").c_str(), stderr);
     return tgcli::kUsage;
 }
@@ -390,10 +388,7 @@ std::optional<int> handle_client_local_or_reserved_command(
             {{schema_target}, unsupported_option, schema_all, schema_help, verbose});
     }
     if (full.count() != 0) {
-        return report_unsupported_mode("--full");
-    }
-    if (command == std::vector<std::string>{"raw"}) {
-        return report_unsupported_mode("raw");
+        return report_reserved_full();
     }
     return std::nullopt;
 }
@@ -1939,6 +1934,32 @@ std::optional<int> read_edit_stdin(MessageCliArguments& messages) {
     return std::nullopt;
 }
 
+std::optional<int> read_raw_stdin(std::string& input) {
+    constexpr std::size_t maximum = static_cast<std::size_t>(1024) * 1024;
+    std::string buffer(maximum + 1, '\0');
+    const tgcli::secure::StringWiper buffer_wiper(buffer, {}, "cli_raw_stdin_buffer");
+    std::size_t offset = 0;
+    for (;;) {
+        const auto count = ::read(STDIN_FILENO, buffer.data() + offset, buffer.size() - offset);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0) {
+            return report_usage("cannot read raw request from stdin", "-");
+        }
+        if (count == 0) {
+            break;
+        }
+        offset += static_cast<std::size_t>(count);
+        if (offset > maximum) {
+            return report_usage("raw stdin exceeds 1 MiB", "-");
+        }
+    }
+    buffer.resize(offset);
+    tgcli::secure::transfer(buffer, input, {}, "cli_raw_stdin_source");
+    return std::nullopt;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): closed CLI grammar and routing table.
 int run(int argc, char** argv) {
     if (consume_legacy_bot_token(argc, argv)) {
@@ -1946,7 +1967,7 @@ int run(int argc, char** argv) {
     }
     const bool schema_invocation = targets_schema_command(argc, argv);
     if (!schema_invocation && contains_reserved_full(argc, argv)) {
-        return report_unsupported_mode("--full");
+        return report_reserved_full();
     }
     bool schema_help = false;
     CLI::App app{"tgcli — Telegram CLI"};
@@ -1963,6 +1984,8 @@ int run(int argc, char** argv) {
     bool allow_write = false;
     bool yes = false;
     bool dry_run = false;
+    std::string raw_stdin_marker;
+    std::string raw_input;
     std::string idempotency_key;
     double timeout_seconds = 0.0;
     std::string resolve_selector;
@@ -2014,9 +2037,10 @@ int run(int argc, char** argv) {
     completion_cmd->add_option("shell", completion_shell, "bash, zsh, or fish")
         ->required()
         ->check(CLI::IsMember({"bash", "zsh", "fish"}));
-    CLI::App* raw_cmd = app.add_subcommand("raw", "reserved until M7");
-    raw_cmd->set_help_flag();
-    raw_cmd->fallthrough(false)->prefix_command();
+    CLI::App* raw_cmd = app.add_subcommand("raw", "invoke an admitted pinned TDLib function");
+    raw_cmd->add_option("input", raw_stdin_marker, "literal -; request JSON is read from stdin")
+        ->required()
+        ->check(CLI::IsMember({"-"}));
     bool login_qr = false;
     bool login_bot = false;
     std::string rejected_bot_token;
@@ -2355,6 +2379,7 @@ int run(int argc, char** argv) {
     }
 
     auto command = selected_command(app);
+    std::unique_ptr<tgcli::secure::StringWiper> raw_input_wiper;
     std::unique_ptr<tgcli::secure::StringWiper> join_invite_wiper;
     std::unique_ptr<tgcli::secure::StringWiper> revoke_invite_wiper;
     if (command == std::vector<std::string>{"chat", "join"} &&
@@ -2384,6 +2409,13 @@ int run(int argc, char** argv) {
     }
     if (command == std::vector<std::string>{"msg", "edit"}) {
         if (const auto stdin_exit = read_edit_stdin(messages); stdin_exit) {
+            return *stdin_exit;
+        }
+    }
+    if (command == std::vector<std::string>{"raw"}) {
+        raw_input_wiper = std::make_unique<tgcli::secure::StringWiper>(
+            raw_input, tgcli::secure::WipeObserver{}, "cli_raw_input");
+        if (const auto stdin_exit = read_raw_stdin(raw_input); stdin_exit) {
             return *stdin_exit;
         }
     }
@@ -2487,6 +2519,16 @@ int run(int argc, char** argv) {
             }
         }
     }
+    if (command == std::vector<std::string>{"raw"}) {
+        if (saved.cursor_option->count() != 0) {
+            return report_usage("--cursor is not supported for raw", "--cursor",
+                                "unsupported_mode");
+        }
+        if (idempotency_key_option->count() != 0) {
+            return report_usage("--idempotency-key is not supported for raw", "--idempotency-key",
+                                "unsupported_mode");
+        }
+    }
     if (const auto pre_routing_exit = handle_client_local_or_reserved_command(
             command, *account_option, *json_option, *full_option, *allow_write_option, *yes_option,
             *dry_run_option, *timeout_option, timeout_seconds, *saved.cursor_option,
@@ -2545,6 +2587,7 @@ int run(int argc, char** argv) {
     const bool supports_dry_run = command == std::vector<std::string>{"logout"} ||
                                   command == std::vector<std::string>{"account", "remove"} ||
                                   command == std::vector<std::string>{"session", "terminate"} ||
+                                  command == std::vector<std::string>{"raw"} ||
                                   tgcli::proto::m3_operation_for_command(command).has_value() ||
                                   (m6_identity != nullptr && m6_identity->mutation);
     if (dry_run && !supports_dry_run) {
@@ -2560,6 +2603,9 @@ int run(int argc, char** argv) {
     nlohmann::json request_args =
         command_request_args(command, login_qr, login_bot, resolve_selector, chats, saved, messages,
                              send, chat, *selected_read, fetch, download, stream, m2_long_read, m6);
+    if (command == std::vector<std::string>{"raw"}) {
+        request_args = {{"input", raw_input}};
+    }
     auto request_context =
         make_request_context(json_output, yes, dry_run, *folded_authority, std::move(frozen_cwd),
                              command == std::vector<std::string>{"download"});

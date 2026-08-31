@@ -9,6 +9,16 @@
 
 namespace tgcli::core::detail {
 
+struct TdRawTransferEvidence {
+    bool source_released = false;
+    bool exact_identity = false;
+    bool transfer_consumed = false;
+};
+
+TdRawTransferEvidence production_consume_raw_function_for_test(TdValue& function);
+bool production_reject_raw_function_transfer_for_test(TdValue& function);
+bool production_retired_raw_response_wipes_for_test(TdRawObjectPtr response,
+                                                    TdRawResponseWiper wiper);
 TdValue convert_production_response_for_test(TdValue object);
 TdValue convert_production_sessions_for_test(TdValue object);
 TdValue make_production_get_active_sessions_for_test();

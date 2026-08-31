@@ -158,7 +158,7 @@ for (const leaf of leaves) {
 }
 
 const raw = leaves.find((leaf) => leaf.path === "raw");
-requireCondition(raw?.activation === "future", "raw must remain future");
+requireCondition(raw?.activation === "active", "raw must be active");
 requireCondition(raw.positionals.join(" ") === "-", "raw positional differs");
 requireCondition(raw.completion_literals.join(" ") === "-", "raw completion literal differs");
 requireCondition(!raw.effectiveOptions.includes("--cursor"), "raw cursor leaked");
@@ -167,7 +167,7 @@ requireCondition(
   leaves.find((leaf) => leaf.path === "completion")?.activation === "active",
   "completion must be active",
 );
-requireCondition(leaves.find((leaf) => leaf.path === "raw")?.activation === "future", "raw must remain future");
+requireCondition(leaves.find((leaf) => leaf.path === "raw")?.activation === "active", "raw must be active");
 
 const visibleLeaves = leaves.filter((leaf) => leaf.activation === "active");
 const visibleCommands = registry.commands
