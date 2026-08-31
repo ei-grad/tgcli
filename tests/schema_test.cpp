@@ -19,8 +19,9 @@ namespace {
 
 constexpr std::string_view kDialect = "https://json-schema.org/draft/2020-12/schema";
 
-void check_schema_node(const json& schema) {
+void check_schema_node(const json& schema, bool allow_raw_live_object = false) {
     std::vector<const json*> pending{&schema};
+    std::size_t open_object_count = 0;
     while (!pending.empty()) {
         const auto* node = pending.back();
         pending.pop_back();
@@ -44,13 +45,26 @@ void check_schema_node(const json& schema) {
         if ((node->contains("type") && (*node)["type"] == "object") ||
             node->contains("properties")) {
             REQUIRE(node->contains("additionalProperties"));
-            CHECK((*node)["additionalProperties"] == false);
+            if ((*node)["additionalProperties"] == true) {
+                ++open_object_count;
+                REQUIRE(allow_raw_live_object);
+                CHECK((*node)["required"] == json::array({"@type"}));
+                REQUIRE((*node)["properties"].is_object());
+                CHECK((*node)["properties"].size() == 3);
+                CHECK((*node)["properties"]["@type"] ==
+                      json{{"type", "string"}, {"pattern", "^[A-Za-z][A-Za-z0-9]{0,127}$"}});
+                CHECK((*node)["properties"]["@extra"] == false);
+                CHECK((*node)["properties"]["@client_id"] == false);
+            } else {
+                CHECK((*node)["additionalProperties"] == false);
+            }
         }
         for (const auto& [name, child] : node->items()) {
             static_cast<void>(name);
             pending.push_back(&child);
         }
     }
+    CHECK(open_object_count == static_cast<std::size_t>(allow_raw_live_object));
 }
 
 struct SchemaCase {
@@ -374,6 +388,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
                     {"msg pin", {{"result", "msg-pin.result.schema.json"}}},
                     {"msg react", {{"result", "msg-react.result.schema.json"}}},
                     {"msg unpin", {{"result", "msg-unpin.result.schema.json"}}},
+                    {"raw", {{"result", "raw.result.schema.json"}}},
                     {"read", {{"result", "read.result.schema.json"}}},
                     {"resolve", {{"result", "resolve.result.schema.json"}}},
                     {"saved attach", {{"result", "saved-attach.result.schema.json"}}},
@@ -393,7 +408,7 @@ TEST_CASE("schema manifest is an exact command-to-result bijection", "[schema]")
             {"result", filename + ".result.schema.json"}};
     }
     CHECK(manifest == expected);
-    CHECK(manifest["commands"].size() == 76);
+    CHECK(manifest["commands"].size() == 77);
 
     std::set<std::string> manifested_files;
     for (const auto& [command, contract] : manifest["commands"].items()) {
@@ -426,7 +441,7 @@ TEST_CASE("result schemas use the strict local Draft 2020-12 subset", "[schema]"
         const auto schema = tgcli::test::load_schema_document(result->get<std::string>());
         REQUIRE(schema.contains("$schema"));
         CHECK(schema["$schema"] == kDialect);
-        check_schema_node(schema);
+        check_schema_node(schema, command == "raw");
     }
 
     const auto doctor = tgcli::test::load_schema_document("doctor.result.schema.json");

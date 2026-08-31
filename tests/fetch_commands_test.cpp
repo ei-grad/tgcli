@@ -286,7 +286,7 @@ TEST_CASE("fetch relative since stays bound to request admission across delayed 
     REQUIRE(outcome.result);
     CHECK((*outcome.result)["target"]["since"] == "1970-01-01T01:46:41Z");
     CHECK((*outcome.result)["stop_reason"] == "since_anchor_reached");
-    CHECK(fake.wall_clock_reads() == 1);
+    CHECK(fake.wall_clock_reads() == 0);
 }
 
 TEST_CASE("fetch defaults to depth 100 and incorporates the complete local page",
