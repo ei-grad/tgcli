@@ -7128,7 +7128,9 @@ this is deliberately fail-closed and must be replaced by the verified archive
 digest before either definition is published. `SKIP`/`:no_check` is forbidden.
 
 The installed `tgcli@.service` is a user template with `Type=notify`, runs the
-foreground `tgcli --account %i daemon run` entrypoint without a shell, applies
+foreground `tgcli --account %I daemon run` entrypoint without a shell, where
+`%I` restores the exact unescaped account name from the systemd instance, and
+applies
 `UMask=0077` and process/filesystem hardening that leaves the current user's XDG
 data and state writable, and permits only Unix/IPv4/IPv6 sockets. SIGTERM uses
 the normal graceful daemon shutdown. The unit does not create account config;

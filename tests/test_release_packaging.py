@@ -14,6 +14,15 @@ VERSION = "1.0.0"
 ZERO_SHA256 = "0" * 64
 SERVICE_SOURCE = Path("packaging/systemd/tgcli@.service")
 SERVICE_PACKAGE = Path("lib/systemd/user/tgcli@.service")
+ACCOUNT_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def unescape_systemd_instance(instance: str) -> str:
+    return re.sub(
+        r"\\x([0-9a-fA-F]{2})",
+        lambda match: chr(int(match.group(1), 16)),
+        instance,
+    )
 
 
 class VersionContractTests(unittest.TestCase):
@@ -82,7 +91,7 @@ After=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=tgcli --account %i daemon run
+ExecStart=tgcli --account %I daemon run
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=90s
@@ -104,6 +113,15 @@ LockPersonality=yes
 WantedBy=default.target
 """,
         )
+
+    def test_systemd_escaped_instance_round_trips_to_a_valid_account(self) -> None:
+        service = (REPOSITORY / SERVICE_SOURCE).read_text(encoding="utf-8")
+        escaped = r"work\x2dtest"
+        account = unescape_systemd_instance(escaped)
+        self.assertEqual(account, "work-test")
+        self.assertRegex(account, ACCOUNT_NAME)
+        self.assertIn("ExecStart=tgcli --account %I daemon run", service)
+        self.assertNotIn("ExecStart=tgcli --account %i daemon run", service)
 
     def test_aur_recipe_is_pretag_fail_closed_and_installs_exact_layout(self) -> None:
         recipe = REPOSITORY / "packaging/aur/PKGBUILD"

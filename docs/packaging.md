@@ -24,8 +24,9 @@ systemctl --user enable --now 'tgcli@main.service'
 ```
 
 The instance name is the exact tgcli account name; names containing characters
-that systemd escapes should be passed through `systemd-escape`. The unit runs
-`tgcli --account %i daemon run` in the foreground, waits for tgcli's native
+that systemd escapes should be passed through `systemd-escape`. The unit uses
+the unescaped `%I` instance value and runs `tgcli --account %I daemon run` in
+the foreground, waits for tgcli's native
 `READY=1` notification, and relies on SIGTERM for the normal graceful shutdown
 path. The executable name is resolved by systemd's fixed executable search
 path, not by a shell or user-controlled `PATH` expansion.
