@@ -49,7 +49,7 @@ before the milestone is closed.
 
 ## M1 — Auth & accounts
 
-- [ ] **M1.1 config/bootstrap:** strict loader, 1 MiB bound, one-second idle
+- [x] **M1.1 config/bootstrap:** strict loader, 1 MiB bound, one-second idle
       watcher/two-second publish-or-reject deadline and immutable last-good
       snapshots; invalid-reload standing-grant deny and config-global current-
       file reads; cross-process `config.lock`, snapshot-identity CAS and
@@ -59,7 +59,7 @@ before the milestone is closed.
       exact phone/QR/registration settings, deterministic implicit-main
       materialization, bounded/redacted per-field `*_cmd` fallback, and fully
       isolated/propagated `TGCLI_TEST_DC=1` roots and parameter identity.
-- [ ] **M1.2 auth core:** source-aware `(client_id, query_id)` correlation,
+- [x] **M1.2 auth core:** source-aware `(client_id, query_id)` correlation,
       immutable auth snapshots, exhaustive 13-state pinned FSM including
       `waitPremiumPurchase`, repeated QR updates, ready-loss termination with
       generic reason, and non-shutdown `Closed` replacement. Lifecycle-owned
@@ -67,14 +67,14 @@ before the milestone is closed.
       resolve their waiter before the unrelated-generation sweep, and preserve
       exactly one terminal; credential and unknown 400/401/429/5xx mapping is
       closed and tested.
-- [ ] **M1.3 challenge/login:** challenge identity binds connection/request,
+- [x] **M1.3 challenge/login:** challenge identity binds connection/request,
       client generation, auth sequence, nonce and sequence; same-state updates
       supersede old input; answer/deadline acceptance is atomic. Cover pre-send
       disconnect, serialized/orphaned in-flight auth queries, cancellation and
       one-deadline/one-terminal behavior; phone/code/email/2FA/database-key and
       registration retry/resume; QR progress and bot hook/no-echo login; reject
       and redact legacy `--bot-token` plus every env/plain-config token path.
-- [ ] **M1.4 identity/safety:** curated `login`/`me`/`doctor` results; every
+- [x] **M1.4 identity/safety:** curated `login`/`me`/`doctor` results; every
       TDLib send crosses the descriptor chokepoint, with AuthBootstrap's closed
       function/state allowlist and all other writes still denied. Implement the
       M1 destructive kernel for `logout`/`account remove` only: authority-source
@@ -82,14 +82,14 @@ before the milestone is closed.
       records, correlated logout completion and fail-closed remote uncertainty.
       Set process-global TDLib logging to ERROR before client creation, keep it
       below INFO for life, and make `-v` affect tgcli diagnostics only.
-- [ ] **M1.5 accounts/removal:** `account add|list|show|use|remove`, empty-config
+- [x] **M1.5 accounts/removal:** `account add|list|show|use|remove`, empty-config
       results, exact duplicate/missing/default-reassignment behavior, target-
       daemon routing and config/tdlib/state/socket isolation. Default removal
       versus `--keep-session` uses a global non-deletable audit/tombstone,
       ordered crash-safe remote/config/data/state/outcome checkpoints, fresh-
       approval recovery, root identity/CAS validation, and mount/device-
       boundary refusal; no local deletion precedes remote proof.
-- [ ] **M1.6 daemon/results:** exact auto-spawn/no-spawn matrix and
+- [x] **M1.6 daemon/results:** exact auto-spawn/no-spawn matrix and
       `daemon status|stop|restart|run` absent/running behavior; preserve M0
       `USAGE {}` for lifecycle `--no-daemon`; one-second config observation and
       request/challenge/subscription `idle_exit` accounting. Add result-only
@@ -98,7 +98,7 @@ before the milestone is closed.
       arrays and `none|possible|confirmed` mutation state while preserving M0
       objects; keep raw rejected until atomic M7 activation and `--full`
       rejected throughout v1.
-- [ ] **M1.7 fake-boundary acceptance:** drive all 13 auth states and the closed
+- [x] **M1.7 fake-boundary acceptance:** drive all 13 auth states and the closed
       exact `(function, code, raw message)` credential table; first-query/all-
       parameter bootstrap in response-first and update-first orders, repeated
       QR replacement, stale/wrong/duplicate answers, same-state supersession,
@@ -109,26 +109,29 @@ before the milestone is closed.
       audit inspection/clear behavior, mount refusal, account
       isolation/routing/empty config and daemon spawn/idle boundaries through
       real dispatch.
-- [ ] **M1.8 test-DC and real-TD sentinel:** `TGCLI_TEST_DC=1` creates and
-      propagates isolated roots/parameters, refuses production state, and runs
-      nightly. Smoke covers add/phone/fixed-code registration, `me`, explicitly
-      granted/confirmed logout and correlated closed/re-login readiness. QR/bot
-      require their named fixtures. Concurrent `-v` auth with sentinel token,
-      codes, password and database key scans stderr, active `tdlib.log` and all
-      rotated logs byte-for-byte and proves TDLib INFO request serialization is
-      absent.
-- [ ] **M1.9 explicit E2E gaps:** every pinned state not deterministically
+- [x] **M1.8 test-DC and real-TD sentinel harness:** `TGCLI_TEST_DC=1` creates
+      and propagates isolated roots/parameters, refuses production state, and
+      is wired into the nightly workflow. The deterministic harness covers the
+      add/phone/fixed-code registration, `me`, explicitly granted/confirmed
+      logout and correlated closed/re-login flows; QR/bot require their named
+      fixtures. Concurrent `-v` auth sentinel scans cover stderr, active
+      `tdlib.log` and every rotation without permitting TDLib INFO request
+      serialization.
+- [x] **M1.9 explicit E2E gaps:** every pinned state not deterministically
       forceable in the test DC has M1.7 coverage and a closed skip reason. Every
       run publishes `<build-dir>/test-results/tgcli-test-dc-skips.json`, even
       when empty, with exact sorted entries and only
       `fixture_missing:qr_approver`, `fixture_missing:bot_token_cmd`, or
       `test_dc_state_not_forceable:<state>`; a missing artifact or silent/pass-
       equivalent skip fails the milestone gate.
-- [ ] Review gate: M1 diff vs DESIGN.md
+- [ ] Run the current HEAD M1 live TestDC smoke and sentinel scan with external
+      credentials/network; local fake-boundary and workflow contracts cannot
+      substitute for this evidence.
+- [x] Review gate: M1 diff vs DESIGN.md
 
 ## M2 — Read path
 
-- [ ] Resolver: exact id/@username/t.me classification and link/bot matrix;
+- [x] Resolver: exact id/@username/t.me classification and link/bot matrix;
       arbitrary title substring over fully loaded active Main+Archive, local
       materialized-prefix scope, strict ambiguity candidates, and exact
       username `NOT_FOUND` normalization; the finalized `ResolverConsumer`
@@ -206,11 +209,11 @@ before the milestone is closed.
 - [x] General M2 read test-DC flow: after auth smoke, run
       `tgcli chats -n 1 --json` and require exit 0 plus a schema-valid empty or
       non-empty list without a pre-created fixture
-- [ ] Review gate: M2 diff vs DESIGN.md
+- [x] Review gate: M2 diff vs DESIGN.md
 
 ## M3 — Safety & write path
 
-- [ ] Implement the frozen protocol-v3 precursor: strict nine-field context
+- [x] Implement the frozen protocol-v3 precursor: strict nine-field context
       with `idempotency_key`, Hello-first parsing/writing, v1/v2↔v3 frozen
       control replacement, exact status/stop/restart/autospawn behavior, and
       auth-bound M3/M4 dry-run read allowlist/effect fixtures, including
@@ -220,13 +223,13 @@ before the milestone is closed.
       arbitration; and zero config/audit/idempotency/spool/prior-group-
       reconciliation or other tgcli persistence mutation across all seventeen
       planner dry-runs
-- [ ] Reuse exact M2 resolver/principal DTOs, add static operation tiers and
+- [x] Reuse exact M2 resolver/principal DTOs, add static operation tiers and
       the user/bot/schedule admission matrix, and extend the single daemon-side
       safety chokepoint to every M3 Write/Destructive descriptor
-- [ ] Add neutral TD request/update DTOs, strict M3 results/errors/plans, and
+- [x] Add neutral TD request/update DTOs, strict M3 results/errors/plans, and
       direct-response/auth-update/deadline arbitration without exposing
       `td_api.h` outside daemon implementation translation units
-- [ ] Add strict mixed-v1/v2 per-account audit schemas, factories, streaming
+- [x] Add strict mixed-v1/v2 per-account audit schemas, factories, streaming
       scanner, recovery and pin-aware fixed-slot rotation; preserve v1 APIs and
       its 64 MiB behavior; freeze AUDIT_INCOMPLETE recovery terminals,
       sent-forward confirmed recovery, cleanup/outcome/store ordering,
@@ -239,17 +242,17 @@ before the milestone is closed.
       pseudo-assertions, emit the exact schema-version-2 marker and
       filename/rules matrix, and test ordinary-schema acceptance separately
       from required runtime semantics.
-- [ ] Align session/M3 AUDIT_UNAVAILABLE schemas with the complete accepted
+- [x] Align session/M3 AUDIT_UNAVAILABLE schemas with the complete accepted
       durability_reason enum; reject rotate_failed in v2 while retaining the
       separate v1 audit_reason, and generator-check every runtime audit record.
 - [x] Add canonical JSON, domain-separated hashes and complete per-operation
       fingerprints with exact canonical byte/golden vectors and raw-key/invite
       sentinel gates.
-- [ ] Extend the accepted audit API with open-group generation, the exact
+- [x] Extend the accepted audit API with open-group generation, the exact
       immutable streamed completed-group view, one-pass tuple pin validation,
       move-only append permits and receipt-bound audit spool holds/releases;
       retain M6 `AbsentByPolicy` as zero store/temp I/O and hole-only rotation.
-- [ ] Add the strict canonical-byte idempotency store and reconciliation:
+- [x] Add the strict canonical-byte idempotency store and reconciliation:
       fixed stale-temp recovery, file-fsync→rename→directory-fsync replacement,
       exhaustive public reason/precedence and canonical absolute path, exact
       count/byte/mutable-headroom quota, keyed/unkeyed equality expiry with
@@ -260,7 +263,7 @@ before the milestone is closed.
       unexpected-insert-loss INTERNAL/AUDIT_INCOMPLETE fatal closure,
       checkpoint→store repair, exact M4 pass-1/pass-2 epoch placement, no inner
       store lock, crash recovery and safe spool/capacity release.
-- [ ] Add shared direct and single-message coordinators with immutable plans,
+- [x] Add shared direct and single-message coordinators with immutable plans,
       schedule ceiling/boundary rechecks, strict timeout oneOf, exact terminal
       ordering, and no post-dispatch cancellation claim
 - [x] Implement `tgcli send` text/Markdown/HTML/reply/forum-topic/silent/
@@ -281,7 +284,7 @@ before the milestone is closed.
 - [x] Implement `tgcli chat mark-read|mute|unmute|pin|unpin|archive|unarchive|join`
       with exact direct-call state machines, invite secrecy and
       notification-setting plans
-- [ ] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel
+- [x] Add the complete fake-boundary/fault/cutpoint/canonicalization/sentinel
       acceptance matrix: same-key dual misses; expiry equality/rollback/order;
       canonical/noncanonical final bytes; fixed-temp and rename/directory-fsync
       crash images; mutable progress quota and completion clearing;
@@ -305,7 +308,7 @@ before the milestone is closed.
 - [x] Add the mandatory no-skip Saved text-send TestDC flow with authoritative
       final-id validation, immediate cleanup registration, get/replay/conflict
       verification, cleanup on every exit, and post-delete absence proof
-- [ ] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
+- [x] Review gate: M3 diff vs DESIGN.md (safety chokepoint gets extra scrutiny)
 
 ## M4 — Files & media
 
@@ -335,35 +338,35 @@ before the milestone is closed.
       two-pass source races, quota/CAS cutpoints, audit, timeout and replay
 - [x] `TGCLI_MEDIA_DIR` handling
 - [x] Add a supported M4 media flow to the test-DC E2E milestone gate
-- [ ] Review gate: M4 diff vs DESIGN.md
+- [x] Review gate: M4 diff vs DESIGN.md
 
 ## M5 — Streaming
 
 - [x] Add strict `listen` item, `wait-for` result, and stream error schemas plus
       the separate exact stream catalog/package bijection and schema-provable
       checked-sum byte-capacity diagnostics
-- [ ] Land the shared M2 resolver, MessageSummary/ChatIdentity/ChatSummary DTOs,
+- [x] Land the shared M2 resolver, MessageSummary/ChatIdentity/ChatSummary DTOs,
       sender matching, int53 handling, and local-history components M5 reuses
-- [ ] Integrate the measured google/re2 `2022-12-01` full-commit archive as a
+- [x] Integrate the measured google/re2 `2022-12-01` full-commit archive as a
       static runtime dependency; lock its archive/tree hashes, BSD and embedded
       Lucent notices, offline staging, and no-ICU/PCRE/Abseil provenance checks
-- [ ] Add tagged unlimited/finite deadlines and stop-aware wait helpers without
+- [x] Add tagged unlimited/finite deadlines and stop-aware wait helpers without
       a maximum-time sentinel
-- [ ] Add generation-scoped metadata bootstrap, the bounded ordered-normalization
+- [x] Add generation-scoped metadata bootstrap, the bounded ordered-normalization
       barrier, curated update/reaction/chat normalization, and explicit metadata
       capacity failures
-- [ ] Add the fixed 32-slot sequentially consistent ingress registry, bounded
+- [x] Add the fixed 32-slot sequentially consistent ingress registry, bounded
       per-subscription SPSC queues, polling workers, overflow causes, and proven
       deferred reclamation
-- [ ] Add RequestSession item/terminal ordering, complete-write counting,
+- [x] Add RequestSession item/terminal ordering, complete-write counting,
       transactional activity promotion, teardown, and first-cause arbitration
-- [ ] Implement exact `listen`/`wait-for` parsing, setup precedence, filters,
+- [x] Implement exact `listen`/`wait-for` parsing, setup precedence, filters,
       retained `--after` scan/deduplication, bot behavior, and command handlers
-- [ ] Add silent internal `listen` Result handling, checked per-item stdout
+- [x] Add silent internal `listen` Result handling, checked per-item stdout
       write/flush, output-failure cancellation, and daemon/no-daemon parity
-- [ ] Add schema, fake/native, TSan, integration, release-provenance, and no-skip
+- [x] Add schema, fake/native, TSan, integration, release-provenance, and no-skip
       Saved TestDC coverage for the complete M5 acceptance matrix
-- [ ] Review gate: M5 diff vs DESIGN.md
+- [x] Review gate: M5 diff vs DESIGN.md
 
 ## M6 — Long tail
 
@@ -490,17 +493,29 @@ before the milestone is closed.
 - [x] Activate `completion bash|zsh|fish` as a client-local meta-command and
       package byte-identical assets, registry and `tgcli(1)` page through one
       generated CMake/Linux/macOS release manifest with unpacked archive checks
-- [ ] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
+- [x] docs/schemas/ — freeze curated JSON schemas per command; keep persistence
       schemas out of command catalogs unless a later reviewed mapping explicitly
       adds them, and byte-preserve semantic markers only for explicitly
       cataloged marked command schemas
-- [ ] Validate the complete M1–M6 test-DC E2E suite at the M7 gate, including
-      fake-boundary coverage and explicit skip reasons for states the test DC
-      or available account capabilities cannot exercise
-- [ ] Static musl Linux binary + macOS universal binary release job
-- [ ] Packaging: AUR, Homebrew; systemd user unit example for `tgcli daemon run`
-- [ ] Review gate: M7 diff vs DESIGN.md
-- [ ] v1.0
+- [ ] Validate the complete current-HEAD M1–M6 test-DC E2E suite at the M7
+      gate, including explicit skip reasons for states the test DC or available
+      account capabilities cannot exercise. The 49-case local fake/workflow
+      contract is green, but external TestDC credentials and network execution
+      are unavailable in this local gate and cannot be reported as live proof.
+- [x] Implement the hermetic static-musl Linux and macOS-universal release jobs,
+      including source/tag/version binding, provenance, SBOM, schema/support
+      assets, signing separation and deterministic offline contract tests.
+- [ ] Execute those jobs on the current HEAD and inspect real Linux static and
+      macOS universal artifacts; local Linux builds and source/layout simulation
+      are not current-head macOS runtime evidence.
+- [x] Prepare fail-closed v1.0.0 AUR and Homebrew definitions plus the hardened
+      systemd user-service template, with one generated CMake/Linux/macOS asset
+      manifest and deterministic offline install/layout verification.
+- [ ] Review gate: M7 diff vs DESIGN.md (pending independent review of the
+      version/package/systemd/status closure).
+- [ ] Tag, sign and publish v1.0.0, replace package checksum placeholders with
+      verified artifact digests, publish the external package definitions, and
+      validate the public release artifacts; no local gate can complete this.
 
 ## Post-1.0 ideas
 

@@ -5,7 +5,7 @@ endif()
 set(manifest_file "${SOURCE_ROOT}/docs/release/command-assets.json")
 file(READ "${manifest_file}" manifest)
 string(JSON asset_count LENGTH "${manifest}" assets)
-if(NOT asset_count EQUAL 5)
+if(NOT asset_count EQUAL 6)
     message(FATAL_ERROR "release command asset count differs")
 endif()
 

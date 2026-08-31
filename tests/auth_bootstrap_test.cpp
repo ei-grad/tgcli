@@ -171,7 +171,7 @@ core::BootstrapSnapshot capture(const TempBootstrapRoot& root, const paths::Envi
     const auto loaded = store.load();
     REQUIRE(loaded);
     auto captured =
-        core::capture_bootstrap_snapshot("main", loaded.snapshot, env, env.test_dc, "0.1.0-test",
+        core::capture_bootstrap_snapshot("main", loaded.snapshot, env, env.test_dc, "1.0.0-test",
                                          std::move(api_id), std::move(api_hash));
     REQUIRE(captured.snapshot);
     static_cast<void>(root);
@@ -743,7 +743,7 @@ TEST_CASE("bootstrap sends all 14 exact fields while neutral data redacts creden
 #else
     CHECK(std::get<std::string>(*field(function, "system_version")) == "Linux");
 #endif
-    CHECK(std::get<std::string>(*field(function, "application_version")) == "0.1.0-test");
+    CHECK(std::get<std::string>(*field(function, "application_version")) == "1.0.0-test");
     CHECK(
         std::holds_alternative<core::TdRedactedValue>(*field(function, "database_encryption_key")));
     CHECK(std::holds_alternative<core::TdRedactedValue>(*field(function, "api_hash")));

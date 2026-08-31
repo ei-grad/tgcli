@@ -1,0 +1,39 @@
+# Maintainer: tgcli maintainers
+# PRETAG_CHECKSUM: replace the all-zero checksum after the v1.0.0 artifacts exist.
+pkgname=tgcli-bin
+_pkgname=tgcli
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Telegram command-line client built on TDLib"
+arch=('x86_64')
+url="https://github.com/ei-grad/tgcli"
+license=('MIT')
+provides=('tgcli')
+conflicts=('tgcli')
+options=('!strip')
+source_x86_64=("${_pkgname}-${pkgver}-linux-x86_64-musl.tar.gz::https://github.com/ei-grad/tgcli/releases/download/v${pkgver}/tgcli-${pkgver}-linux-x86_64-musl.tar.gz")
+sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
+
+package() {
+  local release_root="${srcdir}/${_pkgname}-${pkgver}-linux-x86_64-musl"
+
+  install -Dm755 "${release_root}/tgcli" "${pkgdir}/usr/bin/tgcli"
+  install -Dm644 "${release_root}/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 "${release_root}/README.md" \
+    "${pkgdir}/usr/share/doc/${_pkgname}/README.md"
+  install -Dm644 "${release_root}/THIRD_PARTY_NOTICES.md" \
+    "${pkgdir}/usr/share/doc/${_pkgname}/THIRD_PARTY_NOTICES.md"
+  install -Dm644 "${release_root}/share/bash-completion/completions/tgcli" \
+    "${pkgdir}/usr/share/bash-completion/completions/tgcli"
+  install -Dm644 "${release_root}/share/fish/vendor_completions.d/tgcli.fish" \
+    "${pkgdir}/usr/share/fish/vendor_completions.d/tgcli.fish"
+  install -Dm644 "${release_root}/share/zsh/site-functions/_tgcli" \
+    "${pkgdir}/usr/share/zsh/site-functions/_tgcli"
+  install -Dm644 "${release_root}/share/man/man1/tgcli.1" \
+    "${pkgdir}/usr/share/man/man1/tgcli.1"
+  install -Dm644 "${release_root}/share/tgcli/public-command-registry.json" \
+    "${pkgdir}/usr/share/tgcli/public-command-registry.json"
+  install -Dm644 "${release_root}/lib/systemd/user/tgcli@.service" \
+    "${pkgdir}/usr/lib/systemd/user/tgcli@.service"
+}

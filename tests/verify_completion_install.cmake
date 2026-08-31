@@ -20,7 +20,7 @@ endif()
 file(READ "${manifest_file}" manifest)
 string(JSON schema_version GET "${manifest}" schema_version)
 string(JSON asset_count LENGTH "${manifest}" assets)
-if(NOT schema_version EQUAL 1 OR NOT asset_count EQUAL 5)
+if(NOT schema_version EQUAL 1 OR NOT asset_count EQUAL 6)
     message(FATAL_ERROR "release command asset manifest root differs")
 endif()
 

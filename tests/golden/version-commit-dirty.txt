@@ -1,1 +1,1 @@
-tgcli 0.1.0 (4d7ca6e-dirty, protocol 3, tdlib 1.8.65)
+tgcli 1.0.0 (4d7ca6e-dirty, protocol 3, tdlib 1.8.65)

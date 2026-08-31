@@ -141,7 +141,7 @@ class FakeAuth {
         runtime_->push_response(first_, 1, {}, std::move(initial));
         REQUIRE(wait_state_sequence(1));
         coordinator_ = std::make_unique<daemon::LoginCoordinator>(
-            *client_, store_, tree.environment(), std::move(account), "0.1.0-test",
+            *client_, store_, tree.environment(), std::move(account), "1.0.0-test",
             std::move(environment_api_id), std::move(environment_api_hash), std::move(hook_runner));
         daemon::register_login_commands(dispatcher_, *coordinator_);
     }

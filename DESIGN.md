@@ -7100,13 +7100,41 @@ suggests literal `-` and only its accepted flags; `--full`,
 `--bot-token`, raw cursor and raw idempotency remain absent.
 
 `docs/release/command-assets.json` is the generated authoritative mapping from
-the three completion sources, `docs/man/tgcli.1` and the public registry to
-their `share/` package paths. The generator emits the mechanically identical
-CMake install fragment; Linux and macOS release assembly consume the JSON
-mapping directly. CMake installs and both platform archives must contain every
-mapped file byte-equal to its source. Archive verification also executes the
-packaged binary and requires each completion output to equal the same source
-bytes after unpacking.
+the three completion sources, `docs/man/tgcli.1`, the public registry and the
+systemd user-service template to their package paths. The generator emits the
+mechanically identical CMake install fragment; Linux and macOS release assembly
+consume the JSON mapping directly. CMake installs and both platform archives
+must contain every mapped file byte-equal to its source. Archive verification
+also executes the packaged binary and requires each completion output to equal
+the same source bytes after unpacking. The systemd template is installed at
+`lib/systemd/user/tgcli@.service`; non-systemd packages may retain it as inert
+release metadata.
+
+The canonical source/build version for the first stable release is `1.0.0`.
+The release workflow accepts only an exact `vMAJOR.MINOR.PATCH` tag whose value
+equals the single `project(tgcli VERSION …)` declaration and whose commit is the
+checked-out default-branch source. A version declaration alone is not release
+evidence: v1.0.0 remains unpublished until tag validation, signing and both
+real release artifacts complete.
+
+`packaging/aur/PKGBUILD` consumes the verified static
+`tgcli-1.0.0-linux-x86_64-musl.tar.gz` archive and installs the binary,
+completion assets, registry, man page and systemd user unit at conventional
+Arch paths. `packaging/homebrew/tgcli.rb` consumes the verified
+`tgcli-1.0.0-macos-universal.tar.gz` archive and installs the binary plus the
+macOS-relevant completion, registry and man assets. Before the tag artifacts
+exist, both definitions contain a literal all-zero 64-hex SHA-256 placeholder;
+this is deliberately fail-closed and must be replaced by the verified archive
+digest before either definition is published. `SKIP`/`:no_check` is forbidden.
+
+The installed `tgcli@.service` is a user template with `Type=notify`, runs the
+foreground `tgcli --account %i daemon run` entrypoint without a shell, applies
+`UMask=0077` and process/filesystem hardening that leaves the current user's XDG
+data and state writable, and permits only Unix/IPv4/IPv6 sockets. SIGTERM uses
+the normal graceful daemon shutdown. The unit does not create account config;
+the selected account must already be configured. Exact package definitions,
+service bytes, simulated Arch install layout, CMake install and both release
+archive layouts are offline contract-tested.
 
 Completion rejects `--account`, `--json`, `--full`, `--allow-write`, `--yes`,
 `--dry-run`, `--timeout`, `--cursor` and `--idempotency-key` with exit 2 before
@@ -7255,10 +7283,10 @@ encode these shapes without adding td_api fields. A `UserSummary` is:
 | `account show main` | `{"account":"main","default":true,"allow_write":false,"idle_exit":null,"credentials":{"api_id":"value","api_hash":"value","db_key":"none","password":"interactive","bot_token":"interactive"},"paths":{"data":"/…/tgcli/accounts/main","state":"/…/tgcli/accounts/main","socket":"/…/main.sock"}}` |
 | `account use work` | `{"default_account":"work","previous_default":"main"}`; `previous_default` is null only when none was configured |
 | `account remove work` | `{"account":"work","removed":true,"remote_logout":"confirmed","default_account":"main"}`; `remote_logout` is exactly `confirmed`, `not_present`, or `kept`, and `default_account` is string or null |
-| `daemon status` (running) | `{"account":"main","running":true,"pid":123,"version":"0.1.0","protocol":3,"socket":"/…/main.sock"}` |
+| `daemon status` (running) | `{"account":"main","running":true,"pid":123,"version":"1.0.0","protocol":3,"socket":"/…/main.sock"}` |
 | `daemon status` (absent) | `{"account":"main","running":false,"socket":"/…/main.sock"}` |
 | `daemon stop` | the existing M0 object `{"stopping":true}` |
-| `daemon restart` | `{"account":"main","restarted":true,"pid":124,"version":"0.1.0","protocol":3,"socket":"/…/main.sock"}` |
+| `daemon restart` | `{"account":"main","restarted":true,"pid":124,"version":"1.0.0","protocol":3,"socket":"/…/main.sock"}` |
 
 In `account show`, `api_id`/`api_hash` are exactly `value`, `command`, or
 `missing`; `db_key` is `command` or `none`; and `password`/`bot_token` are
@@ -7318,8 +7346,8 @@ into `version`, the binary version handshake, a protocol-envelope field or an
 audit field, and it does not appear in `doctor`, `daemon status` or
 `daemon restart` results.
 Human output is exactly
-`tgcli 0.1.0 (4d7ca6e, protocol 3, tdlib 1.8.65)` when present and
-`tgcli 0.1.0 (protocol 3, tdlib 1.8.65)` when absent; a dirty value is rendered
+`tgcli 1.0.0 (4d7ca6e, protocol 3, tdlib 1.8.65)` when present and
+`tgcli 1.0.0 (protocol 3, tdlib 1.8.65)` when absent; a dirty value is rendered
 unchanged, for example `4d7ca6e-dirty`.
 
 Every M1 failure uses the single envelope
@@ -8681,7 +8709,7 @@ DB open per command), safe concurrent ordinary invocations, up to 32 simultaneou
   their direction, with the frozen exact encoding:
 
   ```json
-  {"type":"hello","binary_version":"0.1.0","protocol_version":3}
+  {"type":"hello","binary_version":"1.0.0","protocol_version":3}
   ```
 
   No normal Request or Answer is sent before an exact v3 Hello match. A v3

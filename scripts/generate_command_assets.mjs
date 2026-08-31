@@ -56,8 +56,13 @@ const releasePackageAssets = [
     package: "share/man/man1/tgcli.1",
     shell: null,
   },
+  {
+    source: "packaging/systemd/tgcli@.service",
+    package: "lib/systemd/user/tgcli@.service",
+    shell: null,
+  },
 ];
-const safeRelativeAsset = /^[A-Za-z0-9._/-]+$/;
+const safeRelativeAsset = /^[A-Za-z0-9.@_/-]+$/;
 for (const key of ["source", "package"]) {
   const values = releasePackageAssets.map((asset) => asset[key]);
   requireCondition(sortedUnique([...values].sort()), `release ${key} paths differ`);
@@ -364,6 +369,7 @@ if (command === "emit") {
   console.log("docs/man/tgcli.1");
   console.log("docs/commands/public-command-registry.json");
   console.log("docs/release/command-assets.json");
+  console.log("packaging/systemd/tgcli@.service");
 } else if (command === "list-release-package-assets") {
   for (const asset of releasePackageAssets) {
     console.log(`${asset.source}\t${asset.package}`);

@@ -12,9 +12,11 @@ tgcli wait-for --chat @buildbot --regex 'deploy (succeeded|failed)' --timeout 60
 tgcli completion bash > ~/.local/share/bash-completion/completions/tgcli
 ```
 
-**Status: pre-release development.** [DESIGN.md](DESIGN.md) defines the target
-contract; [TODO.md](TODO.md) is the authoritative record of what is currently
-implemented and what remains.
+**Status: v1.0.0 release candidate.** The local v1 contract and build version
+are frozen, but no v1.0.0 tag or public package has been published.
+[DESIGN.md](DESIGN.md) defines the contract; [TODO.md](TODO.md) records the
+remaining external release evidence. Prepared AUR, Homebrew, and systemd assets
+are documented in [docs/packaging.md](docs/packaging.md).
 
 ## Target v1 highlights
 

@@ -302,3 +302,10 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
         -s "${CMAKE_CURRENT_SOURCE_DIR}"
         -p "test_test_dc_tools.py")
+add_test(
+    NAME release-package-contract
+    COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_release_packaging.py")
+set_tests_properties(
+    release-package-contract
+    PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")

@@ -145,7 +145,7 @@ TEST_CASE("TD removal proves absent storage without sending parameters or logout
     scripted->push_response(generation, 1, {},
                             core::AuthStateData{core::AuthState::WaitTdlibParameters});
     SessionFixture request;
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     std::vector<AuditStage> stages;
     const auto proof = remote.prove_remote_logout(plan(false), snapshot(), false, request.session,
                                                   [&](AuditStage stage) {
@@ -168,7 +168,7 @@ TEST_CASE("TD removal syncs send-start before dispatching logOut", "[removal][re
     const auto generation = scripted->clients().front();
     scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::Ready});
     SessionFixture request;
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     std::mutex mutex;
     std::condition_variable condition;
     bool send_checkpoint_started = false;
@@ -219,7 +219,7 @@ TEST_CASE("TD removal rejects a disconnected pre-send without checkpoint or logO
     scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::Ready});
     SessionFixture request;
     request.session.disconnect();
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     std::vector<AuditStage> stages;
     const auto proof = remote.prove_remote_logout(plan(), snapshot(), false, request.session,
                                                   [&](AuditStage stage) {
@@ -264,7 +264,7 @@ TEST_CASE("TD removal rejects a generation closed after send-start without logOu
             throw std::runtime_error("Closed lifecycle claim did not start");
         }
     };
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0", {}, {},
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0", {}, {},
                                   secret_hook::run, hooks);
     std::vector<AuditStage> stages;
     const auto proof = remote.prove_remote_logout(plan(), snapshot(), false, request.session,
@@ -294,7 +294,7 @@ TEST_CASE("TD removal requires same-generation Closed after logOut and then quie
     const auto generation = scripted->clients().front();
     scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::Ready});
     SessionFixture request;
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0", {}, {});
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0", {}, {});
     std::vector<AuditStage> stages;
     std::mutex mutex;
     std::condition_variable condition;
@@ -356,7 +356,7 @@ TEST_CASE("TD removal recovery resends from ready without duplicating the durabl
     const auto generation = scripted->clients().front();
     scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::Ready});
     SessionFixture request;
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     std::vector<AuditStage> stages;
     auto proof = std::async(std::launch::async, [&] {
         return remote.prove_remote_logout(plan(), snapshot(), true, request.session,
@@ -393,7 +393,7 @@ TEST_CASE("TD removal rejects partially authenticated states without a logout se
     const auto generation = scripted->clients().front();
     scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::WaitCode});
     SessionFixture request;
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     const auto proof = remote.prove_remote_logout(plan(), snapshot(), false, request.session,
                                                   [](AuditStage) { return true; });
     REQUIRE(std::holds_alternative<RemovalOperationError>(proof));
@@ -410,7 +410,7 @@ TEST_CASE("TD removal reports an unconfirmed timeout when initial auth state is 
     core::TdClient client(std::move(runtime));
     const auto store = tree.store();
     SessionFixture request(0.02);
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     const auto proof = remote.prove_remote_logout(plan(), snapshot(), false, request.session,
                                                   [](AuditStage) { return true; });
     REQUIRE(std::holds_alternative<RemovalOperationError>(proof));
@@ -446,7 +446,7 @@ TEST_CASE("TD removal maps logout errors without accepting them as remote proof"
         condition.notify_all();
         condition.wait(lock, [&] { return release_claim; });
     };
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0", {}, {},
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0", {}, {},
                                   secret_hook::run, hooks);
     auto proof = std::async(std::launch::async, [&] {
         return remote.prove_remote_logout(plan(), snapshot(), false, request.session,
@@ -487,7 +487,7 @@ TEST_CASE("TD removal terminal events committed before Closed never publish remo
             const auto generation = scripted->clients().front();
             scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::Ready});
             SessionFixture request(terminal == "deadline" ? 0.05 : 1.0);
-            TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+            TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
             std::vector<AuditStage> stages;
             auto proof = std::async(std::launch::async, [&] {
                 return remote.prove_remote_logout(plan(), snapshot(), false, request.session,
@@ -533,7 +533,7 @@ TEST_CASE("TD removal does not treat a logOut ok response as confirmation",
     const auto generation = scripted->clients().front();
     scripted->push_response(generation, 1, {}, core::AuthStateData{core::AuthState::Ready});
     SessionFixture request(0.05);
-    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "0.1.0");
+    TdAccountRemovalRemote remote(client, store, tree.environment(), "work", "1.0.0");
     auto proof = std::async(std::launch::async, [&] {
         return remote.prove_remote_logout(plan(), snapshot(), false, request.session,
                                           [](AuditStage) { return true; });

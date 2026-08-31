@@ -27,6 +27,7 @@ const expectedPackageFiles = [
   "docs/man/tgcli.1",
   "docs/commands/public-command-registry.json",
   "docs/release/command-assets.json",
+  "packaging/systemd/tgcli@.service",
 ];
 if (JSON.stringify(packageFiles) !== JSON.stringify(expectedPackageFiles)) {
   throw new Error("command asset package list differs");
@@ -40,6 +41,7 @@ const expectedReleasePackageAssets = [
   "completions/_tgcli\tshare/zsh/site-functions/_tgcli",
   "docs/commands/public-command-registry.json\tshare/tgcli/public-command-registry.json",
   "docs/man/tgcli.1\tshare/man/man1/tgcli.1",
+  "packaging/systemd/tgcli@.service\tlib/systemd/user/tgcli@.service",
 ];
 if (JSON.stringify(releasePackageAssets) !== JSON.stringify(expectedReleasePackageAssets)) {
   throw new Error("release command asset package manifest differs");

@@ -89,14 +89,14 @@ TEST_CASE("logout human renderers match reviewed goldens", "[logout][render][gol
 
 TEST_CASE("version human output matches reviewed revision goldens", "[version][render][golden]") {
     CHECK(tgcli::cli::render_human("version",
-                                   {{"version", "0.1.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}}) ==
+                                   {{"version", "1.0.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}}) ==
           golden("version.txt"));
     CHECK(
         tgcli::cli::render_human(
             "version",
-            {{"version", "0.1.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}, {"commit", "4d7ca6e"}}) ==
+            {{"version", "1.0.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}, {"commit", "4d7ca6e"}}) ==
         golden("version-commit.txt"));
-    CHECK(tgcli::cli::render_human("version", {{"version", "0.1.0"},
+    CHECK(tgcli::cli::render_human("version", {{"version", "1.0.0"},
                                                {"protocol", 3},
                                                {"tdlib", "1.8.65"},
                                                {"commit", "4d7ca6e-dirty"}}) ==
@@ -108,7 +108,7 @@ TEST_CASE("daemon control human renderers match reviewed goldens",
     CHECK(tgcli::cli::render_human("daemon status", {{"account", "main"},
                                                      {"running", true},
                                                      {"pid", 123},
-                                                     {"version", "0.1.0"},
+                                                     {"version", "1.0.0"},
                                                      {"protocol", 1},
                                                      {"socket", "/run/tgcli/main.sock"}}) ==
           golden("daemon-status-running.txt"));
@@ -121,7 +121,7 @@ TEST_CASE("daemon control human renderers match reviewed goldens",
     CHECK(tgcli::cli::render_human("daemon restart", {{"account", "main"},
                                                       {"restarted", true},
                                                       {"pid", 124},
-                                                      {"version", "0.1.0"},
+                                                      {"version", "1.0.0"},
                                                       {"protocol", 1},
                                                       {"socket", "/run/tgcli/main.sock"}}) ==
           golden("daemon-restart.txt"));

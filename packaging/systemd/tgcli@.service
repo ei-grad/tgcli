@@ -1,0 +1,29 @@
+[Unit]
+Description=tgcli daemon for account %i
+Documentation=https://github.com/ei-grad/tgcli/blob/v1.0.0/docs/packaging.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=tgcli --account %i daemon run
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=90s
+UMask=0077
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

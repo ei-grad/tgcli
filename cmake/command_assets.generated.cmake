@@ -14,3 +14,6 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/commands/public-command-registry
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/man/tgcli.1"
     DESTINATION "share/man/man1"
     RENAME "tgcli.1")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/tgcli@.service"
+    DESTINATION "lib/systemd/user"
+    RENAME "tgcli@.service")

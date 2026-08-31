@@ -46,3 +46,15 @@ fish completion asset.
 .TP
 .I share/tgcli/public-command-registry.json
 Canonical command registry used to generate the installed completion assets.
+.TP
+.I lib/systemd/user/tgcli@.service
+Hardened systemd user-service template for a foreground per-account daemon.
+.SH SYSTEMD USER SERVICE
+After configuring an account, start its daemon with
+.BR "systemctl --user enable --now 'tgcli@main.service'" .
+The instance name is the exact tgcli account name. The unit uses
+.B Type=notify
+and tgcli's native readiness notification, and SIGTERM follows the normal
+graceful shutdown path. See
+.I docs/packaging.md
+in the source repository for the XDG state and pre-release packaging contract.

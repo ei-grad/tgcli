@@ -149,10 +149,10 @@ std::vector<SchemaCase> schema_cases() {
          "items",
          true},
         {"version.result.schema.json",
-         {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}},
+         {{"version", "1.0.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}},
          "version"},
         {"version.result.schema.json",
-         {{"version", "0.1.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}, {"commit", "4d7ca6e"}},
+         {{"version", "1.0.0"}, {"protocol", 2}, {"tdlib", "1.8.65"}, {"commit", "4d7ca6e"}},
          "version"},
         {"daemon-stop.result.schema.json", {{"stopping", true}}, "stopping"},
         {"daemon-status.result.schema.json",
@@ -162,7 +162,7 @@ std::vector<SchemaCase> schema_cases() {
          {{"account", "main"},
           {"running", true},
           {"pid", 123},
-          {"version", "0.1.0"},
+          {"version", "1.0.0"},
           {"protocol", 1},
           {"socket", "/tmp/tgcli.sock"}},
          "account"},
@@ -170,7 +170,7 @@ std::vector<SchemaCase> schema_cases() {
          {{"account", "main"},
           {"restarted", true},
           {"pid", 124},
-          {"version", "0.1.0"},
+          {"version", "1.0.0"},
           {"protocol", 1},
           {"socket", "/tmp/tgcli.sock"}},
          "account"},
@@ -253,7 +253,7 @@ std::vector<SchemaCase> schema_cases() {
            {{"running", true},
             {"in_process", false},
             {"pid", 123},
-            {"version", "0.1.0"},
+            {"version", "1.0.0"},
             {"socket", "/tmp/tgcli.sock"}}},
           {"tdlib", {{"version", "1.8.65"}}},
           {"auth", {{"state", "unknown"}}}},
@@ -262,7 +262,7 @@ std::vector<SchemaCase> schema_cases() {
         {"doctor.result.schema.json",
          {{"account", "main"},
           {"daemon",
-           {{"running", false}, {"in_process", true}, {"pid", 123}, {"version", "0.1.0"}}},
+           {{"running", false}, {"in_process", true}, {"pid", 123}, {"version", "1.0.0"}}},
           {"tdlib", {{"version", "1.8.65"}}},
           {"auth", {{"state", "unknown"}}}},
          "account",
@@ -1420,7 +1420,7 @@ TEST_CASE("result schemas reject missing required and unknown properties", "[sch
 }
 
 TEST_CASE("version result schema bounds the optional build revision", "[schema][version]") {
-    const json base{{"version", "0.1.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}};
+    const json base{{"version", "1.0.0"}, {"protocol", 3}, {"tdlib", "1.8.65"}};
     CHECK_THAT(base, tgcli::test::matches_json_schema("version.result.schema.json"));
 
     const std::vector<std::string> accepted{

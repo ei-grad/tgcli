@@ -25,6 +25,11 @@
       "source": "docs/man/tgcli.1",
       "package": "share/man/man1/tgcli.1",
       "shell": null
+    },
+    {
+      "source": "packaging/systemd/tgcli@.service",
+      "package": "lib/systemd/user/tgcli@.service",
+      "shell": null
     }
   ]
 }

@@ -1,6 +1,6 @@
 account: main
 running: yes
 pid: 123
-version: 0.1.0
+version: 1.0.0
 protocol: 1
 socket: /run/tgcli/main.sock

@@ -158,7 +158,14 @@ authoritative implementation status and roadmap (work milestones top-down).
   tgcli or inspect config/network. No v1 output contains ANSI, so `--no-color`
   and nonempty `NO_COLOR` are byte-preserving no-ops. The generated release
   command-asset manifest is authoritative for CMake, Linux and macOS package
-  paths and includes the man page and public registry.
+  paths and includes the man page, public registry and systemd user template.
+- The canonical v1 build version is `1.0.0`; the release workflow must continue
+  to prove an exact tag-to-CMake-version and tag-to-source identity match.
+  Prepared AUR/Homebrew definitions remain deliberately unusable while their
+  SHA-256 value is the all-zero pretag placeholder. They never use `SKIP` or
+  `:no_check`, and publication waits for verified tag-built archive digests.
+  The systemd user unit runs the existing foreground, readiness-notifying
+  daemon and must not make per-user XDG config/data/state inaccessible.
 
 ## Build & dev
 

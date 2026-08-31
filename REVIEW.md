@@ -107,6 +107,13 @@ orphan crash limitation. Search review covers cleaner byte-equality for both
 the query and untrusted cursor offsets plus page/marker/raw-order progress.
 Completion review proves registry/generated/checked-in/package/runtime byte
 equality and that future registry rows are not runtime-active.
+Release-package review proves the single CMake version remains exactly bound to
+the release tag and source commit, AUR/Homebrew URLs select the corresponding
+platform archives, pretag checksum placeholders fail closed, and package
+definitions cannot be published with an all-zero/`SKIP`/`:no_check` checksum.
+The systemd user unit must use the foreground readiness-notifying daemon,
+preserve writable per-user XDG data/state, avoid shell expansion, and remain
+byte-identical across source, CMake install and both release archives.
 
 ## 7. Changing the spec (DESIGN.md, docs/schemas/)
 
@@ -169,3 +176,7 @@ well:
   registry row becoming invocable before its atomic handler activation; source,
   runtime, CMake-installed and unpacked Linux/macOS release bytes must be
   identical through the generated command-asset manifest.
+- a release tag/version mismatch, a published package definition with the
+  pretag all-zero checksum or an unchecked checksum, or a systemd unit that
+  invokes tgcli through a shell or prevents access to required per-user XDG
+  data/state.

@@ -1068,6 +1068,11 @@ expected = {
         None,
     ),
     ("docs/man/tgcli.1", "share/man/man1/tgcli.1", None),
+    (
+        "packaging/systemd/tgcli@.service",
+        "lib/systemd/user/tgcli@.service",
+        None,
+    ),
 }
 actual: set[tuple[str, str, str | None]] = set()
 runtime_sources: dict[str, pathlib.Path] = {}

@@ -122,7 +122,7 @@ json account_remove_target() {
 } // namespace
 
 TEST_CASE("serialized frames are single-line JSON", "[proto]") {
-    for (const Frame& frame : {Frame{Hello{"0.1.0", kProtocolVersion}}, Frame{make_request()},
+    for (const Frame& frame : {Frame{Hello{"1.0.0", kProtocolVersion}}, Frame{make_request()},
                                Frame{Result{1, json{{"ok", true}}}},
                                Frame{Error{2, "DENIED", "no grant", json::object(), 6}}}) {
         auto line = serialize(frame);
@@ -132,15 +132,15 @@ TEST_CASE("serialized frames are single-line JSON", "[proto]") {
 }
 
 TEST_CASE("hello round-trip", "[proto]") {
-    auto frame = round_trip(Hello{"0.1.0", kProtocolVersion});
+    auto frame = round_trip(Hello{"1.0.0", kProtocolVersion});
     auto& hello = std::get<Hello>(frame);
-    CHECK(hello.binary_version == "0.1.0");
+    CHECK(hello.binary_version == "1.0.0");
     CHECK(hello.protocol_version == kProtocolVersion);
 }
 
 TEST_CASE("protocol v3 Hello is an exact three-field frame", "[proto][protocol-v3]") {
     STATIC_REQUIRE(kProtocolVersion == 3);
-    const auto valid = json::parse(serialize(Hello{"0.1.0", kProtocolVersion}));
+    const auto valid = json::parse(serialize(Hello{"1.0.0", kProtocolVersion}));
     CHECK(valid.size() == 3);
     for (const auto& mutate : std::vector<std::function<void(json&)>>{
              [](json& value) { value.erase("binary_version"); },
