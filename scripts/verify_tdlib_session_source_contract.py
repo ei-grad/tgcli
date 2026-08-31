@@ -32,13 +32,17 @@ EXPECTED_ASSERTIONS = {
             "  Promise<Unit> promise_;",
             "",
             " public:",
-            "  explicit ResetAuthorizationQuery(Promise<Unit> &&promise) : "
-            "promise_(std::move(promise)) {",
+            (
+                "  explicit ResetAuthorizationQuery(Promise<Unit> &&promise) : "
+                "promise_(std::move(promise)) {"
+            ),
             "  }",
             "",
             "  void send(int64 authorization_id) {",
-            "    send_query(G()->net_query_creator().create("
-            "telegram_api::account_resetAuthorization(authorization_id)));",
+            (
+                "    send_query(G()->net_query_creator().create("
+                "telegram_api::account_resetAuthorization(authorization_id)));"
+            ),
             "  }",
             "",
             "  void on_result(BufferSlice packet) final {",
@@ -48,7 +52,7 @@ EXPECTED_ASSERTIONS = {
             "    }",
             "",
             "    bool result = result_ptr.move_as_ok();",
-            "    LOG_IF(WARNING, !result) << \"Failed to terminate session\";",
+            '    LOG_IF(WARNING, !result) << "Failed to terminate session";',
             "    promise_.set_value(Unit());",
             "  }",
             "",
@@ -81,7 +85,9 @@ def require(condition: bool, message: str) -> None:
 
 
 def load_json(source: pathlib.Path, label: str) -> object:
-    require(source.is_file() and not source.is_symlink(), f"{label} is missing or unsafe")
+    require(
+        source.is_file() and not source.is_symlink(), f"{label} is missing or unsafe"
+    )
     try:
         return json.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -113,7 +119,9 @@ def verify_component(lock: object, contract: object) -> None:
         set(contract) == {"assertions", "component", "schema_version"},
         "session source contract keys differ",
     )
-    require(contract["schema_version"] == 1, "unsupported session source contract version")
+    require(
+        contract["schema_version"] == 1, "unsupported session source contract version"
+    )
     component = contract["component"]
     require(
         isinstance(component, dict) and set(component) == COMPONENT_KEYS,
@@ -129,7 +137,10 @@ def verify_assertions(contract: object) -> dict[str, bytes]:
     require(isinstance(contract, dict), "session source contract must be an object")
     assertions = contract["assertions"]
     require(isinstance(assertions, list), "session source assertions must be a list")
-    require(len(assertions) == len(EXPECTED_ASSERTIONS), "session source assertion set differs")
+    require(
+        len(assertions) == len(EXPECTED_ASSERTIONS),
+        "session source assertion set differs",
+    )
     verified: dict[str, bytes] = {}
     for assertion in assertions:
         require(
@@ -143,7 +154,9 @@ def verify_assertions(contract: object) -> dict[str, bytes]:
         )
         require(assertion_id not in verified, "duplicate session source assertion")
         expected = EXPECTED_ASSERTIONS[assertion_id]
-        require(assertion["path"] == expected["path"], f"{assertion_id} source path differs")
+        require(
+            assertion["path"] == expected["path"], f"{assertion_id} source path differs"
+        )
         require(
             assertion["file_sha256"] == expected["file_sha256"],
             f"{assertion_id} whole-file identity differs",
@@ -171,7 +184,9 @@ def verify_assertions(contract: object) -> dict[str, bytes]:
             f"{assertion_id} fragment digest differs",
         )
         verified[assertion_id] = fragment
-    require(set(verified) == set(EXPECTED_ASSERTIONS), "session source assertion IDs differ")
+    require(
+        set(verified) == set(EXPECTED_ASSERTIONS), "session source assertion IDs differ"
+    )
     return verified
 
 
@@ -195,8 +210,7 @@ def verify_checkout(source: pathlib.Path, fragments: dict[str, bytes]) -> None:
         "pinned TDLib checkout is missing or unsafe",
     )
     require(
-        git_output(source, "rev-parse", "HEAD")
-        == EXPECTED_COMPONENT["immutable_ref"],
+        git_output(source, "rev-parse", "HEAD") == EXPECTED_COMPONENT["immutable_ref"],
         "TDLib checkout is not at the accepted immutable ref",
     )
     require(
@@ -227,7 +241,9 @@ def verify_checkout(source: pathlib.Path, fragments: dict[str, bytes]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify the pinned TDLib session source contract")
+    parser = argparse.ArgumentParser(
+        description="Verify the pinned TDLib session source contract"
+    )
     parser.add_argument("--repo-root", type=pathlib.Path, required=True)
     parser.add_argument("--tdlib-source", type=pathlib.Path)
     return parser.parse_args()
@@ -247,7 +263,10 @@ def main() -> int:
         if arguments.tdlib_source is not None:
             verify_checkout(arguments.tdlib_source.resolve(), fragments)
     except (OSError, VerificationError) as error:
-        print(f"TDLib session source contract verification failed: {error}", file=sys.stderr)
+        print(
+            f"TDLib session source contract verification failed: {error}",
+            file=sys.stderr,
+        )
         return 1
     print("TDLib session source contract verified")
     return 0
