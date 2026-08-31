@@ -127,6 +127,8 @@ TEST_CASE("raw result schema separates live TD objects from exact dry-run plans"
     auto transport = live;
     transport["@extra"] = "leak";
     CHECK_FALSE(tgcli::test::matches_json_schema("future/raw.result.schema.json").match(transport));
+    CHECK_FALSE(tgcli::test::matches_json_schema("raw.result.schema.json").match(json(42)));
+    CHECK_FALSE(tgcli::test::matches_json_schema("raw.result.schema.json").match(json("text")));
 
     const json dry{{"dry_run", true},
                    {"plan",

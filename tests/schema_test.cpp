@@ -48,6 +48,8 @@ void check_schema_node(const json& schema, bool allow_raw_live_object = false) {
             if ((*node)["additionalProperties"] == true) {
                 ++open_object_count;
                 REQUIRE(allow_raw_live_object);
+                REQUIRE(node->contains("type"));
+                CHECK((*node)["type"] == "object");
                 CHECK((*node)["required"] == json::array({"@type"}));
                 REQUIRE((*node)["properties"].is_object());
                 CHECK((*node)["properties"].size() == 3);
