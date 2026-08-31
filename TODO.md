@@ -511,8 +511,8 @@ before the milestone is closed.
 - [x] Prepare fail-closed v1.0.0 AUR and Homebrew definitions plus the hardened
       systemd user-service template, with one generated CMake/Linux/macOS asset
       manifest and deterministic offline install/layout verification.
-- [ ] Review gate: M7 diff vs DESIGN.md (pending independent review of the
-      version/package/systemd/status closure).
+- [x] Review gate: complete M7 implementation diff vs DESIGN.md, including the
+      raw/security activation and version/package/systemd/status closure.
 - [ ] Tag, sign and publish v1.0.0, replace package checksum placeholders with
       verified artifact digests, publish the external package definitions, and
       validate the public release artifacts; no local gate can complete this.
