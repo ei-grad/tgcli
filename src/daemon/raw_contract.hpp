@@ -84,6 +84,14 @@ enum class BodyPolicyDecision { Deny, Preserve, RaiseWrite, RaiseDestructive };
 enum class AdmissionTier { Denied, Read, Write, Destructive };
 enum class RawPrincipal { User, Bot, Both };
 
+namespace detail {
+enum class OwnershipFailpoint {
+    None,
+    AfterNativeConversion,
+    BeforeImplementationAllocation,
+};
+} // namespace detail
+
 struct RawPreflightPlan {
     static constexpr std::size_t kMaximumChatTargets = 8;
     std::array<std::int64_t, kMaximumChatTargets> non_secret_chat_ids{};
@@ -131,11 +139,13 @@ class TypedFunction final {
     std::unique_ptr<Impl> implementation_;
 
     friend std::variant<TypedFunction, Failure> parse(std::string&& input,
-                                                      const secure::WipeObserver& wipe_observer);
+                                                      const secure::WipeObserver& wipe_observer,
+                                                      detail::OwnershipFailpoint failpoint);
 };
 
 [[nodiscard]] std::variant<TypedFunction, Failure>
-parse(std::string&& input, const secure::WipeObserver& wipe_observer = {});
+parse(std::string&& input, const secure::WipeObserver& wipe_observer = {},
+      detail::OwnershipFailpoint failpoint = detail::OwnershipFailpoint::None);
 
 [[nodiscard]] std::variant<Digest, Failure>
 response_digest(const TypedFunction& function, td::tl_object_ptr<td::td_api::Object> response,

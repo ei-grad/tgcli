@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -425,10 +426,26 @@ class TdValue {
     }
 
     template <typename T, typename Wiper>
-    static TdValue sensitive_function(T value, TdFunctionData function, Wiper wiper) {
+    static TdValue sensitive_function(T& value, TdFunctionData function, const Wiper& wiper,
+                                      void (*before_holder_allocation)() = nullptr) {
+        static_assert(std::is_nothrow_move_constructible_v<T>);
+        const auto source_deleter = [&wiper](T* source) noexcept {
+            try {
+                std::invoke(wiper, *source);
+            } catch (...) {
+                // A sensitive source must remain protected while its holder is established.
+                return;
+            }
+        };
+        std::unique_ptr<T, decltype(source_deleter)> source_guard(&value, source_deleter);
+        std::function<void(T&)> stored_wiper(wiper);
+        if (before_holder_allocation != nullptr) {
+            before_holder_allocation();
+        }
+        auto holder = std::make_unique<Holder<T>>(value, std::move(stored_wiper));
         TdValue result;
-        result.value_ = std::make_unique<Holder<T>>(std::move(value),
-                                                    std::function<void(T&)>{std::move(wiper)});
+        result.value_ = std::move(holder);
+        static_cast<void>(source_guard.release());
         result.function_ = std::move(function);
         return result;
     }
@@ -498,8 +515,8 @@ class TdValue {
 
     template <typename T> struct Holder final : ValueBase {
         explicit Holder(T stored) : value(std::move(stored)) {}
-        Holder(T stored, std::function<void(T&)> stored_wiper)
-            : value(std::move(stored)), wiper(std::move(stored_wiper)) {}
+        Holder(T& stored, std::function<void(T&)> stored_wiper)
+            : wiper(std::move(stored_wiper)), value(std::move(stored)) {}
         Holder(const Holder&) = delete;
         Holder& operator=(const Holder&) = delete;
         Holder(Holder&&) = delete;
@@ -514,8 +531,8 @@ class TdValue {
                 }
             }
         }
-        T value;
         std::function<void(T&)> wiper;
+        T value;
     };
 
     std::unique_ptr<ValueBase> value_;

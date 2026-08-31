@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <new>
 #include <optional>
 #include <set>
 #include <span>
@@ -650,12 +651,12 @@ void wipe_native_value(std::vector<Value>& values, const secure::WipeObserver& o
 
 class NativeObjectWipeGuard final {
   public:
-    NativeObjectWipeGuard(td::td_api::Object* value, secure::WipeObserver observer)
-        : value_(value), observer_(std::move(observer)) {}
+    NativeObjectWipeGuard(td::td_api::Object* value, const secure::WipeObserver& observer) noexcept
+        : value_(value), observer_(&observer) {}
 
     ~NativeObjectWipeGuard() {
         if (value_ != nullptr) {
-            wipe_native_object(*value_, observer_);
+            wipe_native_object(*value_, *observer_);
         }
     }
 
@@ -666,13 +667,36 @@ class NativeObjectWipeGuard final {
 
   private:
     td::td_api::Object* value_ = nullptr;
-    secure::WipeObserver observer_;
+    const secure::WipeObserver* observer_;
+};
+
+class NativeFunctionWipeGuard final {
+  public:
+    NativeFunctionWipeGuard(td::td_api::object_ptr<td::td_api::Function>& value,
+                            const secure::WipeObserver& observer) noexcept
+        : value_(value), observer_(observer) {}
+
+    ~NativeFunctionWipeGuard() {
+        if (value_ != nullptr) {
+            wipe_native_function(*value_, observer_);
+        }
+    }
+
+    NativeFunctionWipeGuard(const NativeFunctionWipeGuard&) = delete;
+    NativeFunctionWipeGuard& operator=(const NativeFunctionWipeGuard&) = delete;
+    NativeFunctionWipeGuard(NativeFunctionWipeGuard&&) = delete;
+    NativeFunctionWipeGuard& operator=(NativeFunctionWipeGuard&&) = delete;
+
+  private:
+    td::td_api::object_ptr<td::td_api::Function>& value_;
+    const secure::WipeObserver& observer_;
 };
 
 class StringWipeGuard final {
   public:
-    StringWipeGuard(std::string& value, secure::WipeObserver observer, std::string_view stage)
-        : value_(value), observer_(std::move(observer)), stage_(stage) {}
+    StringWipeGuard(std::string& value, const secure::WipeObserver& observer,
+                    std::string_view stage) noexcept
+        : value_(value), observer_(observer), stage_(stage) {}
 
     ~StringWipeGuard() {
         secure::wipe(value_, observer_, stage_);
@@ -685,7 +709,7 @@ class StringWipeGuard final {
 
   private:
     std::string& value_;
-    secure::WipeObserver observer_;
+    const secure::WipeObserver& observer_;
     std::string_view stage_;
 };
 
@@ -1158,12 +1182,8 @@ Digest hash_response(std::string_view function_name, std::string_view canonical)
 } // namespace
 
 struct TypedFunction::Impl {
-    Impl(std::string function_name, std::string declared_result_type,
-         td::td_api::object_ptr<td::td_api::Function> function, std::string canonical_bytes,
-         secure::WipeObserver observer)
+    Impl(std::string function_name, std::string declared_result_type, secure::WipeObserver observer)
         : name(std::move(function_name)), result_type(std::move(declared_result_type)),
-          native(std::move(function)),
-          canonical(std::move(canonical_bytes), observer, "raw_canonical"),
           wipe_observer(std::move(observer)) {}
 
     Impl(const Impl&) = delete;
@@ -1234,7 +1254,7 @@ std::optional<core::TdValue> TypedFunction::release_for_dispatch(Tier effective_
                 wipe_native_function(*value, observer);
             }
         };
-    auto result = core::TdValue::sensitive_function(std::move(implementation_->native),
+    auto result = core::TdValue::sensitive_function(implementation_->native,
                                                     core::TdFunctionData{kind}, request_wiper);
     result.set_raw_request_wiper(request_wiper);
     result.set_raw_response_wiper([observer](core::TdRawObjectPtr& value) noexcept {
@@ -1377,7 +1397,8 @@ std::variant<Digest, Failure> TypedFunction::request_digest(std::string_view tdl
 }
 
 std::variant<TypedFunction, Failure> parse(std::string&& input,
-                                           const secure::WipeObserver& wipe_observer) {
+                                           const secure::WipeObserver& wipe_observer,
+                                           detail::OwnershipFailpoint failpoint) {
     const secure::SensitiveString source(std::move(input), wipe_observer, "raw_physical_input");
     if (source.empty()) {
         return Failure{Error::EmptyInput};
@@ -1408,43 +1429,46 @@ std::variant<TypedFunction, Failure> parse(std::string&& input,
         return Failure{Error::UnexpectedType};
     }
     std::string canonical;
+    const StringWipeGuard canonical_guard(canonical, wipe_observer, "raw_canonical_staging");
     canonical.reserve(source.view().size());
     ConversionArena conversion_arena(wipe_observer);
     td::JsonValue json_value;
     const auto conversion =
         convert_function(*root, *constructor, canonical, json_value, conversion_arena);
     if (conversion != Error::InvalidJson) {
-        secure::wipe(canonical, wipe_observer, "raw_canonical_failure");
         return Failure{conversion};
     }
     if (canonical.size() > kMaximumRequestBytes) {
-        secure::wipe(canonical, wipe_observer, "raw_canonical_oversized");
         return Failure{Error::CanonicalTooLarge};
     }
     td::td_api::object_ptr<td::td_api::Function> native;
+    const NativeFunctionWipeGuard native_guard(native, wipe_observer);
     const auto native_status = td::td_api::from_json(native, std::move(json_value));
     if (native_status.is_error() || native == nullptr ||
         native->get_id() != constructor->constructor_id) {
-        if (native != nullptr) {
-            wipe_native_function(*native, wipe_observer);
-        }
-        secure::wipe(canonical, wipe_observer, "raw_native_conversion_failure");
         return Failure{Error::NativeConversionFailed};
     }
+    if (failpoint == detail::OwnershipFailpoint::AfterNativeConversion) {
+        throw std::bad_alloc();
+    }
     std::string native_canonical;
+    const StringWipeGuard native_canonical_guard(native_canonical, wipe_observer,
+                                                 "raw_native_canonical_proof");
     native_canonical.reserve(canonical.size());
     CanonicalBuffer native_output(native_canonical, kMaximumRequestBytes);
     const bool native_matches = append_native_function(*native, native_output) &&
                                 !native_output.oversized() && native_canonical == canonical;
-    secure::wipe(native_canonical, wipe_observer, "raw_native_canonical_proof");
     if (!native_matches) {
-        wipe_native_function(*native, wipe_observer);
-        secure::wipe(canonical, wipe_observer, "raw_native_canonical_mismatch");
         return Failure{Error::NativeConversionFailed};
     }
+    if (failpoint == detail::OwnershipFailpoint::BeforeImplementationAllocation) {
+        throw std::bad_alloc();
+    }
     auto implementation = std::make_unique<TypedFunction::Impl>(
-        std::string(constructor->name), std::string(constructor->result_type), std::move(native),
-        std::move(canonical), wipe_observer);
+        std::string(constructor->name), std::string(constructor->result_type), wipe_observer);
+    implementation->native = std::move(native);
+    implementation->canonical =
+        secure::SensitiveString(std::move(canonical), wipe_observer, "raw_canonical");
     return TypedFunction(std::move(implementation));
 }
 

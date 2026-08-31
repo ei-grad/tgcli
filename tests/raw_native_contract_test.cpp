@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +45,10 @@ Digest digest(TypedFunction& function,
     auto result = function.request_digest(pin, tier);
     REQUIRE(std::holds_alternative<Digest>(result));
     return std::get<Digest>(std::move(result));
+}
+
+void fail_sensitive_holder_allocation() {
+    throw std::bad_alloc();
 }
 
 } // namespace
@@ -467,6 +472,67 @@ TEST_CASE("production raw request ownership wipes before transfer and moves exac
         CHECK(function.identity() == nullptr);
         CHECK(identity != nullptr);
     }
+}
+
+TEST_CASE("raw owner establishment wipes native and canonical staging on allocation failure",
+          "[core][tdlib][raw][ownership][wipe]") {
+    using tgcli::daemon::raw::detail::OwnershipFailpoint;
+    for (const auto failpoint : {OwnershipFailpoint::AfterNativeConversion,
+                                 OwnershipFailpoint::BeforeImplementationAllocation}) {
+        std::vector<std::string> stages;
+        const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
+            CHECK(std::string_view(bytes, size) == std::string(size, '\0'));
+            stages.emplace_back(stage);
+        };
+        CHECK_THROWS_AS(tgcli::daemon::raw::parse(R"({"@type":"testCallBytes","x":"AAEC/w=="})",
+                                                  observer, failpoint),
+                        std::bad_alloc);
+        CHECK(std::ranges::find(stages, "raw_native_string_or_bytes") != stages.end());
+        CHECK(std::ranges::find(stages, "raw_canonical_staging") != stages.end());
+        if (failpoint == OwnershipFailpoint::BeforeImplementationAllocation) {
+            CHECK(std::ranges::find(stages, "raw_native_canonical_proof") != stages.end());
+        }
+    }
+}
+
+TEST_CASE("raw sensitive holder allocation failure keeps request and response owners protected",
+          "[core][tdlib][raw][ownership][wipe]") {
+    std::vector<std::string> stages;
+    const auto observer = [&](std::string_view stage, const char* bytes, std::size_t size) {
+        CHECK(std::string_view(bytes, size) == std::string(size, '\0'));
+        stages.emplace_back(stage);
+    };
+    auto parsed =
+        tgcli::daemon::raw::parse(R"({"@type":"testCallBytes","x":"AAEC/w=="})", observer);
+    REQUIRE(std::holds_alternative<TypedFunction>(parsed));
+    auto& function = std::get<TypedFunction>(parsed);
+    auto protected_request = function.release_for_dispatch(Tier::Read);
+    REQUIRE(protected_request);
+    auto* request_owner = protected_request->get_if<tgcli::core::TdRawFunctionPtr>();
+    REQUIRE(request_owner != nullptr);
+    tgcli::core::TdRawFunctionPtr request = std::move(*request_owner);
+    const auto request_wiper = protected_request->raw_request_wiper();
+    const auto response_wiper = protected_request->raw_response_wiper();
+
+    stages.clear();
+    CHECK_THROWS_AS(tgcli::core::TdValue::sensitive_function(
+                        request, tgcli::core::TdFunctionData{tgcli::core::TdFunctionKind::RawRead},
+                        request_wiper, fail_sensitive_holder_allocation),
+                    std::bad_alloc);
+    REQUIRE(request != nullptr);
+    CHECK(std::ranges::find(stages, "raw_native_string_or_bytes") != stages.end());
+    CHECK(static_cast<const td::td_api::testCallBytes&>(*request).x_.empty());
+
+    tgcli::core::TdRawObjectPtr response =
+        td::td_api::make_object<td::td_api::testBytes>(std::string("response secret"));
+    stages.clear();
+    CHECK_THROWS_AS(tgcli::core::TdValue::sensitive_function(
+                        response, tgcli::core::TdFunctionData{tgcli::core::TdFunctionKind::RawRead},
+                        response_wiper, fail_sensitive_holder_allocation),
+                    std::bad_alloc);
+    REQUIRE(response != nullptr);
+    CHECK(std::ranges::find(stages, "raw_native_string_or_bytes") != stages.end());
+    CHECK(static_cast<const td::td_api::testBytes&>(*response).value_.empty());
 }
 
 TEST_CASE("raw rejected base64 wipes a decoded valid prefix", "[raw][foundation][bytes][wipe]") {

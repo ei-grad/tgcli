@@ -4096,7 +4096,7 @@ TdValue make_native_join_chat(TdJoinChatRequest request) {
     static_cast<td_api::joinChatByInviteLink*>(native.get())->invite_link_.assign(*invite_link);
     auto wipe_observer = request.wipe_observer();
     return TdValue::sensitive_function(
-        std::move(native),
+        native,
         TdFunctionData{TdFunctionKind::JoinChatByInviteLink,
                        {{"invite_link", TdRedactedValue::InviteLink}}},
         [wipe_observer = std::move(wipe_observer)](NativeFunctionPtr& value) {
@@ -4997,7 +4997,7 @@ class ProductionTdRuntime final : public TdRuntime {
                                      TdFunctionData{TdFunctionKind::GetInternalLinkType,
                                                     {{"link", std::string(source.view())}}});
         }
-        return TdValue::sensitive_function(std::move(native),
+        return TdValue::sensitive_function(native,
                                            TdFunctionData{TdFunctionKind::GetInternalLinkType,
                                                           {{"link", TdRedactedValue::InviteLink}}},
                                            [wipe_observer](NativeFunctionPtr& value) {
@@ -5017,7 +5017,7 @@ class ProductionTdRuntime final : public TdRuntime {
         const secure::SensitiveString source(link, wipe_observer, "td_check_invite_request_source");
         NativeFunctionPtr native = td_api::make_object<td_api::checkChatInviteLink>();
         static_cast<td_api::checkChatInviteLink*>(native.get())->invite_link_.assign(source.view());
-        return TdValue::sensitive_function(std::move(native),
+        return TdValue::sensitive_function(native,
                                            TdFunctionData{TdFunctionKind::CheckChatInviteLink,
                                                           {{"link", TdRedactedValue::InviteLink}}},
                                            [wipe_observer](NativeFunctionPtr& value) {
@@ -5380,8 +5380,8 @@ class ProductionTdRuntime final : public TdRuntime {
         if (!raw_function_kind(function.kind)) {
             return convert_response_for(function.kind, std::move(object), generation);
         }
-        auto value = TdValue::sensitive_function(std::move(object), TdFunctionData{function.kind},
-                                                 function.raw_wiper);
+        auto value =
+            TdValue::sensitive_function(object, TdFunctionData{function.kind}, function.raw_wiper);
         return value;
     }
 
