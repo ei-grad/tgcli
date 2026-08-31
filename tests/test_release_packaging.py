@@ -14,7 +14,7 @@ VERSION = "1.0.0"
 ZERO_SHA256 = "0" * 64
 SERVICE_SOURCE = Path("packaging/systemd/tgcli@.service")
 SERVICE_PACKAGE = Path("lib/systemd/user/tgcli@.service")
-ACCOUNT_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+ACCOUNT_NAME = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 def unescape_systemd_instance(instance: str) -> str:
@@ -120,6 +120,7 @@ WantedBy=default.target
         account = unescape_systemd_instance(escaped)
         self.assertEqual(account, "work-test")
         self.assertRegex(account, ACCOUNT_NAME)
+        self.assertNotRegex("a" * 33, ACCOUNT_NAME)
         self.assertIn("ExecStart=tgcli --account %I daemon run", service)
         self.assertNotIn("ExecStart=tgcli --account %i daemon run", service)
 
