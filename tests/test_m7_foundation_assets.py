@@ -383,6 +383,43 @@ class M7FoundationAssetTest(unittest.TestCase):
             1,
         )
 
+    def test_asan_suppresses_only_the_exact_pinned_tdlib_leak_frames(self) -> None:
+        suppressions = (REPOSITORY / "tests" / "tdlib.lsan.supp").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            suppressions.splitlines(),
+            [
+                "leak:tdsqlite3MemMalloc",
+                "leak:td::SqliteDb::set_cipher_version",
+                "leak:td::SqliteDb::open_with_key",
+                "leak:td::Global::Global",
+                "leak:td::Status::Status",
+            ],
+        )
+        self.assertNotIn("leak:td::", suppressions.splitlines())
+
+        cmake = (REPOSITORY / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('CMAKE_CXX_FLAGS MATCHES "-fsanitize=[^ ]*address"', cmake)
+        self.assertIn(
+            "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tdlib.lsan.supp:print_suppressions=0",
+            cmake,
+        )
+        self.assertIn("add_executable(tgcli_lsan_control lsan_control.cpp)", cmake)
+        self.assertIn("NAME lsan-tgcli-owned-control", cmake)
+        self.assertNotIn("detect_leaks=0", cmake)
+
+        control = (REPOSITORY / "tests" / "verify_lsan_control.cmake").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tgcli-owned leak was incorrectly suppressed", control)
+        self.assertIn("tgcli_owned_leak_control", control)
+
+        account_cli = (REPOSITORY / "tests" / "account_cli_test.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('::setenv("LSAN_OPTIONS"', account_cli)
+
 
 if __name__ == "__main__":
     unittest.main()

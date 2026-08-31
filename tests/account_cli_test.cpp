@@ -700,21 +700,9 @@ TEST_CASE("account show asks a running daemon to reconcile send-started logout a
     seed_unconfirmed_logout(environment);
 
     const std::string daemon_error_path = environment.root() + "/daemon-recovery.err";
-    const std::string leak_suppression_path = environment.root() + "/tdlib-lsan.supp";
-    {
-        std::ofstream suppression(leak_suppression_path, std::ios::binary | std::ios::trunc);
-        REQUIRE(suppression.good());
-        suppression << "leak:tdsqlite3MemMalloc\n";
-    }
     const pid_t daemon_pid = ::fork();
     REQUIRE(daemon_pid >= 0);
     if (daemon_pid == 0) {
-        std::string sanitizer_options = "suppressions=" + leak_suppression_path;
-        if (const char* inherited = std::getenv("LSAN_OPTIONS");
-            inherited != nullptr && *inherited != '\0') {
-            sanitizer_options = std::string(inherited) + ":" + sanitizer_options;
-        }
-        ::setenv("LSAN_OPTIONS", sanitizer_options.c_str(), 1);
         const int null_descriptor = ::open("/dev/null", O_RDWR);
         const int error_descriptor =
             ::open(daemon_error_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);

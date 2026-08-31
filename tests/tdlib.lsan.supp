@@ -1,0 +1,5 @@
+leak:tdsqlite3MemMalloc
+leak:td::SqliteDb::set_cipher_version
+leak:td::SqliteDb::open_with_key
+leak:td::Global::Global
+leak:td::Status::Status

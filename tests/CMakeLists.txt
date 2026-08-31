@@ -120,7 +120,21 @@ target_compile_definitions(tgcli_unit_tests
 
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).
-catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS)
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=[^ ]*address")
+    catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS
+        PROPERTIES ENVIRONMENT
+            "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tdlib.lsan.supp:print_suppressions=0")
+    add_executable(tgcli_lsan_control lsan_control.cpp)
+    add_test(
+        NAME lsan-tgcli-owned-control
+        COMMAND "${CMAKE_COMMAND}"
+            -DTGCLI_LSAN_PROBE=$<TARGET_FILE:tgcli_lsan_control>
+            -DTGCLI_LSAN_SUPPRESSIONS=${CMAKE_CURRENT_SOURCE_DIR}/tdlib.lsan.supp
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_lsan_control.cmake)
+    set_tests_properties(lsan-tgcli-owned-control PROPERTIES LABELS "sanitizer;lsan")
+else()
+    catch_discover_tests(tgcli_unit_tests ADD_TAGS_AS_LABELS)
+endif()
 
 add_executable(tgcli_stream_callback_safety_tests
     stream_callback_safety_test.cpp
