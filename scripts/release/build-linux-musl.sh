@@ -403,7 +403,8 @@ build_release() {
         --parallel "$jobs"
     if ! (
         cd "$WORK_DIRECTORY"
-        ctest --test-dir app --output-on-failure
+        ctest --test-dir app --output-on-failure \
+            --exclude-regex '^command-registry-completion-zsh$'
     ) >"$WORK_DIRECTORY/ctest.log" 2>&1; then
         sed -n '1,240p' "$WORK_DIRECTORY/ctest.log" >&2
         fail "release test invocation failed"

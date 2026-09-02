@@ -244,9 +244,9 @@ ActivityTracker::Snapshot ActivityTracker::snapshot() const {
     };
 }
 
-void ActivityTracker::watch(const std::stop_token& stop) {
+void ActivityTracker::watch(const cancellation::Token& stop) {
     const auto state = state_;
-    const std::stop_callback stop_wakeup(stop, [&state] { state->condition.notify_all(); });
+    const cancellation::Callback stop_wakeup(stop, [&state] { state->condition.notify_all(); });
     std::unique_lock lock(state->mutex);
     while (!stop.stop_requested() && !state->expired) {
         std::function<void()> callback;

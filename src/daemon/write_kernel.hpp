@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/config.hpp"
 #include "common/deadline.hpp"
 #include "common/invite_redaction.hpp"
@@ -11,7 +12,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <variant>
 #include <vector>
@@ -50,7 +50,7 @@ struct WriteKernelRequest {
     std::function<std::uint64_t()> sample_now;
     bool dry_run = false;
     RequestDeadline deadline;
-    std::stop_token cancellation_token;
+    cancellation::Token cancellation_token;
     std::function<bool()> cancelled;
     bool recovery_preflight_complete = false;
 };

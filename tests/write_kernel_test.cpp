@@ -581,8 +581,10 @@ TEST_CASE("write kernel admits two initial misses but one commit winner",
         planners.arrive_and_wait();
         return second_planner(admission);
     };
-    std::jthread first_worker([&] { results.front() = kernel.run(first_request, first_hooks); });
-    std::jthread second_worker([&] { results.back() = kernel.run(second_request, second_hooks); });
+    tgcli::cancellation::Thread first_worker(
+        [&] { results.front() = kernel.run(first_request, first_hooks); });
+    tgcli::cancellation::Thread second_worker(
+        [&] { results.back() = kernel.run(second_request, second_hooks); });
     first_worker.join();
     second_worker.join();
     CHECK(dispatches == 1);

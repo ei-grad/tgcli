@@ -1,3 +1,4 @@
+#include "common/cancellation.hpp"
 #include "common/config.hpp"
 #include "common/config_test_support.hpp"
 #include "common/paths.hpp"
@@ -15,7 +16,6 @@
 #include <future>
 #include <memory>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
@@ -921,8 +921,8 @@ TEST_CASE("implicit main materializes atomically only at the pre-parameter bound
         auto fake = make_fake_boundary();
         const auto auth = fake.client->auth_state();
         core::AuthBootstrap bootstrap(*fake.client, store, std::move(bootstrap_snapshot));
-        const std::stop_source cancellation;
-        cancellation.request_stop();
+        const tgcli::cancellation::Source cancellation;
+        static_cast<void>(cancellation.request_stop());
         auto attempt = internal_attempt(*fake.client, *auth);
         attempt.interactive = true;
         attempt.control.cancellation = cancellation.get_token();

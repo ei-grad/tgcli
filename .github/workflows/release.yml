@@ -257,6 +257,19 @@ jobs:
             --repo-root "$GITHUB_WORKSPACE" \
             --expected-commit "$SOURCE_SHA"
 
+      - name: Install host completion test dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
+
+      - name: Verify zsh completion behavior at the validated revision
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          node tests/verify_command_assets.mjs zsh
+
       - name: Revalidate the pinned build contract
         env:
           BUILD_RECIPE: ${{ needs.metadata.outputs.linux_build_recipe }}
@@ -496,7 +509,9 @@ jobs:
           python3 "$DEPENDENCY_LOCK_VERIFIER" --repo-root "$GITHUB_WORKSPACE"
 
       - name: Install build dependencies
-        run: brew install ccache coreutils gperf jq ninja
+        run: |
+          brew install ccache coreutils gperf jq ninja
+          command -v zsh >/dev/null
 
       - name: Build the locked static OpenSSL input
         id: openssl

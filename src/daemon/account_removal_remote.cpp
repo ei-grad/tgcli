@@ -65,10 +65,12 @@ class RemovalAuthTracker final {
         const auto available = [this] { return latest_ != nullptr; };
         if (!available()) {
             if (deadline.expires_at) {
-                static_cast<void>(condition_.wait_until(lock, session_.cancellation_token(),
-                                                        *deadline.expires_at, available));
+                static_cast<void>(cancellation::wait_until(condition_, lock,
+                                                           session_.cancellation_token(),
+                                                           *deadline.expires_at, available));
             } else {
-                static_cast<void>(condition_.wait(lock, session_.cancellation_token(), available));
+                static_cast<void>(
+                    cancellation::wait(condition_, lock, session_.cancellation_token(), available));
             }
         }
         return latest_;
@@ -86,10 +88,12 @@ class RemovalAuthTracker final {
         const auto available = [&] { return first_after_locked(previous) != nullptr; };
         if (!available()) {
             if (deadline.expires_at) {
-                static_cast<void>(condition_.wait_until(lock, session_.cancellation_token(),
-                                                        *deadline.expires_at, available));
+                static_cast<void>(cancellation::wait_until(condition_, lock,
+                                                           session_.cancellation_token(),
+                                                           *deadline.expires_at, available));
             } else {
-                static_cast<void>(condition_.wait(lock, session_.cancellation_token(), available));
+                static_cast<void>(
+                    cancellation::wait(condition_, lock, session_.cancellation_token(), available));
             }
         }
         return first_after_locked(previous);

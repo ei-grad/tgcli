@@ -31,7 +31,8 @@ class RawPolicyTest(unittest.TestCase):
             evidence,
             {
                 "td_api_tl_sha256": "sha256:a8166ef37efb1a1440357b81e8e26c68ea45a35901c0bcc8d69964487c98476f",
-                "td_api_header_sha256": "sha256:5926a873f226667dfa69e6cda9f28c03407aefc31a90de73dd96be0e8fa6c536",
+                "td_api_header_contract": "doxygen-normalized-v1",
+                "td_api_header_normalized_sha256": "sha256:5926a873f226667dfa69e6cda9f28c03407aefc31a90de73dd96be0e8fa6c536",
             },
         )
         self.assertEqual(graph["function_count"], 1001)
@@ -75,6 +76,68 @@ class RawPolicyTest(unittest.TestCase):
             len({value[0] for value in raw_policy.COMPILED_VALIDATORS.values()}),
             len(raw_policy.COMPILED_VALIDATORS),
         )
+
+    def test_header_evidence_ignores_only_well_formed_doxygen_blocks(self) -> None:
+        bare = "#pragma once\n\nclass value final : public Object {\n};\n"
+        documented = (
+            "#pragma once\n\n"
+            "/**\n * Generated API documentation.\n */\n"
+            "class value final : public Object {\n};\n"
+        )
+        self.assertEqual(raw_policy.normalize_doxygen_header(documented), bare)
+        preserved = (
+            "#define VALUE 1\n"
+            "// /** line comment */\n"
+            "/* ordinary\n"
+            "/** nested-looking ordinary content\n"
+            "*/\n"
+            'constexpr auto value = "/** string */";\n'
+        )
+        self.assertEqual(raw_policy.normalize_doxygen_header(preserved), preserved)
+        for malformed in (
+            "/** outer /** nested */\n",
+            "/** unterminated\n",
+            "/** closed */ trailing\n",
+            "*/\n",
+        ):
+            with (
+                self.subTest(malformed=malformed),
+                self.assertRaises(raw_policy.PolicyError),
+            ):
+                raw_policy.normalize_doxygen_header(malformed)
+
+        changed = bare.replace("class value", "class changed")
+        self.assertNotEqual(
+            raw_policy.normalize_doxygen_header(changed),
+            raw_policy.normalize_doxygen_header(bare),
+        )
+        constructor = (
+            "class value final : public Object {\n"
+            " public:\n"
+            "  static const std::int32_t ID = 7;\n"
+            "};\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bare_header = root / "bare.h"
+            documented_header = root / "documented.h"
+            changed_header = root / "changed.h"
+            bare_header.write_text(constructor, encoding="utf-8")
+            documented_header.write_text(
+                "/**\n * Documentation only.\n */\n" + constructor,
+                encoding="utf-8",
+            )
+            changed_header.write_text(
+                constructor.replace("ID = 7", "ID = 8"), encoding="utf-8"
+            )
+            self.assertEqual(
+                raw_policy.parse_header(bare_header),
+                raw_policy.parse_header(documented_header),
+            )
+            self.assertNotEqual(
+                raw_policy.parse_header(bare_header),
+                raw_policy.parse_header(changed_header),
+            )
 
     def test_accepted_candidate_is_exhaustive_reviewed_and_activation_ready(
         self,

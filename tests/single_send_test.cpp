@@ -581,7 +581,7 @@ TEST_CASE("single send refreshes committed auth while callback publication is bl
             condition.notify_all();
         });
     tgcli::daemon::SingleSendHooks hooks;
-    hooks.wait = [](const tgcli::RequestDeadline&, const std::stop_token&) {
+    hooks.wait = [](const tgcli::RequestDeadline&, const tgcli::cancellation::Token&) {
         std::this_thread::yield();
     };
     auto outcome = harness.execute(std::move(hooks));

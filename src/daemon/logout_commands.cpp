@@ -71,10 +71,12 @@ class AuthQueue final {
         };
         if (!available()) {
             if (deadline.expires_at) {
-                static_cast<void>(condition_.wait_until(lock, session_->cancellation_token(),
-                                                        *deadline.expires_at, available));
+                static_cast<void>(cancellation::wait_until(condition_, lock,
+                                                           session_->cancellation_token(),
+                                                           *deadline.expires_at, available));
             } else {
-                static_cast<void>(condition_.wait(lock, session_->cancellation_token(), available));
+                static_cast<void>(cancellation::wait(condition_, lock,
+                                                     session_->cancellation_token(), available));
             }
         }
         while (!snapshots_.empty() &&
@@ -302,10 +304,11 @@ LogoutCoordinator::acquire_operation(RequestSession& session) {
     bool acquired = true;
     if (contended) {
         if (const auto expires_at = session.deadline().expires_at) {
-            acquired = operation_condition_.wait_until(lock, session.cancellation_token(),
-                                                       *expires_at, available);
+            acquired = cancellation::wait_until(
+                operation_condition_, lock, session.cancellation_token(), *expires_at, available);
         } else {
-            acquired = operation_condition_.wait(lock, session.cancellation_token(), available);
+            acquired = cancellation::wait(operation_condition_, lock, session.cancellation_token(),
+                                          available);
         }
     }
     if (!request_active(session)) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "daemon/activity_tracker.hpp"
 #include "daemon/config_runtime.hpp"
 #include "daemon/dispatch.hpp"
@@ -14,7 +15,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <utility>
 #include <variant>
@@ -125,7 +125,7 @@ class RequestSession final : public ResponseSink {
     [[nodiscard]] std::uint64_t connection_id() const;
     [[nodiscard]] const RequestDeadline& deadline() const;
     [[nodiscard]] WallClock::time_point admission_wall_time() const;
-    [[nodiscard]] std::stop_token cancellation_token() const;
+    [[nodiscard]] cancellation::Token cancellation_token() const;
     [[nodiscard]] bool cancellation_requested() const;
     [[nodiscard]] bool shutdown_requested() const;
     [[nodiscard]] const std::shared_ptr<const AdmittedAccountConfig>& admitted_config() const;
@@ -242,7 +242,7 @@ class RequestSession final : public ResponseSink {
     InFlightState in_flight_state_ = InFlightState::None;
     InFlightHook in_flight_hook_;
     ChallengeReturnHook challenge_return_hook_;
-    std::stop_source cancellation_source_;
+    cancellation::Source cancellation_source_;
     bool audited_terminal_ = false;
     bool terminal_batch_claimed_ = false;
     bool terminal_batch_finished_ = false;

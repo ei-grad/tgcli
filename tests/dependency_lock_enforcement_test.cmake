@@ -228,9 +228,10 @@ file(MAKE_DIRECTORY
     "${valid_prefix}/share/tgcli")
 file(WRITE "${valid_prefix}/share/tgcli/tdlib-source.json"
     "{\n"
-    "  \"schema_version\": 1,\n"
+    "  \"schema_version\": 2,\n"
     "  \"source_repository\": \"${tdlib_repository}\",\n"
-    "  \"immutable_ref\": \"${tdlib_ref}\"\n"
+    "  \"immutable_ref\": \"${tdlib_ref}\",\n"
+    "  \"generated_header_contract\": \"doxygen-normalized-v1\"\n"
     "}\n")
 expect_success(
     "matching prefix provenance"
@@ -238,6 +239,26 @@ expect_success(
     -DREPO_ROOT=${REPO_ROOT}
     -DMODE=prefix
     -DTD_PACKAGE_DIRECTORY=${valid_prefix}/lib/cmake/Td
+    -DEXPECTED_REF=${tdlib_ref}
+    -P "${probe}")
+
+set(wrong_header_contract_prefix "${TEST_OUTPUT_DIR}/wrong-header-contract-prefix")
+file(MAKE_DIRECTORY
+    "${wrong_header_contract_prefix}/lib/cmake/Td"
+    "${wrong_header_contract_prefix}/share/tgcli")
+file(WRITE "${wrong_header_contract_prefix}/share/tgcli/tdlib-source.json"
+    "{\n"
+    "  \"schema_version\": 2,\n"
+    "  \"source_repository\": \"${tdlib_repository}\",\n"
+    "  \"immutable_ref\": \"${tdlib_ref}\",\n"
+    "  \"generated_header_contract\": \"raw-header-bytes\"\n"
+    "}\n")
+expect_failure(
+    "mismatched header evidence provenance" "differs from the source lock"
+    "${CMAKE_COMMAND}"
+    -DREPO_ROOT=${REPO_ROOT}
+    -DMODE=prefix
+    -DTD_PACKAGE_DIRECTORY=${wrong_header_contract_prefix}/lib/cmake/Td
     -DEXPECTED_REF=${tdlib_ref}
     -P "${probe}")
 

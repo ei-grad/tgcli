@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/deadline.hpp"
 #include "common/secure_wipe.hpp"
 #include "core/td_client.hpp"
@@ -8,7 +9,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <variant>
 #include <vector>
@@ -192,7 +192,7 @@ using DirectPreparationOutcome = std::variant<DirectPrepared, DirectAuthorizatio
 
 struct DirectRpcHooks {
     std::function<core::TdEventClock::time_point()> now;
-    std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
+    std::function<void(const RequestDeadline&, const cancellation::Token&)> wait;
     std::function<void()> before_request;
     std::function<void()> before_submit;
     std::function<void()> before_event_arbitration;

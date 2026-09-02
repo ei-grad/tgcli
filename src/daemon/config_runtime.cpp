@@ -14,7 +14,7 @@ ConfigRuntime::ConfigRuntime(std::string config_path,
     publication_.store(std::make_shared<const RuntimePublication>(
         RuntimePublication{.snapshot = snapshots_.current(), .generation = generation_}));
     next_poll_ = initialized_at + kPollInterval;
-    worker_ = std::jthread([this](std::stop_token stop) { run(std::move(stop)); });
+    worker_ = cancellation::Thread([this](cancellation::Token stop) { run(std::move(stop)); });
 }
 
 ConfigRuntime::~ConfigRuntime() {
@@ -22,7 +22,7 @@ ConfigRuntime::~ConfigRuntime() {
         const std::lock_guard lock(mutex_);
         stopped_ = true;
     }
-    worker_.request_stop();
+    static_cast<void>(worker_.request_stop());
     condition_.notify_all();
     if (worker_.joinable()) {
         worker_.join();
@@ -31,7 +31,7 @@ ConfigRuntime::~ConfigRuntime() {
 
 ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
                                            const RequestDeadline& deadline,
-                                           const std::stop_token& cancellation) {
+                                           const cancellation::Token& cancellation) {
     if (hooks_ && hooks_->admission_deadline) {
         hooks_->admission_deadline(deadline);
     }
@@ -56,7 +56,8 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
 
     const auto refresh = ++requested_refresh_;
     condition_.notify_all();
-    const std::stop_callback cancellation_wakeup(cancellation, [this] { condition_.notify_all(); });
+    const cancellation::Callback cancellation_wakeup(cancellation,
+                                                     [this] { condition_.notify_all(); });
 
     while (completed_refresh_ < refresh) {
         if (stopped_) {
@@ -157,8 +158,8 @@ void ConfigRuntime::dispatch_publication_observer(std::unique_lock<std::mutex>& 
     condition_.notify_all();
 }
 
-void ConfigRuntime::run(std::stop_token stop) {
-    const std::stop_callback stop_wakeup(stop, [this] { condition_.notify_all(); });
+void ConfigRuntime::run(cancellation::Token stop) {
+    const cancellation::Callback stop_wakeup(stop, [this] { condition_.notify_all(); });
     std::unique_lock lock(mutex_);
     while (!stop.stop_requested() && !stopped_) {
         if (publication_notification_pending_) {

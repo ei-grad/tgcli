@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const generator = path.join(repository, "scripts", "generate_command_assets.mjs");
+const mode = process.argv[2] ?? "all";
+if (!["all", "static", "bash", "zsh", "runtime"].includes(mode)) {
+  throw new Error(`unknown command asset verification mode: ${mode}`);
+}
 const run = (command, args) => {
   const result = spawnSync(command, args, { cwd: repository, encoding: "utf8" });
   if (result.status !== 0) {
@@ -117,8 +121,6 @@ for (const asset of assets) {
   }
 }
 
-run("bash", ["-n", assets[0]]);
-run("zsh", ["-n", assets[1]]);
 const bashCase = (words, current) =>
   run("bash", [
     "-c",
@@ -135,7 +137,7 @@ const zshCase = (words, current) =>
     assets[1],
   ]).trim().split("\n").filter(Boolean);
 
-for (const shellCase of [bashCase, zshCase]) {
+const verifyShellBehavior = (shellCase) => {
   const permissions = shellCase(
     ["tgcli", "--account", "main", "chat", "--json", "set-permissions", "--p"],
     6 + (shellCase === zshCase ? 1 : 0),
@@ -179,9 +181,19 @@ for (const shellCase of [bashCase, zshCase]) {
   if (!topLevel.includes("daemon") || !topLevel.includes("doctor") || !topLevel.includes("download")) {
     throw new Error("active download command is missing from completion");
   }
+};
+
+if (mode === "all" || mode === "bash") {
+  run("bash", ["-n", assets[0]]);
+  verifyShellBehavior(bashCase);
+}
+if (mode === "all" || mode === "zsh") {
+  run("zsh", ["-n", assets[1]]);
+  verifyShellBehavior(zshCase);
 }
 
-if (spawnSync("fish", ["--version"], { encoding: "utf8" }).status === 0) {
+if ((mode === "all" || mode === "static") &&
+    spawnSync("fish", ["--version"], { encoding: "utf8" }).status === 0) {
   run("fish", ["-n", assets[2]]);
   const state = run("fish", [
     "-c",
@@ -193,8 +205,11 @@ if (spawnSync("fish", ["--version"], { encoding: "utf8" }).status === 0) {
   }
 }
 
-const binary = process.argv[2];
-if (binary) {
+const binary = process.argv[3];
+if (mode === "runtime") {
+  if (!binary) {
+    throw new Error("runtime command asset verification requires the tgcli binary");
+  }
   const isolatedEnvironment = {
     ...process.env,
     HOME: "/tgcli-completion-missing-home",

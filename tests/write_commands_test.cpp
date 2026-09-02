@@ -722,6 +722,22 @@ class FakeWrites final {
         coordinator_hooks_->direct_rpc.before_submit = [expired] { expired->store(true); };
     }
 
+    std::function<void()> expire_direct_after_observed_dispatch() {
+        auto released = std::make_shared<std::promise<void>>();
+        auto release = released->get_future().share();
+        auto forced_now = std::make_shared<std::optional<core::TdEventClock::time_point>>();
+        coordinator_hooks_->direct_rpc.now = [forced_now] {
+            return forced_now->value_or(core::TdEventClock::now());
+        };
+        coordinator_hooks_->direct_rpc.before_wait = [release] { release.wait(); };
+        coordinator_hooks_->direct_rpc.wait = [forced_now](const RequestDeadline& deadline,
+                                                           const cancellation::Token&) {
+            REQUIRE(deadline.expires_at);
+            *forced_now = *deadline.expires_at;
+        };
+        return [released] { released->set_value(); };
+    }
+
     void expire_forward_before_request() {
         coordinator_hooks_->forward.now = [] { return core::TdEventClock::time_point::max(); };
     }
@@ -2738,8 +2754,7 @@ TEST_CASE("public msg react validates availability and exact add-remove options"
             available.unavailability_reason = reason;
             fake.respond(core::TdFunctionKind::GetMessageAvailableReactions, std::move(available));
             fake.respond(core::TdFunctionKind::GetMessageProperties, core::TdMessageProperties{});
-            static_cast<void>(
-                fake.try_respond(core::TdFunctionKind::RemoveMessageReaction, core::TdOk{}));
+            fake.respond(core::TdFunctionKind::RemoveMessageReaction, core::TdOk{});
             const auto outcome = pending.get();
             REQUIRE(outcome.result);
             CHECK((*outcome.result)["removed"] == true);
@@ -3798,10 +3813,12 @@ TEST_CASE("post-dispatch invite query redaction survives terminal races until co
         const std::string invite = "https://t.me/+LateDispatchTimeoutSentinel123";
         WipeTrace trace;
         FakeWrites fake;
+        const auto expire_after_dispatch = fake.expire_direct_after_observed_dispatch();
         auto sink = invite_log_sink(fake);
         auto pending = fake.dispatch(
-            chat_join_request(invite, "late-dispatch-timeout", false, 0.1, trace.observer()));
+            chat_join_request(invite, "late-dispatch-timeout", false, 30.0, trace.observer()));
         const auto query_id = reach_invite_dispatch(fake, invite);
+        expire_after_dispatch();
         const auto outcome = pending.get();
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");

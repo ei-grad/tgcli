@@ -1,5 +1,6 @@
 #include "core/td_client.hpp"
 
+#include "common/shared_publication.hpp"
 #include "core/query_registry.hpp"
 #include "core/request_lifecycle.hpp"
 #include "core/td_authorization.hpp"
@@ -346,7 +347,7 @@ class TdClient::Impl {
         }
         if (!generation || generation->client_id != authorization->client_id ||
             generation->number != authorization->client_generation ||
-            auth_state_.load(std::memory_order_acquire) != authorization) {
+            auth_state_.load() != authorization) {
             return std::nullopt;
         }
         const std::lock_guard lock(generation->m6_cache_mutex);
@@ -1071,7 +1072,7 @@ class TdClient::Impl {
         };
         {
             const std::lock_guard commit_lock(generation->auth_commit_mutex);
-            const auto current = auth_state_.load(std::memory_order_acquire);
+            const auto current = auth_state_.load();
             if (!current || current->client_generation != authorization->client_generation ||
                 current->auth_sequence != authorization->auth_sequence ||
                 current->data.state != AuthState::Ready) {
@@ -1244,7 +1245,7 @@ class TdClient::Impl {
     }
 
     std::shared_ptr<const AuthStateSnapshot> auth_state() const {
-        return auth_state_.load(std::memory_order_acquire);
+        return auth_state_.load();
     }
 
     std::uint64_t subscribe_auth_states(AuthStateHandler handler) {
@@ -1420,7 +1421,7 @@ class TdClient::Impl {
                               .auth_sequence = 0,
                               .data = AuthStateData{AuthState::Unknown},
                               .receive_observed_at = std::nullopt});
-        auth_state_.store(std::move(unknown), std::memory_order_release);
+        auth_state_.store(std::move(unknown));
 
         const TdSendDescriptor descriptor{
             .function = TdFunctionKind::GetAuthorizationState,
@@ -1489,7 +1490,7 @@ class TdClient::Impl {
     authorization_failure_locked(const std::shared_ptr<Generation>& generation,
                                  const TdSendDescriptor& descriptor,
                                  const TdFunctionData* function) const {
-        const auto snapshot = auth_state_.load(std::memory_order_acquire);
+        const auto snapshot = auth_state_.load();
         if (snapshot == nullptr) {
             return TdAuthorizationFailure::AuthStateMismatch;
         }
@@ -1536,7 +1537,7 @@ class TdClient::Impl {
             return;
         }
         generation->close_sent = true;
-        const auto snapshot = auth_state_.load(std::memory_order_acquire);
+        const auto snapshot = auth_state_.load();
         if (snapshot == nullptr) {
             return;
         }
@@ -1873,7 +1874,7 @@ class TdClient::Impl {
                                              std::uint64_t receive_event_sequence,
                                              TdEventClock::time_point observed_at) {
         AuthPublication publication;
-        const auto previous = auth_state_.load(std::memory_order_acquire);
+        const auto previous = auth_state_.load();
         const auto sequence =
             previous != nullptr && previous->client_generation == generation->number
                 ? previous->auth_sequence + 1
@@ -1894,7 +1895,7 @@ class TdClient::Impl {
             const std::lock_guard cache_lock(generation->m6_cache_mutex);
             generation->m6_chat_folders.reset();
         }
-        auth_state_.store(publication.snapshot, std::memory_order_release);
+        auth_state_.store(publication.snapshot);
         generation->initial_state_installed = true;
         generation->accepted_auth_update |= from_update;
         if (publication.snapshot->data.state != AuthState::Closed) {
@@ -1959,7 +1960,7 @@ class TdClient::Impl {
                 notify_shutdown = true;
             } else if (!shutting_down_) {
                 current_ = make_generation();
-                unknown = auth_state_.load(std::memory_order_acquire);
+                unknown = auth_state_.load();
             }
         }
         if (notify_shutdown) {
@@ -1993,7 +1994,7 @@ class TdClient::Impl {
     std::atomic<std::uint64_t> next_owner_id_{1};
     bool shutting_down_ = false;
     std::uint64_t shutdown_generation_ = 0;
-    std::atomic<std::shared_ptr<const AuthStateSnapshot>> auth_state_;
+    SharedPublication<const AuthStateSnapshot> auth_state_;
     UpdateBus<TdValue> updates_;
     UpdateBus<TdValue> ordered_updates_;
     UpdateBus<TdValue> send_updates_;

@@ -176,7 +176,7 @@ TEST_CASE("request source bytes are exact and the socket/direct ceilings agree",
     std::array<int, 2> sockets{};
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets.data()) == 0);
     std::atomic<bool> writer_ok{false};
-    std::jthread writer([&] {
+    tgcli::cancellation::Thread writer([&] {
         exact_source.push_back('\n');
         writer_ok = write_all(sockets[0], exact_source);
         static_cast<void>(::shutdown(sockets[0], SHUT_WR));
@@ -196,7 +196,7 @@ TEST_CASE("request source bytes are exact and the socket/direct ceilings agree",
     std::array<int, 2> oversized_sockets{};
     REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, oversized_sockets.data()) == 0);
     std::atomic<bool> oversized_writer_ok{false};
-    std::jthread oversized_writer([&] {
+    tgcli::cancellation::Thread oversized_writer([&] {
         oversized_source.push_back('\n');
         oversized_writer_ok = write_all(oversized_sockets[0], oversized_source);
         static_cast<void>(::shutdown(oversized_sockets[0], SHUT_WR));
@@ -260,8 +260,8 @@ TEST_CASE("verify-only config grant CAS reports every stable outcome without rew
     write_bytes(config_path, granted);
     const auto current = store.load();
     REQUIRE(current);
-    const std::stop_source cancelled;
-    cancelled.request_stop();
+    const tgcli::cancellation::Source cancelled;
+    static_cast<void>(cancelled.request_stop());
     CHECK(store
               .verify_write_grant(current.snapshot->identity, "main",
                                   config::MutationControl{std::nullopt, cancelled.get_token()})

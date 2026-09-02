@@ -739,10 +739,11 @@ class SingleSendCoordinator::Impl {
         std::unique_lock lock(event_mutex_);
         const auto changed = [this, wake_sequence] { return wake_sequence_ != wake_sequence; };
         if (const auto expires_at = session_.deadline().expires_at) {
-            static_cast<void>(event_condition_.wait_until(lock, session_.cancellation_token(),
-                                                          *expires_at, changed));
+            static_cast<void>(cancellation::wait_until(
+                event_condition_, lock, session_.cancellation_token(), *expires_at, changed));
         } else {
-            static_cast<void>(event_condition_.wait(lock, session_.cancellation_token(), changed));
+            static_cast<void>(
+                cancellation::wait(event_condition_, lock, session_.cancellation_token(), changed));
         }
     }
 
@@ -776,7 +777,7 @@ class SingleSendCoordinator::Impl {
     core::TdClient& client_;
     RequestSession& session_;
     std::function<core::TdEventClock::time_point()> now_;
-    std::function<void(const RequestDeadline&, const std::stop_token&)> wait_;
+    std::function<void(const RequestDeadline&, const cancellation::Token&)> wait_;
     std::function<void()> before_request_;
     std::function<void()> before_submit_;
     std::function<void()> before_event_arbitration_;

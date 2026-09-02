@@ -1,3 +1,4 @@
+#include "common/cancellation.hpp"
 #include "common/config.hpp"
 #include "common/config_test_support.hpp"
 
@@ -8,7 +9,6 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
-#include <stop_token>
 #include <string>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -844,8 +844,8 @@ TEST_CASE("config mutation lock acquisition obeys deadline and cancellation", "[
         CHECK(result.status == MutationStatus::TimedOut);
     }
     SECTION("cancellation") {
-        const std::stop_source source;
-        source.request_stop();
+        const tgcli::cancellation::Source source;
+        static_cast<void>(source.request_stop());
         MutationControl control;
         control.cancellation = source.get_token();
         const auto result = store.add_account(initial.snapshot->identity, "work", control);
@@ -1098,7 +1098,7 @@ TEST_CASE("active config transaction loads obey deadline and cancellation", "[co
             }
         };
         const Store store(temp.file(), hooks);
-        const std::stop_source stop;
+        const tgcli::cancellation::Source stop;
         LoadResult loaded;
         std::thread reader([&] {
             MutationControl control;
@@ -1106,7 +1106,7 @@ TEST_CASE("active config transaction loads obey deadline and cancellation", "[co
             loaded = store.load(control);
         });
         const bool entered = marker_observed.wait_for(1s) == std::future_status::ready;
-        stop.request_stop();
+        static_cast<void>(stop.request_stop());
         reader.join();
 
         REQUIRE(entered);
@@ -1142,8 +1142,8 @@ TEST_CASE("snapshot publication rejects a held transaction with a diagnostic", "
     }
 
     SECTION("cancellation") {
-        const std::stop_source stop;
-        stop.request_stop();
+        const tgcli::cancellation::Source stop;
+        static_cast<void>(stop.request_stop());
         MutationControl control;
         control.cancellation = stop.get_token();
         CHECK(manager.reload(control) == ReloadStatus::Invalid);

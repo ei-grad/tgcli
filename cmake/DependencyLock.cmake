@@ -146,13 +146,19 @@ function(tgcli_assert_tdlib_prefix_provenance td_package_directory expected_ref)
     string(JSON provenance_size LENGTH "${provenance_json}")
     string(JSON provenance_schema_type TYPE "${provenance_json}" schema_version)
     string(JSON provenance_schema GET "${provenance_json}" schema_version)
+    if(NOT provenance_size EQUAL 4 OR NOT provenance_schema_type STREQUAL NUMBER
+       OR NOT provenance_schema EQUAL 2)
+        message(FATAL_ERROR
+            "TDLib prefix provenance ${provenance_file} differs from the source lock")
+    endif()
     string(JSON provenance_repository GET "${provenance_json}" source_repository)
     string(JSON provenance_ref GET "${provenance_json}" immutable_ref)
+    string(JSON provenance_header_contract GET "${provenance_json}"
+        generated_header_contract)
     tgcli_dependency_lock_field(tdlib source_repository locked_repository)
-    if(NOT provenance_size EQUAL 3 OR NOT provenance_schema_type STREQUAL NUMBER
-       OR NOT provenance_schema EQUAL 1
-       OR NOT provenance_repository STREQUAL locked_repository
-       OR NOT provenance_ref STREQUAL expected_ref)
+    if(NOT provenance_repository STREQUAL locked_repository
+       OR NOT provenance_ref STREQUAL expected_ref
+       OR NOT provenance_header_contract STREQUAL "doxygen-normalized-v1")
         message(FATAL_ERROR
             "TDLib prefix provenance ${provenance_file} differs from the source lock")
     endif()

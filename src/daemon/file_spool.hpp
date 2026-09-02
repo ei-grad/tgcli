@@ -1,12 +1,13 @@
 #pragma once
 
+#include "common/cancellation.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
@@ -89,12 +90,13 @@ struct FileSpoolError {
 struct FileSpoolControl {
     FileSpoolControl() = default;
     FileSpoolControl(const std::optional<std::chrono::steady_clock::time_point>& deadline_value,
-                     std::stop_token stop_token_value, std::function<bool()> cancelled_value = {})
+                     cancellation::Token stop_token_value,
+                     std::function<bool()> cancelled_value = {})
         : deadline(deadline_value), stop_token(std::move(stop_token_value)),
           cancelled(std::move(cancelled_value)) {}
 
     std::optional<std::chrono::steady_clock::time_point> deadline;
-    std::stop_token stop_token;
+    cancellation::Token stop_token;
     std::function<bool()> cancelled;
 };
 

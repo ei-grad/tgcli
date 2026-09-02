@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/cancellation.hpp"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -8,7 +10,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 
 namespace tgcli::daemon {
 
@@ -81,7 +82,7 @@ class ActivityTracker {
     [[nodiscard]] Snapshot snapshot() const;
     // Callback failures are contained after expiry is claimed. Expiry remains
     // final and the callback is never retried.
-    void watch(const std::stop_token& stop);
+    void watch(const cancellation::Token& stop);
 
   private:
     [[nodiscard]] std::optional<Token> try_admit(Kind kind);

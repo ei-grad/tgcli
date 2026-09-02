@@ -208,7 +208,7 @@ RequestSession::WallClock::time_point RequestSession::admission_wall_time() cons
     return admission_wall_time_;
 }
 
-std::stop_token RequestSession::cancellation_token() const {
+cancellation::Token RequestSession::cancellation_token() const {
     return cancellation_source_.get_token();
 }
 
@@ -472,11 +472,11 @@ void RequestSession::disconnect() {
         }
         disconnected_at_ = Clock::now();
         if (terminal_batch_claimed_) {
-            cancellation_source_.request_stop();
+            static_cast<void>(cancellation_source_.request_stop());
             return;
         }
         state_ = State::Disconnected;
-        cancellation_source_.request_stop();
+        static_cast<void>(cancellation_source_.request_stop());
         answer_reserved_ = false;
         reserved_identity_.reset();
         if (current_) {
@@ -507,7 +507,7 @@ void RequestSession::shutdown() {
         }
         shutdown_requested_ = true;
         audited = audited_terminal_ || terminal_batch_claimed_;
-        cancellation_source_.request_stop();
+        static_cast<void>(cancellation_source_.request_stop());
         answer_reserved_ = false;
         reserved_identity_.reset();
         if (!audited) {
@@ -673,7 +673,7 @@ void RequestSession::audit_fatal() {
         return;
     }
     state_ = State::AuditFatal;
-    cancellation_source_.request_stop();
+    static_cast<void>(cancellation_source_.request_stop());
     answer_reserved_ = false;
     reserved_identity_.reset();
     release_activity();
@@ -874,7 +874,7 @@ void RequestSession::release_activity() {
 }
 
 void RequestSession::cancel_stream_transport() noexcept {
-    cancellation_source_.request_stop();
+    static_cast<void>(cancellation_source_.request_stop());
 }
 
 bool RequestSession::claim_stream_terminal(StreamTerminalPayload payload) noexcept {

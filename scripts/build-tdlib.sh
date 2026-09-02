@@ -87,9 +87,10 @@ c++ -std=c++20 -fsyntax-only -I"$PREFIX/include" "$CHECK_TU"
 PROVENANCE_FILE="$BUILD_DIR/tgcli-tdlib-source.json"
 printf '%s\n' \
     '{' \
-    '  "schema_version": 1,' \
+    '  "schema_version": 2,' \
     "  \"source_repository\": \"$TDLIB_REPOSITORY\"," \
-    "  \"immutable_ref\": \"$TDLIB_REV\"" \
+    "  \"immutable_ref\": \"$TDLIB_REV\"," \
+    '  "generated_header_contract": "doxygen-normalized-v1"' \
     '}' > "$PROVENANCE_FILE"
 install -Dm644 "$PROVENANCE_FILE" \
     "$PREFIX/share/tgcli/tdlib-source.json"

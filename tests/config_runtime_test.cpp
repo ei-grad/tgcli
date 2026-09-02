@@ -1,3 +1,4 @@
+#include "common/cancellation.hpp"
 #include "daemon/config_runtime.hpp"
 
 #include <atomic>
@@ -7,7 +8,6 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <stop_token>
 #include <string>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -452,12 +452,12 @@ TEST_CASE("forced admission honors deadline and cancellation", "[daemon][config-
         auto hooks = std::make_shared<tgcli::daemon::testing::ConfigRuntimeHooks>();
         hooks->before_reload = [&gate](bool forced) { gate.wait(forced); };
         ConfigRuntime runtime(temp.file(), hooks);
-        std::stop_source stop;
+        tgcli::cancellation::Source stop;
         ConfigAdmissionResult result;
         std::thread caller(
             [&] { result = runtime.admit("main", tgcli::RequestDeadline{}, stop.get_token()); });
         gate.wait_until_entered();
-        stop.request_stop();
+        static_cast<void>(stop.request_stop());
         caller.join();
         CHECK(result.refresh_status == ConfigRefreshStatus::Cancelled);
         CHECK_FALSE(result.decision);

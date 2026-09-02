@@ -29,7 +29,7 @@ jobs:
           path: |
             ${{ steps.tdlib.outputs.prefix }}
             ~/.cache/tgcli-dev/td
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v4
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux' && steps.tdlib-cache.outputs.cache-hit != 'true'
@@ -64,7 +64,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache
+          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache zsh
 
       - name: Resolve tdlib prefix path
         id: tdlib
@@ -77,7 +77,7 @@ jobs:
           path: |
             ${{ steps.tdlib.outputs.prefix }}
             ~/.cache/tgcli-dev/td
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v4
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -121,7 +121,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install gperf ninja ccache coreutils
+        run: |
+          brew install gperf ninja ccache coreutils
+          command -v zsh >/dev/null
 
       - name: Resolve tdlib prefix path
         id: tdlib
@@ -134,7 +136,7 @@ jobs:
           path: |
             ${{ steps.tdlib.outputs.prefix }}
             ~/.cache/tgcli-dev/td
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v4
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -187,7 +189,7 @@ jobs:
           path: |
             ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
             ~/.cache/tgcli-dev/td
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v4
 
       - name: Build tdlib prefix
         if: steps.tdlib-cache.outputs.cache-hit != 'true'

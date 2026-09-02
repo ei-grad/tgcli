@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/config.hpp"
 #include "common/paths.hpp"
 #include "common/secret_hook.hpp"
@@ -37,7 +38,7 @@ class LoginCoordinator {
     core::AuthBootstrap::HookRunner hook_runner_;
     std::mutex lease_mutex_;
     bool login_active_ = false;
-    std::jthread lifecycle_waiter_;
+    cancellation::Thread lifecycle_waiter_;
 };
 
 void register_login_commands(Dispatcher& dispatcher, LoginCoordinator& coordinator);

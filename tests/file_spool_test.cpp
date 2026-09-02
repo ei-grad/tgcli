@@ -1,3 +1,4 @@
+#include "common/cancellation.hpp"
 #include "daemon/file_spool.hpp"
 
 #include <algorithm>
@@ -9,7 +10,6 @@
 #include <fstream>
 #include <limits>
 #include <memory>
-#include <stop_token>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
@@ -780,8 +780,8 @@ TEST_CASE("file spool checks deadline and cancellation without filesystem mutati
     CHECK(require_error(prepare_spool_source(temp.source().string(), "/", expired)).kind ==
           FileSpoolErrorKind::TimedOut);
 
-    const std::stop_source stop;
-    stop.request_stop();
+    const tgcli::cancellation::Source stop;
+    static_cast<void>(stop.request_stop());
     FileSpoolControl cancelled;
     cancelled.stop_token = stop.get_token();
     CHECK(require_error(prepare_spool_source(temp.source().string(), "/", cancelled)).kind ==
@@ -934,7 +934,7 @@ TEST_CASE("file spool readback observes control after each bounded chunk", "[fil
     auto hooks = std::make_shared<testing::FileSpoolHooks>();
 
     SECTION("cancelled") {
-        std::stop_source stop;
+        tgcli::cancellation::Source stop;
         const FileSpoolControl control{std::nullopt, stop.get_token()};
         hooks->read = [&](FileSpoolIo operation, int descriptor, void* data,
                           std::size_t size) -> ssize_t {
@@ -942,7 +942,7 @@ TEST_CASE("file spool readback observes control after each bounded chunk", "[fil
             if (operation == FileSpoolIo::DestinationReadback) {
                 ++readback_calls;
                 CHECK(size <= static_cast<std::size_t>(64) * 1024U);
-                stop.request_stop();
+                static_cast<void>(stop.request_stop());
             }
             return count;
         };
@@ -1008,13 +1008,13 @@ TEST_CASE("file spool defers cleanup cancellation through namespace durability",
     auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
     const auto created = require_created(
         create_spool_file(source, temp.state().string(), std::string(kInvocation), ::getuid()));
-    std::stop_source stop;
+    tgcli::cancellation::Source stop;
     const FileSpoolControl control{std::nullopt, stop.get_token()};
     std::size_t root_syncs = 0;
     auto hooks = std::make_shared<testing::FileSpoolHooks>();
     hooks->at_stage = [&](FileSpoolStage stage) {
         if (stage == FileSpoolStage::BeforeCleanupInvocationRemove) {
-            stop.request_stop();
+            static_cast<void>(stop.request_stop());
         }
     };
     hooks->sync = [&](FileSpoolStage stage, int descriptor) {
@@ -1061,13 +1061,13 @@ TEST_CASE("file spool defers root creation cancellation through parent durabilit
     const TempTree temp;
     temp.write(temp.source(), "payload");
     auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
-    std::stop_source stop;
+    tgcli::cancellation::Source stop;
     const FileSpoolControl control{std::nullopt, stop.get_token()};
     std::size_t parent_syncs = 0;
     auto hooks = std::make_shared<testing::FileSpoolHooks>();
     hooks->at_stage = [&](FileSpoolStage stage) {
         if (stage == FileSpoolStage::AfterRootCreate) {
-            stop.request_stop();
+            static_cast<void>(stop.request_stop());
         }
     };
     hooks->sync = [&](FileSpoolStage stage, int descriptor) {
@@ -1088,13 +1088,13 @@ TEST_CASE("file spool defers invocation cancellation through root durability", "
     const TempTree temp;
     temp.write(temp.source(), "payload");
     auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
-    std::stop_source stop;
+    tgcli::cancellation::Source stop;
     const FileSpoolControl control{std::nullopt, stop.get_token()};
     std::size_t root_syncs = 0;
     auto hooks = std::make_shared<testing::FileSpoolHooks>();
     hooks->at_stage = [&](FileSpoolStage stage) {
         if (stage == FileSpoolStage::AfterInvocationCreate) {
-            stop.request_stop();
+            static_cast<void>(stop.request_stop());
         }
     };
     hooks->sync = [&](FileSpoolStage stage, int descriptor) {
@@ -1118,10 +1118,10 @@ TEST_CASE("file spool stage controls retain typed errors across operations", "[f
     REQUIRE(::chmod((temp.state() / "spool").c_str(), 0700) == 0);
 
     SECTION("create cancellation") {
-        std::stop_source stop;
+        tgcli::cancellation::Source stop;
         const FileSpoolControl control{std::nullopt, stop.get_token()};
-        auto hooks =
-            mutation_hook(FileSpoolStage::BeforeAccountStateOpen, [&] { stop.request_stop(); });
+        auto hooks = mutation_hook(FileSpoolStage::BeforeAccountStateOpen,
+                                   [&] { static_cast<void>(stop.request_stop()); });
         auto source = require_source(prepare_spool_source(temp.source().string(), "/"));
         CHECK(require_error(create_spool_file(source, temp.state().string(),
                                               std::string(kInvocation), ::getuid(), control, hooks))
@@ -1136,10 +1136,10 @@ TEST_CASE("file spool stage controls retain typed errors across operations", "[f
                   .kind == FileSpoolErrorKind::TimedOut);
     }
     SECTION("enumerate cancellation") {
-        std::stop_source stop;
+        tgcli::cancellation::Source stop;
         const FileSpoolControl control{std::nullopt, stop.get_token()};
-        auto hooks =
-            mutation_hook(FileSpoolStage::BeforeRootEnumeration, [&] { stop.request_stop(); });
+        auto hooks = mutation_hook(FileSpoolStage::BeforeRootEnumeration,
+                                   [&] { static_cast<void>(stop.request_stop()); });
         CHECK(require_error(enumerate_spool(temp.state().string(), ::getuid(), control, hooks))
                   .kind == FileSpoolErrorKind::Cancelled);
     }

@@ -65,13 +65,14 @@ enum class HandshakeState { AwaitingHello, Matched, BinaryMismatch };
 
 class AdmissionCancellation {
   public:
-    AdmissionCancellation(int socket_fd, const std::stop_token& shutdown) : socket_fd_(socket_fd) {
+    AdmissionCancellation(int socket_fd, const cancellation::Token& shutdown)
+        : socket_fd_(socket_fd) {
         if (!net::pipe_cloexec(wake_read_fd_, wake_write_fd_)) {
             throw std::runtime_error("cannot create config-admission wake pipe");
         }
         monitor_ = std::thread([this] { monitor(); });
         shutdown_callback_.emplace(shutdown, std::function<void()>([this] {
-                                       cancellation_.request_stop();
+                                       static_cast<void>(cancellation_.request_stop());
                                        wake_monitor();
                                    }));
     }
@@ -87,7 +88,7 @@ class AdmissionCancellation {
     AdmissionCancellation(AdmissionCancellation&&) = delete;
     AdmissionCancellation& operator=(AdmissionCancellation&&) = delete;
 
-    [[nodiscard]] std::stop_token token() const {
+    [[nodiscard]] cancellation::Token token() const {
         return cancellation_.get_token();
     }
 
@@ -114,7 +115,7 @@ class AdmissionCancellation {
 
     void disconnect() {
         peer_disconnected_.store(true, std::memory_order_release);
-        cancellation_.request_stop();
+        static_cast<void>(cancellation_.request_stop());
     }
 
     void monitor() {
@@ -154,12 +155,12 @@ class AdmissionCancellation {
         }
     }
 
-    using ShutdownCallback = std::stop_callback<std::function<void()>>;
+    using ShutdownCallback = cancellation::Callback;
 
     int socket_fd_ = -1;
     int wake_read_fd_ = -1;
     int wake_write_fd_ = -1;
-    std::stop_source cancellation_;
+    cancellation::Source cancellation_;
     std::optional<ShutdownCallback> shutdown_callback_;
     std::thread monitor_;
     std::atomic<bool> peer_disconnected_{false};
@@ -416,14 +417,14 @@ void Server::start_runtime_lifecycle() {
         });
     }
     activity_watcher_ =
-        std::jthread([this](const std::stop_token& stop) { activity_.watch(stop); });
+        cancellation::Thread([this](const cancellation::Token& stop) { activity_.watch(stop); });
 }
 
 void Server::stop_runtime_lifecycle() {
     if (options_.config_runtime != nullptr) {
         options_.config_runtime->set_publication_observer({});
     }
-    activity_watcher_.request_stop();
+    static_cast<void>(activity_watcher_.request_stop());
     if (activity_watcher_.joinable()) {
         activity_watcher_.join();
     }
@@ -437,7 +438,7 @@ void Server::request_stop() {
             idle_cv_.wait(lock, [this] { return shutdown_terminals_sent_; });
             return;
         }
-        admission_cancellation_.request_stop();
+        static_cast<void>(admission_cancellation_.request_stop());
         for (const auto& active : active_requests_) {
             if (!active.shutdown_request) {
                 active_requests.push_back(active.session);

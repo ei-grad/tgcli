@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/deadline.hpp"
 #include "core/td_client.hpp"
 
@@ -7,7 +8,6 @@
 #include <future>
 #include <memory>
 #include <optional>
-#include <stop_token>
 
 namespace tgcli::daemon {
 
@@ -27,7 +27,7 @@ using ReadyReadStart = std::function<std::future<core::TdValue>(
 
 struct ReadyReadHooks {
     std::function<core::TdEventClock::time_point()> now;
-    std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
+    std::function<void(const RequestDeadline&, const cancellation::Token&)> wait;
     std::function<void()> before_event_arbitration;
     std::function<void()> before_wait;
 };

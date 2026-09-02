@@ -1,3 +1,4 @@
+#include "common/cancellation.hpp"
 #include "common/secret_hook.hpp"
 #include "common/secret_hook_test_support.hpp"
 
@@ -7,7 +8,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <thread>
 #include <utility>
@@ -217,11 +217,11 @@ TEST_CASE("trusted hook timeout leaves no process in its process group", "[hook]
 
 TEST_CASE("trusted hook cancellation kills and reaps its process group promptly", "[hook]") {
     pid_t process_group = -1;
-    std::stop_source cancellation;
+    tgcli::cancellation::Source cancellation;
     testing::RunHooks hooks;
     hooks.on_spawn = [&](pid_t child) {
         process_group = child;
-        cancellation.request_stop();
+        static_cast<void>(cancellation.request_stop());
     };
     const auto started = std::chrono::steady_clock::now();
     const auto result = testing::run(

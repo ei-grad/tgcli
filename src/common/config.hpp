@@ -1,6 +1,8 @@
 #pragma once
 
-#include <atomic>
+#include "common/cancellation.hpp"
+#include "common/shared_publication.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +11,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
@@ -89,11 +90,11 @@ enum class MutationStatus {
 struct MutationControl {
     MutationControl() = default;
     MutationControl(std::optional<std::chrono::steady_clock::time_point> deadline_value,
-                    std::stop_token cancellation_value)
+                    cancellation::Token cancellation_value)
         : deadline(deadline_value), cancellation(std::move(cancellation_value)) {}
 
     std::optional<std::chrono::steady_clock::time_point> deadline;
-    std::stop_token cancellation;
+    cancellation::Token cancellation;
     std::function<bool()> pre_commit;
     std::function<bool()> commit_admission;
     std::function<bool(const ConfigSnapshot&)> already_committed_admission;
@@ -213,7 +214,7 @@ class SnapshotManager {
   private:
     const Store& store_;
     mutable std::mutex reload_mutex_;
-    std::atomic<std::shared_ptr<const PublishedSnapshot>> current_;
+    SharedPublication<const PublishedSnapshot> current_;
     Clock::time_point next_poll_;
 };
 

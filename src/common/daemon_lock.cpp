@@ -132,6 +132,7 @@ bool random_control_token(std::string& token, std::string& error) {
         offset += static_cast<std::size_t>(count);
     }
 #elif defined(__APPLE__)
+    (void)error;
     ::arc4random_buf(bytes.data(), bytes.size());
 #else
     error = "secure daemon control tokens are unsupported on this platform";

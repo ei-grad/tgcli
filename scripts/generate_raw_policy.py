@@ -17,6 +17,7 @@ ACCEPTED_POLICY_SHA256 = (
     "sha256:4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce"
 )
 SCHEMA_VERSION = 1
+TD_API_HEADER_EVIDENCE_CONTRACT = "doxygen-normalized-v1"
 FUNCTION_MARKER = "---functions---"
 TL_FUNCTION = re.compile(
     r"^(?P<name>[A-Za-z][A-Za-z0-9_]*)"
@@ -315,8 +316,85 @@ def parse_scheme(source: Path) -> dict[str, tuple[str, str]]:
     return rows
 
 
+def normalize_doxygen_header(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    state = "normal"
+    line_prefix = True
+    line_output_start = 0
+    while index < len(text):
+        if state == "normal" and line_prefix and text.startswith("/**", index):
+            del output[line_output_start:]
+            close = text.find("*/", index + 3)
+            nested = text.find("/**", index + 3)
+            require(close != -1, "unterminated Doxygen block in td_api.h")
+            require(nested == -1 or close < nested, "nested Doxygen block in td_api.h")
+            index = close + 2
+            while index < len(text) and text[index] in " \t":
+                index += 1
+            if index == len(text):
+                break
+            if text.startswith("\r\n", index):
+                index += 2
+            else:
+                require(text[index] == "\n", "junk after Doxygen block in td_api.h")
+                index += 1
+            line_prefix = True
+            line_output_start = len(output)
+            continue
+
+        if state == "normal":
+            require(not text.startswith("*/", index), "stray comment close in td_api.h")
+            if text.startswith("//", index):
+                output.extend(("/", "/"))
+                index += 2
+                line_prefix = False
+                state = "line_comment"
+                continue
+            if text.startswith("/*", index):
+                output.extend(("/", "*"))
+                index += 2
+                line_prefix = False
+                state = "block_comment"
+                continue
+            if text[index] == '"':
+                state = "string"
+            elif text[index] == "'":
+                state = "character"
+        elif state == "line_comment" and text[index] == "\n":
+            state = "normal"
+        elif state == "block_comment" and text.startswith("*/", index):
+            output.extend(("*", "/"))
+            index += 2
+            state = "normal"
+            continue
+        elif state in {"string", "character"}:
+            quote = '"' if state == "string" else "'"
+            if text[index] == "\\" and index + 1 < len(text):
+                output.extend((text[index], text[index + 1]))
+                index += 2
+                line_prefix = False
+                continue
+            if text[index] == quote:
+                state = "normal"
+
+        character = text[index]
+        output.append(character)
+        index += 1
+        if character == "\n":
+            line_prefix = True
+            line_output_start = len(output)
+        elif character not in " \t\r" or not line_prefix:
+            line_prefix = False
+    return "".join(output)
+
+
+def normalized_header_text(source: Path) -> str:
+    return normalize_doxygen_header(source.read_text(encoding="utf-8"))
+
+
 def parse_header(source: Path) -> dict[str, int]:
-    text = source.read_text(encoding="utf-8")
+    text = normalized_header_text(source)
     rows: dict[str, int] = {}
     for match in HEADER_CONSTRUCTOR.finditer(text):
         name = match.group("name")
@@ -869,7 +947,10 @@ def source_inventory(tdlib_source: Path) -> tuple[dict[str, object], dict[str, o
     }
     evidence = {
         "td_api_tl_sha256": file_digest(scheme),
-        "td_api_header_sha256": file_digest(header),
+        "td_api_header_contract": TD_API_HEADER_EVIDENCE_CONTRACT,
+        "td_api_header_normalized_sha256": (
+            f"sha256:{hashlib.sha256(normalized_header_text(header).encode()).hexdigest()}"
+        ),
     }
     return inventory, evidence
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/paths.hpp"
 #include "daemon/activity_tracker.hpp"
 #include "daemon/config_runtime.hpp"
@@ -116,8 +117,8 @@ class Server {
     ServerOptions options_;
     const Dispatcher& dispatcher_;
     ActivityTracker activity_;
-    std::jthread activity_watcher_;
-    std::stop_source admission_cancellation_;
+    cancellation::Thread activity_watcher_;
+    cancellation::Source admission_cancellation_;
     int listen_fd_ = -1;
     int control_fd_ = -1;
     std::optional<paths::SocketIdentity> socket_identity_;

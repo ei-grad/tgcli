@@ -135,10 +135,11 @@ class AuthTracker {
                    latest_->auth_sequence != previous.auth_sequence;
         };
         if (deadline.expires_at) {
-            static_cast<void>(
-                cv_.wait_until(lock, session_.cancellation_token(), *deadline.expires_at, changed));
+            static_cast<void>(cancellation::wait_until(cv_, lock, session_.cancellation_token(),
+                                                       *deadline.expires_at, changed));
         } else {
-            static_cast<void>(cv_.wait(lock, session_.cancellation_token(), changed));
+            static_cast<void>(
+                cancellation::wait(cv_, lock, session_.cancellation_token(), changed));
         }
         return latest_;
     }
@@ -727,9 +728,9 @@ void LoginCoordinator::login(const proto::Request& request, RequestSession& sess
         }
         static_cast<void>(client_.restart_generation(snapshot));
         release.transferred = true;
-        lifecycle_waiter_ = std::jthread(
+        lifecycle_waiter_ = cancellation::Thread(
             [this, generation = snapshot->client_generation,
-             held_owner = std::move(owner_lease)](const std::stop_token& stop) mutable {
+             held_owner = std::move(owner_lease)](const cancellation::Token& stop) mutable {
                 while (!stop.stop_requested()) {
                     const auto live = client_.auth_state();
                     if (live && live->client_generation != generation) {

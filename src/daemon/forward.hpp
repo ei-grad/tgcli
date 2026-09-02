@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/deadline.hpp"
 #include "core/td_client.hpp"
 #include "daemon/single_send.hpp"
@@ -8,7 +9,6 @@
 #include <functional>
 #include <memory>
 #include <optional>
-#include <stop_token>
 #include <variant>
 #include <vector>
 
@@ -117,7 +117,7 @@ using ForwardPreparationOutcome =
 
 struct ForwardHooks {
     std::function<core::TdEventClock::time_point()> now;
-    std::function<void(const RequestDeadline&, const std::stop_token&)> wait;
+    std::function<void(const RequestDeadline&, const cancellation::Token&)> wait;
     std::function<void()> before_request;
     std::function<void()> before_submit;
     std::function<void()> before_event_arbitration;

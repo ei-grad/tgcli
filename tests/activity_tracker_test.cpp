@@ -384,7 +384,8 @@ TEST_CASE("watcher contains an expiry callback failure and remains destructible"
     REQUIRE(tracker.daemon_ready(1s));
     clock.advance(1s);
 
-    std::jthread watcher([&](const std::stop_token& stop) { tracker.watch(stop); });
+    tgcli::cancellation::Thread watcher(
+        [&](const tgcli::cancellation::Token& stop) { tracker.watch(stop); });
     watcher.join();
 
     CHECK(tracker.snapshot().expired);

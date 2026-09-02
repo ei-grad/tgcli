@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache
+          sudo apt-get install -y gperf libssl-dev zlib1g-dev ninja-build ccache zsh
 
       - name: Cache tdlib prefix
         id: tdlib-cache
@@ -36,7 +36,7 @@ jobs:
           path: |
             ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
             ~/.cache/tgcli-dev/td
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v3
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v4
 
       - name: Build tdlib prefix
         if: steps.tdlib-cache.outputs.cache-hit != 'true'

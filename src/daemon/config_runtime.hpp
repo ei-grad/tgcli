@@ -1,9 +1,10 @@
 #pragma once
 
+#include "common/cancellation.hpp"
 #include "common/config.hpp"
 #include "common/deadline.hpp"
+#include "common/shared_publication.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -12,7 +13,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -118,7 +118,7 @@ class ConfigRuntime {
 
     [[nodiscard]] ConfigAdmissionResult admit(std::string_view account,
                                               const RequestDeadline& deadline = {},
-                                              const std::stop_token& cancellation = {});
+                                              const cancellation::Token& cancellation = {});
     [[nodiscard]] ConfigRuntimeSnapshot current(std::string_view account) const;
     // Publication callbacks are serialized on the runtime worker. A callback
     // failure detaches that observer; replacement from inside a callback is
@@ -138,14 +138,14 @@ class ConfigRuntime {
     void wait_for_work(std::unique_lock<std::mutex>& lock, Clock::time_point deadline,
                        const testing::ConfigRuntimeHooks::Predicate& predicate);
     void dispatch_publication_observer(std::unique_lock<std::mutex>& lock);
-    void run(std::stop_token stop);
+    void run(cancellation::Token stop);
     [[nodiscard]] ConfigAdmissionDecision admission_decision(std::string_view account) const;
     [[nodiscard]] ConfigRuntimeSnapshot current_locked(std::string_view account) const;
 
     config::Store store_;
     config::SnapshotManager snapshots_;
     std::shared_ptr<const testing::ConfigRuntimeHooks> hooks_;
-    std::atomic<std::shared_ptr<const RuntimePublication>> publication_;
+    SharedPublication<const RuntimePublication> publication_;
 
     mutable std::mutex mutex_;
     std::condition_variable condition_;
@@ -159,7 +159,7 @@ class ConfigRuntime {
     std::uint64_t completed_refresh_ = 0;
     std::uint64_t generation_ = 1;
     Clock::time_point next_poll_;
-    std::jthread worker_;
+    cancellation::Thread worker_;
 };
 
 } // namespace tgcli::daemon

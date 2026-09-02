@@ -10,6 +10,7 @@ add_executable(tgcli_unit_tests
     auth_bootstrap_test.cpp
     chat_summary_test.cpp
     chats_td_runtime_conversion_test.cpp
+    cancellation_test.cpp
     message_commands_test.cpp
     message_recovery_test.cpp
     message_td_runtime_conversion_test.cpp
@@ -215,8 +216,24 @@ set_tests_properties(
     PROPERTIES ENVIRONMENT
         "PYTHONDONTWRITEBYTECODE=1;TGCLI_TEST_TDLIB_SOURCE=${TGCLI_TDLIB_SOURCE}")
 add_test(
+    NAME ci-portability-source-contract
+    COMMAND "${Python3_EXECUTABLE}" -B
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_ci_portability_contract.py")
+set_tests_properties(
+    ci-portability-source-contract
+    PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+add_test(
     NAME command-registry-completion-assets
-    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs"
+    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs" static)
+add_test(
+    NAME command-registry-completion-bash
+    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs" bash)
+add_test(
+    NAME command-registry-completion-zsh
+    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs" zsh)
+add_test(
+    NAME command-registry-completion-runtime
+    COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/verify_command_assets.mjs" runtime
         "$<TARGET_FILE:tgcli>")
 add_test(
     NAME completion-install-assets
