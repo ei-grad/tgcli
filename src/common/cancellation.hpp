@@ -7,7 +7,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -261,76 +260,161 @@ class Thread final {
     std::thread thread_;
 };
 
-template <typename Condition, typename Lock, typename Predicate>
-bool wait(Condition& condition, Lock& lock, const Token& token, Predicate predicate) {
-    for (;;) {
-        auto* wait_mutex = lock.mutex();
-        std::optional<Callback> wake;
-        lock.unlock();
-        try {
-            wake.emplace(token, [&condition, wait_mutex] {
-                const std::lock_guard wait_lock(*wait_mutex);
-                condition.notify_all();
-            });
-            lock.lock();
-            condition.wait(lock, [&] { return predicate() || token.stop_requested(); });
-        } catch (...) {
-            if (lock.owns_lock()) {
-                lock.unlock();
+// Predicate state is protected by the lock passed to wait(). Every mutation that
+// can satisfy a predicate must be followed by notify_all().
+class Condition final {
+  public:
+    Condition() = default;
+    ~Condition() = default;
+    Condition(const Condition&) = delete;
+    Condition& operator=(const Condition&) = delete;
+    Condition(Condition&&) = delete;
+    Condition& operator=(Condition&&) = delete;
+
+    void notify_all() noexcept {
+        {
+            const std::lock_guard lock(mutex_);
+            ++generation_;
+        }
+        condition_.notify_all();
+    }
+
+    template <typename Lock, typename Predicate> void wait(Lock& lock, Predicate predicate) {
+        for (;;) {
+            std::uint64_t generation = 0;
+            {
+                const std::lock_guard state_lock(mutex_);
+                generation = generation_;
             }
-            wake.reset();
+            if (predicate()) {
+                return;
+            }
+            std::unique_lock state_lock(mutex_);
+            if (generation_ != generation) {
+                continue;
+            }
+            lock.unlock();
+            try {
+                condition_.wait(state_lock);
+            } catch (...) {
+                state_lock.unlock();
+                lock.lock();
+                throw;
+            }
+            state_lock.unlock();
             lock.lock();
-            throw;
-        }
-        lock.unlock();
-        wake.reset();
-        lock.lock();
-        if (predicate()) {
-            return true;
-        }
-        if (token.stop_requested()) {
-            return false;
         }
     }
+
+    template <typename Lock, typename Clock, typename Duration, typename Predicate>
+    bool wait_until(Lock& lock, const std::chrono::time_point<Clock, Duration>& deadline,
+                    Predicate predicate) {
+        for (;;) {
+            std::uint64_t generation = 0;
+            {
+                const std::lock_guard state_lock(mutex_);
+                generation = generation_;
+            }
+            if (predicate()) {
+                return true;
+            }
+            std::unique_lock state_lock(mutex_);
+            if (generation_ != generation) {
+                continue;
+            }
+            lock.unlock();
+            std::cv_status status = std::cv_status::no_timeout;
+            try {
+                status = condition_.wait_until(state_lock, deadline);
+            } catch (...) {
+                state_lock.unlock();
+                lock.lock();
+                throw;
+            }
+            state_lock.unlock();
+            lock.lock();
+            if (status == std::cv_status::timeout) {
+                return predicate();
+            }
+        }
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    // The generation covers only the bounded predicate-to-wait enrollment handoff.
+    // Once enrolled, the condition-variable notification itself wakes the waiter.
+    std::uint64_t generation_ = 0;
+};
+
+namespace detail {
+
+struct NoWaitProbe final {
+    void operator()() const noexcept {}
+};
+
+template <typename Lock, typename Predicate, typename RegistrationProbe, typename WakeProbe>
+bool wait_with_probes(Condition& condition, Lock& lock, const Token& token, Predicate predicate,
+                      RegistrationProbe registration_probe, WakeProbe wake_probe) {
+    const Callback wake(token, [&condition, &wake_probe] {
+        std::invoke(wake_probe);
+        condition.notify_all();
+    });
+    std::invoke(registration_probe);
+    condition.wait(lock, [&] { return predicate() || token.stop_requested(); });
+    return predicate();
 }
 
-template <typename Condition, typename Lock, typename Clock, typename Duration, typename Predicate>
+template <typename Lock, typename Clock, typename Duration, typename Predicate,
+          typename RegistrationProbe, typename WakeProbe>
+bool wait_until_with_probes(Condition& condition, Lock& lock, const Token& token,
+                            const std::chrono::time_point<Clock, Duration>& deadline,
+                            Predicate predicate, RegistrationProbe registration_probe,
+                            WakeProbe wake_probe) {
+    const Callback wake(token, [&condition, &wake_probe] {
+        std::invoke(wake_probe);
+        condition.notify_all();
+    });
+    std::invoke(registration_probe);
+    static_cast<void>(condition.wait_until(lock, deadline,
+                                           [&] { return predicate() || token.stop_requested(); }));
+    return predicate();
+}
+
+} // namespace detail
+
+template <typename Lock, typename Predicate>
+bool wait(Condition& condition, Lock& lock, const Token& token, Predicate predicate) {
+    return detail::wait_with_probes(condition, lock, token, std::move(predicate),
+                                    detail::NoWaitProbe{}, detail::NoWaitProbe{});
+}
+
+template <typename Lock, typename Clock, typename Duration, typename Predicate>
 bool wait_until(Condition& condition, Lock& lock, const Token& token,
                 const std::chrono::time_point<Clock, Duration>& deadline, Predicate predicate) {
-    for (;;) {
-        auto* wait_mutex = lock.mutex();
-        std::optional<Callback> wake;
-        lock.unlock();
-        bool changed = false;
-        try {
-            wake.emplace(token, [&condition, wait_mutex] {
-                const std::lock_guard wait_lock(*wait_mutex);
-                condition.notify_all();
-            });
-            lock.lock();
-            changed = condition.wait_until(lock, deadline,
-                                           [&] { return predicate() || token.stop_requested(); });
-        } catch (...) {
-            if (lock.owns_lock()) {
-                lock.unlock();
-            }
-            wake.reset();
-            lock.lock();
-            throw;
-        }
-        lock.unlock();
-        wake.reset();
-        lock.lock();
-        if (predicate()) {
-            return true;
-        }
-        if (token.stop_requested()) {
-            return false;
-        }
-        if (!changed) {
-            return false;
-        }
-    }
+    return detail::wait_until_with_probes(condition, lock, token, deadline, std::move(predicate),
+                                          detail::NoWaitProbe{}, detail::NoWaitProbe{});
 }
+
+namespace testing {
+
+template <typename Lock, typename Predicate, typename RegistrationProbe, typename WakeProbe>
+bool wait_with_probes(Condition& condition, Lock& lock, const Token& token, Predicate predicate,
+                      RegistrationProbe registration_probe, WakeProbe wake_probe) {
+    return detail::wait_with_probes(condition, lock, token, std::move(predicate),
+                                    std::move(registration_probe), std::move(wake_probe));
+}
+
+template <typename Lock, typename Clock, typename Duration, typename Predicate,
+          typename RegistrationProbe, typename WakeProbe>
+bool wait_until_with_probes(Condition& condition, Lock& lock, const Token& token,
+                            const std::chrono::time_point<Clock, Duration>& deadline,
+                            Predicate predicate, RegistrationProbe registration_probe,
+                            WakeProbe wake_probe) {
+    return detail::wait_until_with_probes(condition, lock, token, deadline, std::move(predicate),
+                                          std::move(registration_probe), std::move(wake_probe));
+}
+
+} // namespace testing
 
 } // namespace tgcli::cancellation

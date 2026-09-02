@@ -90,7 +90,7 @@ printf '%s\n' \
     '  "schema_version": 2,' \
     "  \"source_repository\": \"$TDLIB_REPOSITORY\"," \
     "  \"immutable_ref\": \"$TDLIB_REV\"," \
-    '  "generated_header_contract": "doxygen-normalized-v1"' \
+    '  "generated_header_contract": "doxygen-normalized-v2"' \
     '}' > "$PROVENANCE_FILE"
 install -Dm644 "$PROVENANCE_FILE" \
     "$PREFIX/share/tgcli/tdlib-source.json"

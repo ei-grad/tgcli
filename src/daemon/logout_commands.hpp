@@ -112,7 +112,7 @@ class LogoutCoordinator final {
     std::shared_ptr<const testing::LogoutHooks> hooks_;
     LogoutAuditLog audit_;
     std::mutex operation_mutex_;
-    std::condition_variable_any operation_condition_;
+    cancellation::Condition operation_condition_;
     bool operation_active_ = false;
     std::optional<LogoutAuditInspection> durable_audit_snapshot_;
 };

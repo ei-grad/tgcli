@@ -145,7 +145,7 @@ std::shared_ptr<daemon::testing::ConfigRuntimeHooks>
 counted_runtime_hooks(std::atomic<std::size_t>& reloads) {
     auto hooks = std::make_shared<daemon::testing::ConfigRuntimeHooks>();
     hooks->now = [] { return daemon::ConfigRuntime::Clock::time_point{}; };
-    hooks->wait_until = [](std::condition_variable& condition, std::unique_lock<std::mutex>& lock,
+    hooks->wait_until = [](cancellation::Condition& condition, std::unique_lock<std::mutex>& lock,
                            daemon::ConfigRuntime::Clock::time_point,
                            const daemon::testing::ConfigRuntimeHooks::Predicate& predicate) {
         condition.wait(lock, predicate);

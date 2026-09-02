@@ -231,7 +231,7 @@ file(WRITE "${valid_prefix}/share/tgcli/tdlib-source.json"
     "  \"schema_version\": 2,\n"
     "  \"source_repository\": \"${tdlib_repository}\",\n"
     "  \"immutable_ref\": \"${tdlib_ref}\",\n"
-    "  \"generated_header_contract\": \"doxygen-normalized-v1\"\n"
+    "  \"generated_header_contract\": \"doxygen-normalized-v2\"\n"
     "}\n")
 expect_success(
     "matching prefix provenance"

@@ -119,7 +119,7 @@ class RemovalAuthTracker final {
     core::TdClient& client_;
     RequestSession& session_;
     mutable std::mutex mutex_;
-    std::condition_variable_any condition_;
+    cancellation::Condition condition_;
     std::shared_ptr<const AuthStateSnapshot> latest_;
     std::deque<std::shared_ptr<const AuthStateSnapshot>> pending_;
     std::uint64_t subscription_ = 0;

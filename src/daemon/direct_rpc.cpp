@@ -593,7 +593,7 @@ class DirectRpcCoordinator::Impl {
     std::optional<core::TdDirectRequest> request_;
     std::shared_ptr<const core::AuthStateSnapshot> authorization_;
     std::mutex wait_mutex_;
-    std::condition_variable_any wait_condition_;
+    cancellation::Condition wait_condition_;
     std::uint64_t wake_sequence_ = 0;
     std::mutex auth_mutex_;
     std::shared_ptr<const core::AuthStateSnapshot> latest_auth_;

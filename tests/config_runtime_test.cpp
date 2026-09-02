@@ -187,7 +187,7 @@ class ManualRuntimeClock {
     void install(tgcli::daemon::testing::ConfigRuntimeHooks& hooks) {
         hooks.now = [this] { return now(); };
         hooks.wait_until =
-            [this](std::condition_variable& condition, std::unique_lock<std::mutex>& lock,
+            [this](tgcli::cancellation::Condition& condition, std::unique_lock<std::mutex>& lock,
                    Clock::time_point deadline,
                    const tgcli::daemon::testing::ConfigRuntimeHooks::Predicate& predicate) {
                 condition_.store(&condition, std::memory_order_release);
@@ -204,7 +204,7 @@ class ManualRuntimeClock {
 
   private:
     std::atomic<std::int64_t> ticks_ = 0;
-    std::atomic<std::condition_variable*> condition_ = nullptr;
+    std::atomic<tgcli::cancellation::Condition*> condition_ = nullptr;
 };
 
 class ReloadGate {

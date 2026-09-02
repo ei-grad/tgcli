@@ -106,7 +106,7 @@ struct ActivityTracker::State {
     }
 
     mutable std::mutex mutex;
-    std::condition_variable condition;
+    cancellation::Condition condition;
     std::uint64_t revision = 0;
     bool ready = false;
     bool expired = false;

@@ -17,7 +17,7 @@ ACCEPTED_POLICY_SHA256 = (
     "sha256:4fcfa4c3dc1f81486382351db8b6a6f744e0b2116383e9705a8046245229f4ce"
 )
 SCHEMA_VERSION = 1
-TD_API_HEADER_EVIDENCE_CONTRACT = "doxygen-normalized-v1"
+TD_API_HEADER_EVIDENCE_CONTRACT = "doxygen-normalized-v2"
 FUNCTION_MARKER = "---functions---"
 TL_FUNCTION = re.compile(
     r"^(?P<name>[A-Za-z][A-Za-z0-9_]*)"
@@ -316,76 +316,112 @@ def parse_scheme(source: Path) -> dict[str, tuple[str, str]]:
     return rows
 
 
-def normalize_doxygen_header(text: str) -> str:
-    output: list[str] = []
+def physical_header_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    start = 0
     index = 0
-    state = "normal"
-    line_prefix = True
-    line_output_start = 0
     while index < len(text):
-        if state == "normal" and line_prefix and text.startswith("/**", index):
-            del output[line_output_start:]
-            close = text.find("*/", index + 3)
-            nested = text.find("/**", index + 3)
-            require(close != -1, "unterminated Doxygen block in td_api.h")
-            require(nested == -1 or close < nested, "nested Doxygen block in td_api.h")
-            index = close + 2
-            while index < len(text) and text[index] in " \t":
-                index += 1
-            if index == len(text):
-                break
-            if text.startswith("\r\n", index):
-                index += 2
-            else:
-                require(text[index] == "\n", "junk after Doxygen block in td_api.h")
-                index += 1
-            line_prefix = True
-            line_output_start = len(output)
+        if text[index] not in "\r\n":
+            index += 1
             continue
+        end = index + 1
+        if text[index] == "\r" and end < len(text) and text[end] == "\n":
+            end += 1
+        lines.append(text[start:end])
+        start = end
+        index = end
+    if start < len(text):
+        lines.append(text[start:])
+    return lines
 
+
+def split_header_line_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith(("\r", "\n")):
+        return line[:-1], line[-1]
+    return line, ""
+
+
+def scan_preserved_header_line(
+    body: str, state: str, reject_documentation: bool
+) -> str:
+    if state == "line_comment":
+        return "line_comment" if body.endswith("\\") else "normal"
+    index = 0
+    while index < len(body):
         if state == "normal":
-            require(not text.startswith("*/", index), "stray comment close in td_api.h")
-            if text.startswith("//", index):
-                output.extend(("/", "/"))
-                index += 2
-                line_prefix = False
-                state = "line_comment"
-                continue
-            if text.startswith("/*", index):
-                output.extend(("/", "*"))
-                index += 2
-                line_prefix = False
+            require(not body.startswith("*/", index), "stray comment close in td_api.h")
+            if reject_documentation:
+                require(
+                    not body.startswith("/**", index),
+                    "malformed Doxygen opener in td_api.h",
+                )
+                if body.startswith("////", index):
+                    return "line_comment" if body.endswith("\\") else "normal"
+                require(
+                    not body.startswith("///", index),
+                    "malformed Doxygen line in td_api.h",
+                )
+            if body.startswith("//", index):
+                return "line_comment" if body.endswith("\\") else "normal"
+            if body.startswith("/*", index):
                 state = "block_comment"
+                index += 2
                 continue
-            if text[index] == '"':
+            if body[index] == '"':
                 state = "string"
-            elif text[index] == "'":
+            elif body[index] == "'":
                 state = "character"
-        elif state == "line_comment" and text[index] == "\n":
+        elif state == "block_comment" and body.startswith("*/", index):
             state = "normal"
-        elif state == "block_comment" and text.startswith("*/", index):
-            output.extend(("*", "/"))
             index += 2
-            state = "normal"
             continue
         elif state in {"string", "character"}:
             quote = '"' if state == "string" else "'"
-            if text[index] == "\\" and index + 1 < len(text):
-                output.extend((text[index], text[index + 1]))
+            if body[index] == "\\" and index + 1 < len(body):
                 index += 2
-                line_prefix = False
                 continue
-            if text[index] == quote:
+            if body[index] == quote:
                 state = "normal"
-
-        character = text[index]
-        output.append(character)
         index += 1
-        if character == "\n":
-            line_prefix = True
-            line_output_start = len(output)
-        elif character not in " \t\r" or not line_prefix:
-            line_prefix = False
+    return state
+
+
+def normalize_doxygen_header(text: str) -> str:
+    output: list[str] = []
+    state = "normal"
+    in_doxygen_block = False
+    continued_line = False
+    for line in physical_header_lines(text):
+        body, ending = split_header_line_ending(line)
+        if in_doxygen_block:
+            require(ending != "", "unterminated Doxygen block in td_api.h")
+            require(not body.endswith("\\"), "continued Doxygen block line in td_api.h")
+            require("/**" not in body, "nested Doxygen block in td_api.h")
+            if "*/" in body:
+                require(
+                    re.fullmatch(r"[ \t]*\*/[ \t]*", body) is not None,
+                    "junk after Doxygen block in td_api.h",
+                )
+                in_doxygen_block = False
+            continue
+
+        documentation_eligible = state == "normal" and not continued_line
+        if documentation_eligible and re.fullmatch(r"[ \t]*/\*\*[ \t]*", body):
+            require(ending != "", "unterminated Doxygen block in td_api.h")
+            in_doxygen_block = True
+            continue
+        if documentation_eligible and re.fullmatch(r"[ \t]*///(?: .*)?", body):
+            require(ending != "", "unterminated Doxygen line in td_api.h")
+            require(not body.endswith("\\"), "continued Doxygen line in td_api.h")
+            continue
+
+        state = scan_preserved_header_line(body, state, documentation_eligible)
+        output.append(line)
+        continued_line = body.endswith("\\")
+
+    require(not in_doxygen_block, "unterminated Doxygen block in td_api.h")
     return "".join(output)
 
 

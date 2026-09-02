@@ -36,7 +36,7 @@ jobs:
           path: |
             ~/.cache/tgcli-dev/tdlib-a17f87c4cff7
             ~/.cache/tgcli-dev/td
-          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v4
+          key: tdlib-${{ runner.os }}-a17f87c4cff7b90b278d12b91ba0614383aaee82-v5
 
       - name: Build tdlib prefix
         if: steps.tdlib-cache.outputs.cache-hit != 'true'

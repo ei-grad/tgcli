@@ -117,7 +117,10 @@ authoritative implementation status and roadmap (work milestones top-down).
   `td_api::Function`; a second parse/`from_json` is forbidden. The complete
   pinned function inventory, 3118-constructor type graph and policy are exact
   tl/generated-header bijections with committed count/digests and deny unknown
-  drift. Generated missing/default/null and abstract-variant rules apply before
+  drift. Generated-header evidence uses the `doxygen-normalized-v2` byte
+  projection: only pinned standalone Doxygen blocks/lines are removed and every
+  other byte, including line endings and non-documentation comments, remains
+  exact. Generated missing/default/null and abstract-variant rules apply before
   the single native conversion. Native responses must match the holder's
   declared result base (or exact `td_api::error`) before canonical hashing and
   are consumed through an RAII recursive native wipe. Generated body-validator

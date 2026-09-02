@@ -53,6 +53,19 @@ class CiPortabilityContractTest(unittest.TestCase):
                     (REPOSITORY / relative).read_text(encoding="utf-8"),
                 )
 
+    def test_posix_close_users_include_their_own_declaration(self) -> None:
+        candidates = [
+            source
+            for root in (REPOSITORY / "src", REPOSITORY / "tests")
+            for source in root.rglob("*")
+            if source.suffix in {".cpp", ".hpp"}
+        ]
+        for source in candidates:
+            text = source.read_text(encoding="utf-8")
+            if "::close(" in text:
+                with self.subTest(source=source.relative_to(REPOSITORY)):
+                    self.assertIn("#include <unistd.h>\n", text)
+
     def test_full_ctest_jobs_provision_real_zsh(self) -> None:
         ci = (REPOSITORY / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         test_dc = (REPOSITORY / ".github/workflows/test-dc.yml").read_text(
@@ -76,8 +89,10 @@ class CiPortabilityContractTest(unittest.TestCase):
             "brew install ccache coreutils gperf jq ninja\n          command -v zsh",
             release,
         )
-        self.assertNotIn("-v3", ci)
-        self.assertNotIn("-v3", test_dc)
+        self.assertIn("-v5", ci)
+        self.assertIn("-v5", test_dc)
+        self.assertNotIn("-v4", ci)
+        self.assertNotIn("-v4", test_dc)
 
     def test_offline_musl_excludes_only_host_proven_zsh_behavior(self) -> None:
         cmake = (REPOSITORY / "tests/CMakeLists.txt").read_text(encoding="utf-8")
@@ -115,7 +130,7 @@ class CiPortabilityContractTest(unittest.TestCase):
         build = (REPOSITORY / "scripts/build-tdlib.sh").read_text(encoding="utf-8")
         cmake = (REPOSITORY / "cmake/DependencyLock.cmake").read_text(encoding="utf-8")
         for text in (build, cmake):
-            self.assertIn("doxygen-normalized-v1", text)
+            self.assertIn("doxygen-normalized-v2", text)
         self.assertIn('"schema_version": 2', build)
         self.assertIn("NOT provenance_size EQUAL 4", cmake)
 

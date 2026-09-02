@@ -332,7 +332,7 @@ class ReadyReadSession::Impl {
     std::function<void()> before_event_arbitration_;
     std::function<void()> before_wait_;
     std::mutex wait_mutex_;
-    std::condition_variable_any wait_condition_;
+    cancellation::Condition wait_condition_;
     std::uint64_t wake_sequence_ = 0;
     mutable std::mutex mutex_;
     std::shared_ptr<const core::AuthStateSnapshot> latest_;

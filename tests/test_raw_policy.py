@@ -31,7 +31,7 @@ class RawPolicyTest(unittest.TestCase):
             evidence,
             {
                 "td_api_tl_sha256": "sha256:a8166ef37efb1a1440357b81e8e26c68ea45a35901c0bcc8d69964487c98476f",
-                "td_api_header_contract": "doxygen-normalized-v1",
+                "td_api_header_contract": "doxygen-normalized-v2",
                 "td_api_header_normalized_sha256": "sha256:5926a873f226667dfa69e6cda9f28c03407aefc31a90de73dd96be0e8fa6c536",
             },
         )
@@ -77,7 +77,7 @@ class RawPolicyTest(unittest.TestCase):
             len(raw_policy.COMPILED_VALIDATORS),
         )
 
-    def test_header_evidence_ignores_only_well_formed_doxygen_blocks(self) -> None:
+    def test_header_evidence_ignores_only_well_formed_doxygen_forms(self) -> None:
         bare = "#pragma once\n\nclass value final : public Object {\n};\n"
         documented = (
             "#pragma once\n\n"
@@ -85,19 +85,72 @@ class RawPolicyTest(unittest.TestCase):
             "class value final : public Object {\n};\n"
         )
         self.assertEqual(raw_policy.normalize_doxygen_header(documented), bare)
+        generator_bare = (
+            "#define TD_API_VERSION 1\n"
+            "// ordinary line comment\n"
+            "//// ordinary four-slash comment\n"
+            "/* ordinary block comment */\n"
+            'constexpr auto marker = "/// string";\n'
+            "constexpr char slash = '/';\n"
+            "template <class Type>\n"
+            "class value final : public Object {\n"
+            " public:\n"
+            "  static const std::int32_t ID = 7;\n"
+            "  using ReturnType = object_ptr<value>;\n"
+            "  string field_;\n"
+            "};\n"
+        )
+        generator_documented = (
+            "#define TD_API_VERSION 1\n"
+            "// ordinary line comment\n"
+            "//// ordinary four-slash comment\n"
+            "/* ordinary block comment */\n"
+            'constexpr auto marker = "/// string";\n'
+            "constexpr char slash = '/';\n"
+            "/**\n * Template documentation.\n */\n"
+            "template <class Type>\n"
+            "/**\n * Class documentation.\n */\n"
+            "class value final : public Object {\n"
+            " public:\n"
+            "  /// Identifier documentation.\n"
+            "  static const std::int32_t ID = 7;\n"
+            "  /// Return type documentation.\n"
+            "  using ReturnType = object_ptr<value>;\n"
+            "  /// Field documentation.\n"
+            "  string field_;\n"
+            "};\n"
+        )
+        self.assertEqual(
+            raw_policy.normalize_doxygen_header(generator_documented), generator_bare
+        )
         preserved = (
             "#define VALUE 1\n"
+            "#define CONTINUED_LINE \\\n"
+            "/// preprocessor continuation\n"
+            "#define CONTINUED_BLOCK \\\n"
+            "/** preprocessor continuation */\n"
             "// /** line comment */\n"
+            "// ordinary continuation \\\n"
+            "/// continued ordinary comment\n"
+            "//// ordinary four-slash comment\n"
             "/* ordinary\n"
             "/** nested-looking ordinary content\n"
             "*/\n"
-            'constexpr auto value = "/** string */";\n'
+            'constexpr auto value = "/** and /// string */";\n'
+            "constexpr char slash = '/';\n"
         )
         self.assertEqual(raw_policy.normalize_doxygen_header(preserved), preserved)
         for malformed in (
             "/** outer /** nested */\n",
-            "/** unterminated\n",
+            "/**\n * nested /**\n */\n",
+            "/**\n * unterminated\n",
             "/** closed */ trailing\n",
+            "/**\n */ trailing\n",
+            "/**\n * continued \\\n */\n",
+            "/// documentation without newline",
+            "///malformed documentation\n",
+            "int value; /// trailing documentation\n",
+            "/// continued documentation \\\n",
             "*/\n",
         ):
             with (
@@ -123,6 +176,7 @@ class RawPolicyTest(unittest.TestCase):
             documented_header = root / "documented.h"
             changed_header = root / "changed.h"
             crlf_header = root / "crlf.h"
+            documented_crlf_header = root / "documented-crlf.h"
             bare_header.write_text(constructor, encoding="utf-8")
             documented_header.write_text(
                 "/**\n * Documentation only.\n */\n" + constructor,
@@ -132,6 +186,12 @@ class RawPolicyTest(unittest.TestCase):
                 constructor.replace("ID = 7", "ID = 8"), encoding="utf-8"
             )
             crlf_header.write_bytes(constructor.replace("\n", "\r\n").encode("utf-8"))
+            documented_crlf_header.write_bytes(
+                (
+                    "/**\r\n * Documentation only.\r\n */\r\n"
+                    + constructor.replace("\n", "\r\n")
+                ).encode("utf-8")
+            )
             self.assertEqual(
                 raw_policy.parse_header(bare_header),
                 raw_policy.parse_header(documented_header),
@@ -143,6 +203,18 @@ class RawPolicyTest(unittest.TestCase):
             self.assertNotEqual(
                 raw_policy.normalized_header_text(bare_header),
                 raw_policy.normalized_header_text(crlf_header),
+            )
+            self.assertEqual(
+                raw_policy.normalized_header_text(crlf_header),
+                raw_policy.normalized_header_text(documented_crlf_header),
+            )
+            self.assertNotEqual(
+                raw_policy.normalize_doxygen_header(generator_bare),
+                raw_policy.normalize_doxygen_header(
+                    generator_bare.replace(
+                        "#define TD_API_VERSION 1", "#define TD_API_VERSION 2"
+                    )
+                ),
             )
 
     def test_accepted_candidate_is_exhaustive_reviewed_and_activation_ready(

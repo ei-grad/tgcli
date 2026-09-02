@@ -158,7 +158,7 @@ function(tgcli_assert_tdlib_prefix_provenance td_package_directory expected_ref)
     tgcli_dependency_lock_field(tdlib source_repository locked_repository)
     if(NOT provenance_repository STREQUAL locked_repository
        OR NOT provenance_ref STREQUAL expected_ref
-       OR NOT provenance_header_contract STREQUAL "doxygen-normalized-v1")
+       OR NOT provenance_header_contract STREQUAL "doxygen-normalized-v2")
         message(FATAL_ERROR
             "TDLib prefix provenance ${provenance_file} differs from the source lock")
     endif()

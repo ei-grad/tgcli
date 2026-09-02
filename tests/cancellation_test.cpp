@@ -5,7 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <future>
+#include <latch>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -18,38 +18,29 @@ using namespace std::chrono_literals;
 
 namespace {
 
-class EnrollmentBarrierCondition final {
+class EnrollmentBarrierMutex final {
   public:
-    template <typename Lock, typename Predicate> void wait(Lock& lock, Predicate predicate) {
-        entered_.set_value();
-        release_.get_future().wait();
-        condition_.wait(lock, std::move(predicate));
+    EnrollmentBarrierMutex(std::latch& entered, std::latch& release)
+        : entered_(entered), release_(release) {}
+
+    void lock() {
+        mutex_.lock();
     }
 
-    template <typename Lock, typename Clock, typename Duration, typename Predicate>
-    bool wait_until(Lock& lock, const std::chrono::time_point<Clock, Duration>& deadline,
-                    Predicate predicate) {
-        entered_.set_value();
-        release_.get_future().wait();
-        return condition_.wait_until(lock, deadline, std::move(predicate));
-    }
-
-    void notify_all() {
-        condition_.notify_all();
-    }
-
-    [[nodiscard]] std::future<void> entered() {
-        return entered_.get_future();
-    }
-
-    void release() {
-        release_.set_value();
+    void unlock() {
+        mutex_.unlock();
+        if (first_unlock_) {
+            first_unlock_ = false;
+            entered_.count_down();
+            release_.wait();
+        }
     }
 
   private:
-    std::condition_variable_any condition_;
-    std::promise<void> entered_;
-    std::promise<void> release_;
+    std::mutex mutex_;
+    std::latch& entered_;
+    std::latch& release_;
+    bool first_unlock_ = true;
 };
 
 } // namespace
@@ -153,39 +144,90 @@ TEST_CASE("cancellation callback destruction waits for an in-flight callback",
 TEST_CASE("cancellation wait cannot lose stop before condition enrollment",
           "[cancellation][concurrency]") {
     const tgcli::cancellation::Source source;
-    EnrollmentBarrierCondition condition;
-    auto entered = condition.entered();
-    std::promise<void> completed_promise;
-    auto completed = completed_promise.get_future();
-    std::mutex mutex;
+    tgcli::cancellation::Condition condition;
+    std::latch enrollment_entered{1};
+    std::latch stop_callback_entered{1};
+    std::latch release_enrollment{1};
+    EnrollmentBarrierMutex mutex(enrollment_entered, release_enrollment);
     bool result = true;
+    bool returned_with_lock = false;
     const bool timed = GENERATE(false, true);
     std::thread waiter([&] {
         std::unique_lock lock(mutex);
         if (timed) {
-            result = tgcli::cancellation::wait_until(condition, lock, source.get_token(),
-                                                     std::chrono::steady_clock::now() + 10s,
-                                                     [] { return false; });
+            result = tgcli::cancellation::testing::wait_until_with_probes(
+                condition, lock, source.get_token(), std::chrono::steady_clock::now() + 10s,
+                [] { return false; }, [] {}, [&] { stop_callback_entered.count_down(); });
         } else {
-            result = tgcli::cancellation::wait(condition, lock, source.get_token(),
-                                               [] { return false; });
+            result = tgcli::cancellation::testing::wait_with_probes(
+                condition, lock, source.get_token(), [] { return false; }, [] {},
+                [&] { stop_callback_entered.count_down(); });
         }
-        completed_promise.set_value();
+        returned_with_lock = lock.owns_lock();
     });
-    REQUIRE(entered.wait_for(2s) == std::future_status::ready);
+    enrollment_entered.wait();
     std::thread stopper([&] { static_cast<void>(source.request_stop()); });
-    while (!source.stop_requested()) {
-        std::this_thread::yield();
-    }
-    condition.release();
-    const bool rescued = completed.wait_for(2s) != std::future_status::ready;
-    if (rescued) {
-        condition.notify_all();
-    }
+    stop_callback_entered.wait();
+    release_enrollment.count_down();
     stopper.join();
     waiter.join();
-    CHECK_FALSE(rescued);
     CHECK_FALSE(result);
+    CHECK(returned_with_lock);
+}
+
+TEST_CASE("cancellation condition evaluates predicates outside its enrollment mutex",
+          "[cancellation][concurrency]") {
+    tgcli::cancellation::Condition condition;
+    std::mutex mutex;
+    std::unique_lock lock(mutex);
+    int calls = 0;
+
+    condition.wait(lock, [&] {
+        condition.notify_all();
+        return ++calls == 2;
+    });
+
+    CHECK(calls == 2);
+    CHECK(lock.owns_lock());
+}
+
+TEST_CASE("cancellation stop callback does not acquire the application mutex",
+          "[cancellation][concurrency][lock-order]") {
+    const tgcli::cancellation::Source source;
+    tgcli::cancellation::Condition condition;
+    std::mutex owner_mutex;
+    std::mutex application_mutex;
+    std::latch registration_probe_entered{1};
+    std::latch stopper_holds_owner{1};
+    std::latch release_registration_probe{1};
+    bool result = true;
+    bool returned_with_lock = false;
+
+    std::thread waiter([&] {
+        std::unique_lock lock(application_mutex);
+        result = tgcli::cancellation::testing::wait_with_probes(
+            condition, lock, source.get_token(), [] { return false; },
+            [&] {
+                { const std::lock_guard owner_lock(owner_mutex); }
+                registration_probe_entered.count_down();
+                release_registration_probe.wait();
+            },
+            [] {});
+        returned_with_lock = lock.owns_lock();
+    });
+    registration_probe_entered.wait();
+    std::thread stopper([&] {
+        const std::lock_guard owner_lock(owner_mutex);
+        stopper_holds_owner.count_down();
+        static_cast<void>(source.request_stop());
+    });
+    stopper_holds_owner.wait();
+    release_registration_probe.count_down();
+    stopper.join();
+    waiter.join();
+
+    CHECK_FALSE(result);
+    CHECK(returned_with_lock);
 }
 
 TEST_CASE("cancellation callback may reenter the stop source", "[cancellation]") {
@@ -204,7 +246,7 @@ TEST_CASE("cancellation thread teardown requests stop wakes and joins",
     std::atomic<bool> entered{false};
     std::atomic<bool> exited{false};
     std::mutex mutex;
-    std::condition_variable condition;
+    tgcli::cancellation::Condition condition;
     {
         const tgcli::cancellation::Thread worker([&](const tgcli::cancellation::Token& token) {
             entered.store(true, std::memory_order_release);
@@ -229,7 +271,7 @@ TEST_CASE("cancellation thread move assignment stops and joins the old worker",
     auto worker = [](std::atomic<bool>& started, std::atomic<bool>& exited,
                      const tgcli::cancellation::Token& token) {
         std::mutex mutex;
-        std::condition_variable condition;
+        tgcli::cancellation::Condition condition;
         started.store(true, std::memory_order_release);
         std::unique_lock lock(mutex);
         static_cast<void>(tgcli::cancellation::wait(condition, lock, token,

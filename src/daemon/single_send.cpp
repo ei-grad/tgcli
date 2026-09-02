@@ -795,7 +795,7 @@ class SingleSendCoordinator::Impl {
     std::optional<SingleSendTemporaryId> temporary_;
     std::optional<std::uint64_t> temporary_sequence_;
     mutable std::mutex event_mutex_;
-    std::condition_variable_any event_condition_;
+    cancellation::Condition event_condition_;
     std::uint64_t wake_sequence_ = 0;
     std::vector<StampedUpdate> updates_;
     std::vector<std::shared_ptr<const core::AuthStateSnapshot>> auth_events_;

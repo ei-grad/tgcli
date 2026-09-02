@@ -87,7 +87,7 @@ namespace testing {
 struct ConfigRuntimeHooks {
     using Clock = std::chrono::steady_clock;
     using Predicate = std::function<bool()>;
-    using WaitUntil = std::function<void(std::condition_variable&, std::unique_lock<std::mutex>&,
+    using WaitUntil = std::function<void(cancellation::Condition&, std::unique_lock<std::mutex>&,
                                          Clock::time_point, const Predicate&)>;
 
     std::function<Clock::time_point()> now;
@@ -149,7 +149,7 @@ class ConfigRuntime {
     SharedPublication<const RuntimePublication> publication_;
 
     mutable std::mutex mutex_;
-    std::condition_variable condition_;
+    cancellation::Condition condition_;
     bool stopped_ = false;
     PublicationObserver publication_observer_;
     bool publication_notification_pending_ = false;

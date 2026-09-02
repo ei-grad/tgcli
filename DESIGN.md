@@ -490,7 +490,13 @@ docs/raw/raw-policy.a17f87c4cff7b90b278d12b91ba0614383aaee82.json
 The inventory is derived from the complete pinned function set: at the current
 pin both `td_api.tl` and generated `td_api.h` contain exactly 1001 functions.
 The invariant is equality with both complete sources; 1001 and a committed
-digest are drift evidence, not a timeless API constant. Each inventory row is
+digest are drift evidence, not a timeless API constant. Generated-header
+evidence uses the `doxygen-normalized-v2` byte projection: it removes only
+complete standalone `/** ... */` blocks and standalone `/// ` physical lines
+emitted by the pinned TDLib documentation pass. Every other byte, including
+line endings, preprocessor text, declarations, whitespace, ordinary comments,
+string and character literals, remains exact; malformed, continued, inline or
+trailing documentation forms fail closed. Each inventory row is
 `name,constructor_id,result_type,fields_sha256`. The type graph contains all
 3118 concrete pinned object/function constructors, every generated field in TD
 declaration order, and each abstract result-type membership; its count and

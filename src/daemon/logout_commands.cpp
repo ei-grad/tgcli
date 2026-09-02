@@ -96,7 +96,7 @@ class AuthQueue final {
     RequestSession* session_;
     std::uint64_t subscription_ = 0;
     mutable std::mutex mutex_;
-    std::condition_variable_any condition_;
+    cancellation::Condition condition_;
     std::deque<std::shared_ptr<const AuthStateSnapshot>> snapshots_;
 };
 

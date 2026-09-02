@@ -17,6 +17,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>

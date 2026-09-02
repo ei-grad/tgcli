@@ -452,6 +452,8 @@ before the milestone is closed.
       no-body/no-resend recovery and activation order
 - [x] Add pin-derived exhaustive 1001-function inventory/policy foundations for
       clean TDLib a17f87c4: exact tl/header bijection, committed count/digests,
+      `doxygen-normalized-v2` evidence that removes only pinned standalone
+      Doxygen blocks/lines while preserving every other generated-header byte,
       an exhaustive reviewed dormant candidate with 54 admitted typed rows and
       947 frozen whole-function denies, pinned principal evidence, compiled
       exact direct/nested chat-selector preflight plans, request/response

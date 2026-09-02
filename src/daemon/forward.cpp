@@ -706,7 +706,7 @@ class ForwardCoordinator::Impl {
     core::TdPreparedWrite prepared_write_;
     std::shared_ptr<const core::AuthStateSnapshot> authorization_;
     mutable std::mutex event_mutex_;
-    std::condition_variable_any event_condition_;
+    cancellation::Condition event_condition_;
     std::uint64_t wake_sequence_ = 0;
     std::vector<StampedUpdate> updates_;
     std::vector<std::shared_ptr<const core::AuthStateSnapshot>> auth_events_;
