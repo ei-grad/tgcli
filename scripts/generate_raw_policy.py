@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import re
+import string
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,10 @@ ACCEPTED_POLICY_SHA256 = (
 )
 SCHEMA_VERSION = 1
 TD_API_HEADER_EVIDENCE_CONTRACT = "doxygen-normalized-v2"
+RAW_STRING_PREFIXES = ("u8R", "uR", "UR", "LR", "R")
+RAW_DELIMITER_CHARACTERS = frozenset(
+    string.ascii_letters + string.digits + "_{}[]#<>%:;.?*+-/^&|~!=,\"'"
+)
 FUNCTION_MARKER = "---functions---"
 TL_FUNCTION = re.compile(
     r"^(?P<name>[A-Za-z][A-Za-z0-9_]*)"
@@ -343,12 +348,45 @@ def split_header_line_ending(line: str) -> tuple[str, str]:
     return line, ""
 
 
+def raw_string_opener(body: str, index: int) -> tuple[int, str] | None:
+    if index != 0 and (body[index - 1].isalnum() or body[index - 1] == "_"):
+        return None
+    for prefix in RAW_STRING_PREFIXES:
+        marker = f'{prefix}"'
+        if not body.startswith(marker, index):
+            continue
+        delimiter_start = index + len(marker)
+        opening = body.find("(", delimiter_start)
+        require(opening != -1, "malformed raw string delimiter in td_api.h")
+        delimiter = body[delimiter_start:opening]
+        require(len(delimiter) <= 16, "overlong raw string delimiter in td_api.h")
+        require(
+            all(character in RAW_DELIMITER_CHARACTERS for character in delimiter),
+            "invalid raw string delimiter in td_api.h",
+        )
+        return opening + 1, delimiter
+    return None
+
+
 def scan_preserved_header_line(
-    body: str, state: str, reject_documentation: bool
-) -> str:
+    body: str,
+    state: str,
+    raw_delimiter: str | None,
+    reject_documentation: bool,
+) -> tuple[str, str | None]:
     if state == "line_comment":
-        return "line_comment" if body.endswith("\\") else "normal"
+        return ("line_comment" if body.endswith("\\") else "normal", None)
     index = 0
+    if state == "raw_string":
+        require(raw_delimiter is not None, "raw string delimiter missing in td_api.h")
+        terminator = f'){raw_delimiter}"'
+        closing = body.find(terminator)
+        if closing == -1:
+            return state, raw_delimiter
+        index = closing + len(terminator)
+        state = "normal"
+        raw_delimiter = None
+        reject_documentation = True
     while index < len(body):
         if state == "normal":
             require(not body.startswith("*/", index), "stray comment close in td_api.h")
@@ -358,16 +396,26 @@ def scan_preserved_header_line(
                     "malformed Doxygen opener in td_api.h",
                 )
                 if body.startswith("////", index):
-                    return "line_comment" if body.endswith("\\") else "normal"
+                    return ("line_comment" if body.endswith("\\") else "normal", None)
                 require(
                     not body.startswith("///", index),
                     "malformed Doxygen line in td_api.h",
                 )
             if body.startswith("//", index):
-                return "line_comment" if body.endswith("\\") else "normal"
+                return ("line_comment" if body.endswith("\\") else "normal", None)
             if body.startswith("/*", index):
                 state = "block_comment"
                 index += 2
+                continue
+            raw_opener = raw_string_opener(body, index)
+            if raw_opener is not None:
+                content_start, raw_delimiter = raw_opener
+                terminator = f'){raw_delimiter}"'
+                closing = body.find(terminator, content_start)
+                if closing == -1:
+                    return "raw_string", raw_delimiter
+                index = closing + len(terminator)
+                raw_delimiter = None
                 continue
             if body[index] == '"':
                 state = "string"
@@ -385,12 +433,13 @@ def scan_preserved_header_line(
             if body[index] == quote:
                 state = "normal"
         index += 1
-    return state
+    return state, raw_delimiter
 
 
 def normalize_doxygen_header(text: str) -> str:
     output: list[str] = []
     state = "normal"
+    raw_delimiter: str | None = None
     in_doxygen_block = False
     continued_line = False
     for line in physical_header_lines(text):
@@ -417,11 +466,14 @@ def normalize_doxygen_header(text: str) -> str:
             require(not body.endswith("\\"), "continued Doxygen line in td_api.h")
             continue
 
-        state = scan_preserved_header_line(body, state, documentation_eligible)
+        state, raw_delimiter = scan_preserved_header_line(
+            body, state, raw_delimiter, documentation_eligible
+        )
         output.append(line)
         continued_line = body.endswith("\\")
 
     require(not in_doxygen_block, "unterminated Doxygen block in td_api.h")
+    require(state != "raw_string", "unterminated raw string in td_api.h")
     return "".join(output)
 
 

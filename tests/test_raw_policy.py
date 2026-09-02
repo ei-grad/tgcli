@@ -140,6 +140,32 @@ class RawPolicyTest(unittest.TestCase):
             "constexpr char slash = '/';\n"
         )
         self.assertEqual(raw_policy.normalize_doxygen_header(preserved), preserved)
+        raw_literals = (
+            'R"(raw " /// /** literal)"',
+            'u8R"tag(raw " /// /** literal)tag"',
+            'uR"custom(raw " /// /** literal)custom"',
+            'UR"abcdefghijklmnop(raw " /// /** literal)abcdefghijklmnop"',
+            'LR"x-y(raw " /// /** literal)x-y"',
+        )
+        for literal in raw_literals:
+            with self.subTest(literal=literal):
+                source = f"constexpr auto value = {literal};\n/// Documentation.\nint next;\n"
+                expected = f"constexpr auto value = {literal};\nint next;\n"
+                self.assertEqual(raw_policy.normalize_doxygen_header(source), expected)
+
+        multiline_raw = (
+            'constexpr auto value = u8R"tag(first " line\r\n'
+            "/// raw line\r\n"
+            "/** raw block marker */\r\n"
+            "\\ raw backslash-looking sequence\r\n"
+            ')tag";\r\n'
+            "/// Documentation.\r\n"
+            "int next;\r\n"
+        )
+        self.assertEqual(
+            raw_policy.normalize_doxygen_header(multiline_raw),
+            multiline_raw.replace("/// Documentation.\r\n", ""),
+        )
         for malformed in (
             "/** outer /** nested */\n",
             "/**\n * nested /**\n */\n",
@@ -151,6 +177,14 @@ class RawPolicyTest(unittest.TestCase):
             "///malformed documentation\n",
             "int value; /// trailing documentation\n",
             "/// continued documentation \\\n",
+            'R"bad delimiter(raw)bad delimiter";\n',
+            'R"bad)(raw)bad)";\n',
+            'R"bad\\delimiter(raw)bad\\delimiter";\n',
+            'R"abcdefghijklmnopq(raw)abcdefghijklmnopq";\n',
+            'R"bad@delimiter(raw)bad@delimiter";\n',
+            'R"missing delimiter opener";\n',
+            'R"tag(unterminated raw literal\n/// raw content\n',
+            'R"(raw)" /// trailing documentation\n',
             "*/\n",
         ):
             with (
