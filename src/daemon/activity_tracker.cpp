@@ -246,7 +246,6 @@ ActivityTracker::Snapshot ActivityTracker::snapshot() const {
 
 void ActivityTracker::watch(const cancellation::Token& stop) {
     const auto state = state_;
-    const cancellation::Callback stop_wakeup(stop, [&state] { state->condition.notify_all(); });
     std::unique_lock lock(state->mutex);
     while (!stop.stop_requested() && !state->expired) {
         std::function<void()> callback;
@@ -263,9 +262,10 @@ void ActivityTracker::watch(const cancellation::Token& stop) {
         };
         if (state->deadline) {
             const auto deadline = state->deadline.value_or(Clock::time_point::max());
-            static_cast<void>(state->condition.wait_until(lock, deadline, changed));
+            static_cast<void>(
+                cancellation::wait_until(state->condition, lock, stop, deadline, changed));
         } else {
-            state->condition.wait(lock, changed);
+            static_cast<void>(cancellation::wait(state->condition, lock, stop, changed));
         }
     }
 }

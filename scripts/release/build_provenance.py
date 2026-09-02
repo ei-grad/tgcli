@@ -573,7 +573,15 @@ def validate_test_evidence(document: dict) -> None:
         "test evidence has an invalid schema",
     )
     require(
-        document["argv"] == ["ctest", "--test-dir", "app", "--output-on-failure"]
+        document["argv"]
+        == [
+            "ctest",
+            "--test-dir",
+            "app",
+            "--output-on-failure",
+            "--exclude-regex",
+            "^command-registry-completion-zsh$",
+        ]
         and document["working_directory"] == ".tgcli-build"
         and document["binary"] == ".tgcli-build/app/tgcli_unit_tests"
         and document["passed"] is True,

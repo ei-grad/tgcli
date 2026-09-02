@@ -119,6 +119,15 @@ target_compile_definitions(tgcli_unit_tests
         TGCLI_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden"
         TGCLI_TEST_BINARY="$<TARGET_FILE:tgcli>")
 
+add_executable(tgcli_cancellation_allocation_test cancellation_allocation_test.cpp)
+target_include_directories(tgcli_cancellation_allocation_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(tgcli_cancellation_allocation_test PRIVATE cxx_std_20)
+add_test(
+    NAME cancellation-stop-is-allocation-free
+    COMMAND tgcli_cancellation_allocation_test)
+set_tests_properties(cancellation-stop-is-allocation-free
+    PROPERTIES LABELS "cancellation;concurrency")
+
 # Catch2 tags become ctest labels so the TSan preset can exclude the [tdlib]
 # tests (tdlib is uninstrumented; see CLAUDE.md sanitizer policy).
 if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=[^ ]*address")

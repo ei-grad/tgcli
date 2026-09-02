@@ -56,8 +56,6 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
 
     const auto refresh = ++requested_refresh_;
     condition_.notify_all();
-    const cancellation::Callback cancellation_wakeup(cancellation,
-                                                     [this] { condition_.notify_all(); });
 
     while (completed_refresh_ < refresh) {
         if (stopped_) {
@@ -73,9 +71,9 @@ ConfigAdmissionResult ConfigRuntime::admit(std::string_view account,
             return completed_refresh_ >= refresh || stopped_ || cancellation.stop_requested();
         };
         if (deadline.expires_at) {
-            wait_for_work(lock, *deadline.expires_at, changed);
+            wait_for_work(lock, *deadline.expires_at, changed, cancellation);
         } else {
-            condition_.wait(lock, changed);
+            static_cast<void>(cancellation::wait(condition_, lock, cancellation, changed));
         }
     }
 
@@ -119,12 +117,14 @@ ConfigRuntime::Clock::time_point ConfigRuntime::now() const {
 }
 
 void ConfigRuntime::wait_for_work(std::unique_lock<std::mutex>& lock, Clock::time_point deadline,
-                                  const testing::ConfigRuntimeHooks::Predicate& predicate) {
+                                  const testing::ConfigRuntimeHooks::Predicate& predicate,
+                                  const cancellation::Token& cancellation) {
     if (hooks_ && hooks_->wait_until) {
         hooks_->wait_until(condition_, lock, deadline, predicate);
         return;
     }
-    static_cast<void>(condition_.wait_until(lock, deadline, predicate));
+    static_cast<void>(
+        cancellation::wait_until(condition_, lock, cancellation, deadline, predicate));
 }
 
 void ConfigRuntime::dispatch_publication_observer(std::unique_lock<std::mutex>& lock) {
@@ -159,7 +159,6 @@ void ConfigRuntime::dispatch_publication_observer(std::unique_lock<std::mutex>& 
 }
 
 void ConfigRuntime::run(cancellation::Token stop) {
-    const cancellation::Callback stop_wakeup(stop, [this] { condition_.notify_all(); });
     std::unique_lock lock(mutex_);
     while (!stop.stop_requested() && !stopped_) {
         if (publication_notification_pending_) {
@@ -170,10 +169,14 @@ void ConfigRuntime::run(cancellation::Token stop) {
         const bool forced = requested_refresh_ > completed_refresh_;
         const bool poll_due = current_time >= next_poll_;
         if (!forced && !poll_due) {
-            wait_for_work(lock, next_poll_, [&] {
-                return stop.stop_requested() || stopped_ ||
-                       requested_refresh_ > completed_refresh_ || publication_notification_pending_;
-            });
+            wait_for_work(
+                lock, next_poll_,
+                [&] {
+                    return stop.stop_requested() || stopped_ ||
+                           requested_refresh_ > completed_refresh_ ||
+                           publication_notification_pending_;
+                },
+                stop);
             continue;
         }
 

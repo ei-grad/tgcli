@@ -13,6 +13,12 @@ readonly ARTIFACT_INSPECTOR="$REPO_ROOT/scripts/release/inspect_linux_artifact.p
 readonly PROVENANCE_TOOL="$REPO_ROOT/scripts/release/build_provenance.py"
 readonly RE2_BUILD_VERIFIER="$REPO_ROOT/scripts/release/verify_re2_build.py"
 readonly RUNTIME_VERIFIER="$REPO_ROOT/scripts/release/verify_toolchain_runtime.py"
+readonly -a RELEASE_TEST_COMMAND=(
+    ctest
+    --test-dir app
+    --output-on-failure
+    --exclude-regex '^command-registry-completion-zsh$'
+)
 readonly INPUT_DIRECTORY="${TGCLI_RELEASE_INPUTS_DIR:-$REPO_ROOT/build/release-inputs}"
 readonly OUTPUT_DIRECTORY="${TGCLI_RELEASE_OUTPUT_DIR:-$REPO_ROOT/build/release-static}"
 readonly WORK_DIRECTORY="${TGCLI_RELEASE_WORK_DIR:-$REPO_ROOT/build/release-linux-musl}"
@@ -403,8 +409,7 @@ build_release() {
         --parallel "$jobs"
     if ! (
         cd "$WORK_DIRECTORY"
-        ctest --test-dir app --output-on-failure \
-            --exclude-regex '^command-registry-completion-zsh$'
+        "${RELEASE_TEST_COMMAND[@]}"
     ) >"$WORK_DIRECTORY/ctest.log" 2>&1; then
         sed -n '1,240p' "$WORK_DIRECTORY/ctest.log" >&2
         fail "release test invocation failed"
@@ -417,7 +422,7 @@ build_release() {
     python3 "$PROVENANCE_TOOL" source-identity \
         --repo-root "$REPO_ROOT" \
         --expected-commit "$TGCLI_SOURCE_SHA" >/dev/null
-    python3 - "$WORK_DIRECTORY/test-evidence.json" <<'PY'
+    python3 - "$WORK_DIRECTORY/test-evidence.json" "${RELEASE_TEST_COMMAND[@]}" <<'PY'
 import json
 import pathlib
 import sys
@@ -425,7 +430,7 @@ import sys
 pathlib.Path(sys.argv[1]).write_text(
     json.dumps(
         {
-            "argv": ["ctest", "--test-dir", "app", "--output-on-failure"],
+            "argv": sys.argv[2:],
             "binary": ".tgcli-build/app/tgcli_unit_tests",
             "passed": True,
             "working_directory": ".tgcli-build",

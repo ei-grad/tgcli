@@ -92,6 +92,8 @@ class CiPortabilityContractTest(unittest.TestCase):
         exclusion = "--exclude-regex '^command-registry-completion-zsh$'"
         self.assertEqual(recipe.count(exclusion), 1)
         self.assertEqual(recipe.count("--exclude-regex"), 1)
+        self.assertIn('"${RELEASE_TEST_COMMAND[@]}"', recipe)
+        self.assertIn("sys.argv[2:]", recipe)
         identity = workflow.index("- name: Verify the release source identity")
         install = workflow.index(
             "- name: Install host completion test dependency", identity

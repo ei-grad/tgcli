@@ -5,14 +5,54 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 using namespace std::chrono_literals;
+
+namespace {
+
+class EnrollmentBarrierCondition final {
+  public:
+    template <typename Lock, typename Predicate> void wait(Lock& lock, Predicate predicate) {
+        entered_.set_value();
+        release_.get_future().wait();
+        condition_.wait(lock, std::move(predicate));
+    }
+
+    template <typename Lock, typename Clock, typename Duration, typename Predicate>
+    bool wait_until(Lock& lock, const std::chrono::time_point<Clock, Duration>& deadline,
+                    Predicate predicate) {
+        entered_.set_value();
+        release_.get_future().wait();
+        return condition_.wait_until(lock, deadline, std::move(predicate));
+    }
+
+    void notify_all() {
+        condition_.notify_all();
+    }
+
+    [[nodiscard]] std::future<void> entered() {
+        return entered_.get_future();
+    }
+
+    void release() {
+        release_.set_value();
+    }
+
+  private:
+    std::condition_variable_any condition_;
+    std::promise<void> entered_;
+    std::promise<void> release_;
+};
+
+} // namespace
 
 TEST_CASE("cancellation registration and stop are linearizable", "[cancellation][concurrency]") {
     for (int iteration = 0; iteration < 256; ++iteration) {
@@ -110,6 +150,55 @@ TEST_CASE("cancellation callback destruction waits for an in-flight callback",
     CHECK(destroyed.load(std::memory_order_acquire));
 }
 
+TEST_CASE("cancellation wait cannot lose stop before condition enrollment",
+          "[cancellation][concurrency]") {
+    const tgcli::cancellation::Source source;
+    EnrollmentBarrierCondition condition;
+    auto entered = condition.entered();
+    std::promise<void> completed_promise;
+    auto completed = completed_promise.get_future();
+    std::mutex mutex;
+    bool result = true;
+    const bool timed = GENERATE(false, true);
+    std::thread waiter([&] {
+        std::unique_lock lock(mutex);
+        if (timed) {
+            result = tgcli::cancellation::wait_until(condition, lock, source.get_token(),
+                                                     std::chrono::steady_clock::now() + 10s,
+                                                     [] { return false; });
+        } else {
+            result = tgcli::cancellation::wait(condition, lock, source.get_token(),
+                                               [] { return false; });
+        }
+        completed_promise.set_value();
+    });
+    REQUIRE(entered.wait_for(2s) == std::future_status::ready);
+    std::thread stopper([&] { static_cast<void>(source.request_stop()); });
+    while (!source.stop_requested()) {
+        std::this_thread::yield();
+    }
+    condition.release();
+    const bool rescued = completed.wait_for(2s) != std::future_status::ready;
+    if (rescued) {
+        condition.notify_all();
+    }
+    stopper.join();
+    waiter.join();
+    CHECK_FALSE(rescued);
+    CHECK_FALSE(result);
+}
+
+TEST_CASE("cancellation callback may reenter the stop source", "[cancellation]") {
+    const tgcli::cancellation::Source source;
+    bool invoked = false;
+    const tgcli::cancellation::Callback callback(source.get_token(), [&] {
+        invoked = true;
+        CHECK_FALSE(source.request_stop());
+    });
+    REQUIRE(source.request_stop());
+    CHECK(invoked);
+}
+
 TEST_CASE("cancellation thread teardown requests stop wakes and joins",
           "[cancellation][concurrency]") {
     std::atomic<bool> entered{false};
@@ -198,4 +287,34 @@ TEST_CASE("shared publication exposes one immutable generation", "[publication][
     REQUIRE(final);
     CHECK(final->generation == 4096);
     CHECK(final->complement == ~std::uint64_t{4096});
+}
+
+TEST_CASE("shared publication releases the prior owner outside its mutex", "[publication]") {
+    struct ReentrantValue {
+        ReentrantValue() = default;
+        ReentrantValue(tgcli::SharedPublication<const ReentrantValue>* publication_value,
+                       bool* observed_replacement_value)
+            : publication(publication_value), observed_replacement(observed_replacement_value) {}
+        ReentrantValue(const ReentrantValue&) = delete;
+        ReentrantValue& operator=(const ReentrantValue&) = delete;
+        ReentrantValue(ReentrantValue&&) = delete;
+        ReentrantValue& operator=(ReentrantValue&&) = delete;
+
+        tgcli::SharedPublication<const ReentrantValue>* publication = nullptr;
+        bool* observed_replacement = nullptr;
+
+        ~ReentrantValue() {
+            if (publication != nullptr) {
+                *observed_replacement = static_cast<bool>(publication->load());
+            }
+        }
+    };
+
+    tgcli::SharedPublication<const ReentrantValue> publication;
+    bool observed_replacement = false;
+    auto first = std::make_shared<const ReentrantValue>(&publication, &observed_replacement);
+    publication.store(first);
+    first.reset();
+    publication.store(std::make_shared<const ReentrantValue>());
+    CHECK(observed_replacement);
 }

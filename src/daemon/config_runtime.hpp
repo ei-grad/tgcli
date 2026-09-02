@@ -136,7 +136,8 @@ class ConfigRuntime {
 
     [[nodiscard]] Clock::time_point now() const;
     void wait_for_work(std::unique_lock<std::mutex>& lock, Clock::time_point deadline,
-                       const testing::ConfigRuntimeHooks::Predicate& predicate);
+                       const testing::ConfigRuntimeHooks::Predicate& predicate,
+                       const cancellation::Token& cancellation);
     void dispatch_publication_observer(std::unique_lock<std::mutex>& lock);
     void run(cancellation::Token stop);
     [[nodiscard]] ConfigAdmissionDecision admission_decision(std::string_view account) const;

@@ -122,6 +122,7 @@ class RawPolicyTest(unittest.TestCase):
             bare_header = root / "bare.h"
             documented_header = root / "documented.h"
             changed_header = root / "changed.h"
+            crlf_header = root / "crlf.h"
             bare_header.write_text(constructor, encoding="utf-8")
             documented_header.write_text(
                 "/**\n * Documentation only.\n */\n" + constructor,
@@ -130,6 +131,7 @@ class RawPolicyTest(unittest.TestCase):
             changed_header.write_text(
                 constructor.replace("ID = 7", "ID = 8"), encoding="utf-8"
             )
+            crlf_header.write_bytes(constructor.replace("\n", "\r\n").encode("utf-8"))
             self.assertEqual(
                 raw_policy.parse_header(bare_header),
                 raw_policy.parse_header(documented_header),
@@ -137,6 +139,10 @@ class RawPolicyTest(unittest.TestCase):
             self.assertNotEqual(
                 raw_policy.parse_header(bare_header),
                 raw_policy.parse_header(changed_header),
+            )
+            self.assertNotEqual(
+                raw_policy.normalized_header_text(bare_header),
+                raw_policy.normalized_header_text(crlf_header),
             )
 
     def test_accepted_candidate_is_exhaustive_reviewed_and_activation_ready(

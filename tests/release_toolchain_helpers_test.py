@@ -874,7 +874,14 @@ def swapped_artifact_test(base: pathlib.Path) -> None:
     write_json(
         tests,
         {
-            "argv": ["ctest", "--test-dir", "app", "--output-on-failure"],
+            "argv": [
+                "ctest",
+                "--test-dir",
+                "app",
+                "--output-on-failure",
+                "--exclude-regex",
+                "^command-registry-completion-zsh$",
+            ],
             "binary": ".tgcli-build/app/tgcli_unit_tests",
             "passed": True,
             "working_directory": ".tgcli-build",

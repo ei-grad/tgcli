@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <utility>
 
 namespace tgcli {
 
@@ -15,8 +16,11 @@ template <typename Value> class SharedPublication final {
     SharedPublication& operator=(SharedPublication&&) = delete;
 
     void store(std::shared_ptr<Value> value) {
-        const std::lock_guard lock(mutex_);
-        value_ = std::move(value);
+        std::shared_ptr<Value> previous;
+        {
+            const std::lock_guard lock(mutex_);
+            previous = std::exchange(value_, std::move(value));
+        }
     }
 
     [[nodiscard]] std::shared_ptr<Value> load() const {

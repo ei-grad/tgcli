@@ -390,7 +390,7 @@ def normalize_doxygen_header(text: str) -> str:
 
 
 def normalized_header_text(source: Path) -> str:
-    return normalize_doxygen_header(source.read_text(encoding="utf-8"))
+    return normalize_doxygen_header(source.read_bytes().decode("utf-8"))
 
 
 def parse_header(source: Path) -> dict[str, int]:

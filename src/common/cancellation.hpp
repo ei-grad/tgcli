@@ -7,11 +7,11 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 namespace tgcli::cancellation {
 
@@ -88,30 +88,27 @@ class State final {
     }
 
     bool request_stop() noexcept {
-        std::vector<std::shared_ptr<CallbackNode>> callbacks;
         {
             const std::lock_guard lock(mutex_);
             if (stop_requested_) {
                 return false;
             }
             stop_requested_ = true;
-            callbacks.reserve(callbacks_.size());
-            for (const auto& [unused_id, callback] : callbacks_) {
-                if (auto retained = callback.lock()) {
-                    callbacks.push_back(std::move(retained));
-                }
+            callbacks_.swap(dispatch_callbacks_);
+        }
+        for (const auto& [unused_id, callback] : dispatch_callbacks_) {
+            if (auto retained = callback.lock()) {
+                retained->invoke();
             }
-            callbacks_.clear();
         }
-        for (const auto& callback : callbacks) {
-            callback->invoke();
-        }
+        dispatch_callbacks_.clear();
         return true;
     }
 
   private:
     mutable std::mutex mutex_;
     std::unordered_map<std::uint64_t, std::weak_ptr<CallbackNode>> callbacks_;
+    std::unordered_map<std::uint64_t, std::weak_ptr<CallbackNode>> dispatch_callbacks_;
     std::uint64_t next_id_ = 1;
     bool stop_requested_ = false;
 };
@@ -266,29 +263,74 @@ class Thread final {
 
 template <typename Condition, typename Lock, typename Predicate>
 bool wait(Condition& condition, Lock& lock, const Token& token, Predicate predicate) {
-    const Callback wake(token, [&condition] { condition.notify_all(); });
-    while (!predicate()) {
+    for (;;) {
+        auto* wait_mutex = lock.mutex();
+        std::optional<Callback> wake;
+        lock.unlock();
+        try {
+            wake.emplace(token, [&condition, wait_mutex] {
+                const std::lock_guard wait_lock(*wait_mutex);
+                condition.notify_all();
+            });
+            lock.lock();
+            condition.wait(lock, [&] { return predicate() || token.stop_requested(); });
+        } catch (...) {
+            if (lock.owns_lock()) {
+                lock.unlock();
+            }
+            wake.reset();
+            lock.lock();
+            throw;
+        }
+        lock.unlock();
+        wake.reset();
+        lock.lock();
+        if (predicate()) {
+            return true;
+        }
         if (token.stop_requested()) {
             return false;
         }
-        condition.wait(lock);
     }
-    return true;
 }
 
 template <typename Condition, typename Lock, typename Clock, typename Duration, typename Predicate>
 bool wait_until(Condition& condition, Lock& lock, const Token& token,
                 const std::chrono::time_point<Clock, Duration>& deadline, Predicate predicate) {
-    const Callback wake(token, [&condition] { condition.notify_all(); });
-    while (!predicate()) {
+    for (;;) {
+        auto* wait_mutex = lock.mutex();
+        std::optional<Callback> wake;
+        lock.unlock();
+        bool changed = false;
+        try {
+            wake.emplace(token, [&condition, wait_mutex] {
+                const std::lock_guard wait_lock(*wait_mutex);
+                condition.notify_all();
+            });
+            lock.lock();
+            changed = condition.wait_until(lock, deadline,
+                                           [&] { return predicate() || token.stop_requested(); });
+        } catch (...) {
+            if (lock.owns_lock()) {
+                lock.unlock();
+            }
+            wake.reset();
+            lock.lock();
+            throw;
+        }
+        lock.unlock();
+        wake.reset();
+        lock.lock();
+        if (predicate()) {
+            return true;
+        }
         if (token.stop_requested()) {
             return false;
         }
-        if (condition.wait_until(lock, deadline) == std::cv_status::timeout) {
-            return predicate();
+        if (!changed) {
+            return false;
         }
     }
-    return true;
 }
 
 } // namespace tgcli::cancellation
