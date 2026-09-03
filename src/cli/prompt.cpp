@@ -80,7 +80,7 @@ class PromptSignalGuard {
         const auto index = signal_index(signal);
         struct sigaction action {};
         action.sa_handler = record_prompt_signal;
-        ::sigemptyset(&action.sa_mask);
+        sigemptyset(&action.sa_mask);
         action.sa_flags = 0;
         if (::sigaction(signal, &action, &previous_.at(index)) != 0) {
             return false;

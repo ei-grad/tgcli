@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -65,6 +66,22 @@ class CiPortabilityContractTest(unittest.TestCase):
             if "::close(" in text:
                 with self.subTest(source=source.relative_to(REPOSITORY)):
                     self.assertIn("#include <unistd.h>\n", text)
+
+    def test_signal_set_macros_are_not_namespace_qualified(self) -> None:
+        qualified_signal_set_call = re.compile(
+            r"::\s*(?:sigemptyset|sigfillset|sigaddset|sigdelset|sigismember)\s*\("
+        )
+        candidates = [
+            source
+            for root in (REPOSITORY / "src", REPOSITORY / "tests")
+            for source in root.rglob("*")
+            if source.suffix in {".cpp", ".hpp"}
+        ]
+        for source in candidates:
+            with self.subTest(source=source.relative_to(REPOSITORY)):
+                self.assertIsNone(
+                    qualified_signal_set_call.search(source.read_text(encoding="utf-8"))
+                )
 
     def test_full_ctest_jobs_provision_real_zsh(self) -> None:
         ci = (REPOSITORY / ".github/workflows/ci.yml").read_text(encoding="utf-8")
