@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -29,6 +31,10 @@ def compile_cpp(source: str, directory: Path) -> None:
             *shlex.split(os.environ.get("CXX", "c++")),
             "-std=c++20",
             "-fsyntax-only",
+            "-Werror",
+            "-Woverlength-strings",
+            "-I",
+            str(REPOSITORY / "src"),
             str(source_file),
         ],
         check=True,
@@ -152,6 +158,92 @@ class GeneratorTest(unittest.TestCase):
             "static_assert(raw.size() > 0 && escaped.size() > 0);\n",
             self.fixture.root.parent,
         )
+
+    def test_literal_chunks_preserve_exact_bytes_at_portable_boundaries(self) -> None:
+        boundary = b"a" * generator.CPP_LITERAL_CHUNK_BYTES
+        over_boundary = boundary + b"b"
+        utf8_boundary = b"a" * (generator.CPP_LITERAL_CHUNK_BYTES - 1) + "雪".encode()
+        escaped_nul_utf8 = b'{"title":"\\u0000 snow \xe9\x9b\xaa"}\n'
+        cases = (
+            (boundary, (generator.CPP_LITERAL_CHUNK_BYTES,)),
+            (over_boundary, (generator.CPP_LITERAL_CHUNK_BYTES, 1)),
+            (utf8_boundary, (generator.CPP_LITERAL_CHUNK_BYTES - 1, 3)),
+            (escaped_nul_utf8, (len(escaped_nul_utf8),)),
+        )
+        for data, expected_sizes in cases:
+            with self.subTest(size=len(data)):
+                chunks = generator.literal_chunks(data, "fixture")
+                reconstructed = b"".join(chunks)
+                self.assertEqual(tuple(map(len, chunks)), expected_sizes)
+                self.assertEqual(reconstructed, data)
+                self.assertEqual(
+                    hashlib.sha256(reconstructed).digest(),
+                    hashlib.sha256(data).digest(),
+                )
+                self.assertTrue(
+                    all(
+                        len(chunk) <= generator.CPP_LITERAL_CHUNK_BYTES
+                        for chunk in chunks
+                    )
+                )
+
+    def test_large_generated_assets_use_only_bounded_literals_and_compile(self) -> None:
+        padding = '雪/raw)TGdelimiter"' * generator.CPP_LITERAL_CHUNK_BYTES
+        self.fixture.write_schema(
+            "alpha.result.schema.json",
+            {
+                "$schema": generator.DIALECT,
+                "type": "object",
+                "description": padding,
+            },
+        )
+        self.fixture.write_schema(
+            "other.result.schema.json",
+            {
+                "$schema": generator.DIALECT,
+                "type": "object",
+                "description": padding + "second\0",
+            },
+        )
+        self.fixture.write_catalog(
+            "manifest.json",
+            {
+                "alpha": {"result": "alpha.result.schema.json"},
+                "beta": {"result": "other.result.schema.json"},
+            },
+        )
+        inventory = generator.build_inventory(self.fixture.root)
+        rendered = generator.render_cpp(inventory).decode()
+        literals = tuple(
+            match.group("body").encode()
+            for match in re.finditer(
+                r'R"(?P<delimiter>[A-Za-z0-9]+)\((?P<body>.*?)\)(?P=delimiter)"',
+                rendered,
+                re.DOTALL,
+            )
+        )
+        self.assertTrue(literals)
+        self.assertLess(generator.CPP_LITERAL_CHUNK_BYTES, 65_536)
+        self.assertLessEqual(max(map(len, literals)), generator.CPP_LITERAL_CHUNK_BYTES)
+        expected_assets = tuple(data for _, data in inventory.assets) + tuple(
+            catalog.bytes for catalog in inventory.catalogs
+        )
+        literal_index = 0
+        for expected in expected_assets:
+            chunk_count = len(generator.literal_chunks(expected, "expected asset"))
+            reconstructed = b"".join(
+                literals[literal_index : literal_index + chunk_count]
+            )
+            self.assertEqual(reconstructed, expected)
+            self.assertEqual(
+                hashlib.sha256(reconstructed).digest(),
+                hashlib.sha256(expected).digest(),
+            )
+            literal_index += chunk_count
+        self.assertEqual(literal_index, len(literals))
+        self.assertIn("constexpr auto kSchema", rendered)
+        self.assertNotIn("constexpr std::string_view kSchema0 =", rendered)
+        compile_cpp(rendered, self.fixture.root.parent)
 
     def test_duplicate_json_keys_are_rejected(self) -> None:
         (self.fixture.schemas / "manifest.json").write_text(
@@ -467,6 +559,7 @@ class GeneratorTest(unittest.TestCase):
             b'{"$schema":"wrong"}\n',
             b'{"$schema":"https://json-schema.org/draft/2020-12/schema"}',
             b'{"$schema":"https://json-schema.org/draft/2020-12/schema"}\n\n',
+            b'{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"raw\0nul"}\n',
         )
         for index, data in enumerate(cases):
             with self.subTest(index=index):

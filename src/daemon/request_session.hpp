@@ -277,6 +277,11 @@ class RequestSessionTestAccess {
         session.probe_hook_ = hook;
     }
 
+    static void expire_deadline(RequestSession& session) noexcept {
+        const std::lock_guard lock(session.session_mutex_);
+        session.deadline_ = RequestDeadline{RequestSession::Clock::time_point::min()};
+    }
+
     static StreamSubscriptionWorker stream_worker(const RequestSession& session) {
         return session.stream_worker();
     }

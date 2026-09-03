@@ -274,6 +274,12 @@ class FakeDownload {
         session_pointer_->disconnect();
     }
 
+    void expire_session_deadline() {
+        const std::lock_guard lock(session_pointer_mutex_);
+        REQUIRE(session_pointer_ != nullptr);
+        tgcli::daemon::testing::RequestSessionTestAccess::expire_deadline(*session_pointer_);
+    }
+
     void before_download_send(tgcli::core::TdFile file) {
         runtime_->set_before_send([this, file = std::move(file)](const auto& function) mutable {
             if (function.kind() == tgcli::core::TdFunctionKind::DownloadFile) {
@@ -802,8 +808,7 @@ TEST_CASE("download final ordered drain never invokes the transport sink",
 TEST_CASE("download publication claim orders auth shutdown disconnect and deadline",
           "[download][commands][race]") {
     const auto run = [](tgcli::daemon::DownloadFilesystemStage stage,
-                        const std::function<void(FakeDownload&)>& action, std::string_view output,
-                        double timeout = 2.0) {
+                        const std::function<void(FakeDownload&)>& action, std::string_view output) {
         const TempDirectory temporary;
         temporary.write("source.bin", "payload");
         auto hooks = std::make_shared<tgcli::daemon::testing::DownloadFilesystemHooks>();
@@ -817,7 +822,6 @@ TEST_CASE("download publication claim orders auth shutdown disconnect and deadli
         FakeDownload fake(hooks);
         fake_pointer = &fake;
         auto invocation = request(temporary, std::string(output));
-        invocation.context.timeout_seconds = timeout;
         return std::pair{run_completed_download(fake, std::move(invocation), temporary),
                          std::filesystem::exists(temporary.root() / output)};
     };
@@ -880,7 +884,7 @@ TEST_CASE("download publication claim orders auth shutdown disconnect and deadli
     SECTION("deadline before claim wins") {
         const auto [outcome, published] = run(
             tgcli::daemon::DownloadFilesystemStage::BeforePublish,
-            [](FakeDownload&) { std::this_thread::sleep_for(150ms); }, "deadline-before.bin", 0.1);
+            [](FakeDownload& fake) { fake.expire_session_deadline(); }, "deadline-before.bin");
         REQUIRE(outcome.error);
         CHECK((*outcome.error)["error"]["code"] == "TIMEOUT");
         CHECK_FALSE(published);
@@ -888,7 +892,7 @@ TEST_CASE("download publication claim orders auth shutdown disconnect and deadli
     SECTION("deadline after claim loses") {
         const auto [outcome, published] = run(
             tgcli::daemon::DownloadFilesystemStage::PublicationClaimed,
-            [](FakeDownload&) { std::this_thread::sleep_for(150ms); }, "deadline-after.bin", 0.1);
+            [](FakeDownload& fake) { fake.expire_session_deadline(); }, "deadline-after.bin");
         REQUIRE(outcome.result);
         CHECK(outcome.terminal_count == 1);
         CHECK(published);

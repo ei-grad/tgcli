@@ -33,6 +33,8 @@ CATALOG_RULES = {
 DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 REGULAR_OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
 READ_CHUNK_SIZE = 64 * 1024
+# Keep every raw-literal body well below the C++ support floor of 65,536 bytes.
+CPP_LITERAL_CHUNK_BYTES = 16 * 1024
 
 
 class GenerationError(RuntimeError):
@@ -428,6 +430,28 @@ def raw_literal(data: bytes, owner: str) -> str:
     fail(f"cannot choose a raw string delimiter for {owner}")
 
 
+def literal_chunks(data: bytes, owner: str) -> tuple[bytes, ...]:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise GenerationError(f"{owner}: invalid UTF-8: {error}") from error
+    if not data:
+        return (b"",)
+
+    chunks: list[bytes] = []
+    start = 0
+    while start < len(data):
+        end = min(start + CPP_LITERAL_CHUNK_BYTES, len(data))
+        while end < len(data) and data[end] & 0xC0 == 0x80:
+            end -= 1
+        require(end > start, f"{owner}: UTF-8 code point exceeds literal chunk bound")
+        chunk = data[start:end]
+        chunk.decode("utf-8")
+        chunks.append(chunk)
+        start = end
+    return tuple(chunks)
+
+
 def cpp_identifier(prefix: str, index: int) -> str:
     return f"k{prefix}{index}"
 
@@ -446,30 +470,63 @@ def cpp_string_literal(value: str) -> str:
     return f'"{"".join(encoded)}"'
 
 
+def render_asset(identifier: str, data: bytes, owner: str) -> list[str]:
+    chunks = literal_chunks(data, owner)
+    lines = [
+        f"constexpr auto {identifier}Storage = assemble_asset<{len(data)}>(",
+        f"    std::array<std::string_view, {len(chunks)}>{{{{",
+    ]
+    for index, chunk in enumerate(chunks):
+        lines.append(f"        {raw_literal(chunk, f'{owner} chunk {index}')},")
+    lines.extend(
+        [
+            "    }});",
+            (
+                f"constexpr std::string_view {identifier}{{{identifier}Storage.data(), "
+                f"{identifier}Storage.size()}};"
+            ),
+        ]
+    )
+    return lines
+
+
 def render_cpp(inventory: AssetInventory) -> bytes:
     asset_names: dict[str, str] = {}
     lines = [
         '#include "cli/schema_catalog.hpp"',
         "",
         "#include <array>",
+        "#include <cstddef>",
+        "#include <string_view>",
         "",
         "namespace tgcli::cli {",
         "namespace {",
+        "",
+        "template <std::size_t Size, std::size_t ChunkCount>",
+        "consteval std::array<char, Size>",
+        "assemble_asset(const std::array<std::string_view, ChunkCount>& chunks) {",
+        "    std::array<char, Size> bytes{};",
+        "    std::size_t offset = 0;",
+        "    for (const auto chunk : chunks) {",
+        "        for (const char value : chunk) {",
+        "            bytes[offset++] = value;",
+        "        }",
+        "    }",
+        "    if (offset != Size) {",
+        '        throw "schema asset size mismatch";',
+        "    }",
+        "    return bytes;",
+        "}",
         "",
     ]
     for index, (filename, data) in enumerate(inventory.assets):
         identifier = cpp_identifier("Schema", index)
         asset_names[filename] = identifier
-        lines.append(
-            f"constexpr std::string_view {identifier} = {raw_literal(data, filename)};"
-        )
+        lines.extend(render_asset(identifier, data, filename))
     lines.append("")
     for index, catalog in enumerate(inventory.catalogs):
         identifier = cpp_identifier("Catalog", index)
-        lines.append(
-            f"constexpr std::string_view {identifier} = "
-            f"{raw_literal(catalog.bytes, catalog.name)};"
-        )
+        lines.extend(render_asset(identifier, catalog.bytes, catalog.name))
     lines.extend(
         [
             "",
