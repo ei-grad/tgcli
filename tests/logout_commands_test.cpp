@@ -1938,6 +1938,12 @@ TEST_CASE("logout lifecycle gate orders terminal events and replacement",
 
 TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
           "[logout][dispatch][lifecycle][ordering][deadline][gate]") {
+    const auto dispatch_with_injected_deadline = [](FakeLogout& logout) {
+        return logout.dispatch_controlled(proto::WriteAuthority::Unset, true, false, 0.2, false,
+                                          std::nullopt, {"logout"}, {}, {},
+                                          daemon::RequestSession::Clock::time_point::max());
+    };
+
     for (const bool error_before_deadline : {false, true}) {
         DYNAMIC_SECTION((error_before_deadline ? "TD error before deadline wins"
                                                : "deadline before TD error wins")) {
@@ -1954,20 +1960,20 @@ TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
                 condition.notify_all();
                 condition.wait(lock, [&] { return release; });
             };
-            hooks->during_terminal_claim = [&] {
+            hooks->after_terminal_claim = [&] {
                 const std::lock_guard lock(mutex);
                 claimed = true;
                 condition.notify_all();
             };
             FakeLogout logout(tree, hooks);
-            auto outcome = logout.dispatch(proto::WriteAuthority::Unset, true, false, 0.2);
+            auto controlled = dispatch_with_injected_deadline(logout);
             {
                 std::unique_lock lock(mutex);
                 REQUIRE(condition.wait_for(lock, 2s, [&] { return sent; }));
             }
             const auto sent_functions = logout.runtime().sent_functions();
             if (!error_before_deadline) {
-                std::this_thread::sleep_for(220ms);
+                daemon::testing::RequestSessionTestAccess::expire_deadline(*controlled.session);
             }
             logout.runtime().push_response(logout.first(), sent_functions[1].query_id,
                                            core::TdValue::from(core::TdError{400, "ordered"}));
@@ -1976,7 +1982,7 @@ TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
                 REQUIRE(condition.wait_for(lock, 2s, [&] { return claimed; }));
             }
             if (error_before_deadline) {
-                std::this_thread::sleep_for(220ms);
+                daemon::testing::RequestSessionTestAccess::expire_deadline(*controlled.session);
             }
             {
                 const std::lock_guard lock(mutex);
@@ -1984,7 +1990,7 @@ TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
             }
             condition.notify_all();
 
-            const auto result = outcome.get();
+            const auto result = controlled.outcome.get();
             REQUIRE(result.error);
             CHECK((*result.error)["error"]["code"] ==
                   (error_before_deadline ? "TDLIB_ERROR" : "REMOTE_LOGOUT_UNCONFIRMED"));
@@ -2010,19 +2016,19 @@ TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
                 condition.notify_all();
                 condition.wait(lock, [&] { return release; });
             };
-            hooks->during_terminal_claim = [&] {
+            hooks->after_terminal_claim = [&] {
                 const std::lock_guard lock(mutex);
                 ++claims;
                 condition.notify_all();
             };
             FakeLogout logout(tree, hooks);
-            auto outcome = logout.dispatch(proto::WriteAuthority::Unset, true, false, 0.2);
+            auto controlled = dispatch_with_injected_deadline(logout);
             {
                 std::unique_lock lock(mutex);
                 REQUIRE(condition.wait_for(lock, 2s, [&] { return sent; }));
             }
             if (!progress_before_deadline) {
-                std::this_thread::sleep_for(220ms);
+                daemon::testing::RequestSessionTestAccess::expire_deadline(*controlled.session);
             }
             logout.runtime().push_update(logout.first(), {},
                                          core::AuthStateData{core::AuthState::LoggingOut});
@@ -2031,7 +2037,7 @@ TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
                 REQUIRE(condition.wait_for(lock, 2s, [&] { return claims >= 1; }));
             }
             if (progress_before_deadline) {
-                std::this_thread::sleep_for(220ms);
+                daemon::testing::RequestSessionTestAccess::expire_deadline(*controlled.session);
             }
             const auto sent_functions = logout.runtime().sent_functions();
             logout.runtime().push_response(logout.first(), sent_functions[1].query_id,
@@ -2042,7 +2048,7 @@ TEST_CASE("logout terminal gate orders TD errors and progress against deadline",
             }
             condition.notify_all();
 
-            const auto result = outcome.get();
+            const auto result = controlled.outcome.get();
             REQUIRE(result.error);
             CHECK((*result.error)["error"]["code"] == "REMOTE_LOGOUT_UNCONFIRMED");
             CHECK((*result.error)["error"]["details"]["reason"] == "timeout");

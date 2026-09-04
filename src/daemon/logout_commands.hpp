@@ -28,7 +28,8 @@ class LogoutLifecycle final {
     [[nodiscard]] static core::TdClosedDecision
     begin(core::TdClient& client,
           const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
-          RequestSession& session, std::function<void()> during_terminal_claim = {});
+          RequestSession& session, std::function<void()> during_terminal_claim = {},
+          std::function<void()> after_terminal_claim = {});
     static std::future<core::TdValue>
     send(core::TdClient& client,
          const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
@@ -46,6 +47,7 @@ struct LogoutHooks {
     std::function<void()> after_send;
     std::function<void()> after_operation_admission;
     std::function<void()> during_terminal_claim;
+    std::function<void()> after_terminal_claim;
     std::shared_ptr<const LogoutAuditHooks> audit;
 };
 

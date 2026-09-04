@@ -14,6 +14,7 @@ class CiPortabilityContractTest(unittest.TestCase):
             "std::stop_source",
             "std::stop_callback",
             "std::jthread",
+            "std::quick_exit",
             "atomic<std::shared_ptr",
         )
         candidates = [
@@ -54,7 +55,9 @@ class CiPortabilityContractTest(unittest.TestCase):
                     (REPOSITORY / relative).read_text(encoding="utf-8"),
                 )
 
-    def test_posix_close_users_include_their_own_declaration(self) -> None:
+    def test_posix_close_and_immediate_exit_users_include_their_own_declaration(
+        self,
+    ) -> None:
         candidates = [
             source
             for root in (REPOSITORY / "src", REPOSITORY / "tests")
@@ -63,8 +66,12 @@ class CiPortabilityContractTest(unittest.TestCase):
         ]
         for source in candidates:
             text = source.read_text(encoding="utf-8")
-            if "::close(" in text:
-                with self.subTest(source=source.relative_to(REPOSITORY)):
+            for operation in ("::close(", "::_exit("):
+                if operation not in text:
+                    continue
+                with self.subTest(
+                    source=source.relative_to(REPOSITORY), operation=operation
+                ):
                     self.assertIn("#include <unistd.h>\n", text)
 
     def test_signal_set_macros_are_not_namespace_qualified(self) -> None:

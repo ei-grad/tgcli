@@ -213,14 +213,20 @@ int terminal_exit(std::string_view code) {
 core::TdClosedDecision
 LogoutLifecycle::begin(core::TdClient& client,
                        const std::shared_ptr<const core::AuthStateSnapshot>& authorization,
-                       RequestSession& session, std::function<void()> during_terminal_claim) {
+                       RequestSession& session, std::function<void()> during_terminal_claim,
+                       std::function<void()> after_terminal_claim) {
     return client.begin_logout_decision(
-        authorization, [&session, during_terminal_claim = std::move(during_terminal_claim)](
+        authorization, [&session, during_terminal_claim = std::move(during_terminal_claim),
+                        after_terminal_claim = std::move(after_terminal_claim)](
                            std::chrono::steady_clock::time_point committed_at) {
             if (during_terminal_claim) {
                 during_terminal_claim();
             }
-            switch (session.claim_audited_terminal_event(committed_at)) {
+            const auto status = session.claim_audited_terminal_event(committed_at);
+            if (after_terminal_claim) {
+                after_terminal_claim();
+            }
+            switch (status) {
             case AuditedTerminalStatus::Designated:
                 return core::TdLifecycleClaimStatus::Active;
             case AuditedTerminalStatus::Disconnected:
@@ -869,9 +875,10 @@ void LogoutCoordinator::logout(const proto::Request& request, RequestSession& se
     AuditedDispatchStatus dispatch_status = AuditedDispatchStatus::ProtocolError;
     try {
         dispatch_status = session.dispatch_audited([&] {
-            auto decision = LogoutLifecycle::begin(client_, starting, session,
-                                                   hooks_ ? hooks_->during_terminal_claim
-                                                          : std::function<void()>{});
+            auto decision = LogoutLifecycle::begin(
+                client_, starting, session,
+                hooks_ ? hooks_->during_terminal_claim : std::function<void()>{},
+                hooks_ ? hooks_->after_terminal_claim : std::function<void()>{});
             if (decision) {
                 closed_decision.emplace(std::move(decision));
                 if (hooks_ && hooks_->before_send) {

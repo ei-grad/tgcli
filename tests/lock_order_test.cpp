@@ -6,13 +6,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
@@ -28,7 +28,7 @@ template <typename Operation> void require_bounded_completion(Operation&& operat
     std::thread worker(std::move(task));
     if (completion.wait_for(2s) != std::future_status::ready) {
         std::fputs("reentrant wipe observer did not complete\n", stderr);
-        std::quick_exit(86);
+        ::_exit(86);
     }
     worker.join();
     completion.get();
