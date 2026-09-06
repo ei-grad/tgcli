@@ -1,19 +1,86 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: Run Linux Debug build and tests (enabled for a full run)
+        required: true
+        default: true
+        type: boolean
+      asan:
+        description: Run Linux ASan build and tests (enabled for a full run)
+        required: true
+        default: true
+        type: boolean
+      tsan:
+        description: Run Linux TSan build and tests (enabled for a full run)
+        required: true
+        default: true
+        type: boolean
+      macos:
+        description: Run macOS Debug build and tests (enabled for a full run)
+        required: true
+        default: true
+        type: boolean
+      lint:
+        description: Run formatting and clang-tidy (enabled for a full run)
+        required: true
+        default: true
+        type: boolean
 
 jobs:
+  selection:
+    runs-on: ubuntu-24.04
+    outputs:
+      linux_profiles: ${{ steps.profiles.outputs.linux_profiles }}
+      tdlib_os: ${{ steps.profiles.outputs.tdlib_os }}
+    steps:
+      - name: Validate and resolve selected profiles
+        id: profiles
+        env:
+          PROFILE_SELECTION: >-
+            {"debug":${{ inputs.debug }},"asan":${{ inputs.asan }},"tsan":${{ inputs.tsan }},"macos":${{ inputs.macos }},"lint":${{ inputs.lint }}}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          selection = json.loads(os.environ["PROFILE_SELECTION"])
+          if not any(selection.values()):
+              print("::error::Select at least one CI profile.")
+              raise SystemExit(1)
+
+          linux_profiles = [
+              profile for profile in ("debug", "asan", "tsan") if selection[profile]
+          ]
+          tdlib_os = []
+          if linux_profiles or selection["lint"]:
+              tdlib_os.append("ubuntu-24.04")
+          if selection["macos"]:
+              tdlib_os.append("macos-14")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(
+                  "linux_profiles="
+                  + json.dumps(linux_profiles, separators=(",", ":")),
+                  file=output,
+              )
+              print(
+                  "tdlib_os=" + json.dumps(tdlib_os, separators=(",", ":")),
+                  file=output,
+              )
+          PY
+
   # Builds the tdlib prefix once per OS and saves it to the actions cache so
   # a cold cache doesn't make every test/lint job build tdlib from source.
   # Downstream jobs keep their own conditional build step as a fallback
   # against cache eviction.
   tdlib:
+    needs: selection
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: ${{ fromJSON(needs.selection.outputs.tdlib_os) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,11 +119,12 @@ jobs:
           ./scripts/build-tdlib.sh "${{ steps.tdlib.outputs.prefix }}"
 
   test:
-    needs: tdlib
+    needs: [selection, tdlib]
+    if: ${{ needs.selection.outputs.linux_profiles != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        preset: [debug, asan, tsan]
+        preset: ${{ fromJSON(needs.selection.outputs.linux_profiles) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +183,8 @@ jobs:
           fi
 
   test-macos:
-    needs: tdlib
+    needs: [selection, tdlib]
+    if: ${{ inputs.macos }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -166,7 +235,8 @@ jobs:
         run: ctest --preset debug
 
   lint:
-    needs: tdlib
+    needs: [selection, tdlib]
+    if: ${{ inputs.lint }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
